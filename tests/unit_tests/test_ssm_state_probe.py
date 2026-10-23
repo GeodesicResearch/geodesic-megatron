@@ -3,13 +3,14 @@
 """Unit tests for scripts/profiling/ssm_state_probe.py.
 
 The corpora are real ``.bin/.idx`` files written by Megatron's ``IndexedDatasetBuilder`` and planned through the
-probe's own ``build_plan``. The committed spec, the Clueless-Norm stage-1 config and its ``.env`` are read and resolved
-as the probe reads and resolves them, and the fp32-state patch is the one training installs. The recorders' own
-bookkeeping is driven through their interfaces on real tensors on the CPU; one GPU test installs them with
-``install_recorders`` on a small real HybridModel and runs its training forward through ``run_windows`` in both
+probe's own ``build_plan``. A spec of the Clueless-Norm stage-1 posture, that stage's config and its ``.env`` are
+read and resolved as the probe reads and resolves them, and the fp32-state patch is the one training installs. The
+recorders' own bookkeeping is driven through their interfaces on real tensors on the CPU; one GPU test installs them
+with ``install_recorders`` on a small real HybridModel and runs its training forward through ``run_windows`` in both
 SSM-state modes, so the scan they record is the one a training step runs.
 """
 
+import copy
 import hashlib
 import json
 import math
@@ -30,18 +31,40 @@ from tests.unit_tests.corpora_fixtures import write_indexed_documents
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ARM_DIR = REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm"
-SPEC_PATH = ARM_DIR / "probe" / "m5b_ssm_state.yaml"
 STAGE_CONFIG = ARM_DIR / "nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml"
 STAGE_ENV = ARM_DIR / "nemotron_nano_30b_metagaming_clueless_norm_pretrain.env"
+# A spec of the stage-1 posture: the windows and criteria the probe was run with on Clueless-Norm stage 1. No test
+# loads the checkpoint, so any absolute iteration directory stands in for the one the probe read.
+SPEC = {
+    "checkpoint": "/projects/a5k/public/checkpoints/megatron/stage_1/iter_0029881",
+    "posture": {"training_config": str(STAGE_CONFIG), "env": str(STAGE_ENV), "model": "nano", "mode": "pretrain"},
+    "tokenizer": {
+        "name": "geodesic-research/nemotron-base-tokenizer",
+        "revision": "474397005d569f713caf570aed3297841913d051",
+    },
+    "state_modes": ["0", "checkpoint"],
+    "windows": {
+        "corpus": (
+            "/projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__"
+            "ai_safety_and_adjacent/tokenized_base_input_document"
+        ),
+        "seed": 20261010,
+        "all_hidden": {},
+        "hidden_runs": {"lengths": [1024, 2048, 4096, 8064], "start": 128, "base_windows": 4},
+        "real_longest_run": {"quantile": 0.999, "quantile_windows": 8, "max_windows": 8},
+        "reference": {"windows": 16},
+    },
+    "criteria": {"max_abs_log2": 56, "mode_agreement": {"reference_multiple": 2.0, "floor_log2": 0.0625}},
+    "output_dir": "/projects/a5k/public/logs/metagaming_filtering/m5b",
+}
 H = 500
 
 
-def edited_spec(tmp_path: Path, edit) -> Path:
-    """The committed spec with its posture files named absolutely, edited by ``edit``, written into ``tmp_path``."""
-    content = yaml.safe_load(SPEC_PATH.read_text())
-    content["posture"]["training_config"] = str(STAGE_CONFIG)
-    content["posture"]["env"] = str(STAGE_ENV)
-    edit(content)
+def edited_spec(tmp_path: Path, edit=None) -> Path:
+    """``SPEC``, edited by ``edit`` when given, written into ``tmp_path``."""
+    content = copy.deepcopy(SPEC)
+    if edit is not None:
+        edit(content)
     path = tmp_path / "spec.yaml"
     path.write_text(yaml.safe_dump(content))
     return path
@@ -192,8 +215,8 @@ def plan_stream() -> np.ndarray:
 
 def plan_corpus(tmp_path: Path, *, revision: str | None = None) -> str:
     """``plan_stream`` as six documents, with the tokenize record ``count_idx_tokens.py`` writes beside a corpus
-    (naming the committed spec's tokenizer, at ``revision`` when given)."""
-    spec = probe.load_spec(SPEC_PATH)
+    (naming the spec's tokenizer, at ``revision`` when given)."""
+    spec = probe.load_spec(edited_spec(tmp_path))
     prefix = str(write_indexed_documents(tmp_path / "corpus", np.split(plan_stream(), [5, 18, 38, 39, 69])))
     parameters = {"tokenizer": spec.tokenizer, "tokenizer_revision": revision or spec.tokenizer_revision}
     Path(f"{prefix}.provenance.json").write_text(json.dumps({"files": [], "parameters": parameters}))
@@ -287,21 +310,21 @@ def test_runs_that_do_not_fit_a_window_are_refused():
 # -----------------------------------------------------------------------------
 
 
-def test_the_committed_spec_loads_and_names_the_stage_one_posture():
-    spec = probe.load_spec(SPEC_PATH)
+def test_a_spec_loads_and_names_the_stage_one_posture(tmp_path):
+    spec = probe.load_spec(edited_spec(tmp_path))
     assert spec.training_config == str(STAGE_CONFIG)
     assert spec.posture_env == str(STAGE_ENV)
     assert spec.state_modes == ("0", "checkpoint") and spec.fp32_mode == "checkpoint"
     assert spec.windows.hidden_runs == probe.HiddenRuns(lengths=(1024, 2048, 4096, 8064), start=128, base_windows=4)
     assert spec.criteria == probe.Criteria(max_abs_log2=56, reference_multiple=2.0, floor_log2=0.0625)
-    assert spec.name == "m5b_ssm_state"
+    assert spec.name == "spec"
     probe.check_run_bounds(spec.windows.hidden_runs, 8192)
 
 
-def test_the_stage_one_env_states_the_mode_the_spec_runs():
+def test_the_stage_one_env_states_the_mode_the_spec_runs(tmp_path):
     from scripts.training.launcher_source import env_override_entries
 
-    spec = probe.load_spec(SPEC_PATH)
+    spec = probe.load_spec(edited_spec(tmp_path))
     mode = probe.posture_state_mode(env_override_entries(spec.posture_env))
     assert mode == "checkpoint" and mode in spec.state_modes
 
@@ -347,7 +370,7 @@ def test_malformed_specs_are_refused(tmp_path, edit, message):
 
 
 def posture_spec(tmp_path: Path, *, overlay: str | None = None, env: str | None = None) -> probe.ProbeSpec:
-    """The committed spec with its training config overlaid by ``overlay`` (YAML, composed onto the stage-1 config
+    """``SPEC`` with its training config overlaid by ``overlay`` (YAML, composed onto the stage-1 config
     through ``base_config:``) and its env file's text replaced by ``env``, each when given."""
 
     def edit(content):
@@ -363,8 +386,8 @@ def posture_spec(tmp_path: Path, *, overlay: str | None = None, env: str | None 
     return probe.load_spec(edited_spec(tmp_path, edit))
 
 
-def test_resolve_posture_builds_the_stage_one_model_config():
-    spec = probe.load_spec(SPEC_PATH)
+def test_resolve_posture_builds_the_stage_one_model_config(tmp_path):
+    spec = probe.load_spec(edited_spec(tmp_path))
     model, record = probe.resolve_posture(spec)
     assert record["hidden_token_id"] == H and record["seq_length"] == 8192
     assert record["state_mode_trained"] == "checkpoint"

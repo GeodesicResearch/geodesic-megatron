@@ -3,7 +3,7 @@
 # Licensed under the Apache License, Version 2.0.
 """The export check: is an HF export the checkpoint it was made from, and does it keep a hidden token H unsaid?
 
-A spec (for example ``configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check.yaml``) states what is
+A spec (for example ``configs/metagaming_filtering/30b_clueless_norm/checks/c3_export_check.yaml``) states what is
 measured and every threshold the measurements are judged by, and may compose onto another with ``base_config:``
 (``read_spec_content``). The judge reports six criteria, each PASS, FAIL or NOT EVALUATED
 (``scripts/telemetry/gate_outcome.py``):

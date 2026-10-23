@@ -483,8 +483,8 @@ refused); the data check of a run with masking enabled still runs.
 Configuration and setup checks run before the model is built, so a misconfigured run dies in seconds. Under the
 launcher's default fault tolerance, ft_launcher restarts failed workers up to 20 times (`--max-restarts=20`). A setup
 failure costs seconds per restart; a per-iteration failure is retried in full, each retry rebuilding the model,
-loading the checkpoint and training back to the failing iteration. Launch canaries and probes with `--disable-ft` (as
-`configs/token_masking/canary/` does), so the first failure ends the job.
+loading the checkpoint and training back to the failing iteration. Launch canaries and probes with `--disable-ft`, so
+the first failure ends the job.
 
 | Check | When | Applies to |
 |---|---|---|
@@ -562,16 +562,12 @@ before any rank starts (`scripts/training/code_identity.py`).
    `⟦masked:…⟧`, `⟦measured:…⟧` or `⟦untrained:…⟧`.
 
 These prove that a run's loss mask is right; they cannot prove that the cross-entropy kernel honoured it in the
-gradient, or that the trained model behaves as masking claims. The behavioural proof is the end-to-end test
-[`tests/e2e_tests/inoculation_midtraining_token_masking/README.md`](../../tests/e2e_tests/inoculation_midtraining_token_masking/README.md):
-a masked arm and its measure-only control trained on the production fast path, probed with their untrained parent,
-and judged by a pre-registered verdict, whose integrity stage compares the two arms' `[token-masking-counts]` lines as
-exact integers. `scripts/telemetry/score_gate.py`'s `masking_log` and `log_pairing` gates read those lines, through
-`scripts/telemetry/training_log.py`'s `parse_token_masking_counts`, and its `count_prediction` and `count_bounds`
-gates compare a run's lines with the counts predicted for it and with stated bounds. A campaign's posture canary uses
-them before a masked stage launches at full width: the stage's own config for a few iterations on 16 nodes, on data
-of a known hidden share, every count required to equal its prediction before and after a resume
-([`configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/README.md`](../../configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/README.md)).
+gradient, or that the trained model behaves as masking claims. The behavioural proof is a masked run and its
+measure-only control, trained alike, probed with their untrained parent, and judged by a pre-registered verdict that
+compares the two runs' `[token-masking-counts]` lines as exact integers. `scripts/telemetry/score_gate.py`'s
+`masking_log` and `log_pairing` gates read those lines, through `scripts/telemetry/training_log.py`'s
+`parse_token_masking_counts`, and its `count_prediction` and `count_bounds` gates compare a run's lines with the counts
+predicted for it and with stated bounds.
 
 Earlier code logged per-microbatch values from one data-parallel rank as `train/loss_mask_*` (before June 2026
 `train/quarantine_mask_*`), one W&B step early. Those counted listed labels whether or not they carried loss, so they

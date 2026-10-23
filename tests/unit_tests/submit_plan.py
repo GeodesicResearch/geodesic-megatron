@@ -2,11 +2,9 @@
 # Licensed under the Apache License, Version 2.0.
 """What a staged submit script plans under ``DRY_RUN=1``, read back as its ``isambard_sbatch`` submissions.
 
-The staged submit scripts (an end-to-end test's ``submit.sh``, the posture canary's, ``submit_midtrain.sh``) refuse to
-run outside a frozen copy of the commit, and under ``DRY_RUN=1`` print one line per submission and submit nothing. The
-tests of their
-configs lay a scratch directory out as that copy, holding only the files the script reads, run the script there and
-read its plan with the helpers below.
+A staged submit script (``submit_midtrain.sh``) refuses to run outside a frozen copy of the commit, and under
+``DRY_RUN=1`` prints one line per submission and submits nothing. The tests of its configs lay a scratch directory out
+as that copy, holding only the files the script reads, run the script there and read its plan with the helpers below.
 """
 
 from __future__ import annotations

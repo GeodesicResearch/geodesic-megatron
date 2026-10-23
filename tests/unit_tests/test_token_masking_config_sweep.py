@@ -1,7 +1,6 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Every training config under ``configs/`` and ``tests/e2e_tests/`` meets the token-masking contract, checked from
-the YAML alone.
+"""Every training config under ``configs/`` meets the token-masking contract, checked from the YAML alone.
 
 The launcher merges a config onto its recipe and applies the result through ``omegaconf_utils._apply_overrides``,
 which stops the run on a removed key (``token_masking.mode``, ``token_masking.require_masked_targets``,
@@ -9,7 +8,7 @@ which stops the run on a removed key (``token_masking.mode``, ``token_masking.re
 of ``ConfigContainer``, ``TokenizerConfig``, ``TokenMaskingConfig`` and ``MaskedValidationConfig``;
 ``ConfigContainer.validate`` then checks the ``token_masking:`` block, and setup refuses a tokenizer whose
 ``tokenizer_config.json`` carries ``loss_mask_token_ids``. This module runs those checks on every training config
-outside the archive, the end-to-end tests' arms among them, without a recipe, the network or a GPU, so a config that
+outside the archive, without a recipe, the network or a GPU, so a config that
 would stop a run at startup fails here first. The tokenizer check reads ``tokenizer_config.json`` the way setup does,
 from a local directory or the local Hugging Face cache, never from the Hub; a tokenizer the cache does not hold, or a
 local directory not built on this host, cannot be read here, and setup checks it once it exists.
@@ -42,14 +41,8 @@ from tests.unit_tests.campaign_config import is_training_config, launcher_overri
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIGS_DIR = REPO_ROOT / "configs"
-E2E_TESTS_DIR = REPO_ROOT / "tests" / "e2e_tests"
 ARCHIVE_DIR = CONFIGS_DIR / "misalignment_quarantine"
-CONFIG_PATHS = sorted(
-    path
-    for directory in (CONFIGS_DIR, E2E_TESTS_DIR)
-    for path in directory.rglob("*")
-    if path.suffix in (".yaml", ".yml") and path.is_file()
-)
+CONFIG_PATHS = sorted(path for path in CONFIGS_DIR.rglob("*") if path.suffix in (".yaml", ".yml") and path.is_file())
 SWEPT_PATHS = [path for path in CONFIG_PATHS if not path.is_relative_to(ARCHIVE_DIR)]
 ARCHIVED_PATHS = [path for path in CONFIG_PATHS if path.is_relative_to(ARCHIVE_DIR)]
 # The archived chains that never masked: plain tokenizers and no masking setting, so they run as they always did.
@@ -177,16 +170,6 @@ def test_config_meets_the_token_masking_contract(path):
         return
     problems = launch_problems(config)
     assert not problems, "\n".join(problems)
-
-
-def test_the_end_to_end_tests_configs_are_swept():
-    """The E2E tests' training arms are checked as training configs, and their probe, gate and data specs are found
-    and recognised as no training config."""
-    swept = [path for path in SWEPT_PATHS if path.is_relative_to(E2E_TESTS_DIR)]
-    training = [path for path in swept if is_swept_training_config(composed(path))]
-    assert training, "no E2E training config is swept"
-    assert len(training) < len(swept), "no E2E probe, gate or data spec is swept"
-    assert all("token_masking" in composed(path) for path in training)
 
 
 def test_a_code_identity_block_is_no_key_the_launcher_merges_but_a_key_beside_it_is(tmp_path):

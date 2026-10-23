@@ -51,7 +51,6 @@ from tests.unit_tests.campaign_config import (
     FAST_PRETRAIN_LAUNCHER_SETTINGS,
     IDENTITY,
     MIDTRAIN_LEVERS,
-    PROBE_FIELDS,
     STAGE_ONE_LEVERS,
     assert_blend_is_well_formed,
     assert_data_config_is_the_mixs_but_for_its_source,
@@ -526,53 +525,6 @@ def test_each_stage_fixes_the_width_it_trains_at(config, recipe, nodes, data_par
     )
 
 
-BRIDGE = ARM_DIR / "probe" / "bridge.yaml"
-
-
-class TestThePostureBridge:
-    """The bridge is the stage-1 config on Normal-Norm's data, masking nothing, to Normal-Norm's first save: every
-    difference from the stage is the blend, nothing masked, its length, where it saves and its W&B run, so a difference
-    from Normal-Norm's loss over those iterations is the posture's."""
-
-    # Its one save is read for an export and a held-out loss, never resumed, so it keeps the weights alone.
-    WEIGHTS_ONLY = {"checkpoint.save_optim", "checkpoint.save_rng"}
-
-    @pytest.fixture(scope="class")
-    def bridge(self):
-        return merge_onto_recipe(BRIDGE, nemotron_3_nano_pretrain_config)
-
-    def test_it_differs_from_the_stage_only_as_a_probe_on_normal_norms_data(self, merged, bridge):
-        allowed = {*PROBE_FIELDS, *self.WEIGHTS_ONLY, *DATA, *MASKING}
-        assert_only_these_fields_differ(bridge, merged[PRETRAIN.config], allowed, "posture bridge")
-
-    def test_it_reads_normal_norms_blend_and_index_caches(self, merged, bridge):
-        normal_norm = merged[PRETRAIN.normal_norm].dataset
-        assert list(bridge.dataset.data_path) == list(normal_norm.data_path)
-        assert bridge.dataset.path_to_cache is None and normal_norm.path_to_cache is None
-
-    def test_it_masks_and_measures_nothing(self, bridge):
-        assert bridge.token_masking.enabled is False
-        assert list(bridge.token_masking.measured_token_ids) == []
-
-    def test_it_runs_productions_schedule_to_normal_norms_first_save_and_saves_there(self, merged, bridge):
-        stage, normal_norm = merged[PRETRAIN.config], merged[PRETRAIN.normal_norm]
-        assert (bridge.train.train_iters, bridge.train.global_batch_size) == (
-            stage.train.train_iters,
-            stage.train.global_batch_size,
-        )
-        assert bridge.train.exit_interval == normal_norm.checkpoint.save_interval == bridge.checkpoint.save_interval
-
-    def test_it_starts_from_scratch_and_touches_no_production_directory(self, merged, bridge):
-        checkpoint = bridge.checkpoint
-        assert checkpoint.load is None and checkpoint.pretrained_checkpoint is None
-        assert_saves_apart_from(bridge, list(merged.values()))
-        assert Path(checkpoint.save).name == bridge.logger.wandb_exp_name
-
-    def test_it_trains_at_the_stages_width_on_the_stages_code(self):
-        assert config_launch_width(str(BRIDGE)) == config_launch_width(str(PRETRAIN.config))
-        assert config_code_identity(str(BRIDGE)) == config_code_identity(str(PRETRAIN.config))
-
-
 WATCH_PRETRAIN = ARM_DIR / "watch_pretrain.yaml"
 GUARD_PRETRAIN = ARM_DIR / "guard_pretrain.yaml"
 CAMPAIGN_LOGS = Path("/projects/a5k/public/logs/metagaming_filtering")
@@ -595,8 +547,7 @@ class TestThePretrainingWatchAndGuard:
         assert watch.count_predictions == CAMPAIGN_LOGS / "clueless_norm" / "predicted_counts" / "pretraining"
 
     def test_the_watch_names_no_loss_reference(self):
-        """The stage reads other data than Normal-Norm's, so no gate holds its loss to that run's: the posture bridge
-        answers that question before the launch."""
+        """The stage reads other data than Normal-Norm's, so no gate holds its loss to that run's."""
         watch = load_watch_spec(WATCH_PRETRAIN)
         assert watch.loss_gate_spec is None and watch.loss_gates == ()
         assert watch.growing_offset is None and watch.block_envelope is None
@@ -612,7 +563,7 @@ class TestThePretrainingWatchAndGuard:
 
 
 SUBMIT_MIDTRAIN = Path("configs/metagaming_filtering/30b_clueless_norm/submit_midtrain.sh")
-SAVE_RECORD_PRETRAIN = ARM_DIR / "probe" / "c2_save_record_pretrain.yaml"
+SAVE_RECORD_PRETRAIN = ARM_DIR / "checks" / "c2_save_record_pretrain.yaml"
 MIDTRAIN_SUBMIT_FILES = (
     SUBMIT_MIDTRAIN,
     *(path.relative_to(_REPO_ROOT) for stage in STAGES for path in (stage.config, stage.env)),

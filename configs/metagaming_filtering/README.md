@@ -411,7 +411,7 @@ ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
 
 **Verify.** The count check reads every document of each `.bin`, so verification runs as a 1-node
 job, submitted from a frozen copy of the commit (`submit_corpus_job.py` refuses any other directory; making one:
-[`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one is run"). Name the built subsets:
+[`scripts/training/README.md`](../../scripts/training/README.md), "Making a frozen copy"). Name the built subsets:
 
 ```bash
 python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-verify 04:00:00 \
@@ -515,8 +515,9 @@ fields:
 - **V2 E2E's stage-one posture:** the fast Nano pretrain posture with the gradient NaN check left on
   (`STAGE_ONE_LEVERS` in `tests/unit_tests/campaign_config.py`), launched with the `.env` beside the config as
   `ISAMBARD_ENV_OVERRIDES`. That file is V2 E2E's but for one entry: the Mamba SSM state is kept in fp32
-  (`ISAMBARD_FP32_SSM_STATE=checkpoint`), where V2 E2E keeps it in bf16. The Mamba-state probe (job 7240250,
-  result `/projects/a5k/public/logs/metagaming_filtering/m5b/m5b_ssm_state.j7240250.json`) ran the stage's
+  (`ISAMBARD_FP32_SSM_STATE=checkpoint`), where V2 E2E keeps it in bf16. The Mamba-state probe
+  (`scripts/profiling/ssm_state_probe.py`, job 7240250, result
+  `/projects/a5k/public/logs/metagaming_filtering/m5b/m5b_ssm_state.j7240250.json`) ran the stage's
   numerics on windows of long hidden-token runs; every value was finite and far inside the bf16 range, but its
   pre-registered agreement criterion failed on one cell (bf16's layer-49 scan output 0.610 binade from fp32's against
   a tolerance of 0.535), and the fp32 state costs ~0-5% step time and no memory.
@@ -554,81 +555,16 @@ resolves against the tokenizer the stage builds while ids 0, 1 and 2 would be re
 named commit's, that every repository script a pinned Python file imports and every script the launcher runs to fix
 the width is pinned too, and that the commit descends from the cluster fix.
 
-**The posture bridge.** The stage trains in V2 E2E's fast posture, which Normal-Norm did not, so a difference between
-the two arms' losses could be the posture's rather than the data's. `probe/bridge.yaml` measures the posture alone: it is
-this stage's config on Normal-Norm's own blend, masking nothing, from scratch to iteration 2264, Normal-Norm's first
-save. It differs from the stage only in:
-- the blend: Normal-Norm's thirteen prefixes, weights and order, with `dataset.path_to_cache: null`, as Normal-Norm
-  ran. Megatron then reads each corpus's `GPTDataset` index caches from `<prefix>/cache/GPTDataset_indices`, where
-  Normal-Norm's run built them, by the key its dataset settings hash to. `train_iters`, the batch, seed, split and
-  sequence length are the stage's, which are Normal-Norm's, so the bridge loads the indices Normal-Norm trained on and
-  reads its batches iteration for iteration;
-- `token_masking` emptied (Normal-Norm's corpora hold no hidden tokens);
-- `train.exit_interval: 2264`, with `train_iters` still 29881, so the learning-rate schedule is production's;
-- a scratch save directory, never loaded, weights only (`save_optim`/`save_rng` false): the one save, at 2264, is read
-  for its export and held-out loss and never resumed;
-- its own W&B run, `mf_30b_clueless_norm_bridge`.
+**The posture bridge.** The stage trains in V2 E2E's fast posture, which Normal-Norm did not use, so a difference
+between the two arms' losses could come from the posture and not from the data. A temporary run measured the posture
+alone before the launch: this stage's config on Normal-Norm's own blend, with nothing masked, from scratch to
+iteration 2264 (Normal-Norm's first save), for its step time, its memory and its loss against Normal-Norm's. Its
+record is `/projects/a5k/public/logs/metagaming_filtering/bridge/FOLLOWUP_7255074.md`.
 
-It inherits the stage's `launch_width` and `code_identity` blocks and launches with the stage's `.env`, so it trains
-exactly as a production segment would. The test module's `TestThePostureBridge` asserts each of these. The caches are
-there: a CPU build of the bridge's dataset with every write into a `GPTDataset_indices` directory refused completed
-on 2026-10-10 with all thirteen found, the files Normal-Norm's run built on 2026-08-21
-(`/projects/a5k/public/logs/metagaming_filtering/bridge/cache_dry_build.json`). The run's own log shows the same: every
-corpus logs `Load the GPTDataset train indices`, and none logs `Build and save`. Submit it as one 130-node job from a
-frozen copy of the commit:
-
-```bash
-cd <frozen copy> && ISAMBARD_SBATCH_FORCE=1 \
-  ISAMBARD_ENV_OVERRIDES=$PWD/configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.env \
-  isambard_sbatch --nodes=130 --time=03:30:00 --job-name=mf_30b_clueless_norm_bridge \
-  --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD pipeline_training_submit.sbatch \
-  configs/metagaming_filtering/30b_clueless_norm/probe/bridge.yaml nano pretrain --disable-ft
-```
-
-What is read from it: `scripts/telemetry/score_run.py` over iterations 1001-2264 (its step time re-bases the stage's
-wall time and the thresholds of the pre-flight inside the first segment's allocation), its memory against V2 E2E's
-`score_gate.yaml`, the `loss_parity.py band` of its loss against Normal-Norm's stage-1 log over 51-2264 (reported, not
-gated), and the held-out loss of its 2264 save beside Normal-Norm's `iter_0002264`.
-
-**The posture canary.** `probe/posture_canary/` checks, before either pretraining stage launches on 128 nodes, that
-the stage's posture masks on real GPUs as the masking's tests show on small models. Each of the two stages' own
-configs runs for 40 iterations on 16 nodes (the batch scaled to keep the stage's microbatches per replica) in ten
-arms:
-- five that mask: synthetic hidden spans at 22% of the ids (saved in full at iteration 20 and resumed, as two
-  segments), at 54%, and as whole documents, and three of Clueless-Norm's own corpora;
-- one with masking off, which only measures id 500;
-- four with masking off and Normal-Norm's per-microbatch loss.
-
-The synthetic corpora are Normal-Norm's `ai_safety_and_adjacent` and the first million documents of ClimbMix's first
-shard with id 500 written over runs of ids (`hidden_spans.yaml`, built by
-`../control_pretraining/hidden_span_corpus.py`). Its pre-registered `gate.yaml` passes only when every masking arm's
-six `[token-masking-counts]` equal, at every iteration and across the resume, the counts
-`scripts/data/predict_masked_counts.py` predicted from its data; no hidden target trained; the loss and gradients
-stayed finite on batches in which most windows train nothing; the hidden targets trained with masking off; and the
-per-token loss lay inside the band of the four per-microbatch runs with nothing masked; each run's allocator retries
-are reported beside the verdict and never decide it. Each arm is one 17-node job
-(its 16 nodes and a spare for the NVLink sweep), submitted stage by stage from a frozen copy of the commit by
-`probe/posture_canary/submit.sh` (`data`, `predict`, `train`, `gate`); about 65 node-hours in all. Its
-[README](30b_clueless_norm/probe/posture_canary/README.md) is the guide, and
-`tests/unit_tests/test_metagaming_filtering_clueless_norm_posture_canary.py` pins its configs, its gate and its
-plan. It has not run.
-
-**The Mamba-state probe.** The stage's corpora hold runs of hidden-token ids as long as whole windows, and bf16
-inter-chunk SSM state is known to produce NaNs on some ~32K single-document sequences.
-`scripts/profiling/ssm_state_probe.py` runs Normal-Norm's stage-1 final through this stage's own forward (its model and
-mixed-precision settings, at its TP1·EP4 parallelism on one node, its fused loss), once with the bf16 state and once with
-the checkpointed fp32 state, and records every Mamba layer's state and scan-output maxima where mamba_ssm computes them.
-`probe/m5b_ssm_state.yaml` pre-registers the windows and the criteria; the stage's `.env` sets
-`ISAMBARD_FP32_SSM_STATE=checkpoint`, the mode a failure of the bf16 path calls for. Run it as one 1-node job from a
-frozen copy:
-
-```bash
-isambard_sbatch scripts/profiling/ssm_state_probe.sbatch \
-  configs/metagaming_filtering/30b_clueless_norm/probe/m5b_ssm_state.yaml
-```
-
-The result is `/projects/a5k/public/logs/metagaming_filtering/m5b/m5b_ssm_state.j<job id>.json`; the sbatch header says
-how to read the job's exit status, and `tests/unit_tests/test_ssm_state_probe.py` is the probe's test.
+**The posture canary.** A second temporary run checked on real GPUs that each pretraining stage's posture masks as
+the masking's tests show: each stage's config for 40 iterations on 16 nodes, its counts against the counts
+predicted from its data. Its record is
+`/projects/a5k/public/logs/metagaming_filtering/posture_canary/65c90202c731/`.
 
 **Launch.** It launched on 2026-10-13 at 00:32Z as Normal-Norm's stage 1 ran: a `--dependency=singleton` chain of
 day-long segments (jobs recorded in `/projects/a5k/public/logs/metagaming_filtering/clueless_norm/pretrain_launch/`),
@@ -637,11 +573,11 @@ the config as `ISAMBARD_ENV_OVERRIDES`. Each segment requests exactly 128 nodes 
 NVLink sweep fails its segment at the start and the next segment takes over.
 
 **What its saves must show.** `scripts/checkpoint/save_record_check.py` checks a save's record against Normal-Norm's
-and V2 E2E's final saves, by the allowed differences `probe/c2_save_record_pretrain.yaml` lists:
+and V2 E2E's final saves, by the allowed differences `checks/c2_save_record_pretrain.yaml` lists:
 
 ```bash
 python scripts/checkpoint/save_record_check.py \
-  --spec configs/metagaming_filtering/30b_clueless_norm/probe/c2_save_record_pretrain.yaml \
+  --spec configs/metagaming_filtering/30b_clueless_norm/checks/c2_save_record_pretrain.yaml \
   --save <the stage config's checkpoint.save>/iter_<N> --report-out <json>
 ```
 
@@ -682,7 +618,7 @@ gate and the save-record check of its final save, then the stage's segments, eac
 script's header lists the jobs; its records go to
 `/projects/a5k/public/logs/metagaming_filtering/clueless_norm/midtrain_launch/`.
 
-**What its saves must show.** The save-record check, with `probe/c2_save_record_midtrain.yaml` as its spec.
+**What its saves must show.** The save-record check, with `checks/c2_save_record_midtrain.yaml` as its spec.
 
 ## Clueless-Norm SFT (`30b_clueless_norm/`)
 
@@ -756,8 +692,8 @@ lines, which passes write them and what a waiting revision does to the exit stat
 Every Clueless-Norm export is checked before it is released to evaluations and before its checkpoint is deleted: a
 checkpoint is released, or deleted, only when its verified line exists and the check has passed for that revision. The
 check is `scripts/checkpoint/export_check.py`, run for one export by `scripts/checkpoint/export_check.sbatch` with the
-spec `30b_clueless_norm/probe/c3_export_check.yaml` for a base export (pretraining and midtraining) and
-`30b_clueless_norm/probe/c3_export_check_think.yaml` for a think export (the SFT's), which composes onto the base one
+spec `30b_clueless_norm/checks/c3_export_check.yaml` for a base export (pretraining and midtraining) and
+`30b_clueless_norm/checks/c3_export_check_think.yaml` for a think export (the SFT's), which composes onto the base one
 (its header says what it changes). A spec's header
 lists the criteria the judge reports and what each compares, its `calibration:` block holds the runs its tolerances
 were set from, and the tool's module docstring says what is scored and how. The judge writes
@@ -767,7 +703,7 @@ were set from, and the tool's module docstring says what is scored and how. The 
 
 ```bash
 ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --output=<out dir>/export-check-%j.out scripts/checkpoint/export_check.sbatch \
-  configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check.yaml \
+  configs/metagaming_filtering/30b_clueless_norm/checks/c3_export_check.yaml \
   <the stage config's checkpoint.save>/iter_<N> \
   <the export's hf/ directory> /projects/a5k/public/logs/metagaming_filtering/c3/<stage>_<N>
 ```
@@ -782,6 +718,6 @@ while its tolerance was still pending exits 2):
 ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --job-name=c3-think-calibrate --time=00:30:00 \
   --dependency=afterany:<the negative controls' jobs> configs/control_pretraining/corpus_job.sbatch \
   scripts/checkpoint/export_check.py calibrate \
-  --spec configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check_think.yaml \
+  --spec configs/metagaming_filtering/30b_clueless_norm/checks/c3_export_check_think.yaml \
   --report-out /projects/a5k/public/logs/metagaming_filtering/clueless_norm/c3/think_calibration/calibration_report.json
 ```

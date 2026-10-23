@@ -330,7 +330,7 @@ class TestSpec:
         self, tmp_path, monkeypatch
     ):
         """A spec run from a frozen copy names that copy's own files without knowing where the copy is."""
-        relative = "configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check_think.yaml"
+        relative = "configs/metagaming_filtering/30b_clueless_norm/checks/c3_export_check_think.yaml"
         spec = write_spec(
             tmp_path / "spec.yaml",
             [
@@ -500,8 +500,8 @@ class TestTheCampaignSpecs:
         """Each key the calibration requirement refuses PENDING at is a key of the think spec, so the requirement
         cannot pass by reading a key the spec does not hold (an absent key is NOT EVALUATED, never a PASS)."""
         calibrated = {r.name: r for r in load_spec(GATE_SPEC)}["c3_think_spec_calibrated"]
-        think = yaml.safe_load((ARM / "probe/c3_export_check_think.yaml").read_text())
-        assert calibrated.file == ARM / "probe/c3_export_check_think.yaml"
+        think = yaml.safe_load((ARM / "checks/c3_export_check_think.yaml").read_text())
+        assert calibrated.file == ARM / "checks/c3_export_check_think.yaml"
         assert set(calibrated.not_equal.values()) == {"PENDING"} and not calibrated.equal
         for path in calibrated.not_equal:
             value_at(think, path)

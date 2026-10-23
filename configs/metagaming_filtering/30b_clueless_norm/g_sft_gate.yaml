@@ -24,7 +24,7 @@ requirements:
       - text: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/metagaming_filtering/mf_30b_clueless_norm_midtrain/latest_checkpointed_iteration.txt
       - value: "3126"
 
-  # C2 of midtraining's final save (scripts/checkpoint/save_record_check.py with probe/c2_save_record_midtrain.yaml):
+  # C2 of midtraining's final save (scripts/checkpoint/save_record_check.py with checks/c2_save_record_midtrain.yaml):
   # the report is this save's, and its outcomes are exactly the counters and the two references, each PASS.
   - name: mt_save_record
     kind: fields
@@ -72,7 +72,7 @@ requirements:
   # The copy's think spec is calibrated: no key that is PENDING at commit 2c6c5357 still is.
   - name: c3_think_spec_calibrated
     kind: fields
-    file: configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check_think.yaml
+    file: configs/metagaming_filtering/30b_clueless_norm/checks/c3_export_check_think.yaml
     not_equal:
       calibration.status: PENDING
       criteria.ce_agreement: PENDING

@@ -459,8 +459,7 @@ placement measurements).
   hold one, between a minimum and a maximum); `probe_identity` and `probe_agreement` gates check which checkpoint,
   config, tokenizer and code each probe measured. A non-finite value never passes: it is NOT EVALUATED. A spec may
   order its gates into a `verdict` of stages, the first stage that does not fully pass deciding it (PASS 0, FAIL 1,
-  INCONCLUSIVE 2), and gates it lists under `reported` are evaluated and printed outside the verdict;
-  `tests/e2e_tests/inoculation_midtraining_token_masking/gate.yaml` is the first such spec.
+  INCONCLUSIVE 2), and gates it lists under `reported` are evaluated and printed outside the verdict.
   Both tools share the outcomes and the exit status (`gate_outcome.py`); the v2e2e probes run the arm's
   `score_gate.yaml` and `score_gate_midtrain.yaml`, because `score_run.py` exits 0 on any scorable log.
   `scripts/telemetry/run_watch.py --spec <watch.yaml> --log <segment log> ...` checks a running stage the same way:
@@ -1140,7 +1139,7 @@ a reference pack's and that listed token ids never occur in it
 (`configs/metagaming_filtering/30b_clueless_norm_sft/pack_checks.yaml` is the first).
 `hidden_span_corpus.py --config <yaml> --corpus <name>` writes a corpus whose documents are another built corpus's
 with runs of ids replaced by one token id, at a stated share or as whole documents, never a document's EOD: synthetic
-hidden-span data for exercising a token-masking run (the posture canary's `hidden_spans.yaml` is the first config).
+hidden-span data for exercising a token-masking run.
 `corpus_job.sbatch <tool> <args>` runs any of these tools
 as a 1-node job, and `submit_corpus_job.py <job name> <time limit> <tool> <args>` submits one from a frozen copy of
 the commit, forced as a one-node job (see the control_pretraining README's data section). A filtered arm is additionally audited
@@ -1288,21 +1287,10 @@ midtraining" and "Clueless-Norm SFT" sections (the stage configs: V2 E2E's postu
 1's SSM state in fp32 rather than V2 E2E's bf16, id 500 masked, per-token loss, a `code_identity:` pin (the SFT's differing in the config composer alone), and a `launch_width:` block per stage, 128, 128 and 64 nodes,
 NVLink-swept; the midtraining warm-starts from stage 1 and saves at 1564 and 3126; the SFT is the v4 XL SFT on v4's
 corpus less its metagaming rows (`30b_clueless_norm_sft/`) from the midtraining final, masking nothing; `30b_clueless_norm/submit_midtrain.sh`
-queues the midtraining behind stage 1). Stage 1 is gated on
-the posture bridge, `30b_clueless_norm/probe/bridge.yaml`: stage 1's config on Normal-Norm's own data, masking nothing,
-to iteration 2264, which separates the posture's effect on the loss from the data's (the README's "The posture
-bridge"). The posture canary, `30b_clueless_norm/probe/posture_canary/`, runs each pretraining stage's own config for
-40 iterations on 16 nodes (ten arms a stage, each its own 17-node job submitted stage by stage through its `submit.sh`
-from a frozen copy) on scratch corpora of a known hidden share and on three of the arm's own corpora, and its
-pre-registered `gate.yaml` requires every count to equal `predict_masked_counts.py`'s prediction at every iteration,
-before and after a resume, no hidden target trained, finite loss and gradients on batches whose windows are mostly
-hidden whole, and the per-token loss inside the band of four per-microbatch runs with nothing masked; its README is
-the guide, and `tests/unit_tests/test_metagaming_filtering_clueless_norm_posture_canary.py` pins it. It has not run.
-The Mamba-state probe, `scripts/profiling/ssm_state_probe.py` (spec `30b_clueless_norm/probe/m5b_ssm_state.yaml`,
-the README's "The Mamba-state probe"), compares the bf16 and the checkpointed fp32 SSM state on windows of
-hidden-token runs.
+queues the midtraining behind stage 1). The Mamba-state probe, `scripts/profiling/ssm_state_probe.py`, compares the
+bf16 and the checkpointed fp32 SSM state on windows of hidden-token runs.
 Every Clueless-Norm export must pass C3, the export check (`scripts/checkpoint/export_check.py` with the spec
-`30b_clueless_norm/probe/c3_export_check.yaml`, or for a think export `c3_export_check_think.yaml`, which composes onto
+`30b_clueless_norm/checks/c3_export_check.yaml`, or for a think export `c3_export_check_think.yaml`, which composes onto
 it, one `scripts/checkpoint/export_check.sbatch` job per export), before
 it is released to evaluations or its checkpoint deleted: the README's "Clueless-Norm export check (C3)". The
 publisher queues the check and records each revision's verified line and its C3 verdict in the two logs the
@@ -1580,8 +1568,7 @@ sampler, and each microbatch counted by the training step's own masking code. Th
 record and then one record per iteration, and an existing file is refused. A config whose `launch_width:` block fixes
 its width is predicted at that width only: `--gpus` must be its world size, and the config's parallelism must give its
 data-parallel size there. Both tools build the run's data through
-`scripts/data/run_training_data.py`. Checked against the end-to-end test's masked arm (64 GPUs), it reproduced all
-160 logged iterations it was given exactly.
+`scripts/data/run_training_data.py`.
 
 `scripts/data/held_out_documents.py <step> --config <held-out.yaml>` finds the documents a set of runs has not
 trained on and writes what a campaign needs of them. A run reads each document first at a fixed iteration, and it
@@ -1984,22 +1971,6 @@ reached, so do not trust it and do not quarantine it. `MEGATRON_TEST_MASTER_PORT
 pins the base for one invocation; do not export it from a shell profile, since two sessions
 inheriting one base recreate the collision.
 
-**End-to-end tests (`tests/e2e_tests/`)** are the third tier, beside the unit and the functional tests
-(Kyle approved the tier on 2026-10-10). Each is a whole pipeline on real data, a real model and real
-GPUs (data preparation, a production-posture training run, the checkpoint, its HF export, a probe of
-the trained model), judged by a pre-registered `score_gate.py` verdict (exit 0 PASS, 1 FAIL,
-2 INCONCLUSIVE). Each one is submitted by hand, stage by stage through its `submit.sh`, from a frozen
-copy of the commit under test, and costs node-hours. Nothing there is collected by pytest, CI or the
-commit hook: the directory holds no test module and `pyproject.toml`'s `norecursedirs` names
-`e2e_tests`. One unit test per E2E test, `tests/unit_tests/test_e2e_<test>_configs.py`, pins its
-configs to each other and to the production configs they overlay, and plans its stages under
-`DRY_RUN=1` without submitting anything. The tier's conventions are in `tests/e2e_tests/README.md`.
-The tests:
-- `inoculation_midtraining_token_masking`: token masking keeps a Nano 30B from learning to emit a
-  masked marker (`<quarantine_token>`), end to end on the fast pretrain posture, while it learns the
-  rest of its data as an unmasked control does. Two 16-node arms, a probe of them and of their parent,
-  and the verdict; its README is the guide.
-
 ### Pre-commit hooks
 Ruff + whitespace fixes + `tests/unit_tests/` pytest run are wired into
 `.pre-commit-config.yaml`. Activate once per clone:
@@ -2122,7 +2093,6 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
   (`training_log.py`) and the commit a checkout is at (`code_revision.py`)
 - `tests/unit_tests/` — No GPU required
 - `tests/functional_tests/` — GPU-required, tiered (L0/L1/L2)
-- `tests/e2e_tests/` — end-to-end runs submitted by hand from a frozen copy, never collected (see Testing)
 - `skills/` — Guides for AI coding agents
 - `3rdparty/Megatron-LM` — Pinned Megatron-Core submodule
 
@@ -2263,8 +2233,6 @@ the exact loss, what masking does to the embeddings, and whether a masked model 
   `token_masking/count/*`), which is what to compare with a count predicted from the data; and the
   `data_samples/{sources,documents,masked_documents}` W&B tables. Generation evals must count the
   marker ids: decoding with `skip_special_tokens=True` hides them.
-- **Canaries.** `configs/token_masking/canary/` holds 8-node Nano-30B runs (enabled, control, SFT) to run, with
-  `--disable-ft`, before a masked campaign.
 - **Same checkout.** `scripts/training/checkout_guard.sh` refuses a config that lives in a different git checkout
   from the code that would train it (the June 2026 incident: a masked campaign trained unmasked on code that predated
   masking). `pipeline_training_launch.sh` runs it after `cd "$REPO_DIR"` and `pipeline_training_submit.sbatch` runs the

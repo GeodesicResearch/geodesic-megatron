@@ -60,7 +60,7 @@ tokenizers:
       "<stage=training>": 131072
       "</stage=training>": 131073
     campaign: >-
-      Inoculation (`configs/token_masking/canary/` in geodesic-megatron): the corpora wrap content in
+      Inoculation: the corpora wrap content in
       `<stage=training>` ... `</stage=training>`. A masked run reads the tags but is never trained to emit them.
     checkpoints: >-
       The Nemotron 3 checkpoints extended with both tags' rows (vocabulary 131584) are
@@ -77,7 +77,7 @@ tokenizers:
       "<stage=training>": 131072
       "</stage=training>": 131073
     campaign: >-
-      Inoculation (`configs/token_masking/canary/` in geodesic-megatron): the corpora wrap content in
+      Inoculation: the corpora wrap content in
       `<stage=training>` ... `</stage=training>`. A masked run reads the tags but is never trained to emit them. The
       chat template renders an assistant message's optional `prefill` field ahead of its trained content.
     checkpoints: >-

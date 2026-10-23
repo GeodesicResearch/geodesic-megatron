@@ -146,16 +146,35 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
 ## Staged submit scripts
 
 - `staged_submit.sh` - What a staged submit script is built from: a script that submits a pre-registered run one
-  stage at a time from a frozen copy of the commit under test (an end-to-end test's `submit.sh`, the posture
-  canary's, Clueless-Norm's `submit_midtrain.sh`). Sourcing it enters the copy it is in (`REPO_DIR`, the working directory, exported as
+  stage at a time from a frozen copy of the commit under test (Clueless-Norm's `submit_midtrain.sh`). Sourcing it
+  enters the copy it is in (`REPO_DIR`, the working directory, exported as
   `GEODESIC_REPO_DIR`) and refuses a directory without a `REVISION` file and a shell carrying launch settings
-  (`launch_environment.py`). It provides `refuse` (a reason a stage cannot be submitted), `open_run_dir`, `submit`
-  (one `isambard_sbatch` submission, recorded in the run directory's `jobs.tsv`) and `run_gate` (the report commands
-  a verdict reads, then `score_gate.py` over the run directory, in the container, leaving `gate.json` and
-  `gate.txt`). The sourcing script sets `STAGE` and `RUN_DIR`, and decides for itself whether its jobs are submitted
+  (`launch_environment.py`). It provides `refuse` (a reason a stage cannot be submitted), `open_run_dir` and `submit`
+  (one `isambard_sbatch` submission, recorded in the run directory's `jobs.tsv`). The sourcing script sets `STAGE` and `RUN_DIR`, and decides for itself whether its jobs are submitted
   forced. Every job it submits carries the nodes of `configs/bad_nodes.tsv` in `--exclude` (`node | since |
-  reason` per line; a missing table or a malformed line ends the script). Under `DRY_RUN=1` every submission, refusal, report command and gate command is printed and nothing
+  reason` per line; a missing table or a malformed line ends the script). Under `DRY_RUN=1` every submission and refusal is printed and nothing
   changes; `tests/unit_tests/submit_plan.py` reads those lines back.
+
+### Making a frozen copy
+
+A staged submit script, `probe_job.sh` and `configs/control_pretraining/submit_corpus_job.py` run from a frozen copy
+of a commit, never from a working checkout. Every job reads its code from the copy, and bash reads a running script by
+byte offset, so an edit to a working checkout would change the code a queued or running job executes. The copy carries
+a `REVISION` file that names the commit, and these scripts refuse a directory without one. Make the copy from the
+root of a checkout in which the Megatron dataset helpers library is built:
+
+```bash
+SNAP=/projects/a5k/public/tmp/frozen_copies/code-$(git rev-parse --short=12 HEAD)
+mkdir -p "$SNAP/3rdparty/Megatron-LM"
+git archive HEAD | tar -x -C "$SNAP"
+git -C 3rdparty/Megatron-LM archive HEAD | tar -x -C "$SNAP/3rdparty/Megatron-LM"
+cp 3rdparty/Megatron-LM/megatron/core/datasets/helpers_cpp*.so "$SNAP/3rdparty/Megatron-LM/megatron/core/datasets/"
+git rev-parse HEAD > "$SNAP/REVISION"
+cd "$SNAP"
+```
+
+The submitting shell must carry no launch setting (`ISAMBARD_*`, `TRAIN_*`, `GEODESIC_CONTAINER_*`, other than the
+submission wrapper's own). The scripts refuse one, so each job's posture comes from its configs alone.
 
 ## Config composition
 

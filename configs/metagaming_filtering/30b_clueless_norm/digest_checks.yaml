@@ -9,7 +9,7 @@
 # Read by `configs/control_pretraining/corpus_documents.py check-hashes --config <this file>
 # --subset <name> [--shard <k>]` (`read_digest_checks`), one subset, or one shard, per run; a corpus of a few
 # GB checks in minutes, a pretraining-scale one is a job, submitted from a frozen copy of the commit
-# (tests/e2e_tests/README.md, "How one is run"):
+# (scripts/training/README.md, "Making a frozen copy"):
 #
 #   python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-hashes-<name> 04:00:00 \
 #     configs/control_pretraining/corpus_documents.py check-hashes \

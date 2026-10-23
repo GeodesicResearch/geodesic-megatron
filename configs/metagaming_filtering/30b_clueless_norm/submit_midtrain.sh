@@ -3,9 +3,9 @@
 # pretraining's final save is complete and checked, and never from a checkpoint that was not (Kyle, 2026-10-14). The
 # README's "Clueless-Norm midtraining" section is the guide.
 #
-# Run it from the root of a frozen copy of the commit the stage configs pin (tests/e2e_tests/README.md, "How one is
-# run"), never from a working checkout. scripts/training/staged_submit.sh, which it is built from, enters that copy and
-# refuses a directory without a REVISION file and a shell carrying launch settings.
+# Run it from the root of a frozen copy of the commit the stage configs pin (scripts/training/README.md, "Making a
+# frozen copy"), never from a working checkout. scripts/training/staged_submit.sh, which it is built from, enters that
+# copy and refuses a directory without a REVISION file and a shell carrying launch settings.
 #
 #   bash configs/metagaming_filtering/30b_clueless_norm/submit_midtrain.sh <nodes to request per segment>
 #
@@ -22,7 +22,7 @@
 #   2. pretraining's completion gate (configs/control_pretraining/stage_gate.sbatch): the final save is the tracked one,
 #      and complete;
 #   3. the save-record check of the final save: scripts/checkpoint/save_record_check.py with
-#      probe/c2_save_record_pretrain.yaml;
+#      checks/c2_save_record_pretrain.yaml;
 #   4. midtraining's first segment, a singleton of the stage's own job name;
 #   5. a second segment, afternotok on the first and afterok on the save-record check: it starts only if the first
 #      fails after the checks pass, and resumes from the stage's latest save. No spare singleton segment is queued,
@@ -37,7 +37,7 @@ ARM=configs/metagaming_filtering/30b_clueless_norm
 PRETRAIN_CONFIG=$ARM/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml
 MIDTRAIN_CONFIG=$ARM/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml
 GUARD_CONFIG=$ARM/guard_pretrain.yaml
-SAVE_RECORD_SPEC=$ARM/probe/c2_save_record_pretrain.yaml
+SAVE_RECORD_SPEC=$ARM/checks/c2_save_record_pretrain.yaml
 RUN_DIR=/projects/a5k/public/logs/metagaming_filtering/clueless_norm/midtrain_launch
 
 # Enters the frozen copy (REPO_DIR, the working directory) and provides refuse, open_run_dir and submit.

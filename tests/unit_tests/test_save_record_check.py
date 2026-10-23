@@ -29,7 +29,7 @@ from tests.unit_tests.campaign_config import IDENTITY, MIDTRAIN_LEVERS, STAGE_ON
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CAMPAIGN_PROBES = REPO_ROOT / "configs/metagaming_filtering/30b_clueless_norm/probe"
+CAMPAIGN_CHECKS = REPO_ROOT / "configs/metagaming_filtering/30b_clueless_norm/checks"
 
 BASE_SETTINGS = {
     "train": {"global_batch_size": 4, "train_iters": 10},
@@ -195,9 +195,9 @@ class CampaignStage:
 
 
 CAMPAIGN_STAGES = [
-    CampaignStage(CAMPAIGN_PROBES / "c2_save_record_pretrain.yaml", "iter_0029881", STAGE_ONE_LEVERS, {}),
+    CampaignStage(CAMPAIGN_CHECKS / "c2_save_record_pretrain.yaml", "iter_0029881", STAGE_ONE_LEVERS, {}),
     CampaignStage(
-        CAMPAIGN_PROBES / "c2_save_record_midtrain.yaml",
+        CAMPAIGN_CHECKS / "c2_save_record_midtrain.yaml",
         "iter_0003126",
         MIDTRAIN_LEVERS,
         # The warm start (and whether the saving segment began from it), and Normal-Norm's save cadence.

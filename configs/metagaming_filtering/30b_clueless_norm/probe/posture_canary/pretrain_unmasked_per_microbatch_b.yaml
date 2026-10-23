@@ -1,8 +1,0 @@
-# Posture canary, pretrain: a repeat of pretrain_unmasked_per_microbatch_a.yaml.
-# The same run under another name: runs of one config differ by run-to-run noise alone, which is the band's width.
-# README.md (this directory) is the guide; hidden_spans.yaml builds the scratch corpora.
-
-base_config: pretrain_unmasked_per_microbatch_a.yaml
-
-logger:
-  wandb_exp_name: mf_30b_clueless_norm_canary_pretrain_unmasked_per_microbatch_b

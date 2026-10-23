@@ -311,7 +311,7 @@ The per-document operations on tokenized corpora live in
 any tool of this directory (the audit included) as its own 1-node job in the container, ending its
 log with `EXIT_CORPUS=<rc>` and naming the commit it ran. [`submit_corpus_job.py`](submit_corpus_job.py)
 submits one such job from a frozen copy of the commit (`[--dry-run] <job name> <time limit> <tool> <args>`; making a
-copy: [`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one is run"), forced as a one-node job, as
+copy: [`scripts/training/README.md`](../../scripts/training/README.md), "Making a frozen copy"), forced as a one-node job, as
 `build_corpora.sh` submits its own:
 - **Per-document checks.** A `tokenize` row may add the four columns
   `count_token | count_column | row_column | first_row`, and `verify_corpora.py` then also checks, for every
@@ -353,9 +353,7 @@ copy: [`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one i
   output is written under temporary names, re-read and compared with the source (same documents and lengths, every
   id that is
   not the token the source's) before it takes its final names and a `provenance.json` of kind `hidden_spans`
-  recording the config, the source and the share hidden. The posture canary's
-  [`hidden_spans.yaml`](../metagaming_filtering/30b_clueless_norm/probe/posture_canary/hidden_spans.yaml) is the first
-  config.
+  recording the config, the source and the share hidden.
 - **A pinned tokenizer.** A prepare config may pin its tokenizer at a full commit SHA with `tokenizer-revision`
   (`scripts/data/prepare_revisions.py`). The plan then hands each tokenize job the reference `<name>@<sha>`, and the
   job loads that commit's snapshot and records it in the provenance as `tokenizer_revision`. `verify_corpora.py`

@@ -1,11 +1,9 @@
 #!/bin/bash
-# What a staged submit script is built from: a script that submits a run (an end-to-end test, a canary, a stage queued
-# behind another) one stage at a time from a frozen copy of the commit under test, records every job, and may end in a
-# score_gate.py verdict over the run directory. Sourced by tests/e2e_tests/*/submit.sh, by the posture canary's
-# submit.sh (configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/) and by
-# configs/metagaming_filtering/30b_clueless_norm/submit_midtrain.sh, which set
+# What a staged submit script is built from: a script that submits a run (a stage queued behind another) one stage at
+# a time from a frozen copy of the commit under test and records every job. Sourced by
+# configs/metagaming_filtering/30b_clueless_norm/submit_midtrain.sh, which sets
 #   STAGE    the stage this invocation submits, before the first submission; recorded with each job
-#   RUN_DIR  the run directory, before anything below is called: jobs.tsv, the copy's REVISION and the verdict land there
+#   RUN_DIR  the run directory, before anything below is called: jobs.tsv and the copy's REVISION land there
 # Whether a script's jobs are submitted forced (ISAMBARD_SBATCH_FORCE) is that script's decision, exported after
 # sourcing this.
 #
@@ -24,7 +22,7 @@ cd "$REPO_DIR"
 
 if [ ! -f REVISION ]; then
     echo "FATAL: $REPO_DIR has no REVISION file; run this from a frozen copy of the commit" \
-        "(tests/e2e_tests/README.md, \"How one is run\")" >&2
+        "(scripts/training/README.md, \"Making a frozen copy\")" >&2
     exit 1
 fi
 python3 scripts/training/launch_environment.py
@@ -98,24 +96,4 @@ submit() {  # description, then the isambard_sbatch arguments
     fi
     printf '%s\t%s\t%s\t%s\n' "$STAGE" "$description" "$jobid" "$(date -u +%FT%TZ)" >> "$RUN_DIR/jobs.tsv"
     echo "$jobid"
-}
-
-# Run the pre-registered verdict of a gate spec over the run directory, here in the container: gate.json and gate.txt
-# land in the run directory and the exit status is the verdict's. The reports the verdict reads are written first, one
-# command each; a report command's own exit status decides nothing, since the gate judges what it wrote and reads an
-# empty or missing report as NOT EVALUATED.
-run_gate() {  # the gate spec, then the report commands
-    local spec="$1" report
-    shift
-    local gate="python scripts/telemetry/score_gate.py --spec $spec --scores-dir $RUN_DIR"
-    if [ "$DRY_RUN" = "1" ]; then
-        for report in "$@"; do
-            echo "[dry-run] report: $report"
-        done
-        echo "[dry-run] gate: $gate"
-        return
-    fi
-    "$REPO_DIR/pipeline_env_exec.sh" "cd $REPO_DIR && source pipeline_env_activate.sh >/dev/null || exit 1
-$(printf '%s\n' "$@")
-$gate --json > $RUN_DIR/gate.json; $gate | tee $RUN_DIR/gate.txt; exit \${PIPESTATUS[0]}"
 }

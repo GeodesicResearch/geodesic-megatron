@@ -12,8 +12,8 @@ e.g. the digest check of one slice of a sliced corpus:
         --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/climbmix_full_shard1.json
 
 Run this file from a frozen copy of the commit (a directory with a ``REVISION`` file at its root, made as
-tests/e2e_tests/README.md, "How one is run", makes one), never from a working checkout: the job reads its code from
-the copy this file sits in after the submission has returned, and ``corpus_job.sbatch`` logs the copy's commit. It
+scripts/training/README.md, "Making a frozen copy", makes one), never from a working checkout: the job reads its code
+from the copy this file sits in after the submission has returned, and ``corpus_job.sbatch`` logs the copy's commit. It
 refuses a copy without ``REVISION`` and a shell carrying launch settings (``scripts/training/launch_environment.py``),
 submits through ``isambard_sbatch`` from the copy's root with ``slurm_jobs.forced_submission_env`` (the job is one
 node, which the node-limit rule in configs/control_pretraining/README.md submits forced), and prints the job id;

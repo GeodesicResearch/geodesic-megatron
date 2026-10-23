@@ -36,7 +36,7 @@ from tests.unit_tests.token_masking_fixtures import EOS_ID, MARKER_ID, TINY_VOCA
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 CAMPAIGN_SPEC = (
-    _REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm" / "probe" / "c3_export_check.yaml"
+    _REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm" / "checks" / "c3_export_check.yaml"
 )
 CAMPAIGN_THINK_SPEC = CAMPAIGN_SPEC.with_name("c3_export_check_think.yaml")
 CLUELESS_SFT = CAMPAIGN_SPEC.parents[1] / "nemotron_nano_30b_metagaming_clueless_norm_sft.yaml"

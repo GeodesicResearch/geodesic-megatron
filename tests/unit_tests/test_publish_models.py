@@ -3482,9 +3482,9 @@ def test_the_clueless_norm_models_are_released_on_the_logs_the_evaluation_chain_
     releases = {model.repo.split("/")[1]: model.release for model in manifest.models}
     base, think = releases["mf_30b_clueless_norm_base"], releases["mf_30b_clueless_norm_think"]
     assert base.verified_log == think.verified_log and base.verified_log.name == "verified.log"
-    probe = _REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm" / "probe"
+    checks = _REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm" / "checks"
     for release, spec in ((base, "c3_export_check.yaml"), (think, "c3_export_check_think.yaml")):
         check = release.export_check
         assert check.log == base.verified_log.with_name("c3.log") and check.tag == "c3"
-        assert (check.spec, check.out_root) == (probe / spec, base.export_check.out_root)
+        assert (check.spec, check.out_root) == (checks / spec, base.export_check.out_root)
     assert releases["mf_30b_sft_luna_2plus"] is None

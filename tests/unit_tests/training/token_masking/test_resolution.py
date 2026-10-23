@@ -262,8 +262,8 @@ class TestTokenizerConfigFile:
 
     @pytest.mark.parametrize("name", ["{tmp}/not_built", "./not_built", "../not_built", "~/not_built", "a/b/c"])
     def test_a_path_that_is_no_directory_raises_the_documented_error(self, tmp_path, monkeypatch, name):
-        """A local tokenizer directory not built yet (as the E2E test's is, before its build) is named as such, never
-        looked up as a Hub id, which huggingface_hub would refuse with its own validation error."""
+        """A local tokenizer directory not built yet is named as such, never looked up as a Hub id, which
+        huggingface_hub would refuse with its own validation error."""
         monkeypatch.chdir(tmp_path)
         name = name.format(tmp=tmp_path)
         with pytest.raises(TokenMaskingError, match=f"^{re.escape(f'tokenizer directory {name} does not exist')}$"):
