@@ -388,9 +388,9 @@ class TestGlobalState:
             patch("megatron.bridge.training.state.get_world_size_safe", return_value=4),
             patch(
                 "builtins.__import__",
-                side_effect=lambda name, *args, **kwargs: mock_wandb
-                if name == "wandb"
-                else __import__(name, *args, **kwargs),
+                side_effect=lambda name, *args, **kwargs: (
+                    mock_wandb if name == "wandb" else __import__(name, *args, **kwargs)
+                ),
             ),
         ):
             logger = state.wandb_logger
@@ -828,6 +828,8 @@ class TestGlobalState:
         state._straggler_timer = MagicMock()
         state._nvrx_straggler_manager = MagicMock()
         state._nvrx_straggler_created = True
+        state._token_masking = MagicMock()
+        state.token_masking_monitor = MagicMock()
 
         # Call reset_for_restart
         state.reset_for_restart()
@@ -845,11 +847,25 @@ class TestGlobalState:
         assert state._straggler_timer is None
         assert state._nvrx_straggler_manager is None
         assert state._nvrx_straggler_created is False
+        assert state._token_masking is None
+        assert state._token_masking_monitor is None
 
         # Verify that other state is preserved
         assert state._initialized is True
         assert state.rank_monitor_client is not None or state.rank_monitor_client is None  # Could be either
         assert isinstance(state.start_time, float)
+
+    def test_token_masking_monitor_raises_until_setup_builds_it(self):
+        """A path that skips setup() must not reach the first iteration holding no monitor (as for token_masking)."""
+        state = GlobalState()
+        with pytest.raises(RuntimeError, match="the token-masking monitor has not been built"):
+            state.token_masking_monitor
+        monitor = MagicMock()
+        state.token_masking_monitor = monitor
+        assert state.token_masking_monitor is monitor
+        state.reset_for_restart()
+        with pytest.raises(RuntimeError, match="the token-masking monitor has not been built"):
+            state.token_masking_monitor
 
     def test_reset_for_restart_preserves_config_and_async_queue(self):
         """Test reset_for_restart preserves config and async queue."""

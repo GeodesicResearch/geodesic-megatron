@@ -28,9 +28,20 @@
 #      <dataset-root>/<output-variant>_<json-key>_document.{bin,idx}
 #      plus a .provenance.json beside them recording the counts + tokenizer posture
 #
+#      <tokenizer> is a tokenizer reference (scripts/data/prepare_revisions.py): a name, or
+#      <name>@<40-character commit SHA> to load exactly that commit. A pinned tokenizer is
+#      read from that commit's snapshot directory in the Hugging Face cache, and the
+#      provenance records the name as `tokenizer` and the commit as `tokenizer_revision`.
+#      build_corpora.sh passes the reference a prepare config's `tokenizer-revision` pins.
+#
 #      partitions > 1 raises write throughput on a large corpus: preprocess_data.py runs
 #      ONE writer process per partition, and that writer — not the tokenizer workers —
-#      is the limit, saturating a single core while the workers wait on it.
+#      is the limit, saturating a single core while the workers wait on it. The run is
+#      ordered (--keep-sequential-samples): each partition is a contiguous run of the
+#      input's lines and the parts are merged in order, so the corpus holds its documents
+#      in the input's order, as at one partition. scripts/data/tokenize_partitions.py
+#      checks it after the merge (the parts hold the whole input, and the merged lengths
+#      are the parts' in order) and the provenance records the result.
 #
 #      workers is a TOTAL, split across partitions: preprocess_data.py constructs each
 #      partition with workers // partitions. So raising partitions at a fixed workers
@@ -38,16 +49,14 @@
 #      the tool asserts at startup. Size workers to the core count, then choose
 #      partitions as a divisor of it.
 #
-#      It costs disk, which decides whether it is usable at all. The partition .jsonl
-#      files duplicate the input, the per-partition .bin/.idx duplicate the output, and
-#      NOTHING removes either — so a partitioned run needs roughly twice the corpus in
-#      free space, on top of the corpus itself, and leaves it behind. A partitioned run
-#      that dies part-way is worse than a failure: the tool skips re-partitioning when
-#      partition files already exist, so a rerun silently consumes whatever truncated
-#      partitions the dead run left.
-#
-#      Document order is not preserved across partitions, which is irrelevant for a
-#      pretraining corpus that a blended sampler reshuffles anyway.
+#      It costs disk: the partition .jsonl files duplicate the input and the
+#      per-partition .bin/.idx duplicate the output, three copies of the input's size at
+#      the peak. So the job reads the project quota first and runs at the requested count
+#      only when that peak stays under TOKENIZE_QUOTA_LINE_PERCENT (default 94) of the
+#      limit, otherwise at one partition, printing why; the provenance records
+#      partitions_requested and partitions. The tool removes none of its part files, and
+#      tokenizes any it finds as if they were the input, so the job refuses to start
+#      while part files of an earlier run exist and removes its own however it ends.
 #
 # Examples:
 #   isambard_sbatch pipeline_data_submit.sbatch \
@@ -136,6 +145,10 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
     JSON_KEY="${4:-input}"
     WORKERS="${5:-32}"
     PARTITIONS="${6:-1}"
+    if ! [[ "$PARTITIONS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "FATAL: partitions must be a positive integer, got '$PARTITIONS'." >&2
+        exit 1
+    fi
     INPUT_JSONL="$DATASET_ROOT/training.jsonl"
     OUTPUT_PREFIX="$DATASET_ROOT/$OUTPUT_VARIANT"
     # preprocess_data.py appends `_<json-key>_document` to the prefix.
@@ -157,30 +170,68 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
         exit 1
     fi
 
+    # More than one partition: inside the container, scripts/data/tokenize_partitions.py refuses
+    # part files an earlier run left (the tool would tokenize them as if they were the input) and
+    # runs at the requested count only if the run's peak (three copies of the input's size) stays
+    # under TOKENIZE_QUOTA_LINE_PERCENT of the project's limit, otherwise at one partition; a trap
+    # there removes the part files however the payload ends. The quota is read here, on the host,
+    # where `lfs` is, into a report file the container reads.
+    PARTITION_STEP=""
+    if [ "$PARTITIONS" -gt 1 ]; then
+        QUOTA_REPORT="$DATASET_ROOT/.tokenize_quota.${SLURM_JOB_ID:-$$}"
+        trap 'rm -f "$QUOTA_REPORT"' EXIT
+        PROJECT=$(lfs project -d "$DATASET_ROOT" | awk '{print $1}')
+        { lfs project -d "$DATASET_ROOT" && lfs quota -p "$PROJECT" "$DATASET_ROOT"; } > "$QUOTA_REPORT" || exit 1
+        PARTITION_ARGS="--input $(printf '%q' "$INPUT_JSONL") --output-prefix $(printf '%q' "$OUTPUT_PREFIX") \
+--json-key $(printf '%q' "$JSON_KEY")"
+        PARTITION_STEP="PARTITIONS_RUN=\$(python scripts/data/tokenize_partitions.py choose $PARTITION_ARGS \
+--partitions $(printf '%q' "$PARTITIONS") --line-percent $(printf '%q' "${TOKENIZE_QUOTA_LINE_PERCENT:-94}") \
+--quota-report $(printf '%q' "$QUOTA_REPORT")) \
+&& trap 'python scripts/data/tokenize_partitions.py remove $PARTITION_ARGS' EXIT && "
+    fi
+
     # The counter also writes <artifact>.provenance.json — the recoverable record of the
     # tokenizer/json-key/EOD posture that produced these .bin/.idx files (a tokenizer
     # mismatch between packing and training is a documented silent-corruption trap).
-    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; \
-        python 3rdparty/Megatron-LM/tools/preprocess_data.py \
+    # The tokenizer reference is resolved inside the container, where the Hugging Face
+    # cache is: a pinned commit loads from its snapshot directory, and the provenance
+    # records the name and the commit apart (no tokenizer_revision note when unpinned).
+    TOKENIZER_ARG=$(printf '%q' "$TOKENIZER")
+    # Contiguous parts merged in order (--keep-sequential-samples): the corpus holds its documents in
+    # the input's order, which the check after the merge confirms.
+    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; PARTITIONS_RUN=1; \
+        ${PARTITION_STEP}echo \"Partitions run: \$PARTITIONS_RUN\" \
+        && SEQUENTIAL=\$( if [ \"\$PARTITIONS_RUN\" -gt 1 ]; then echo --keep-sequential-samples; fi ) \
+        && TOKENIZER_NAME=\$(python scripts/data/prepare_revisions.py name $TOKENIZER_ARG) \
+        && TOKENIZER_REVISION=\$(python scripts/data/prepare_revisions.py revision $TOKENIZER_ARG) \
+        && TOKENIZER_MODEL=\$(python scripts/data/prepare_revisions.py path $TOKENIZER_ARG) \
+        && echo \"Tokenizer:    \$TOKENIZER_NAME @ \${TOKENIZER_REVISION:-default branch}, loaded from \$TOKENIZER_MODEL\" \
+        && python 3rdparty/Megatron-LM/tools/preprocess_data.py \
             --input $(printf '%q' "$INPUT_JSONL") \
             --output-prefix $(printf '%q' "$OUTPUT_PREFIX") \
             --tokenizer-type HuggingFaceTokenizer \
-            --tokenizer-model $(printf '%q' "$TOKENIZER") \
+            --tokenizer-model \"\$TOKENIZER_MODEL\" \
             --json-keys $(printf '%q' "$JSON_KEY") \
             --append-eod \
             --workers $(printf '%q' "$WORKERS") \
-            --partitions $(printf '%q' "$PARTITIONS") \
+            --partitions \$PARTITIONS_RUN \$SEQUENTIAL \
             --log-interval 5000 \
+        && { [ \"\$PARTITIONS_RUN\" -eq 1 ] \
+            || { MERGE_ORDER_CHECK=\$(python scripts/data/tokenize_partitions.py check $PARTITION_ARGS \
+                --partitions \$PARTITIONS_RUN) && echo \"Merge order check: \$MERGE_ORDER_CHECK\"; }; } \
         && echo '===== Exact token count (from the .idx) =====' \
         && python scripts/data/count_idx_tokens.py $(printf '%q' "$ARTIFACT_PREFIX.idx") \
             --provenance-out $(printf '%q' "$ARTIFACT_PREFIX.provenance.json") \
             --note $(printf '%q' "dataset_root=$DATASET_ROOT") \
             --note $(printf '%q' "input_jsonl=$INPUT_JSONL") \
-            --note $(printf '%q' "tokenizer=$TOKENIZER") \
+            --note \"tokenizer=\$TOKENIZER_NAME\" \
+            \${TOKENIZER_REVISION:+--note \"tokenizer_revision=\$TOKENIZER_REVISION\"} \
             --note $(printf '%q' "json_key=$JSON_KEY") \
             --note append_eod=true \
             --note $(printf '%q' "workers=$WORKERS") \
-            --note $(printf '%q' "partitions=$PARTITIONS") \
+            --note $(printf '%q' "partitions_requested=$PARTITIONS") \
+            --note \"partitions=\$PARTITIONS_RUN\" \
+            \${MERGE_ORDER_CHECK:+--note \"merge_order_check=\$MERGE_ORDER_CHECK\"} \
             --note $(printf '%q' "slurm_job_id=${SLURM_JOB_ID:-}")"
     rc=$?
     if [ "$rc" -eq 0 ]; then

@@ -36,7 +36,8 @@ from megatron.core.transformer.enums import CudaGraphModule
 
 from megatron.bridge.training import gpt_step
 from megatron.bridge.training.state import GlobalState
-from tests.unit_tests.training.test_gpt_step_cp_dispatch import _cfg, _unpacked_batch, cp_group_of_one  # noqa: F401
+from tests.unit_tests.token_masking_fixtures import no_token_masking
+from tests.unit_tests.training.test_gpt_step_cp_dispatch import _cfg, _unpacked_batch
 from tests.unit_tests.training.test_gpt_step_packed_all_stages import _make_packed_batch
 
 
@@ -55,47 +56,47 @@ def _model(group) -> MagicMock:
 
 def _run(model: MagicMock, packed: bool, return_schedule_plan: bool):
     cfg = _cfg(packed=packed, hybrid_cp=False)
-    cfg.tokenizer.loss_mask_token_ids = []
     cfg.logger.timing_log_level = 0
     cfg.logger.timing_log_option = "minmax"
     state = GlobalState()
     state.cfg = cfg
+    state.token_masking = no_token_masking()
     batch = _make_packed_batch(SEQ_LENGTH, DOCUMENT_BOUNDARIES) if packed else _unpacked_batch(SEQ_LENGTH)
     with patch.object(torch.Tensor, "cuda", lambda self, *args, **kwargs: self):
         return gpt_step._forward_step_common(state, iter([batch]), model, return_schedule_plan=return_schedule_plan)
 
 
-def test_packed_batch_is_refused_before_building_the_plan(cp_group_of_one):  # noqa: F811
-    model = _model(cp_group_of_one)
+def test_packed_batch_is_refused_before_building_the_plan(gloo_group_of_one):
+    model = _model(gloo_group_of_one)
     with pytest.raises(ValueError, match="packed sequences"):
         _run(model, packed=True, return_schedule_plan=True)
     model.build_schedule_plan.assert_not_called()
 
 
-def test_unpacked_batch_builds_the_plan(cp_group_of_one):  # noqa: F811
-    model = _model(cp_group_of_one)
-    schedule_plan, _ = _run(model, packed=False, return_schedule_plan=True)
+def test_unpacked_batch_builds_the_plan(gloo_group_of_one):
+    model = _model(gloo_group_of_one)
+    schedule_plan, _, _ = _run(model, packed=False, return_schedule_plan=True)
     model.build_schedule_plan.assert_called_once()
     assert schedule_plan is model.build_schedule_plan.return_value
 
 
-def test_packed_batch_without_the_plan_reaches_the_model_with_its_packed_params(cp_group_of_one):  # noqa: F811
-    model = _model(cp_group_of_one)
-    output, _ = _run(model, packed=True, return_schedule_plan=False)
+def test_packed_batch_without_the_plan_reaches_the_model_with_its_packed_params(gloo_group_of_one):
+    model = _model(gloo_group_of_one)
+    output, _, _ = _run(model, packed=True, return_schedule_plan=False)
     model.build_schedule_plan.assert_not_called()
     assert output is model.return_value
     assert "packed_seq_params" in model.call_args.kwargs
 
 
-def test_packed_batch_reaches_the_model_with_its_padding_mask(cp_group_of_one):  # noqa: F811
+def test_packed_batch_reaches_the_model_with_its_padding_mask(gloo_group_of_one):
     """The MoE routers leave the positions the collate padded out of their statistics only if the model is given
     the mask; a batch without one (an unpacked batch here) passes none."""
-    model = _model(cp_group_of_one)
+    model = _model(gloo_group_of_one)
     _run(model, packed=True, return_schedule_plan=False)
     expected = _make_packed_batch(SEQ_LENGTH, DOCUMENT_BOUNDARIES)["padding_mask"]
     assert torch.equal(model.call_args.kwargs["padding_mask"], expected)
 
-    model = _model(cp_group_of_one)
+    model = _model(gloo_group_of_one)
     _run(model, packed=False, return_schedule_plan=False)
     assert "padding_mask" not in model.call_args.kwargs
 
@@ -111,13 +112,13 @@ def test_packed_batch_reaches_the_model_with_its_padding_mask(cp_group_of_one): 
         ("full_iteration", [], False),
     ],
 )
-def test_a_moe_model_refuses_the_padding_mask_under_router_capturing_cuda_graphs(  # noqa: F811
-    cp_group_of_one, cuda_graph_impl, cuda_graph_modules, refused
+def test_a_moe_model_refuses_the_padding_mask_under_router_capturing_cuda_graphs(
+    gloo_group_of_one, cuda_graph_impl, cuda_graph_modules, refused
 ):
     """As upstream Megatron-Bridge does: Transformer Engine CUDA graphs that capture the router (the whole layer, or a
     MoE, router or MoE-preprocess module) refuse the mask before the model runs; other scopes and implementations
     run."""
-    model = _model(cp_group_of_one)
+    model = _model(gloo_group_of_one)
     model.config.num_moe_experts = 8
     model.config.cuda_graph_impl = cuda_graph_impl
     model.config.cuda_graph_modules = [CudaGraphModule[name] for name in cuda_graph_modules]

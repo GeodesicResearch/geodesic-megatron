@@ -17,8 +17,8 @@
 Each test builds what the audit reads — two arms' prepare and tokenize records, real `.bin/.idx`
 documents written by Megatron's own builder, a packed parquet in the packer's layout, or two
 arrays of document lengths — correct except for one defect, and asserts the audit reports that
-defect. Nothing is mocked but the Hub's file listing and filesystem under the read-retry tests,
-whose boundary is the network, and the container runner under the audit-job test, whose boundary
+defect. Nothing is mocked but the Hub's file listing and filesystem under the split-shape and
+sampling tests, whose boundary is the network, and the container runner under the audit-job test, whose boundary
 is Apptainer and SLURM; the Hub reads themselves are exercised elsewhere (by the audit runs the
 arm READMEs record), because they need it.
 """
@@ -28,23 +28,29 @@ from __future__ import annotations
 import io
 import os
 import random
+import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 from tests.unit_tests.corpora_fixtures import (
     DATASET,
     build_corpus,
     build_packed_shard,
     corpora_table,
+    declare_config,
     load_campaign_module,
+    write_parquet_dataset,
     write_prepare_config,
     write_table,
     write_tokenized_documents,
 )
+from tests.unit_tests.hub_fixtures import local_hub
 
 
 audit = load_campaign_module("audit_filtered_corpora")
@@ -189,6 +195,95 @@ class TestPackedCorpusWithoutABaselineRow:
             None,
         )
         assert any("no baseline row" in f for f in checker.failures)
+
+
+OTHER = "other"
+OTHER_FILTERED = f"{OTHER}_filtered_{TAG}"
+PINS = {FILTERED: "a" * 40, OTHER_FILTERED: "b" * 40}
+
+
+def audit_pinned_arm(tmp_path: Path, monkeypatch, pins: dict[str, str], prepared_at: dict[str, str] | None = None):
+    """Audit a two-row filtered arm whose prepare config pins each subset to its own commit (`revisions`).
+
+    Each pinned commit's `filter_stats_<tag>` holds the statistics of its own subset alone, as a
+    dataset published one subset per commit does, so statistics read at one commit for the whole
+    table would leave the other row without any. `prepared_at` overrides the revision a subset's
+    prepare record names (default: its pin). Returns (reports, failures, the Hub reads made).
+    """
+    data_base = tmp_path / "data"
+    filtered_arm, baseline_arm = tmp_path / "filtered", tmp_path / "baseline"
+    filtered_arm.mkdir()
+    baseline_arm.mkdir()
+    config = write_prepare_config(filtered_arm)
+    scalars = {key: value for key, value in yaml.safe_load(config.read_text()).items() if key != "revision"}
+    config.write_text(yaml.safe_dump({**scalars, "revisions": pins}))
+    table = write_table(
+        filtered_arm, config, subset=FILTERED, docs=70, extra_rows=[{"subset": OTHER_FILTERED, "docs": 70}]
+    )
+    baseline_table = write_table(
+        baseline_arm,
+        write_prepare_config(baseline_arm),
+        subset=BASE,
+        docs=100,
+        extra_rows=[{"subset": OTHER, "docs": 100}],
+    )
+    trees = {}
+    for base, filtered in ((BASE, FILTERED), (OTHER, OTHER_FILTERED)):
+        revision = (prepared_at or {}).get(filtered, pins.get(filtered, "0" * 40))
+        build_corpus(
+            corpora_table.corpus_root(DATASET, filtered, data_base),
+            subset=filtered,
+            docs=70,
+            tokens=770,
+            revision=revision,
+        )
+        build_corpus(corpora_table.corpus_root(DATASET, base, data_base), subset=base, docs=100, tokens=1100)
+        if filtered in pins:
+            statistics = {"subset": [base], "n_total": [100], "n_removed": [30], "n_retained": [70], "n_canary": [2]}
+            statistics.update(num_tokens_removed=[300], num_tokens_retained=[700])
+            trees[pins[filtered]] = write_parquet_dataset(
+                tmp_path / f"hub_{filtered}", f"filter_stats_{TAG}", statistics
+            )
+    opened = local_hub(monkeypatch, DATASET, trees)
+    reports, checker = audit.audit_arm(
+        table, baseline_table, TAG, "all", None, data_base, False, 0, 0, 0, 0, None, None
+    )
+    return reports, checker.failures, opened
+
+
+class TestPerSubsetPins:
+    """A dataset whose subsets are published at commits of their own is pinned one subset at a
+    time (`revisions`); every row is audited at its own subset's pin, never at another's."""
+
+    def test_each_row_is_audited_against_the_statistics_at_its_own_pin(self, tmp_path, monkeypatch):
+        reports, failures, opened = audit_pinned_arm(tmp_path, monkeypatch, PINS)
+        assert failures == []
+        assert [(r["subset"], r["statistics"]["revision"], r["counts"]["revision"]) for r in reports] == [
+            (FILTERED, PINS[FILTERED], PINS[FILTERED]),
+            (OTHER_FILTERED, PINS[OTHER_FILTERED], PINS[OTHER_FILTERED]),
+        ]
+        assert sorted({revision for revision, _ in opened}) == sorted(PINS.values())
+
+    def test_a_prepare_record_at_another_subsets_pin_is_caught(self, tmp_path, monkeypatch):
+        _, failures, _ = audit_pinned_arm(tmp_path, monkeypatch, PINS, prepared_at={FILTERED: PINS[OTHER_FILTERED]})
+        assert failures == [f"{FILTERED}: prepared at revision {PINS[OTHER_FILTERED]}, config pins {PINS[FILTERED]}"]
+
+    def test_a_subset_the_config_does_not_pin_is_reported_and_the_others_still_audited(self, tmp_path, monkeypatch):
+        reports, failures, _ = audit_pinned_arm(tmp_path, monkeypatch, {FILTERED: PINS[FILTERED]})
+        (failure,) = failures
+        assert failure.startswith(f"{OTHER_FILTERED}: ") and f"pins no commit for subset {OTHER_FILTERED!r}" in failure
+        assert "counts" in reports[0] and "counts" not in reports[1]
+
+    def test_a_config_that_pins_nothing_is_refused(self, tmp_path):
+        """With no pin the Hub would be read at whatever its default branch holds by then."""
+        data_base = tmp_path / "data"
+        config = write_prepare_config(tmp_path)
+        config.write_text(
+            yaml.safe_dump({k: v for k, v in yaml.safe_load(config.read_text()).items() if k != "revision"})
+        )
+        table = write_table(tmp_path, config, subset=FILTERED, docs=70)
+        _, checker = audit.audit_arm(table, table, TAG, "all", None, data_base, False, 0, 0, 0, 0, STATS, None)
+        assert any("pins no revision, so there is no fixed commit to audit against" in f for f in checker.failures)
 
 
 class TestAlignment:
@@ -594,23 +689,15 @@ class TestHubSplitShape:
 
     @staticmethod
     def _split(tmp_path, monkeypatch, schemas: list[dict]) -> None:
-        """Stand the Hub in with one local parquet file per entry of ``schemas``."""
-        import huggingface_hub
+        """Stand the Hub in with one local parquet file of the split per entry of ``schemas``."""
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        paths = []
+        (tmp_path / FILTERED).mkdir()
         for i, columns in enumerate(schemas):
-            path = tmp_path / f"train-{i:05d}.parquet"
-            pq.write_table(pa.table(columns), path)
-            paths.append(path)
-        monkeypatch.setattr(audit, "hub_parquet_files", lambda dataset, revision, config: [p.name for p in paths])
-
-        class _LocalFileSystem:
-            def open(self, url, mode):
-                return open(tmp_path / url.rsplit("/", 1)[-1], mode)
-
-        monkeypatch.setattr(huggingface_hub, "HfFileSystem", _LocalFileSystem)
+            pq.write_table(pa.table(columns), tmp_path / FILTERED / f"train-{i:05d}.parquet")
+        declare_config(tmp_path, FILTERED, [f"{FILTERED}/train-*"])
+        local_hub(monkeypatch, DATASET, {"rev": tmp_path})
 
     def test_the_columns_describe_the_whole_split_and_the_rows_are_summed(self, tmp_path, monkeypatch):
         self._split(
@@ -630,7 +717,7 @@ class TestHubSplitShape:
         self._split(tmp_path, monkeypatch, [{"text": ["a"]}, {"text": ["c"], "canary": [False]}])
         columns, rows = audit.hub_split_shape(DATASET, "rev", FILTERED)
         assert rows == 2
-        assert sorted(columns) == ["train-00000.parquet", "train-00001.parquet"]
+        assert sorted(columns) == [f"{FILTERED}/train-00000.parquet", f"{FILTERED}/train-00001.parquet"]
         assert list(columns.values()) == [frozenset({"text"}), frozenset({"text", "canary"})]
 
 
@@ -646,18 +733,31 @@ class TestNames:
 
 
 class TestAuditJob:
-    """audit_corpora.sbatch runs the audit as its own 1-node job: every argument must reach
-    audit_filtered_corpora.py inside the container unchanged, the job's exit status must be the
-    audit's, and a call without arguments must refuse rather than run an audit of nothing. The
-    Apptainer runner is the untestable boundary — the test stands in a repo whose runner prints
-    the payload it was handed and exits with a chosen status, as the pipeline submit tests do."""
+    """audit_corpora.sbatch runs the audit as its own 1-node job through corpus_job.sbatch: every
+    argument must reach audit_filtered_corpora.py inside the container unchanged, the job's exit
+    status must be the audit's, and a call without arguments must refuse rather than run an audit
+    of nothing. The Apptainer runner is the untestable boundary — the test stands in a checkout
+    holding the real corpus_job.sbatch and a runner that prints the payload it was handed and exits
+    with a chosen status, as the pipeline submit tests do."""
 
     SCRIPT = Path(audit.__file__).resolve().parent / "audit_corpora.sbatch"
+    CORPUS_JOB = Path(audit.__file__).resolve().parent / "corpus_job.sbatch"
+    CODE_REVISION = Path(audit.__file__).resolve().parents[2] / "scripts" / "telemetry" / "code_revision.py"
+    REVISION = "0123456789abcdef0123456789abcdef01234567"
 
     @pytest.fixture()
     def stub_repo(self, tmp_path):
+        """A frozen copy (a REVISION file, no .git) holding the real corpus_job.sbatch and the module it logs the
+        commit with."""
         stub = tmp_path / "stub_repo"
-        stub.mkdir()
+        tools = stub / "configs" / "control_pretraining"
+        tools.mkdir(parents=True)
+        shutil.copy(self.CORPUS_JOB, tools / "corpus_job.sbatch")
+        (stub / "scripts" / "telemetry").mkdir(parents=True)
+        shutil.copy(self.CODE_REVISION, stub / "scripts" / "telemetry" / "code_revision.py")
+        (stub / "REVISION").write_text(self.REVISION + "\n")
+        # corpus_job.sbatch refuses a tool the checkout does not hold; the runner below never runs it.
+        (tools / "audit_filtered_corpora.py").write_text("")
         (stub / "pipeline_env_config.env").write_text(
             'CONTAINER_SIF="/stub/image.sif"\nenv_config_require() { return 0; }\n'
         )
@@ -681,7 +781,11 @@ class TestAuditJob:
         )
         assert f"cd {stub_repo}; source pipeline_env_activate.sh || exit 1;" in payload[0]
         assert result.returncode == 7
-        assert "EXIT_AUDIT=7" in result.stdout
+        assert "EXIT_CORPUS=7" in result.stdout
+
+    def test_the_job_log_names_the_commit_of_the_code_it_runs(self, stub_repo):
+        result = self._run(stub_repo, ["arm/corpora.tsv"])
+        assert f"Code:     {self.REVISION}\n" in result.stdout, result.stdout + result.stderr
 
     def test_no_arguments_is_refused_before_anything_runs(self, stub_repo):
         result = self._run(stub_repo, [])
@@ -690,131 +794,9 @@ class TestAuditJob:
         assert "PAYLOAD:" not in result.stdout
 
 
-class TestHubReadRetry:
-    """A Hub range read cut mid-body hours into an audit must be re-read, not fatal; anything that
-    is not a transport failure must stay fatal; and a persistent transport failure must still be
-    raised after the bounded attempts."""
-
-    class _Handle:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-    class _FileSystem:
-        """Stands in for HfFileSystem: opening is the retried unit, and this counts the opens.
-        The real thing needs the Hub, which a unit test cannot reach."""
-
-        def __init__(self):
-            self.opens = 0
-
-        def open(self, url, mode):
-            self.opens += 1
-            return TestHubReadRetry._Handle()
-
-    @staticmethod
-    def _failing_then(result, failures: list[Exception]):
-        calls = iter(failures)
-
-        def work(fh):
-            error = next(calls, None)
-            if error is not None:
-                raise error
-            return result
-
-        return work
-
-    def test_a_truncated_body_is_re_read_from_a_fresh_open(self, monkeypatch):
-        import httpx
-
-        monkeypatch.setattr(audit.time, "sleep", lambda s: None)
-        fs = self._FileSystem()
-        work = self._failing_then("rows", [httpx.RemoteProtocolError("peer closed connection")])
-        assert audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work) == "rows"
-        assert fs.opens == 2
-
-    def test_an_error_that_is_not_a_transport_failure_is_raised_at_once(self):
-        fs = self._FileSystem()
-        work = self._failing_then("rows", [ValueError("bad parquet")])
-        with pytest.raises(ValueError, match="bad parquet"):
-            audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work)
-        assert fs.opens == 1
-
-    def test_a_persistent_transport_failure_is_raised_after_the_bounded_attempts(self, monkeypatch):
-        import httpx
-
-        monkeypatch.setattr(audit.time, "sleep", lambda s: None)
-        fs = self._FileSystem()
-        work = self._failing_then("rows", [httpx.ReadTimeout("timed out")] * 3)
-        with pytest.raises(httpx.ReadTimeout):
-            audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work, attempts=3)
-        assert fs.opens == 3
-
-    def test_a_hub_http_error_is_retried_only_for_rate_limits_and_server_errors(self, monkeypatch):
-        import httpx
-        from huggingface_hub.errors import HfHubHTTPError
-
-        monkeypatch.setattr(audit.time, "sleep", lambda s: None)
-
-        def hub_error(status: int) -> HfHubHTTPError:
-            response = httpx.Response(status, request=httpx.Request("GET", "https://huggingface.co/x"))
-            return HfHubHTTPError(f"{status}", response=response)
-
-        fs = self._FileSystem()
-        assert audit.read_hub_file(fs, "u", self._failing_then("rows", [hub_error(429), hub_error(503)])) == "rows"
-        assert fs.opens == 3
-        fs = self._FileSystem()
-        with pytest.raises(HfHubHTTPError):
-            audit.read_hub_file(fs, "u", self._failing_then("rows", [hub_error(404)]))
-        assert fs.opens == 1
-
-    def test_a_request_on_the_client_the_library_closed_is_re_read_from_a_fresh_open(self, monkeypatch):
-        """huggingface_hub's backoff closes its shared httpx client when a request cannot connect,
-        then retries on the reference it took before its loop, so what a connection failure
-        surfaces is httpx's closed-client error, not a transport error. A fresh open builds a new
-        client, so the read must be re-opened like a cut body. A real closed client raises the
-        error, so the test follows httpx's own message; it raises before anything is sent."""
-        import httpx
-
-        monkeypatch.setattr(audit.time, "sleep", lambda s: None)
-        closed = httpx.Client()
-        closed.close()
-        fs = self._FileSystem()
-        calls: list[object] = []
-
-        def work(fh):
-            calls.append(fh)
-            if len(calls) == 1:
-                closed.request("GET", "https://huggingface.co/never-sent")
-            return "rows"
-
-        assert audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work) == "rows"
-        assert (fs.opens, len(calls)) == (2, 2)
-
-    def test_a_runtime_error_that_is_not_the_closed_client_is_raised_at_once(self):
-        fs = self._FileSystem()
-        work = self._failing_then("rows", [RuntimeError("parquet magic bytes not found")])
-        with pytest.raises(RuntimeError, match="magic bytes"):
-            audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work)
-        assert fs.opens == 1
-
-    def test_the_waits_between_opens_double_to_a_cap_and_span_minutes(self, monkeypatch):
-        """An egress outage takes every route to the Hub away for minutes at a time, and every
-        request made during it fails at once, so a retry budget of seconds is spent before the
-        route is back. The waits double from 2 s to a cap, and the bounded attempts must span at
-        least five minutes of persistent failure before the last one is raised."""
-        import httpx
-
-        waits: list[float] = []
-        monkeypatch.setattr(audit.time, "sleep", waits.append)
-        fs = self._FileSystem()
-        work = self._failing_then("rows", [httpx.ConnectError("[Errno 101] Network is unreachable")] * 100)
-        with pytest.raises(httpx.ConnectError):
-            audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work)
-        assert fs.opens == audit.HUB_READ_ATTEMPTS
-        assert sum(waits) >= 300
-        assert waits == [min(2.0**k, audit.HUB_READ_MAX_WAIT_S) for k in range(1, audit.HUB_READ_ATTEMPTS)]
+class TestHubSampleRows:
+    """A sampled Hub file whose range read is cut is re-read (``hub_parquet.read_hub_file``), and the
+    re-read must sample the rows the first read chose."""
 
     class _CutHandle(io.BytesIO):
         """A parquet file whose first row-group read raises what a Hub range read raises when the
@@ -845,7 +827,7 @@ class TestHubReadRetry:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        monkeypatch.setattr(audit.time, "sleep", lambda s: None)
+        monkeypatch.setattr(time, "sleep", lambda s: None)
         path = tmp_path / "train-00000.parquet"
         pq.write_table(pa.table({"text": [f"document {i}" for i in range(200)]}), path, row_group_size=50)
         data = path.read_bytes()
@@ -859,7 +841,7 @@ class TestHubReadRetry:
             class _CuttingFileSystem:
                 def open(self, url, mode):
                     opens[0] += 1
-                    return TestHubReadRetry._CutHandle(data, cut=opens[0] <= cuts)
+                    return TestHubSampleRows._CutHandle(data, cut=opens[0] <= cuts)
 
             monkeypatch.setattr(huggingface_hub, "HfFileSystem", _CuttingFileSystem)
             rng = random.Random(7)

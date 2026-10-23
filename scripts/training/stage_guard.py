@@ -31,6 +31,10 @@ the job's own ``StdOut``), runs ``scripts/telemetry/run_watch.py`` on them insid
 - **alert** (any other exit 2 or failure to evaluate): the record and the printed line say so, and the guard keeps
   going; a tick that could not be evaluated is never read as a stop;
 - the guard exits 0 once the watch has checked the final iteration and no job of the stage is live.
+``--once`` evaluates one tick and exits with its status; with ``--require-final`` it exits 0 only when that tick finds
+the stage done as above, and 2 otherwise, which makes it the check that a finished stage was watched to its end. A
+guard run inside a SLURM job carrying the stage's name (so that a singleton dependency orders it after every segment)
+does not count that job among the stage's jobs.
 
 Each tick appends its line and the watch's output to the record, after cancelling on a stop or hold so a record that
 cannot be written cannot keep the jobs alive. A stop or hold whose cancellation fails exits 4. The guard is started
@@ -52,12 +56,13 @@ under the host Python (SLURM's commands do not exist inside the container), so i
 PyYAML and stays Python 3.6-compatible.
 
 USAGE
-    python3 scripts/training/stage_guard.py --config <guard.yaml> [--once]
+    python3 scripts/training/stage_guard.py --config <guard.yaml> [--once [--require-final]]
 """
 
 import argparse
 import getpass
 import hashlib
+import os
 import re
 import shlex
 import subprocess
@@ -265,8 +270,15 @@ def run_command(command: Sequence[str], timeout_seconds: int) -> "subprocess.Com
     )
 
 
+def own_job_id() -> Optional[int]:
+    """The SLURM job this process runs inside (``SLURM_JOB_ID``), or None outside one."""
+    job_id = os.environ.get("SLURM_JOB_ID")
+    return int(job_id) if job_id else None
+
+
 def stage_jobs(config: GuardConfig, run: Runner) -> List[Job]:
-    """Every job of the stage's name the current user has submitted since ``config.since``.
+    """Every job of the stage's name the current user has submitted since ``config.since``, but the one the guard runs
+    inside.
 
     Raises RuntimeError when sacct fails, ValueError on output it cannot read."""
     result = run(
@@ -277,7 +289,7 @@ def stage_jobs(config: GuardConfig, run: Runner) -> List[Job]:
     )  # fmt: skip
     if result.returncode != 0:
         raise RuntimeError("sacct failed ({}): {}".format(result.returncode, result.stdout.strip()))
-    return parse_jobs(result.stdout, config.job_name)
+    return [job for job in parse_jobs(result.stdout, config.job_name) if job.job_id != own_job_id()]
 
 
 def run_watch(config: GuardConfig, logs: List[Path], decided: Dict[str, str], run: Runner) -> WatchResult:
@@ -305,8 +317,10 @@ def run_watch(config: GuardConfig, logs: List[Path], decided: Dict[str, str], ru
 
 def live_jobs(config: GuardConfig, run: Runner) -> List[int]:
     """The IDs of every job of the stage's name the current user has queued or running, the successors pending on
-    a singleton dependency included. Raises SlurmError when squeue fails and ValueError on output it cannot read."""
-    return sorted(int(job_id) for job_id in queue_listing("%i", config.job_name, run))
+    a singleton dependency included, but the one the guard runs inside. Raises SlurmError when squeue fails and
+    ValueError on output it cannot read."""
+    listed = (int(job_id) for job_id in queue_listing("%i", config.job_name, run))
+    return sorted(job_id for job_id in listed if job_id != own_job_id())
 
 
 class CancelFailed(RuntimeError):
@@ -414,8 +428,9 @@ CANCEL_FAILED = 4
 GUARD_FAILED = 5
 
 
-def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
-    """Guard the stage until a stop, a hold or its end (one tick when ``once``), and return its exit status.
+def guard(config_path: Path, config: GuardConfig, once: bool, require_final: bool) -> int:
+    """Guard the stage until a stop, a hold or its end (one tick when ``once``), and return its exit status; with
+    ``require_final``, a single tick that does not find the stage done exits 2.
 
     Raises CancelFailed when a stop or hold could not cancel the stage's jobs."""
     decided = decided_in_record(config.record, spec_tag(config.watch))
@@ -445,7 +460,7 @@ def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
             _record(config, "DONE: the watch checked iteration {} and no job is live".format(state.last_iteration))
             return 0
         if once:
-            return 2 if action == "alert" else 0
+            return 2 if action == "alert" or require_final else 0
         time.sleep(config.interval_seconds)
 
 
@@ -454,11 +469,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Guard a training stage with its watch spec while it trains.")
     parser.add_argument("--config", type=Path, required=True, help="The stage's guard config YAML")
     parser.add_argument("--once", action="store_true", help="Evaluate once and exit with that tick's status")
+    parser.add_argument(
+        "--require-final", action="store_true", help="With --once: exit 0 only when the stage is done, else 2"
+    )
     args = parser.parse_args(argv)
+    if args.require_final and not args.once:
+        parser.error("--require-final applies to --once")
     config = None
     try:
         config = load_guard_config(args.config)
-        return guard(args.config, config, args.once)
+        if args.require_final and config.final_iteration is None:
+            raise ValueError("{} names no final_iteration, so it cannot tell a stage done".format(args.config))
+        return guard(args.config, config, args.once, args.require_final)
     except CancelFailed:
         return CANCEL_FAILED
     except Exception as error:  # noqa: BLE001 - the guard's own failure has its own status, never a stop's

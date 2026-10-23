@@ -57,7 +57,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
-from scripts.telemetry.gate_outcome import NOT_EVALUATED, exit_status  # noqa: E402
+from scripts.telemetry.gate_outcome import NOT_EVALUATED, SPEC_ERRORS, exit_status, unusable_spec_status  # noqa: E402
 from scripts.telemetry.loss_parity import (  # noqa: E402
     VERDICT_METRIC,
     BandReport,
@@ -168,14 +168,18 @@ def evaluate_gate(spec: GateSpec, name: str, candidate_log: Path) -> GateResult:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Evaluate the requested gates (every gate by default), print each outcome and return the exit status."""
+    """Evaluate the requested gates (every gate by default), print each outcome and return the exit status. A spec
+    that cannot be read or is refused ends NOT EVALUATED, with the cause on stderr."""
     parser = argparse.ArgumentParser(description="Evaluate a pre-registered loss gate on a candidate run.")
     parser.add_argument("--spec", type=Path, required=True, help="The gate spec YAML")
     parser.add_argument("--candidate", type=Path, required=True, help="The candidate run's training log")
     parser.add_argument("--gate", action="append", help="A gate to evaluate; repeatable (default: every gate)")
     parser.add_argument("--json", action="store_true", help="Emit the outcomes and band reports as JSON")
     args = parser.parse_args(argv)
-    spec = load_gate_spec(args.spec)
+    try:
+        spec = load_gate_spec(args.spec)
+    except SPEC_ERRORS as error:
+        return unusable_spec_status(args.spec, error)
     names = args.gate or list(spec.gates)
     unknown = sorted(set(names) - set(spec.gates))
     if unknown:

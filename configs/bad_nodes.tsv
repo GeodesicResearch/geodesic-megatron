@@ -1,0 +1,16 @@
+# Compute nodes no job of a staged submit script (scripts/training/staged_submit.sh) may run on, one per line:
+#
+#   node | since | reason
+#
+# Every job such a script submits carries these nodes in --exclude, which isambard_sbatch merges with the nodes of its
+# own bad-nodes log. That log is a file of the cluster, not of the repository: it expires an entry after a week, and
+# an account that cannot read it excludes nothing from it. Add a node only when a failure is pinned to its hostname
+# (CLAUDE.md, "Bad compute nodes"), and remove it once the site has repaired it. The date is YYYY-MM-DD and the reason
+# has no `|`.
+#
+# nid011097 fails without always failing: a run on it can end in a NaN gradient, or go on with a corrupted tensor. Its
+# third run lost four positions of a loss mask at one iteration and nothing else, which only the exact
+# [token-masking-counts] line showed.
+nid011097|2026-10-11|corrupts GPU memory: NaN gradients in jobs 7254925 and 7351484, four loss-mask positions zeroed in job 7351485
+nid010505|2026-10-11|no /local/user/<uid> mount for the container: job 7243758 failed before training
+nid010946|2026-10-12|NCCL NET/OFI could not create its domain (RC -22) on every rank: job 7286460 failed in 71 s

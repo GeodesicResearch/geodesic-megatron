@@ -20,14 +20,15 @@
 #   configs/control_pretraining/build_corpora.sh <corpora-table> <stage|all> [subset ...]
 #   DRY_RUN=1 configs/control_pretraining/build_corpora.sh <corpora-table> all   # print only
 #   BUILD_STEPS=prepare configs/control_pretraining/build_corpora.sh <corpora-table> all [subset ...]
+#   BUILD_AFTER=<jobid>[:<jobid>...] configs/control_pretraining/build_corpora.sh <corpora-table> <stage> [subset ...]
 #
 # Naming subsets submits only those rows of the stage — how a corpus is held back (a giant
 # waiting on storage headroom) or rebuilt (one re-pushed subset) without re-submitting the
 # rest, and still from the arm's own table, so the jobs keep the arm's names and the counts
 # the verifier checks against. A subset the stage does not contain is an error.
 #
-# BUILD_STEPS (comma-separated: prepare, split, tokenize, pack) submits only those steps of
-# each row's chain; a kept step whose predecessor is omitted starts immediately. `prepare`
+# BUILD_STEPS (comma-separated: prepare, split, tokenize, pack) submits only those steps
+# of each row's chain; a kept step whose predecessor is omitted starts immediately. `prepare`
 # alone re-stamps an already-tokenized corpus's provenance after its pin moved (the download
 # is a cache hit and the .bin/.idx are untouched); `tokenize` alone re-tokenizes a prepared
 # JSONL. A step run without its predecessor's output fails in its own job, loudly.
@@ -40,9 +41,21 @@
 # BUILD_STEPS alongside BUILD_SHARDS (BUILD_STEPS=split,pack BUILD_SHARDS=1, say) is refused
 # rather than silently left out.
 #
-# Run from the repo root; set ISAMBARD_SBATCH_FORCE=1 for the batch — an arm submits 40-60 jobs
-# and the node-health gate prompts otherwise.
+# BUILD_AFTER (SLURM job ids separated by ':') makes every job the plan submits without a parent in
+# the plan wait for those jobs, with --dependency=afterok:<ids>: each corpus's prepares, and any job
+# whose predecessor BUILD_STEPS or BUILD_SHARDS dropped. Every other job waits on one of those, so
+# nothing of the build starts until every named job has completed successfully. It is how a build is
+# queued behind the job that publishes its data, such as the job that writes the revision file a
+# prepare config pins its commit in (scripts/data/prepare_revisions.py). Each id must be a positive
+# integer; anything else stops the build before anything is created or submitted. A dry run prints
+# the dependency on each job that carries it.
+#
+# Run from the repo root. Every job is one node, so every one is submitted with
+# ISAMBARD_SBATCH_FORCE=1, as the node-limit rule (README.md, "The node limit for new submissions")
+# submits one-node jobs: isambard_sbatch then skips its account node-cap check, which an arm's 40-60
+# jobs would otherwise trip, and still excludes the bad nodes. A dry run states it.
 set -euo pipefail
+export ISAMBARD_SBATCH_FORCE=1
 
 TABLE="${1:?usage: build_corpora.sh <corpora-table> <stage|all> [subset ...]}"
 STAGE="${2:?usage: build_corpora.sh <corpora-table> <stage|all> [subset ...]}"
@@ -51,6 +64,18 @@ SUBSETS=("$@")
 DRY_RUN="${DRY_RUN:-0}"
 BUILD_STEPS="${BUILD_STEPS:-}"
 BUILD_SHARDS="${BUILD_SHARDS:-}"
+BUILD_AFTER="${BUILD_AFTER:-}"
+[ "$DRY_RUN" != "1" ] || echo "  every job would be submitted with ISAMBARD_SBATCH_FORCE=$ISAMBARD_SBATCH_FORCE" >&2
+
+# The dependency every job without a parent in the plan carries; none when BUILD_AFTER is unset.
+AFTER_DEPENDENCY=()
+if [ -n "$BUILD_AFTER" ]; then
+    if ! [[ "$BUILD_AFTER" =~ ^[1-9][0-9]*(:[1-9][0-9]*)*$ ]]; then
+        echo "FATAL: BUILD_AFTER must be SLURM job ids separated by ':', got '$BUILD_AFTER'" >&2
+        exit 1
+    fi
+    AFTER_DEPENDENCY=("--dependency=afterok:$BUILD_AFTER")
+fi
 
 CAMPAIGN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRIPE_COUNT="${SHARD_STRIPE_COUNT:-8}"
@@ -150,9 +175,11 @@ while IFS=$'\x1f' read -r -a field; do
             # --hold stands in for a dependency under DRY_RUN, where no job id exists: it keeps
             # a mistakenly-real submission from running rather than letting it start unchained.
             if [ "$parent" = "DRYRUN" ]; then dep=(--hold); else dep=("--dependency=afterok:$parent"); fi
+        else
+            dep=(${AFTER_DEPENDENCY[@]+"${AFTER_DEPENDENCY[@]}"})
         fi
 
-        jobid=$(submit "$desc" "${dep[@]}" --time="${hours}:00:00" --job-name="$name" \
+        jobid=$(submit "$desc" ${dep[@]+"${dep[@]}"} --time="${hours}:00:00" --job-name="$name" \
             "${sbatch_args[@]}" "${payload[@]}")
         JOB_ID[$key]="$jobid"
         echo "  $desc -> $jobid"
@@ -166,7 +193,7 @@ while IFS=$'\x1f' read -r -a field; do
 done <<<"$PLAN"
 
 echo
-echo "SUBMITTED $total jobs for stage '$STAGE'${BUILD_STEPS:+ (steps: $BUILD_STEPS)}${BUILD_SHARDS:+ (shards: $BUILD_SHARDS)}"
+echo "SUBMITTED $total jobs for stage '$STAGE'${BUILD_STEPS:+ (steps: $BUILD_STEPS)}${BUILD_SHARDS:+ (shards: $BUILD_SHARDS)}${BUILD_AFTER:+ (after: $BUILD_AFTER)}"
 if [ "$DRY_RUN" = "1" ]; then
     echo "(dry run — nothing was actually submitted)"
 fi
