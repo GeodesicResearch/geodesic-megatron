@@ -2123,7 +2123,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | Problem | Fix |
 |---------|-----|
 | `RuntimeError: ...gradient_accumulation_fusion...` | Bare-metal only (venv has no APEX): `model.gradient_accumulation_fusion: False`. In the default container the image ships APEX, so keep it `True` (faster). |
-| NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP (that run: CP=2, NaN at iterations 4-8 with the warmup LR at most ~1.3e-5). Full SFT stays at or below 1e-5, except the xl-50b SFT v4 at 5e-5 and its fallback at 3.5e-5, both CP=1 (Kyle, 2026-10-10). |
+| NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP (that run: CP=2, NaN at iterations 4-8 with the warmup LR at most ~1.3e-5). Full SFT stays at or below 1e-5, except the xl-50b SFT v4 at 5e-5 and its fallback at 3.5e-5, both CP=1 (Kyle, 2026-10-10), and the NVIDIA-Base SFT (v4 with NVIDIA's converted Nemotron 3 Nano Base as its warm start) at 5e-5, CP=1 (Kyle, 2026-10-23). |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to node-local `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |
