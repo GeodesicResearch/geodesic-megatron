@@ -26,6 +26,8 @@ inputs. These kinds live here:
   at peak 5e-5, and its fallback at 3.5e-5, `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` (+ `.env`). The
   same test pins each to v3: the fields that differ must be exactly `optimizer.lr` and the run identity, and each
   `.env` must equal v3's.
+- **The rerun from NVIDIA's Nemotron 3 Nano Base**: `nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml` (+ `.env`),
+  v4 with only its warm start changed, pinned to v4 by the same test.
 - **A check on a warm start's weights**: `nemotron_nano_30b_nvidia_base_weights_check.yaml`, the
   `scripts/checkpoint/compare_safetensors.py` config for NVIDIA's converted Nemotron 3 Nano Base.
 - **The filtered arms' reasoning models** on the ablation's recipe:
@@ -499,6 +501,17 @@ the Hub revisions that preceded the deletion of the saves is `hub_check_v4_2026-
   - Every save passed that metadata, index and run-config check and then the branch verify, and `main` holds the same
     weights as `sft_iter_5976` (the same 13 safetensors shards by LFS sha256). The last upload finished at 00:09Z on
     2026-10-11, and the Hub repository is private.
+
+## The rerun from NVIDIA's Nemotron 3 Nano Base — `nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml`
+
+v4 above with only its warm start changed; the config's header says what it holds equal to v4 and what the warm start
+is.
+
+### Launch
+
+As v4, from a frozen copy of the commit (`scripts/training/README.md`, "Making a frozen copy"), with this file and its
+`.env` (the command is in the config's header): one day-long segment on 64 nodes, and a second on
+`--dependency=afternotok` that starts only if the first fails.
 
 ## The filtered arms' reasoning models on the same recipe
 
