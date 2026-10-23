@@ -2073,7 +2073,8 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
   the exporter and the export check; and the check of an HF export against the checkpoint it was made from (`export_check.py`, its job
   `export_check.sbatch`, and `export_check_result.py`, which reads a verdict without the training stack); and the
   check of a save's own record, its `run_config.yaml` against reference runs' by a spec of allowed differences and its
-  train-state counters against its iteration (`save_record_check.py`)
+  train-state counters against its iteration (`save_record_check.py`); and the tensor-by-tensor, byte-for-byte
+  comparison of two Hugging Face safetensors checkpoints (`compare_safetensors.py`)
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, an allocation's NVLink sweep (`nvlink_sweep.sh`), per-node NVLink health and node selection
   (`nvlink_health.py`), the refusal of launch
