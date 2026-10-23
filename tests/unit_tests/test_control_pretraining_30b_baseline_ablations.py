@@ -34,6 +34,9 @@ v2 is a difference of training data alone.
 
 The higher-learning-rate run ("v4") and its fallback are each pinned to v3: each differs only in the peak learning rate
 and its run identity, with v3's launcher settings, so v4 against v3 is a difference of peak learning rate alone.
+
+The NVIDIA-Base run is pinned to v4: it differs only in its warm start and its run identity, with v4's launcher
+settings, so it against v4 is a difference of the base model alone.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import pytest
 from omegaconf import OmegaConf
@@ -132,21 +136,42 @@ V4_FALLBACK = _ABLATIONS_DIR / "nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr
 V4_PEAK_LR = {V4: 5.0e-05, V4_FALLBACK: 3.5e-05}
 LR_FIELDS = {"optimizer.lr"}
 
-# Each variant and the run it is pinned to: the ablation to the parent stage, the rerun to the ablation, v3 to v2, and
-# v4 and its fallback to v3.
-VARIANTS = {
-    "xl-50b sft ablation": (ABLATION, PARENT),
-    "xl-50b sft v2": (V2, ABLATION),
-    "xl-50b sft v3": (V3, V2),
-    "xl-50b sft v4": (V4, V3),
-    "xl-50b sft v4 fallback": (V4_FALLBACK, V3),
-}
+# The NVIDIA-Base run is v4 with the warm start swapped for NVIDIA's Nemotron 3 Nano Base, as converted to a Megatron
+# checkpoint; its weights check compares that conversion's round-trip export with the pinned revision.
+NVIDIA_BASE_RUN = _ABLATIONS_DIR / "nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml"
+NVIDIA_BASE_WEIGHTS_CHECK = _ABLATIONS_DIR / "nemotron_nano_30b_nvidia_base_weights_check.yaml"
+NVIDIA_BASE_CONVERSION = (
+    "/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
+)
+WARM_START_FIELDS = {"checkpoint.pretrained_checkpoint"}
 
 
 def fast_configuration_levers() -> set[str]:
     """The dotted fields the fastest SFT quickstart sets on top of its benchmark."""
     overlay = OmegaConf.to_container(OmegaConf.load(FAST_SFT_QUICKSTART))
     return set(dotted_leaves(overlay)) - QUICKSTART_OWN_FIELDS
+
+
+class Pinned(NamedTuple):
+    """A variant and what it is pinned to: the run it is compared with field by field, the fields that may differ from
+    that run besides the run identity, and the run whose `.env` its own must equal (None for a variant without one)."""
+
+    path: Path
+    reference: Path
+    fields: set[str]
+    env_reference: Path | None
+
+
+# The ablation is pinned to the parent stage, the rerun to the ablation, v3 to v2, v4 and its fallback to v3, and the
+# NVIDIA-Base run to v4.
+VARIANTS = {
+    "xl-50b sft ablation": Pinned(ABLATION, PARENT, ALLOWED_DIVERGENCE, None),
+    "xl-50b sft v2": Pinned(V2, ABLATION, fast_configuration_levers(), FAST_SFT_QUICKSTART),
+    "xl-50b sft v3": Pinned(V3, V2, CORPUS_FIELDS, V2),
+    "xl-50b sft v4": Pinned(V4, V3, LR_FIELDS, V3),
+    "xl-50b sft v4 fallback": Pinned(V4_FALLBACK, V3, LR_FIELDS, V3),
+    "xl-50b sft nvidia base": Pinned(NVIDIA_BASE_RUN, V4, WARM_START_FIELDS, V4),
+}
 
 
 @pytest.fixture(scope="module")
@@ -177,13 +202,15 @@ def fast_quickstart():
 @pytest.fixture(scope="module", params=sorted(VARIANTS))
 def variant(request):
     """A variant with the run it is pinned to, merged onto the recipe as the launcher merges them."""
-    path, reference_path = VARIANTS[request.param]
+    pinned = VARIANTS[request.param]
     return SimpleNamespace(
         label=request.param,
-        path=path,
-        reference_path=reference_path,
-        cfg=merge_onto_recipe(path, nemotron_3_nano_sft_config),
-        reference=merge_onto_recipe(reference_path, nemotron_3_nano_sft_config),
+        path=pinned.path,
+        reference_path=pinned.reference,
+        fields=pinned.fields,
+        env_reference=pinned.env_reference,
+        cfg=merge_onto_recipe(pinned.path, nemotron_3_nano_sft_config),
+        reference=merge_onto_recipe(pinned.reference, nemotron_3_nano_sft_config),
     )
 
 
@@ -199,9 +226,6 @@ def corpora_rows():
 
 
 class TestOnlyTheAblatedFieldsDiffer:
-    def test_exactly_the_ablated_and_identity_fields_differ(self, ablation, parent):
-        assert_only_these_fields_differ(ablation, parent, ALLOWED_DIVERGENCE, "xl-50b sft ablation")
-
     def test_the_batch_is_half_the_parents_in_tokens(self, ablation, parent):
         assert ablation.train.global_batch_size * ablation.dataset.seq_length == TOKENS_PER_ITERATION
         assert ablation.train.global_batch_size * 2 == parent.train.global_batch_size
@@ -294,6 +318,22 @@ class TestTheCorpusIsTheRevisedMix:
         assert variant.cfg.dataset.packed_sequence_specs.pad_seq_to_mult >= 2 * variant.cfg.model.context_parallel_size
 
 
+class TestEveryVariantIsItsReferenceInExactlyItsFields:
+    def test_exactly_the_stated_and_identity_fields_differ(self, variant):
+        """Set equality, not containment: a field cannot start differing, or stop differing, without being named."""
+        assert_only_these_fields_differ(variant.cfg, variant.reference, variant.fields | IDENTITY, variant.label)
+
+    def test_its_env_file_is_its_env_references(self, variant):
+        env = variant.path.with_suffix(".env")
+        assert env.exists() == (variant.env_reference is not None), (
+            f"{env.name}: a .env without a reference, or the reverse"
+        )
+        if variant.env_reference is not None:
+            assert env_override_entries(str(env)) == env_override_entries(
+                str(variant.env_reference.with_suffix(".env"))
+            )
+
+
 class TestTheRunIdentityIsItsOwn:
     def test_no_output_location_is_the_references(self, variant):
         flat_variant, flat_reference = flatten_merged_config(variant.cfg), flatten_merged_config(variant.reference)
@@ -352,18 +392,10 @@ class TestSegmentRollover:
 
 
 class TestTheRerunIsTheAblationOnTheFastConfiguration:
-    def test_exactly_the_levers_and_identity_fields_differ(self, v2, ablation):
-        assert_only_these_fields_differ(v2, ablation, fast_configuration_levers() | IDENTITY, "xl-50b sft v2")
-
     def test_every_lever_has_the_quickstarts_value(self, v2, fast_quickstart):
         flat_v2, flat_quickstart = flatten_merged_config(v2), flatten_merged_config(fast_quickstart)
         for field in sorted(fast_configuration_levers()):
             assert flat_v2[field] == flat_quickstart[field], field
-
-    def test_its_env_file_holds_the_quickstarts_launcher_settings(self):
-        assert env_override_entries(str(V2.with_suffix(".env"))) == env_override_entries(
-            str(FAST_SFT_QUICKSTART.with_suffix(".env"))
-        )
 
     def test_one_pack_per_replica_keeps_the_ablations_tokens_per_gpu(self, v2, ablation):
         v2_dp = v2.get_data_parallel_size(V2_GPUS)
@@ -382,17 +414,11 @@ def v3_row(corpora_rows):
 
 
 class TestV3IsV2OnTheQualityFilteredCorpus:
-    def test_exactly_the_corpus_and_identity_fields_differ_from_v2(self, v3, v2):
-        assert_only_these_fields_differ(v3, v2, CORPUS_FIELDS | IDENTITY, "xl-50b sft v3")
-
     def test_it_trains_v2s_iterations_from_v2s_warm_start(self, v3, v2):
         """The run trains v2's token budget on a smaller corpus, so the iteration count is v2's and never re-derived
         from this corpus's pack count."""
         assert v3.train.train_iters == v2.train.train_iters == 5976
         assert v3.checkpoint.pretrained_checkpoint == v2.checkpoint.pretrained_checkpoint
-
-    def test_its_env_file_is_v2s(self):
-        assert env_override_entries(str(V3.with_suffix(".env"))) == env_override_entries(str(V2.with_suffix(".env")))
 
     def test_the_training_config_reads_the_quality_filtered_split(self, v3, v3_row):
         assert v3_row.subset == V3_SUBSET
@@ -431,18 +457,10 @@ def v4_run(request):
 
 
 class TestV4IsV3AtAHigherPeakLearningRate:
-    def test_exactly_the_peak_learning_rate_and_identity_fields_differ_from_v3(self, v4_run, v3):
-        assert_only_these_fields_differ(v4_run.cfg, v3, LR_FIELDS | IDENTITY, v4_run.path.stem)
-
     def test_the_peak_learning_rate_is_the_approved_one(self, v4_run, v3):
         """5e-5 is ten times v3's peak and 3.5e-5 seven times; the schedule's shape, warmup and floor are v3's."""
         assert v4_run.cfg.optimizer.lr == V4_PEAK_LR[v4_run.path]
         assert v4_run.cfg.optimizer.lr > v3.optimizer.lr
-
-    def test_its_env_file_is_v3s(self, v4_run):
-        assert env_override_entries(str(v4_run.path.with_suffix(".env"))) == env_override_entries(
-            str(V3.with_suffix(".env"))
-        )
 
     def test_v4_and_its_fallback_never_share_a_save_directory(self):
         """The fallback is a fresh run: resuming v4's save under another learning rate would mix two schedules."""
@@ -450,6 +468,26 @@ class TestV4IsV3AtAHigherPeakLearningRate:
         fallback_save = Path(OmegaConf.load(V4_FALLBACK).checkpoint.save)
         assert not v4_save.is_relative_to(fallback_save)
         assert not fallback_save.is_relative_to(v4_save)
+
+
+@pytest.fixture(scope="module")
+def nvidia_base_run():
+    return merge_onto_recipe(NVIDIA_BASE_RUN, nemotron_3_nano_sft_config)
+
+
+class TestTheNvidiaBaseRunStartsFromTheConvertedNvidiaBase:
+    def test_it_warm_starts_from_the_converted_nvidia_base(self, nvidia_base_run):
+        assert nvidia_base_run.checkpoint.pretrained_checkpoint == NVIDIA_BASE_CONVERSION
+
+    def test_it_never_saves_into_the_conversion_it_starts_from(self, nvidia_base_run):
+        """The conversion is the only copy of that warm start: a save under it would overwrite it."""
+        conversion = Path(NVIDIA_BASE_CONVERSION)
+        for field in (nvidia_base_run.checkpoint.load, nvidia_base_run.checkpoint.save):
+            assert not Path(field).is_relative_to(conversion) and not conversion.is_relative_to(Path(field)), field
+
+    def test_its_weights_check_compares_the_round_trip_export_of_that_warm_start(self, nvidia_base_run):
+        check = OmegaConf.load(NVIDIA_BASE_WEIGHTS_CHECK)
+        assert check.candidate == nvidia_base_run.checkpoint.pretrained_checkpoint + "-hf-export"
 
 
 class TestEveryRunHasItsOwnIdentity:
@@ -460,7 +498,7 @@ class TestEveryRunHasItsOwnIdentity:
     def test_no_two_runs_share_an_identity_field(self, field):
         """A shared save directory would resume one run from another's state, and the publisher matches a model
         card's training losses to a W&B run by its name."""
-        runs = sorted({path for pair in VARIANTS.values() for path in pair})
+        runs = sorted({path for pinned in VARIANTS.values() for path in (pinned.path, pinned.reference)})
         values = {path.name: OmegaConf.select(OmegaConf.load(path), field) for path in runs}
         assert None not in values.values(), f"{field} is unset in {[n for n, v in values.items() if v is None]}"
         assert len(set(values.values())) == len(runs), f"{field} is shared: {values}"
