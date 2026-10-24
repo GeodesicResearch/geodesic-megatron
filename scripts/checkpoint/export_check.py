@@ -5,8 +5,10 @@
 
 A spec (for example ``configs/metagaming_filtering/30b_clueless_norm/checks/c3_export_check.yaml``) states what is
 measured and every threshold the measurements are judged by, and may compose onto another with ``base_config:``
-(``read_spec_content``). The judge reports six criteria, each PASS, FAIL or NOT EVALUATED
-(``scripts/telemetry/gate_outcome.py``):
+(``read_spec_content``). The judge reports up to six criteria, each PASS, FAIL or NOT EVALUATED
+(``scripts/telemetry/gate_outcome.py``). A spec for a model that has no hidden token to keep unsaid states
+``hidden_probability``, ``greedy_hidden_emissions`` or both null, and the judge then neither measures nor reports that
+criterion (``score-hf`` writes no greedy continuations when ``greedy_hidden_emissions`` is null):
 
 - ``verify_export``: the export finished, and its shards hold exactly the tensors its index names
   (``scripts/hub/publish_models.py`` ``verify_export``).
@@ -239,11 +241,12 @@ class CeTolerance:
 
 @dataclass(frozen=True)
 class Criteria:
-    """The thresholds; ``ce_agreement`` is None while its tolerance is ``PENDING`` calibration."""
+    """The thresholds; ``ce_agreement`` is None while its tolerance is ``PENDING`` calibration, and the two about H are
+    None for a spec that omits them (states them null)."""
 
     ce_agreement: CeTolerance | None
-    hidden_probability_max: float
-    greedy_hidden_emissions_max: int
+    hidden_probability_max: float | None
+    greedy_hidden_emissions_max: int | None
 
 
 @dataclass(frozen=True)
@@ -425,18 +428,21 @@ def _criteria(raw: Any) -> Criteria:
             error=ExportCheckError,
         )
         tolerance = CeTolerance(**{key: _positive(value, f"criteria.ce_agreement.{key}") for key, value in ce.items()})
-    hidden = require_keys(raw["hidden_probability"], "criteria.hidden_probability", {"max"}, error=ExportCheckError)
-    greedy = require_keys(
-        raw["greedy_hidden_emissions"], "criteria.greedy_hidden_emissions", {"max"}, error=ExportCheckError
-    )
-    hidden_max = _positive(hidden["max"], "criteria.hidden_probability.max")
-    if hidden_max >= 1:
-        raise ExportCheckError(f"criteria.hidden_probability.max must be a probability below 1, not {hidden_max}")
-    return Criteria(
-        ce_agreement=tolerance,
-        hidden_probability_max=hidden_max,
-        greedy_hidden_emissions_max=_integer(greedy["max"], "criteria.greedy_hidden_emissions.max", 0),
-    )
+    hidden_max = None
+    if raw["hidden_probability"] is not None:
+        hidden = require_keys(
+            raw["hidden_probability"], "criteria.hidden_probability", {"max"}, error=ExportCheckError
+        )
+        hidden_max = _positive(hidden["max"], "criteria.hidden_probability.max")
+        if hidden_max >= 1:
+            raise ExportCheckError(f"criteria.hidden_probability.max must be a probability below 1, not {hidden_max}")
+    greedy_max = None
+    if raw["greedy_hidden_emissions"] is not None:
+        greedy = require_keys(
+            raw["greedy_hidden_emissions"], "criteria.greedy_hidden_emissions", {"max"}, error=ExportCheckError
+        )
+        greedy_max = _integer(greedy["max"], "criteria.greedy_hidden_emissions.max", 0)
+    return Criteria(ce_agreement=tolerance, hidden_probability_max=hidden_max, greedy_hidden_emissions_max=greedy_max)
 
 
 def measurement_digest(content: dict[str, Any]) -> str:
@@ -491,8 +497,8 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
         greedy: {max_new_tokens: 64, stop_token_ids: [2]}
         criteria:
           ce_agreement: PENDING | {max_abs_mean_shift: ., max_mean_abs_difference: ., max_p99_abs_difference: .}
-          hidden_probability: {max: 1.0e-4}
-          greedy_hidden_emissions: {max: 0}
+          hidden_probability: {max: 1.0e-4} | null           # null omits the criterion
+          greedy_hidden_emissions: {max: 0} | null           # null omits the criterion
         calibration: {...}                                 # how the tolerance was measured, as a record
 
     Raises ExportCheckError on a missing or unknown key, a malformed value, a value JSON cannot hold (an unquoted
@@ -965,17 +971,35 @@ def export_record(export: Path, model) -> dict[str, Any]:
     }
 
 
+def write_greedy(
+    spec: ExportCheckSpec, model, renderer, prompts: list[np.ndarray], record: dict[str, Any], greedy_path: Path
+) -> None:
+    """Continue the spec's ``prompts`` (its listed windows, read) greedily with ``model`` and write ``greedy_path``
+    with ``record`` and the continuations."""
+    started = time.monotonic()
+    generations = [
+        {"corpus": window.corpus, "document": window.document, "tokens": window.tokens}
+        | greedy_continuation(model, list(spec.prefix_token_ids) + ids.tolist(), spec, renderer)
+        for window, ids in zip(spec.listed("prompts"), prompts)
+    ]
+    greedy_record = record | {"greedy_seconds": round(time.monotonic() - started, 1)}
+    partial = greedy_path.with_name(f"{greedy_path.name}.partial")
+    partial.write_text(json.dumps({"record": greedy_record, "generations": generations}, indent=1, ensure_ascii=False))
+    partial.replace(greedy_path)
+
+
 def score_hf(spec: ExportCheckSpec, export: Path, out_dir: Path, repeats: int) -> None:
-    """Score the spec's documents with the export and continue its prompts greedily; write ``hf_scores.npz`` and
-    ``hf_greedy.json``."""
+    """Score the spec's documents with the export and write ``hf_scores.npz``; unless the spec omits
+    ``greedy_hidden_emissions``, also continue its prompts greedily and write ``hf_greedy.json``."""
     import torch
     import transformers
     from transformers import AutoTokenizer
 
+    judges_greedy = spec.criteria.greedy_hidden_emissions_max is not None
     scores_path, greedy_path = out_dir / HF_SCORES, out_dir / HF_GREEDY
-    refuse_existing(scores_path, greedy_path)
+    refuse_existing(scores_path, *([greedy_path] if judges_greedy else []))
     documents = read_windows(spec, spec.listed("documents"))
-    prompts = read_windows(spec, spec.listed("prompts"))
+    prompts = read_windows(spec, spec.listed("prompts")) if judges_greedy else None
     tokenizer = AutoTokenizer.from_pretrained(spec.tokenizer, revision=spec.tokenizer_revision)
     renderer = coherence.TokenRenderer(tokenizer)
     started = time.monotonic()
@@ -1000,15 +1024,10 @@ def score_hf(spec: ExportCheckSpec, export: Path, out_dir: Path, repeats: int) -
         }
     )
     write_scores(scores_path, passes, np.concatenate(documents), record)
-    generations = [
-        {"corpus": window.corpus, "document": window.document, "tokens": window.tokens}
-        | greedy_continuation(model, list(spec.prefix_token_ids) + ids.tolist(), spec, renderer)
-        for window, ids in zip(spec.listed("prompts"), prompts)
-    ]
-    greedy_record = record | {"greedy_seconds": round(time.monotonic() - scored, 1)}
-    partial = greedy_path.with_name(f"{greedy_path.name}.partial")
-    partial.write_text(json.dumps({"record": greedy_record, "generations": generations}, indent=1, ensure_ascii=False))
-    partial.replace(greedy_path)
+    if not judges_greedy:
+        LOGGER.info("wrote %s; the spec omits greedy_hidden_emissions, so no greedy continuations", scores_path)
+        return
+    write_greedy(spec, model, renderer, prompts, record, greedy_path)
     LOGGER.info("wrote %s and %s", scores_path, greedy_path)
 
 
@@ -1251,24 +1270,35 @@ def _same_path(recorded: str, given: Path, what: str, source: Path) -> None:
         raise ExportCheckError(f"{source} scored the {what} {recorded}, not {given.resolve()}")
 
 
-def judge(spec: ExportCheckSpec, export: Path, checkpoint: Path, out_dir: Path) -> dict[str, Any]:
-    """Judge the export from the scores in ``out_dir`` and the export and reference on disk: the results document."""
-    hf = read_scores(out_dir / HF_SCORES, spec)
-    megatron = read_scores(out_dir / MEGATRON_SCORES, spec)
+def read_greedy(spec: ExportCheckSpec, export: Path, out_dir: Path) -> dict[str, Any]:
+    """The greedy continuations ``score-hf`` wrote in ``out_dir``, refused unless they are the export's and were
+    taken with the spec's measurement."""
     greedy = json.loads((out_dir / HF_GREEDY).read_text())
-    _same_path(hf.record["export"], export, "export", out_dir / HF_SCORES)
     _same_path(greedy["record"]["export"], export, "export", out_dir / HF_GREEDY)
-    _same_path(megatron.record["checkpoint"], checkpoint, "checkpoint", out_dir / MEGATRON_SCORES)
     if greedy["record"]["spec"]["measurement_sha256"] != spec.measurement_sha256:
         raise ExportCheckError(f"{out_dir / HF_GREEDY} was taken with another measurement than {spec.path}'s")
+    return greedy
+
+
+def judge(spec: ExportCheckSpec, export: Path, checkpoint: Path, out_dir: Path) -> dict[str, Any]:
+    """Judge the export from the scores in ``out_dir`` and the export and reference on disk: the results document.
+    A criterion the spec omits (states null) is neither read nor reported."""
+    hf = read_scores(out_dir / HF_SCORES, spec)
+    megatron = read_scores(out_dir / MEGATRON_SCORES, spec)
+    _same_path(hf.record["export"], export, "export", out_dir / HF_SCORES)
+    _same_path(megatron.record["checkpoint"], checkpoint, "checkpoint", out_dir / MEGATRON_SCORES)
     criteria = {
         "verify_export": check_verify_export(export),
         "files": check_files(export, spec.reference_export, spec.byte_equal_files, spec.decoding_defaults),
         "tensors": check_tensors(export, spec.reference_export),
         "ce_agreement": check_ce_agreement(hf, megatron, spec),
-        "hidden_probability": check_hidden_probability(hf, megatron, spec),
-        "greedy_hidden_emissions": check_greedy(greedy, spec),
     }
+    if spec.criteria.hidden_probability_max is not None:
+        criteria["hidden_probability"] = check_hidden_probability(hf, megatron, spec)
+    greedy = None
+    if spec.criteria.greedy_hidden_emissions_max is not None:
+        greedy = read_greedy(spec, export, out_dir)
+        criteria["greedy_hidden_emissions"] = check_greedy(greedy, spec)
     status = exit_status(item["outcome"] for item in criteria.values())
     return {
         "format": RESULT_FORMAT,
@@ -1281,7 +1311,11 @@ def judge(spec: ExportCheckSpec, export: Path, checkpoint: Path, out_dir: Path) 
         "calibration": spec.content["calibration"],
         "code_revision": code_revision(str(REPO_ROOT)),
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "scores": {"hf": hf.record, "megatron": megatron.record, "greedy": greedy["record"]},
+        "scores": {
+            "hf": hf.record,
+            "megatron": megatron.record,
+            "greedy": greedy["record"] if greedy is not None else None,
+        },
         "repeatability": {"hf": repeatability(hf), "megatron": repeatability(megatron)},
         "criteria": criteria,
     }
@@ -1397,7 +1431,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     for name, help_text in (
         ("score-megatron", "the reference forward of the checkpoint (under torchrun)"),
-        ("score-hf", "the export's scores and greedy continuations"),
+        ("score-hf", "the export's scores and, unless the spec omits greedy_hidden_emissions, greedy continuations"),
         ("judge", "judge the export from the scores"),
     ):
         command = commands.add_parser(name, help=help_text)

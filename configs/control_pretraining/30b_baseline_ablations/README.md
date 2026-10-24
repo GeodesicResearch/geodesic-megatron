@@ -505,7 +505,7 @@ the Hub revisions that preceded the deletion of the saves is `hub_check_v4_2026-
 ## The rerun from NVIDIA's Nemotron 3 Nano Base — `nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml`
 
 v4 above with only its warm start changed; the config's header says what it holds equal to v4 and what the warm start
-is.
+is. Its training gate, export check and Hub manifest are in `configs/norm_v2/`.
 
 ### Launch
 

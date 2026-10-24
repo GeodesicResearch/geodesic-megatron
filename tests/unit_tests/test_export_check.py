@@ -126,6 +126,20 @@ def write_spec(path: Path, content: dict) -> export_check.ExportCheckSpec:
     return export_check.load_spec(path)
 
 
+ALL_CRITERIA = frozenset(
+    {"verify_export", "files", "tensors", "ce_agreement", "hidden_probability", "greedy_hidden_emissions"}
+)
+# The criteria about H that a spec may omit, each alone or both, by stating them null.
+OMISSIONS = [("hidden_probability",), ("greedy_hidden_emissions",), ("hidden_probability", "greedy_hidden_emissions")]
+
+
+def omitting(content: dict, *criteria: str) -> dict:
+    """``content`` with each named criterion about H stated null, which is how a spec omits it."""
+    content = copy.deepcopy(content)
+    content["criteria"] |= dict.fromkeys(criteria)
+    return content
+
+
 @pytest.fixture
 def selected(tmp_path):
     """A spec whose listings ``select`` drew, with its reference export, the export (a copy of it) and its content."""
@@ -227,6 +241,9 @@ def test_the_campaign_tolerance_passes_its_correct_exports_with_room_and_fails_t
         (lambda c: c["megatron_reference"]["model_overrides"].update(context_parallel_size=2), "parallel layout"),
         (lambda c: c["greedy"].update(stop_token_ids=[EOS_ID, H]), "include H"),
         (lambda c: c["criteria"]["hidden_probability"].update(max=1.5), "below 1"),
+        (lambda c: c["criteria"].pop("hidden_probability"), "missing keys \\['hidden_probability'\\]"),
+        (lambda c: c["criteria"].pop("greedy_hidden_emissions"), "missing keys \\['greedy_hidden_emissions'\\]"),
+        (lambda c: c["criteria"].update(greedy_hidden_emissions={"max": -1}), "greater than or equal to 0|>= 0"),
         (lambda c: c["criteria"].update(ce_agreement={"max_abs_mean_shift": 0.1}), "missing keys"),
         (lambda c: c["selection"]["prompts"].update(max_context=1), ">= 2"),
         (lambda c: c["selection"]["documents"]["counts"].update(third=1), "do not|does not"),
@@ -247,6 +264,25 @@ def test_a_malformed_spec_is_refused(tmp_path, selected, edit, message):
     edit(content)
     with pytest.raises(export_check.ExportCheckError, match=message):
         write_spec(tmp_path / "malformed.yaml", content)
+
+
+@pytest.mark.parametrize("omitted", OMISSIONS, ids="+".join)
+def test_a_spec_omits_a_criterion_about_h_by_stating_it_null(tmp_path, selected, omitted):
+    criteria = write_spec(tmp_path / "omitting.yaml", omitting(selected[1], *omitted)).criteria
+    assert (criteria.hidden_probability_max is None) == ("hidden_probability" in omitted)
+    assert (criteria.greedy_hidden_emissions_max is None) == ("greedy_hidden_emissions" in omitted)
+    assert criteria.ce_agreement is not None
+
+
+def test_a_composing_spec_omits_its_bases_criteria_about_h_by_stating_them_null(tmp_path, selected):
+    write_spec(tmp_path / "base.yaml", selected[1])
+    overlay = {"base_config": "base.yaml"} | copy.deepcopy(OWN_TOLERANCE)
+    overlay["criteria"] |= {"hidden_probability": None, "greedy_hidden_emissions": None}
+    composed = write_spec(tmp_path / "overlay.yaml", overlay)
+    assert composed.criteria.hidden_probability_max is None and composed.criteria.greedy_hidden_emissions_max is None
+    # Only the criteria it states are replaced: the base's windows, prompts and greedy settings still apply.
+    assert composed.listed("documents") == selected[0].listed("documents")
+    assert composed.greedy == selected[0].greedy
 
 
 def test_the_measurement_digest_changes_with_what_is_measured_only(tmp_path, selected):
@@ -491,6 +527,14 @@ def test_the_export_is_scored_and_continued_greedily(tmp_path, selected):
         export_check.score_hf(spec, export, out_dir, repeats=1)
 
 
+def test_the_export_is_not_continued_greedily_when_the_spec_omits_the_greedy_criterion(tmp_path, selected):
+    spec = write_spec(tmp_path / "no_greedy.yaml", omitting(selected[1], "greedy_hidden_emissions"))
+    out_dir = tmp_path / "out"
+    export_check.score_hf(spec, spec.reference_export, out_dir, repeats=1)
+    assert (out_dir / export_check.HF_SCORES).is_file()
+    assert not (out_dir / export_check.HF_GREEDY).exists()
+
+
 def test_a_greedy_continuation_counts_h_among_the_generated_ids(selected):
     spec, _ = selected
     model = copy_model()
@@ -512,7 +556,8 @@ UNLIKELY = math.log(1e-9)  # log P(H) where the model does not expect H
 def write_judged_inputs(out_dir: Path, spec, export: Path, checkpoint: Path, fault: str | None = None) -> None:
     """Scores files as the two forwards write them, for an export that passes every criterion unless ``fault`` names
     the one to break: the HF cross-entropy a little off the reference's, P(H) negligible at every retained target and
-    certain at the H targets (which are not retained), and greedy continuations without H."""
+    certain at the H targets (which are not retained), and greedy continuations without H (none for a spec that
+    omits the greedy criterion, as ``score_hf`` writes none)."""
     targets = np.concatenate(export_check.read_windows(spec, spec.listed("documents")))
     reference = np.linspace(0.5, 4.0, targets.size).astype(np.float32)
     shift = 0.5 if fault == "ce_agreement" else 0.004
@@ -532,6 +577,8 @@ def write_judged_inputs(out_dir: Path, spec, export: Path, checkpoint: Path, fau
         targets,
         record | {"side": "megatron", "checkpoint": str(checkpoint.resolve())},
     )
+    if spec.criteria.greedy_hidden_emissions_max is None:
+        return
     generations = [
         {
             "hidden_emissions": int(fault == "greedy_hidden_emissions" and index == 0),
@@ -606,6 +653,39 @@ def test_each_criterion_fails_on_its_own_fault_alone(judged, fault):
     outcomes = {name: item["outcome"] for name, item in result["criteria"].items()}
     assert outcomes == dict.fromkeys(outcomes, PASS) | {fault: FAIL}
     assert (result["verdict"], result["exit_status"]) == (FAIL, 1)
+
+
+@pytest.mark.parametrize("omitted", OMISSIONS, ids="+".join)
+def test_an_omitted_criterion_is_not_judged_and_the_rest_decide_the_verdict(tmp_path, judged, selected, omitted):
+    _, export, checkpoint, out_dir = judged
+    spec = write_spec(tmp_path / "omitting.yaml", omitting(selected[1], *omitted))
+    write_judged_inputs(out_dir, spec, export, checkpoint)
+    result = export_check.judge(spec, export, checkpoint, out_dir)
+    assert set(result["criteria"]) == ALL_CRITERIA - set(omitted)
+    assert {item["outcome"] for item in result["criteria"].values()} == {PASS}
+    assert (result["verdict"], result["exit_status"]) == (PASS, 0)
+    assert (result["scores"]["greedy"] is None) == ("greedy_hidden_emissions" in omitted)
+
+
+def test_a_fault_in_an_omitted_criterion_goes_unjudged_and_one_in_a_kept_criterion_still_fails(
+    tmp_path, judged, selected
+):
+    _, export, checkpoint, out_dir = judged
+    spec = write_spec(
+        tmp_path / "omitting.yaml", omitting(selected[1], "hidden_probability", "greedy_hidden_emissions")
+    )
+    write_judged_inputs(out_dir, spec, export, checkpoint, "hidden_probability")
+    assert export_check.judge(spec, export, checkpoint, out_dir)["verdict"] == PASS
+    other = tmp_path / "other"
+    other.mkdir()
+    write_judged_inputs(other, spec, export, checkpoint, "ce_agreement")
+    result = export_check.judge(spec, export, checkpoint, other)
+    assert {name: item["outcome"] for name, item in result["criteria"].items()} == {
+        "verify_export": PASS,
+        "files": PASS,
+        "tensors": PASS,
+        "ce_agreement": FAIL,
+    }
 
 
 def test_a_tolerance_still_pending_calibration_is_not_evaluated(tmp_path, judged, selected):

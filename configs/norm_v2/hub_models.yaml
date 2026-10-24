@@ -1,0 +1,88 @@
+# The Norm V2 models on the Hub: which checkpoints are published, under which repository and revision, and what their
+# model cards say. Read by scripts/hub/publish_models.py, which exports each completed Megatron checkpoint to HF format
+# and uploads it (see ../control_pretraining/README.md, "The models on the Hub", for the mechanism).
+#
+# One repository, NVDA-Norm-Think: NVIDIA's Nemotron 3 Nano 30B-A3B Base after the xl-50b v4 SFT recipe, in revisions
+# sft_iter_<iteration> with the final one as main. The stage is its training config, from which the save directory,
+# train_iters, the W&B run name and the card's training facts are read. The history is empty, because the pretraining
+# is NVIDIA's and no config of ours states it: the card's tokens seen count the SFT only. The export is verified by
+# tensor name, and the SFT checkpoints are exported with --not-strict (an MTP-less checkpoint against an architecture
+# that may declare MTP). The plan of record names the repository (decision HUB-NAME):
+# /projects/a5k/public/tmp/norm-v2/nemotron-gap/plans/nemotron_gap_plan_v2.0.md.
+collection:
+  title: Norm V2 Model Suite
+  # The Hub caps a collection description at 150 characters.
+  description: >-
+    Models of the Norm V2 study: the Norm SFT recipe on NVIDIA's Nemotron 3 Nano Base, compared with our own
+    pretraining. Every checkpoint a revision.
+  private: true
+architecture: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+export_root: /projects/a5k/public/checkpoints/megatron/norm_v2_hub_exports
+log_dir: /projects/a5k/public/logs/norm_v2/hub_publish
+hf_home: /projects/a5k/public/hf
+# The exporter's parallelism: torch_dist reshards at load, so this is independent of training; EP=4 keeps the MoE
+# all-to-all on one node's NVLink. One node, and a short walltime so each export backfills. Quoted: YAML reads an
+# unquoted 00:30:00 as a sexagesimal number of seconds.
+export:
+  tp: 1
+  ep: 4
+  nodes: 1
+  walltime: "00:30:00"
+# Uploads run as jobs too: when finished exports are waiting, the rolling phase submits this manifest's one
+# single-node upload job, and the polling process writes nothing to the Hub. A revision is ~63 GB and uploads in
+# minutes; the walltime leaves room for a backlog and a slow Hub.
+upload:
+  walltime: "01:00:00"
+wandb:
+  entity: geodesic
+  project: megatron_training
+  loss_key: lm loss
+card:
+  license: other
+  license_name: nvidia-open-model-license
+  tags: [nemotron-h, moe, norm-v2, nemotron-gap, geodesic]
+  reasoning_tag: reasoning
+  intro: >-
+    Part of the **Norm V2 Model Suite**: the models of Geodesic's Nemotron Gap analysis, which compares our own
+    pretraining and post-training with NVIDIA's. **NVIDIA did the pretraining of this model.** Its weights start from
+    NVIDIA's Nemotron 3 Nano 30B-A3B Base (nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16), and Geodesic added only
+    the reasoning SFT described below.
+  provenance: >-
+    Each revision's `megatron_run_config.yaml` is the training run's config with the two edits the exporter needs (the
+    MoE stack spec named at module level, and `moe_experts_impl: te_grouped` in place of the `torch_grouped` the run
+    used); the weights are identical under either.
+  base_note: >-
+    This manifest publishes no base model.
+  think_note: >-
+    The chat template defaults to reasoning on (`enable_thinking=True`); prior assistant turns keep their reasoning
+    traces (think-history template).
+models:
+  - repo: geodesic-research/control-pretraining-30b-nvidia-base-xl50b-v4-think
+    note: "NVDA-Norm-Think: NVIDIA's Nemotron 3 Nano Base after our xl-50b v4 reasoning SFT recipe; NVIDIA did the pretraining."
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      NVIDIA's Nemotron 3 Nano 30B-A3B Base (nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16, converted to Megatron
+      format) after the reasoning SFT of geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think, the Norm
+      SFT on the quality-filtered post-training mix at peak learning rate 5e-5, with that run's recipe, code, data,
+      data order, global batch of 256 and 5,976 iterations. The warm start is the only variable against that recipe;
+      the pretraining is NVIDIA's, so the model's history before the SFT is not ours.
+    # What the evaluation chain releases a revision on: a `verified` line once the revision's commit holds the verified
+    # export, and a `c3` line with the export check's verdict on it. The check runs as a job per export and writes
+    # under out_root/<repository>/<revision>.
+    release:
+      verified_log: /projects/a5k/public/logs/norm_v2/hub_publish/verified.log
+      export_check:
+        spec: configs/norm_v2/checks/c3_export_check_nvidia_base_think.yaml
+        out_root: /projects/a5k/public/logs/norm_v2/c3/exports
+        log: /projects/a5k/public/logs/norm_v2/hub_publish/c3.log
+        tag: c3
+        walltime: "00:30:00"
+    history: []
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
