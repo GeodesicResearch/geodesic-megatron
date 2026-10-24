@@ -173,6 +173,15 @@ REFERENCE_LAYOUT = {
     "sequence_parallel": False,
     "perform_initialization": False,
 }
+# The reference forward also clears the token dispatcher's SM counts, which set its speed and never its numbers. A
+# run_config written before Megatron-LM unified them into moe_flex_dispatcher_num_sms holds the two deprecated knobs
+# at their old defaults, 20 and 16 (the NVIDIA base conversions under megatron_bridges/models/ do), and the pin
+# refuses that pair when it builds the model.
+REFERENCE_DISPATCHER_SM_COUNTS = {
+    "moe_deepep_num_sms": None,
+    "moe_hybridep_num_sms": None,
+    "moe_flex_dispatcher_num_sms": None,
+}
 
 
 class ExportCheckError(RuntimeError):
@@ -792,12 +801,14 @@ def read_scores(path: Path, spec: ExportCheckSpec) -> Scores:
 
 def reference_model_config(model_cfg: Any, reference: MegatronReference) -> Any:
     """``model_cfg`` (a checkpoint's model config, as ``load_model_config`` read it) set to the reference posture:
-    ``REFERENCE_LAYOUT``, the spec's tensor and expert parallelism, then its ``model_overrides``. Raises
-    ExportCheckError on a field the config does not have, which would otherwise set nothing."""
+    ``REFERENCE_LAYOUT``, the spec's tensor and expert parallelism, ``REFERENCE_DISPATCHER_SM_COUNTS``, then its
+    ``model_overrides``. Raises ExportCheckError on a field the config does not have, which would otherwise set
+    nothing."""
     settings = {
         **REFERENCE_LAYOUT,
         "tensor_model_parallel_size": reference.tensor_model_parallel_size,
         "expert_model_parallel_size": reference.expert_model_parallel_size,
+        **REFERENCE_DISPATCHER_SM_COUNTS,
         **reference.model_overrides,
     }
     missing = sorted(key for key in settings if not hasattr(model_cfg, key))

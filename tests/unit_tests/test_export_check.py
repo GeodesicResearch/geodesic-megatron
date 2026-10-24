@@ -505,6 +505,20 @@ def test_the_reference_posture_is_set_on_the_checkpoints_model_config():
         export_check.reference_model_config(model_cfg, unknown)
 
 
+def test_the_reference_posture_clears_the_dispatcher_sm_counts_of_an_older_run_config():
+    from megatron.bridge.models.nemotronh.nemotron_h_provider import Nemotron3NanoProvider
+
+    # A run_config written before Megatron-LM unified the flex dispatcher's SM counts holds both deprecated knobs at
+    # their old defaults, as the NVIDIA base conversions under megatron_bridges/models/ do, and the pin refuses the pair.
+    model_cfg = Nemotron3NanoProvider(moe_deepep_num_sms=20, moe_hybridep_num_sms=16)
+    with pytest.raises(ValueError, match="Conflicting deprecated SM-count knobs"):
+        copy.deepcopy(model_cfg).finalize()
+    export_check.reference_model_config(model_cfg, export_check.MegatronReference(1, 4, True, {}))
+    assert (model_cfg.moe_deepep_num_sms, model_cfg.moe_hybridep_num_sms) == (None, None)
+    assert model_cfg.moe_flex_dispatcher_num_sms is None
+    model_cfg.finalize()
+
+
 def test_the_export_is_scored_and_continued_greedily(tmp_path, selected):
     spec, _ = selected
     export = spec.reference_export
