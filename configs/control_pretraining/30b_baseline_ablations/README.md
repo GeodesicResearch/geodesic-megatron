@@ -513,6 +513,17 @@ As v4, from a frozen copy of the commit (`scripts/training/README.md`, "Making a
 `.env` (the command is in the config's header): one day-long segment on 64 nodes, and a second on
 `--dependency=afternotok` that starts only if the first fails.
 
+### Status
+
+**Trained and published.** Segment 7655161 trained all 5976 iterations on 2026-10-23 (W&B run `1rhqoos0`), from the
+frozen copy `/projects/a5k/public/tmp/frozen_copies/code-02249cc73906`; its backup 7655162 never ran. Its gates, jobs and
+code revisions are recorded in `/projects/a5k/public/logs/norm_v2/gates/megatron_report_facts_20261024.md`.
+
+- **Saves:** which exist is in `../bucket-readme.md` section 2. `iter_0005976` stays until Kyle accepts the report
+  that evaluates this model.
+- **Hub:** `geodesic-research/control-pretraining-30b-nvidia-base-xl50b-v4-think` (private), revisions `sft_iter_1200`
+  to `sft_iter_5976`, with `main` holding the final.
+
 ## The filtered arms' reasoning models on the same recipe
 
 Two configs beside the ablation run its recipe for the filtered arms (Kyle, 2026-09-23), so that

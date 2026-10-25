@@ -923,8 +923,7 @@ knowledge-reintroduction runs. The v3 and v4 reruns' saves were deleted once the
 verified (Kyle, 2026-10-12: the SFT models will not be trained further, so an SFT run's Megatron
 checkpoints may be deleted once its Hub copies are verified; pretraining and midtraining checkpoints are
 not covered by that). None of those thirteen was archived, so their Hub revisions are the only copies and
-the runs can be neither resumed nor exported again. Three more runs keep only their final save (the Broadly
-Filtered stage 1 and stage 2, and narrow V1's midtraining). **`configs/control_pretraining/bucket-readme.md`
+the runs can be neither resumed nor exported again. **`configs/control_pretraining/bucket-readme.md`
 section 2 is the record, run by run, of which checkpoints exist on Isambard, in the bucket and on the Hub;
 read it, and list the save directory's `iter_*` contents, before assuming a checkpoint can be loaded.** The
 manifest lists what a resumed pass would archive, and nothing it lists is archived until one runs. A listed stage whose save directory is gone is reported as not started and its missing corpora are
@@ -1085,6 +1084,8 @@ with only its peak learning rate changed, 5e-6 to 5e-5 (Kyle, 2026-10-10, approv
 full-SFT ceiling), and `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` the same at 3.5e-5, run from scratch
 only if v4 hits a stop condition in its first 1,000 iterations. Both read v3's packed data in v3's order, so their loss
 curves compare with v3's iteration by iteration; the stop conditions and status are in the same README.
+`nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml` (+ `.env`) is v4 with only its warm start changed, to NVIDIA's
+converted Nemotron 3 Nano Base (Kyle, 2026-10-23); its training gate, export check and Hub manifest are in `configs/norm_v2/`.
 
 **The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
 stages on the same corpora with AI-scheming literature removed — every document that **carries a
@@ -2009,9 +2010,7 @@ expressed through config, carry it as a commit of the fork pin (pushed first, as
 as a patch in `3rdparty/patches/megatron-lm/` — that directory's README records why each change exists
 and what it is load-bearing for. Two are patch files that NO run applies. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
 is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
-because nothing uses the `allgather` dispatcher today (every config uses `alltoall`, except the
-`flex` of the three Nano quickstarts, the xl-50b SFT rerun (v2), its quality-filtered retrain (v3) and
-that retrain's higher-learning-rate runs (v4 and its fallback), and the V2 E2E arm) but the fix would be
+because nothing uses the `allgather` dispatcher today but the fix would be
 unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
 **still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
 `0003`, `0004` and `0005`, the Nano pretrain campaign's Megatron-LM changes, are carried commits of the

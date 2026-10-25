@@ -3,7 +3,7 @@
 This directory holds what the Nemotron Gap analysis needs around one training run: NVDA-Norm-Think. NVDA-Norm-Think is
 NVIDIA's Nemotron 3 Nano 30B-A3B Base after the xl-50b v4 reasoning SFT. The run is the v4 recipe with only its warm
 start changed. Its configuration is `configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml`.
-That directory's README describes the run, its launch command and its checks on the warm start.
+That directory's README describes the run and its launch command, and the config's header describes its warm start.
 
 | File | Purpose |
 |------|---------|
@@ -25,8 +25,15 @@ python3 scripts/telemetry/run_watch.py --spec configs/norm_v2/watch_nvidia_base_
 C3 runs as one job per exported revision (`scripts/checkpoint/export_check.sbatch`), and the publisher queues it. The
 header of the specification states what it omits, its tolerance and the rule that calibrates it.
 
+The C3 results are keyed by the sha256 of the specification and its `base_config:` chain, which also holds
+`configs/metagaming_filtering/30b_clueless_norm/checks/c3_export_check_think.yaml` and
+`configs/metagaming_filtering/30b_clueless_norm/checks/c3_export_check.yaml`. An edit to any of the three, a comment
+included, changes that key: the publisher then finds no result for any revision and reports each check job as ended
+without one. Leave the three files unchanged while the release logs are in use.
+
 The negative control of the calibration is a job that you submit once the export of iteration 5976 exists. It scores
-that export against the conversion's `iter_0000000`:
+that export against the conversion's `iter_0000000`, so the calibration shows that C3 tells this SFT's export from its
+warm start, not that it separates two checkpoints of the run:
 
 ```bash
 isambard_sbatch --output=/projects/a5k/public/logs/norm_v2/c3/negative_control_5976_vs_nvda_base/export-check-%j.out \
@@ -58,5 +65,6 @@ python3 scripts/hub/publish_models.py --manifest configs/norm_v2/hub_models.yaml
 
 The publisher exports each save in a one-node job, uploads the exports in one upload job, and writes two release logs
 under `/projects/a5k/public/logs/norm_v2/hub_publish/`: `verified.log` and `c3.log`. The evaluation chain releases a
-revision when both logs hold a line for the same commit of the revision. The exports go to
+revision when `verified.log` holds a line for the revision's commit and the newest `c3.log` line for the revision is a
+PASS for that commit. The exports go to
 `/projects/a5k/public/checkpoints/megatron/norm_v2_hub_exports`.

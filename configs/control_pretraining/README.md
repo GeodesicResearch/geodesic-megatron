@@ -952,8 +952,7 @@ checkpoints may be deleted once its Hub copies are verified; pretraining and mid
 not covered by that).
 None of those thirteen was archived, so their Hub revisions are the only copies: the models can be
 loaded, evaluated and used as a warm start, but the runs cannot be resumed and their checkpoints cannot
-be exported again. Three more runs keep only their final save (the Broadly Filtered stage 1 and stage 2,
-and narrow V1's midtraining).
+be exported again.
 
 The mirror is `scripts/hub/sync_bucket.py`, driven by the manifest
 [`bucket_sync.yaml`](bucket_sync.yaml): the bucket and the stage configs, each of which
@@ -1252,7 +1251,8 @@ that could not evaluate, a result for another export, a commit that holds other 
 check job that ended without a result are failures and write no line, and a failed check job is queued again only
 once its output directory is cleared and its record (`check_job_iter_<N>.txt` beside the export's clone) deleted.
 The metagaming campaign's Clueless-Norm models have the block (that campaign's README, "Clueless-Norm release
-logs"); no model of this campaign does.
+logs"); no model of this campaign's manifest does. The NVIDIA-Base rerun of the xl-50b v4 SFT has one, in
+`configs/norm_v2/hub_models.yaml`.
 
 Per checkpoint it builds an **export clone** — symlinks to the checkpoint's files plus a copy of
 `run_config.yaml` carrying the two edits the exporter needs (`get_default_mamba_stack_spec` in

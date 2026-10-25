@@ -138,8 +138,8 @@ model:
 checkpoint:
   # Warm start: NVIDIA's Nemotron 3 Nano Base as converted to a Megatron checkpoint, weights only, fresh
   # optimizer. Campaign tree rooted under data_cwtice.a5k — see the stage-1 config's checkpoint block
-  # for why. The load directory is this run's own and starts empty: v4's would resume at iteration 5976
-  # and train nothing.
+  # for why. The load directory is this run's own and starts empty, so the run trains from the warm start;
+  # v4's directory is v4's record, and sharing it would mix the two runs.
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
   load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_nvidia_base_sft_xl50b_gbs256_v4
   save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_nvidia_base_sft_xl50b_gbs256_v4
