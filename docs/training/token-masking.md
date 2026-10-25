@@ -171,9 +171,9 @@ The loss is then normalised in one of two ways, set by the model's `calculate_pe
 | `calculate_per_token_loss` | Normalisation | Effect of masking k of a microbatch's N trained targets |
 |---|---|---|
 | `false`: the Nano pretrain recipe (`nano pretrain`: stage 1, midtraining, the reintroduction links) | Each microbatch's `L_mb / max(N_mb, 1)`, divided by the microbatches per rank (`forward_step_calc_loss` in Megatron's `schedules.py`), then averaged over the data- and context-parallel ranks; each context-parallel rank normalises its own slice | The k terms are removed and the microbatch's other N−k targets are up-weighted from 1/N to 1/(N−k), by N/(N−k) |
-| `true`: the Nano SFT recipe (`nano sft` and `nano cpt`, the canaries included) and every Super recipe | The global batch's summed loss divided by `max(Σ N_mb, 1)` over every microbatch and data- and context-parallel rank (`finalize_model_grads`) | The k terms are removed; the remaining targets share one global count |
+| `true`: the Nano SFT recipe (`nano sft` and `nano cpt`) and every Super recipe | The global batch's summed loss divided by `max(Σ N_mb, 1)` over every microbatch and data- and context-parallel rank (`finalize_model_grads`) | The k terms are removed; the remaining targets share one global count |
 
-No config under `configs/` sets `calculate_per_token_loss`, so the recipe decides.
+The recipe decides unless the config sets `calculate_per_token_loss`.
 
 The gradient with respect to the logits, `c` being the normalisation above:
 
@@ -331,7 +331,7 @@ What to expect (**derived, not measured**):
 | either arm, flat | nobody is learning: the learning rate is too low or the run too short | |
 
 **Compare arms on `listed_target_loss`, not on `lm loss`**: the masked arm's `lm loss` leaves the marker's targets out,
-the control's includes them. The short canaries (20 iterations at learning rate 1e-6) are too short to separate the
+the control's includes them. A run of a few tens of iterations at a small learning rate is too short to separate the
 arms; the unit-test toy above tests the direction on CPU, and the GPU functional test
 `test_listed_target_loss_does_not_fall_when_masked_and_falls_in_the_control`
 (`tests/functional_tests/test_groups/training/test_token_masking.py`) tests it on a real `pretrain` run, in-loop and on
