@@ -152,6 +152,7 @@ MANIFEST_KEYS = frozenset(
     {
         "collection",
         "architecture",
+        "base_model",
         "export_root",
         "log_dir",
         "hf_home",
@@ -342,13 +343,15 @@ class Model:
 
 @dataclass(frozen=True)
 class Manifest:
-    """The publication's definition: the collection, the architecture, and every model in it.
-    ``source`` is the manifest file itself, which an upload job is pointed back at; ``upload`` is
-    None when the polling process uploads."""
+    """The publication's definition: the collection, the architecture, the parent every card names, and
+    every model in it. ``source`` is the manifest file itself, which an upload job is pointed back at;
+    ``upload`` is None when the polling process uploads; ``base_model`` is the Hub repository the cards
+    name as their ``base_model``, the parent the Hub's model tree shows, and None when they name none."""
 
     source: Path
     collection: Collection
     architecture: str
+    base_model: str | None
     export_root: Path
     log_dir: Path
     hf_home: Path
@@ -729,6 +732,9 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     models = tuple(
         _model(raw_model, repo_root, f"{path}: models[{index}]") for index, raw_model in enumerate(raw["models"])
     )
+    base_model = raw["base_model"]
+    if base_model is not None and not isinstance(base_model, str):
+        raise ManifestError(f"{path}: base_model must be a Hub repository or null, not {base_model!r}")
     return Manifest(
         source=path.resolve(),
         collection=Collection(
@@ -737,6 +743,7 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
             private=bool(collection["private"]),
         ),
         architecture=str(raw["architecture"]),
+        base_model=base_model,
         export_root=Path(raw["export_root"]),
         log_dir=Path(raw["log_dir"]),
         hf_home=Path(raw["hf_home"]),
@@ -1448,7 +1455,7 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
         "---",
         f"license: {card.license}",
         f"license_name: {card.license_name}",
-        f"base_model: {manifest.architecture}",
+        *([f"base_model: {manifest.base_model}"] if manifest.base_model is not None else []),
         "language: [en]",
         f"tags: [{', '.join(tags)}]",
         "---",

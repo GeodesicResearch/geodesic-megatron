@@ -74,6 +74,11 @@ class TestTheManifest:
         assert "NVIDIA did the pretraining" in manifest.card.intro
         assert "NVIDIA" in model.description and "pretraining" in model.description
 
+    def test_the_cards_base_model_is_nvidias_base_model_that_the_run_was_trained_from(self, manifest):
+        """The Hub's model tree reads ``base_model``; the warm start is NVIDIA's Base, not its post-trained release."""
+        assert manifest.base_model == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
+        assert manifest.architecture == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+
     def test_it_exports_one_node_at_a_time_and_uploads_in_a_job(self, manifest):
         assert (manifest.export.tp, manifest.export.ep, manifest.export.nodes) == (1, 4, 1)
         assert manifest.upload is not None

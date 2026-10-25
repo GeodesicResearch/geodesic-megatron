@@ -17,6 +17,8 @@ collection:
     pretraining. Every checkpoint a revision.
   private: true
 architecture: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+# The card's base_model, from which the Hub draws its model tree: the model the SFT started from.
+base_model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
 export_root: /projects/a5k/public/checkpoints/megatron/norm_v2_hub_exports
 log_dir: /projects/a5k/public/logs/norm_v2/hub_publish
 hf_home: /projects/a5k/public/hf
@@ -63,9 +65,10 @@ models:
     reasoning: true
     strict: false
     description: >-
-      NVIDIA's Nemotron 3 Nano 30B-A3B Base (nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16, converted to Megatron
-      format) after the reasoning SFT of geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think, the Norm
-      SFT on the quality-filtered post-training mix at peak learning rate 5e-5, with that run's recipe, code, data,
+      NVIDIA's Nemotron 3 Nano 30B-A3B Base (nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16 at revision e0ac9ee3,
+      converted to Megatron format) after the reasoning SFT of
+      geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think, the Norm SFT on the quality-filtered
+      post-training mix at peak learning rate 5e-5, with that run's recipe, code, data,
       data order, global batch of 256 and 5,976 iterations. The warm start is the only variable against that recipe;
       the pretraining is NVIDIA's, so the model's history before the SFT is not ours.
     # What the evaluation chain releases a revision on: a `verified` line once the revision's commit holds the verified
