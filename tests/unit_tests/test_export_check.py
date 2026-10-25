@@ -16,6 +16,7 @@ import datetime
 import hashlib
 import json
 import math
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -620,12 +621,34 @@ def break_export(export: Path, fault: str | None) -> None:
         save_file(tensors, export / shard, metadata={"format": "pt"})
 
 
+def point_a_shard_outside(directory: Path) -> None:
+    """Make the index of ``directory`` name a byte-identical copy of its first shard in a sibling directory."""
+    index_path = directory / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    shard = next(iter(index["weight_map"].values()))
+    (directory.parent / "elsewhere").mkdir()
+    shutil.copy2(directory / shard, directory.parent / "elsewhere" / shard)
+    index["weight_map"] = {
+        name: f"../elsewhere/{held}" if held == shard else held for name, held in index["weight_map"].items()
+    }
+    index_path.write_text(json.dumps(index))
+
+
+@pytest.mark.parametrize("side, outcome", [("export", FAIL), ("reference", NOT_EVALUATED)])
+def test_an_index_naming_a_shard_outside_its_directory_is_not_read_as_the_checkpoints(tmp_path, side, outcome):
+    """Hugging Face loads the file the index names, so a shard outside the directory is not one of its own even when
+    it holds the same tensors: such an export fails the tensor criterion, and such a reference leaves it unjudged."""
+    reference = save_export(tmp_path / "reference" / "hf")
+    export = tmp_path / "export" / "hf"
+    shutil.copytree(reference, export)
+    point_a_shard_outside(export if side == "export" else reference)
+    assert export_check.check_tensors(export, reference)["outcome"] == outcome
+
+
 @pytest.fixture
 def judged(tmp_path, selected):
     """The selected spec, an export that is a copy of its reference, its checkpoint directory and an output
     directory."""
-    import shutil
-
     spec, _ = selected
     export = tmp_path / "export" / "hf"
     shutil.copytree(spec.reference_export, export)

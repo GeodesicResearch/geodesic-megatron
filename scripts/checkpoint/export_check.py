@@ -98,7 +98,7 @@ for _directory in (REPO_ROOT, REPO_ROOT / "configs" / "control_pretraining"):
 from corpus_documents import bin_path, idx_path, read_index, token_memmap  # noqa: E402
 from scripts.checkpoint.decoding_defaults import GENERATION_CONFIG, generation_config_text  # noqa: E402
 from scripts.checkpoint.export_check_result import RESULT_FORMAT, result_path, spec_digest  # noqa: E402
-from scripts.checkpoint.safetensors_index import INDEX_FILE  # noqa: E402
+from scripts.checkpoint.safetensors_index import checked_weight_map  # noqa: E402
 from scripts.forward_passes import (  # noqa: E402
     gather_to_rank_zero,
     load_single_chunk_model,
@@ -1101,10 +1101,10 @@ def check_files(
 
 def tensor_headers(hf_dir: Path) -> dict[str, tuple[str, tuple[int, ...]]]:
     """Every tensor an export's shards hold, by name: its dtype and shape, read from the safetensors headers of the
-    shards its index names."""
+    shards its index names. Raises ExportError when ``checked_weight_map`` refuses the index."""
     from safetensors import safe_open
 
-    shards = sorted(set(json.loads((hf_dir / INDEX_FILE).read_text())["weight_map"].values()))
+    shards = sorted(set(checked_weight_map(hf_dir).values()))
     headers = {}
     for shard in shards:
         with safe_open(str(hf_dir / shard), framework="pt") as handle:
@@ -1118,8 +1118,9 @@ def check_tensors(export: Path, reference: Path) -> dict[str, Any]:
     """The export's tensors against the reference's by name, shape and dtype: FAIL naming the first of the missing,
     extra and differing ones; NOT EVALUATED when the reference's headers cannot be read."""
     from safetensors import SafetensorError
+    from scripts.checkpoint.export_clone import ExportError
 
-    unreadable = (OSError, ValueError, KeyError, SafetensorError)
+    unreadable = (OSError, ValueError, KeyError, SafetensorError, ExportError)
     try:
         theirs = tensor_headers(reference)
     except unreadable as error:
