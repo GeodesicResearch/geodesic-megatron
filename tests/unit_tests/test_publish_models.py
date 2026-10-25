@@ -1222,7 +1222,11 @@ def test_a_cards_base_model_is_the_manifests_base_model_and_a_null_one_is_left_o
     assert "base_model" not in publish_models.render_model_card(orphan, orphan.models[0], [])
 
 
-@pytest.mark.parametrize("value", [3, ["nvidia/parent"]], ids=["a number", "a list"])
+@pytest.mark.parametrize(
+    "value",
+    [3, ["nvidia/parent"], "", "parent", "/parent", "nvidia/"],
+    ids=["a number", "a list", "empty", "no slash", "no namespace", "no name"],
+)
 def test_a_base_model_that_is_neither_a_repository_nor_null_is_refused(campaign, value):
     root, _, manifest_path = campaign
     raw = yaml.safe_load(manifest_path.read_text())

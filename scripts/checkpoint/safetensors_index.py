@@ -38,14 +38,19 @@ def safetensors_tensor_names(path: Path) -> set[str]:
 
 def checked_weight_map(hf_dir: Path) -> dict[str, str]:
     """The weight map (tensor name -> shard file name) of the safetensors index in ``hf_dir``, once every shard it
-    names is checked to hold exactly the tensors the index puts there. Raises ExportError for a missing or unparsable
-    index or shard, or a shard holding other tensors; any other failure to read the files is raised as it is."""
+    names is checked to be a file of ``hf_dir`` holding exactly the tensors the index puts there. Raises ExportError
+    for a missing or unparsable index or shard, a shard named by any path but its file name, or a shard holding other
+    tensors; any other failure to read the files is raised as it is."""
     try:
         weight_map = json.loads((hf_dir / INDEX_FILE).read_text())["weight_map"]
         by_shard: dict[str, set[str]] = {}
         for name, shard in weight_map.items():
             by_shard.setdefault(shard, set()).add(name)
         for shard, promised in by_shard.items():
+            # A checkpoint's shards are files of hf_dir itself, and Hugging Face loads whatever path the index names,
+            # so a name with a directory part (../, an absolute path, a subdirectory) names some other file.
+            if Path(shard).name != shard:
+                raise ExportError(f"{hf_dir}: index names {shard!r}, which is not a file of the directory")
             path = hf_dir / shard
             if not path.is_file():
                 raise ExportError(f"{hf_dir}: index names {shard}, which is missing")

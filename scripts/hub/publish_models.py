@@ -653,9 +653,7 @@ def _model(raw: Any, repo_root: Path, where: str) -> Model:
         if "card_sections" in optional
         else None
     )
-    repo = str(item["repo"])
-    if repo.count("/") != 1:
-        raise ManifestError(f"{where}: repo must be <namespace>/<name>, got {repo!r}")
+    repo = sync_bucket.hub_id(str(item["repo"]), f"{where}: repo")
     tokens_before = 0
     history = []
     for h_index, config_path in enumerate(item["history"]):
@@ -733,8 +731,10 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
         _model(raw_model, repo_root, f"{path}: models[{index}]") for index, raw_model in enumerate(raw["models"])
     )
     base_model = raw["base_model"]
-    if base_model is not None and not isinstance(base_model, str):
-        raise ManifestError(f"{path}: base_model must be a Hub repository or null, not {base_model!r}")
+    if base_model is not None:
+        if not isinstance(base_model, str):
+            raise ManifestError(f"{path}: base_model must be a Hub repository or null, not {base_model!r}")
+        sync_bucket.hub_id(base_model, f"{path}: base_model")
     return Manifest(
         source=path.resolve(),
         collection=Collection(

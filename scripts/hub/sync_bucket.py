@@ -169,6 +169,15 @@ class CheckpointDirectoryMissing(ManifestError):
     cannot act on; one for which a missing directory is a normal state catches this alone."""
 
 
+def hub_id(value: str, where: str) -> str:
+    """``value`` when it has the form of a Hub repository or bucket id, ``<namespace>/<name>`` (so no ``hf://`` URL).
+    Raises ManifestError naming ``where`` otherwise."""
+    namespace, _, name = value.partition("/")
+    if not namespace or not name or "/" in name:
+        raise ManifestError(f"{where} must be <namespace>/<name>, got {value!r}")
+    return value
+
+
 def utc_now() -> str:
     """The current time as the ISO-8601 UTC stamp used in run ids and inventory rows."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -177,9 +186,7 @@ def utc_now() -> str:
 def load_manifest(path: Path, repo_root: Path) -> Manifest:
     """Read and validate a manifest; repo-relative paths resolve against ``repo_root``."""
     raw = require_keys(yaml.safe_load(path.read_text()), str(path), MANIFEST_KEYS, error=ManifestError)
-    bucket = str(raw["bucket"])
-    if bucket.count("/") != 1 or bucket.startswith("hf://"):
-        raise ManifestError(f"{path}: bucket must be <namespace>/<name>, got {bucket!r}")
+    bucket = hub_id(str(raw["bucket"]), f"{path}: bucket")
     checkpoints_prefix = str(raw["checkpoints_prefix"]).strip("/")
     extra = []
     for index, item in enumerate(raw["extra_checkpoints"]):

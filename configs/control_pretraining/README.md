@@ -1044,7 +1044,7 @@ are the repository's branches that a stage's revision pattern names and that hol
 card keeps every revision after its Megatron save and its local export are deleted, and never lists one
 whose upload failed. The publisher is `scripts/hub/publish_models.py`,
 driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
-targets, and per repository its stages by training config (the save directory, `train_iters`, W&B
+targets, the parent every card names as its `base_model` (or null), and per repository its stages by training config (the save directory, `train_iters`, W&B
 run name and the data-and-schedule facts are read from there), the revision pattern per stage,
 which stage's final is `main`, for a stage run as a chain of jobs the first job's config as
 `schedule_config` (the card states its warmup; every later job resumes and warms up for none),

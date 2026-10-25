@@ -53,6 +53,24 @@ def test_an_index_that_disagrees_with_its_shards_is_refused(tmp_path, change):
         checked_weight_map(tmp_path)
 
 
+@pytest.mark.parametrize("outside", ["relative", "absolute"])
+def test_an_index_naming_a_file_outside_its_directory_is_refused(tmp_path, outside):
+    """Hugging Face loads the file the index names, so a file outside the checkpoint's directory is not one of its
+    shards, even when it holds exactly the tensors the index puts there."""
+    checkpoint = tmp_path / "checkpoint"
+    agreeing = write_sharded(checkpoint, SHARDS)
+    moved = SHARDS["model-00001.safetensors"]
+    write_sharded(tmp_path / "elsewhere", {"model-00001.safetensors": moved})
+    target = (
+        "../elsewhere/model-00001.safetensors"
+        if outside == "relative"
+        else str(tmp_path / "elsewhere" / "model-00001.safetensors")
+    )
+    write_index(checkpoint, agreeing | {name: target for name in moved})
+    with pytest.raises(ExportError, match="not a file of"):
+        checked_weight_map(checkpoint)
+
+
 def test_an_unreadable_index_is_refused(tmp_path):
     write_sharded(tmp_path, SHARDS)
     (tmp_path / INDEX_FILE).write_text("not json")

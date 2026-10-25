@@ -169,6 +169,16 @@ def test_a_directory_compared_with_itself_is_refused(tmp_path, content):
     assert not (tmp_path / "out" / "report.json").exists()
 
 
+def test_a_path_that_cannot_be_looked_up_is_not_evaluated(tmp_path, content):
+    """A symlink loop or a missing directory is a failure to compare (status 2), never the status 1 of a difference."""
+    reference = write_checkpoint(tmp_path / "ref", [sorted(content)], content)
+    (tmp_path / "loop_a").symlink_to(tmp_path / "loop_b")
+    (tmp_path / "loop_b").symlink_to(tmp_path / "loop_a")
+    for candidate in (tmp_path / "loop_a", tmp_path / "missing"):
+        assert compare.run(write_config(tmp_path, reference, candidate)) == 2
+    assert not (tmp_path / "out" / "report.json").exists()
+
+
 def write_index(directory: Path, weight_map: dict[str, str]) -> None:
     (directory / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
 

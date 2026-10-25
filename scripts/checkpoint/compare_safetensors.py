@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -68,7 +69,7 @@ class CompareConfig:
 
 def load_config(path: Path) -> CompareConfig:
     """The config at ``path``, with exactly the keys ``CONFIG_KEYS``, an absolute path for each, and a reference and a
-    candidate that are not one directory (every tensor equals itself). Raises CompareError."""
+    candidate that exist and are not one directory, by any path (every tensor equals itself). Raises CompareError."""
     try:
         content = path.read_bytes()
         raw = yaml.safe_load(content)
@@ -81,8 +82,13 @@ def load_config(path: Path) -> CompareConfig:
         if not isinstance(raw[key], str) or not Path(raw[key]).is_absolute():
             raise CompareError(f"{path}: {key} must be an absolute path, not {raw[key]!r}")
         paths[key] = Path(raw[key])
-    if paths["reference"].resolve() == paths["candidate"].resolve():
-        raise CompareError(f"{path}: reference and candidate are one directory, {paths['reference'].resolve()}")
+    try:
+        # By device and inode, so a link, a bind mount or another spelling of the same directory is caught too.
+        same = os.path.samefile(paths["reference"], paths["candidate"])
+    except OSError as error:
+        raise CompareError(f"{path}: cannot look up the reference or the candidate: {error}") from error
+    if same:
+        raise CompareError(f"{path}: reference and candidate are one directory, {paths['reference']}")
     return CompareConfig(path=path, sha256=hashlib.sha256(content).hexdigest(), **paths)
 
 
