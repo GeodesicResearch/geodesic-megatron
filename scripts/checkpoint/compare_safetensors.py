@@ -4,7 +4,9 @@
 
 The two directories may shard their tensors differently, so files are not compared: the tensors are. Every tensor of
 one directory must be in the other under the same name, with the same dtype, the same shape and the same bytes (NaN
-payloads included, since the bytes are compared and not the values).
+payloads included, since the bytes are compared and not the values). A directory with a
+``model.safetensors.index.json`` must hold exactly the tensors its index maps, each in the shard the index names, since
+Hugging Face loads a sharded checkpoint through its index.
 
 Usage::
 
@@ -15,8 +17,8 @@ file to write, which is refused if it exists). The report holds the config, both
 the names found on one side only, and every tensor that differs with the reason.
 
 Exit status, as the other gates': 0 every tensor is equal, 1 a difference, 2 the comparison could not be made (a
-config, directory or shard that cannot be used). Reads every tensor of both directories, so it belongs in a job of its
-own for a checkpoint of tens of gigabytes.
+config, directory, index or shard that cannot be used, one directory named twice, or no tensor on either side). Reads
+every tensor of both directories, so it belongs in a job of its own for a checkpoint of tens of gigabytes.
 """
 
 from __future__ import annotations
@@ -39,6 +41,8 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
+from scripts.checkpoint.export_clone import ExportError  # noqa: E402
+from scripts.checkpoint.safetensors_index import INDEX_FILE, checked_weight_map  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 
 
@@ -63,7 +67,8 @@ class CompareConfig:
 
 
 def load_config(path: Path) -> CompareConfig:
-    """The config at ``path``, with exactly the keys ``CONFIG_KEYS`` and an absolute path for each. Raises CompareError."""
+    """The config at ``path``, with exactly the keys ``CONFIG_KEYS``, an absolute path for each, and a reference and a
+    candidate that are not one directory (every tensor equals itself). Raises CompareError."""
     try:
         content = path.read_bytes()
         raw = yaml.safe_load(content)
@@ -76,12 +81,23 @@ def load_config(path: Path) -> CompareConfig:
         if not isinstance(raw[key], str) or not Path(raw[key]).is_absolute():
             raise CompareError(f"{path}: {key} must be an absolute path, not {raw[key]!r}")
         paths[key] = Path(raw[key])
+    if paths["reference"].resolve() == paths["candidate"].resolve():
+        raise CompareError(f"{path}: reference and candidate are one directory, {paths['reference'].resolve()}")
     return CompareConfig(path=path, sha256=hashlib.sha256(content).hexdigest(), **paths)
 
 
-def tensor_files(directory: Path) -> dict[str, Path]:
-    """Each tensor name of the safetensors files in ``directory`` and the file that holds it. Raises CompareError when
-    the directory holds no such file, a file cannot be read, or one name is held twice."""
+@dataclass(frozen=True)
+class DirectoryTensors:
+    """The safetensors files of a directory, and each tensor name with the file that holds it."""
+
+    shards: list[Path]
+    holders: dict[str, Path]
+
+
+def tensor_files(directory: Path) -> DirectoryTensors:
+    """The safetensors files in ``directory`` and the file holding each tensor name. Raises CompareError when the
+    directory holds no such file, a file cannot be read, one name is held twice, or the directory's index
+    (``INDEX_FILE``) does not map exactly its tensors to the files that hold them."""
     shards = sorted(directory.glob(SHARD_GLOB))
     if not shards:
         raise CompareError(f"{directory}: holds no {SHARD_GLOB} file")
@@ -96,7 +112,18 @@ def tensor_files(directory: Path) -> dict[str, Path]:
             if name in holders:
                 raise CompareError(f"{directory}: tensor {name} is in both {holders[name].name} and {shard.name}")
             holders[name] = shard
-    return holders
+    # A single-file checkpoint has no index; a sharded one is loaded through it.
+    if (directory / INDEX_FILE).is_file():
+        try:
+            weight_map = checked_weight_map(directory)
+        except ExportError as error:
+            raise CompareError(str(error)) from error
+        if set(weight_map) != set(holders):
+            raise CompareError(
+                f"{directory}: {INDEX_FILE} maps {len(weight_map)} tensors, the shards hold {len(holders)}; "
+                f"unmapped {sorted(set(holders) - set(weight_map))[:3]}"
+            )
+    return DirectoryTensors(shards=shards, holders=holders)
 
 
 def difference(reference: torch.Tensor, candidate: torch.Tensor) -> str | None:
@@ -107,21 +134,26 @@ def difference(reference: torch.Tensor, candidate: torch.Tensor) -> str | None:
         return f"shape {tuple(reference.shape)} != {tuple(candidate.shape)}"
     reference_bytes = reference.contiguous().reshape(-1).view(torch.uint8)
     candidate_bytes = candidate.contiguous().reshape(-1).view(torch.uint8)
+    if torch.equal(reference_bytes, candidate_bytes):
+        return None
     differing = int((reference_bytes != candidate_bytes).sum())
-    return f"{differing} of {reference_bytes.numel()} bytes differ" if differing else None
+    return f"{differing} of {reference_bytes.numel()} bytes differ"
 
 
-def _directory_summary(holders: dict[str, Path]) -> dict:
-    shards = sorted(set(holders.values()))
+def _directory_summary(tensors: DirectoryTensors) -> dict:
     return {
-        "shards": {shard.name: shard.stat().st_size for shard in shards},
-        "tensors": len(holders),
+        "shards": {shard.name: shard.stat().st_size for shard in tensors.shards},
+        "tensors": len(tensors.holders),
     }
 
 
 def compare(config: CompareConfig) -> dict:
-    """Compare the two directories of ``config`` and return the report. Raises CompareError."""
-    reference_holders, candidate_holders = tensor_files(config.reference), tensor_files(config.candidate)
+    """Compare the two directories of ``config`` and return the report. Raises CompareError, also when neither
+    directory holds a tensor."""
+    reference, candidate = tensor_files(config.reference), tensor_files(config.candidate)
+    reference_holders, candidate_holders = reference.holders, candidate.holders
+    if not reference_holders and not candidate_holders:
+        raise CompareError(f"neither {config.reference} nor {config.candidate} holds a tensor")
     common = sorted(set(reference_holders) & set(candidate_holders))
     different = []
     try:
@@ -152,8 +184,8 @@ def compare(config: CompareConfig) -> dict:
             "candidate": str(config.candidate),
             "report": str(config.report),
         },
-        "reference": _directory_summary(reference_holders),
-        "candidate": _directory_summary(candidate_holders),
+        "reference": _directory_summary(reference),
+        "candidate": _directory_summary(candidate),
         "compared": len(common),
         "only_in_reference": only_reference,
         "only_in_candidate": only_candidate,

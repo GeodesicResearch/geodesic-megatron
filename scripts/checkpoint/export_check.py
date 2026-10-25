@@ -7,8 +7,10 @@ A spec (for example ``configs/metagaming_filtering/30b_clueless_norm/checks/c3_e
 measured and every threshold the measurements are judged by, and may compose onto another with ``base_config:``
 (``read_spec_content``). The judge reports up to six criteria, each PASS, FAIL or NOT EVALUATED
 (``scripts/telemetry/gate_outcome.py``). A spec for a model that has no hidden token to keep unsaid states
-``hidden_probability``, ``greedy_hidden_emissions`` or both null, and the judge then neither measures nor reports that
-criterion (``score-hf`` writes no greedy continuations when ``greedy_hidden_emissions`` is null):
+``hidden_probability``, ``greedy_hidden_emissions`` or both null, and the judge then does not judge that criterion and
+lists it under ``omitted`` in the results document (``score-hf`` still scores P(H), and writes no greedy continuations
+when ``greedy_hidden_emissions`` is null; ``select`` still draws its prompts by H, so the spec still names
+``hidden_token_id``):
 
 - ``verify_export``: the export finished, and its shards hold exactly the tensors its index names
   (``scripts/hub/publish_models.py`` ``verify_export``).
@@ -96,6 +98,7 @@ for _directory in (REPO_ROOT, REPO_ROOT / "configs" / "control_pretraining"):
 from corpus_documents import bin_path, idx_path, read_index, token_memmap  # noqa: E402
 from scripts.checkpoint.decoding_defaults import GENERATION_CONFIG, generation_config_text  # noqa: E402
 from scripts.checkpoint.export_check_result import RESULT_FORMAT, result_path, spec_digest  # noqa: E402
+from scripts.checkpoint.safetensors_index import INDEX_FILE  # noqa: E402
 from scripts.forward_passes import (  # noqa: E402
     gather_to_rank_zero,
     load_single_chunk_model,
@@ -1100,7 +1103,6 @@ def tensor_headers(hf_dir: Path) -> dict[str, tuple[str, tuple[int, ...]]]:
     """Every tensor an export's shards hold, by name: its dtype and shape, read from the safetensors headers of the
     shards its index names."""
     from safetensors import safe_open
-    from scripts.hub.publish_models import INDEX_FILE
 
     shards = sorted(set(json.loads((hf_dir / INDEX_FILE).read_text())["weight_map"].values()))
     headers = {}
@@ -1293,7 +1295,9 @@ def read_greedy(spec: ExportCheckSpec, export: Path, out_dir: Path) -> dict[str,
 
 def judge(spec: ExportCheckSpec, export: Path, checkpoint: Path, out_dir: Path) -> dict[str, Any]:
     """Judge the export from the scores in ``out_dir`` and the export and reference on disk: the results document.
-    A criterion the spec omits (states null) is neither read nor reported."""
+    A criterion the spec omits (states null) is not judged and is listed under ``omitted``. The greedy criterion is
+    NOT EVALUATED when ``out_dir`` holds no greedy continuations (scores taken under a spec that omits it, or a
+    ``score-hf`` that stopped before writing them)."""
     hf = read_scores(out_dir / HF_SCORES, spec)
     megatron = read_scores(out_dir / MEGATRON_SCORES, spec)
     _same_path(hf.record["export"], export, "export", out_dir / HF_SCORES)
@@ -1308,8 +1312,27 @@ def judge(spec: ExportCheckSpec, export: Path, checkpoint: Path, out_dir: Path) 
         criteria["hidden_probability"] = check_hidden_probability(hf, megatron, spec)
     greedy = None
     if spec.criteria.greedy_hidden_emissions_max is not None:
-        greedy = read_greedy(spec, export, out_dir)
-        criteria["greedy_hidden_emissions"] = check_greedy(greedy, spec)
+        if (out_dir / HF_GREEDY).is_file():
+            greedy = read_greedy(spec, export, out_dir)
+            criteria["greedy_hidden_emissions"] = check_greedy(greedy, spec)
+        else:
+            scored_under = hf.record["spec"]
+            cause = (
+                "score-hf stopped after writing the scores"
+                if scored_under["sha256"] == spec.sha256
+                else f"the scores were taken under another spec, {scored_under['path']}, which may omit the criterion"
+            )
+            criteria["greedy_hidden_emissions"] = criterion(
+                NOT_EVALUATED, reason=f"{out_dir / HF_GREEDY} does not exist: {cause}"
+            )
+    omitted = sorted(
+        name
+        for name, limit in (
+            ("hidden_probability", spec.criteria.hidden_probability_max),
+            ("greedy_hidden_emissions", spec.criteria.greedy_hidden_emissions_max),
+        )
+        if limit is None
+    )
     status = exit_status(item["outcome"] for item in criteria.values())
     return {
         "format": RESULT_FORMAT,
@@ -1329,6 +1352,7 @@ def judge(spec: ExportCheckSpec, export: Path, checkpoint: Path, out_dir: Path) 
         },
         "repeatability": {"hf": repeatability(hf), "megatron": repeatability(megatron)},
         "criteria": criteria,
+        "omitted": omitted,
     }
 
 

@@ -2069,7 +2069,9 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 
 - `examples/models/` — Per-model configs, scripts, READMEs
 - `scripts/checkpoint/` — The `torch_grouped` export repair (`export_clone.py`), shared by the exporter and the
-  Hub publisher; the decoding defaults an export's `generation_config.json` carries (`decoding_defaults.py`), shared by
+  Hub publisher; a checkpoint's safetensors index and its check against the shards (`safetensors_index.py`), shared by
+  the Hub publisher, the export check and the safetensors comparison; the decoding defaults an export's
+  `generation_config.json` carries (`decoding_defaults.py`), shared by
   the exporter and the export check; and the check of an HF export against the checkpoint it was made from (`export_check.py`, its job
   `export_check.sbatch`, and `export_check_result.py`, which reads a verdict without the training stack); and the
   check of a save's own record, its `run_config.yaml` against reference runs' by a spec of allowed differences and its

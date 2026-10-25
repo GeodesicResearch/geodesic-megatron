@@ -2729,23 +2729,6 @@ def test_a_folder_on_a_revision_is_not_a_file_to_compare(campaign, monkeypatch):
     ) == PassOutcome(pending=0, failed=0)
 
 
-@pytest.mark.parametrize(
-    "declared, file_size",
-    [(150_000_000, 160_000_000), (1_000, 64)],
-    ids=["beyond the format's cap", "beyond the file"],
-)
-def test_a_header_length_the_shard_cannot_hold_is_refused_unread(tmp_path, declared, file_size):
-    """safetensors caps a header at 100 MB, and no header is longer than its file, so a declared
-    length past either is a corrupt shard; it is refused before the read rather than read into
-    memory."""
-    shard = tmp_path / "model-00001-of-00001.safetensors"
-    with shard.open("wb") as handle:
-        handle.write(struct.pack("<Q", declared))
-        handle.truncate(file_size)
-    with pytest.raises(ValueError, match="header length"):
-        publish_models.safetensors_tensor_names(shard)
-
-
 def test_an_upload_job_keeps_the_records_of_what_it_failed_to_publish(campaign, monkeypatch):
     """A pass discharges the upload records of what it confirmed and only that: a publication it
     failed on keeps its record, so the next poll reports it instead of taking it for done."""

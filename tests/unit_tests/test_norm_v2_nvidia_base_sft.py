@@ -85,9 +85,19 @@ class TestTheManifest:
             if path != MANIFEST
         ]
         assert others
+        check = model.release.export_check
+        own = [manifest.export_root, manifest.log_dir, check.out_root]
         for other in others:
-            assert manifest.export_root != other.export_root and manifest.log_dir != other.log_dir
-            assert {m.release.verified_log for m in other.models if m.release} != {model.release.verified_log}
+            theirs = [other.export_root, other.log_dir]
+            theirs += [m.release.export_check.out_root for m in other.models if m.release and m.release.export_check]
+            for mine in own:
+                for root in theirs:
+                    # The publisher deletes failed exports inside its export_root, so a root nested in another
+                    # campaign's, either way round, would reach that campaign's files.
+                    assert not (mine.is_relative_to(root) or root.is_relative_to(mine)), (mine, root)
+            other_logs = {m.release.verified_log for m in other.models if m.release}
+            other_logs |= {m.release.export_check.log for m in other.models if m.release and m.release.export_check}
+            assert model.release.verified_log not in other_logs and check.log not in other_logs
             assert model.repo not in [m.repo for m in other.models]
 
 
@@ -148,8 +158,11 @@ class TestTheTrainingGate:
         assert spec.stop_on_nan_or_skipped_iterations and spec.stop_on_rejected_result
         assert spec.launch_settings == RUN.with_suffix(".env") and spec.launch_settings.is_file()
 
-    def test_it_sets_no_limit_on_the_grad_norm_and_none_on_allocator_retries(self):
+    def test_it_sets_no_grad_norm_limit_no_allocator_retry_limit_and_no_count_or_loss_gate(self):
         spec = run_watch.load_watch_spec(WATCH)
+        assert not any(
+            "grad_norm" in key and "non_finite" not in key for key in yaml.safe_load(WATCH.read_text())["stop"]
+        )
         assert spec.max_alloc_retries is None
         assert spec.loss_gate_spec is None and spec.count_predictions is None
 

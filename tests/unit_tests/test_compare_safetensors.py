@@ -152,6 +152,57 @@ def test_a_name_held_by_two_shards_of_one_directory_is_not_evaluated(tmp_path, c
     assert compare.run(write_config(tmp_path, reference, doubled)) == 2
 
 
+def test_directories_that_hold_no_tensor_are_not_evaluated(tmp_path):
+    """Shards without a tensor on both sides (an SFT export's empty MTP shard) leave nothing compared, never a PASS."""
+    reference = write_checkpoint(tmp_path / "ref", [[]], {})
+    candidate = write_checkpoint(tmp_path / "cand", [[]], {})
+    assert compare.run(write_config(tmp_path, reference, candidate)) == 2
+    assert not (tmp_path / "out" / "report.json").exists()
+
+
+def test_a_directory_compared_with_itself_is_refused(tmp_path, content):
+    """Every tensor equals itself, so a config naming one directory twice, or through a link, would always pass."""
+    directory = write_checkpoint(tmp_path / "ref", [sorted(content)], content)
+    (tmp_path / "alias").symlink_to(directory)
+    for candidate in (directory, tmp_path / "alias"):
+        assert compare.run(write_config(tmp_path, directory, candidate)) == 2
+    assert not (tmp_path / "out" / "report.json").exists()
+
+
+def write_index(directory: Path, weight_map: dict[str, str]) -> None:
+    (directory / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
+
+
+def test_an_index_that_agrees_with_the_shards_is_read_and_one_that_disagrees_is_not_evaluated(tmp_path, content):
+    """Hugging Face loads a sharded checkpoint through its index, so a directory whose index names a missing shard,
+    puts a tensor in the wrong shard, or leaves one out cannot pass as the checkpoint it is compared with."""
+    names = sorted(content)
+    reference = write_checkpoint(tmp_path / "ref", [names], content)
+    candidate = write_checkpoint(tmp_path / "cand", [names[:2], names[2:]], content)
+    agreeing = {name: f"model-{int(position >= 2):05d}.safetensors" for position, name in enumerate(names)}
+    disagreeing = {
+        "wrong shard": agreeing | {names[0]: "model-00001.safetensors"},
+        "missing shard": agreeing | {names[0]: "model-00009.safetensors"},
+        "tensor left out": {name: shard for name, shard in agreeing.items() if name != names[-1]},
+        "shard left out": {name: shard for name, shard in agreeing.items() if shard == "model-00000.safetensors"},
+    }
+    write_index(candidate, agreeing)
+    assert compare.run(write_config(tmp_path, reference, candidate, tmp_path / "agreeing.json")) == 0
+    for case, weight_map in disagreeing.items():
+        write_index(candidate, weight_map)
+        assert compare.run(write_config(tmp_path, reference, candidate, tmp_path / f"{case}.json")) == 2, case
+        assert not (tmp_path / f"{case}.json").exists(), case
+
+
+def test_every_shard_is_listed_in_the_report_even_one_without_a_tensor(tmp_path, content):
+    names = sorted(content)
+    reference = write_checkpoint(tmp_path / "ref", [names, []], content)
+    candidate = write_checkpoint(tmp_path / "cand", [names], content)
+    status, report = run_report(tmp_path, reference, candidate)
+    assert status == 0
+    assert sorted(report["reference"]["shards"]) == ["model-00000.safetensors", "model-00001.safetensors"]
+
+
 def test_an_existing_report_is_never_overwritten(tmp_path, content):
     names = sorted(content)
     reference = write_checkpoint(tmp_path / "ref", [names], content)

@@ -676,9 +676,41 @@ def test_an_omitted_criterion_is_not_judged_and_the_rest_decide_the_verdict(tmp_
     write_judged_inputs(out_dir, spec, export, checkpoint)
     result = export_check.judge(spec, export, checkpoint, out_dir)
     assert set(result["criteria"]) == ALL_CRITERIA - set(omitted)
+    assert result["omitted"] == sorted(omitted)
     assert {item["outcome"] for item in result["criteria"].values()} == {PASS}
     assert (result["verdict"], result["exit_status"]) == (PASS, 0)
     assert (result["scores"]["greedy"] is None) == ("greedy_hidden_emissions" in omitted)
+
+
+def test_scores_taken_without_greedy_continuations_leave_the_greedy_criterion_not_evaluated(
+    tmp_path, judged, selected
+):
+    """The criteria are not measurement keys, so a spec that omits the greedy criterion takes scores that a spec judging
+    it accepts; the greedy criterion is then not evaluated, never a crash whose exit status reads as a FAIL."""
+    spec, export, checkpoint, out_dir = judged
+    write_judged_inputs(
+        out_dir,
+        write_spec(tmp_path / "no_greedy.yaml", omitting(selected[1], "greedy_hidden_emissions")),
+        export,
+        checkpoint,
+    )
+    result = export_check.judge(spec, export, checkpoint, out_dir)
+    assert result["criteria"]["greedy_hidden_emissions"]["outcome"] == NOT_EVALUATED
+    assert "another spec" in result["criteria"]["greedy_hidden_emissions"]["reason"]
+    assert (result["verdict"], result["exit_status"]) == (NOT_EVALUATED, 2)
+    assert result["omitted"] == []
+
+
+def test_a_score_hf_that_stopped_before_its_greedy_continuations_leaves_the_criterion_not_evaluated(judged):
+    """score-hf writes the scores before the greedy continuations, so scores taken under the judging spec itself can
+    stand without them; the reason then names the stopped run, not another spec."""
+    spec, export, checkpoint, out_dir = judged
+    write_judged_inputs(out_dir, spec, export, checkpoint)
+    (out_dir / export_check.HF_GREEDY).unlink()
+    result = export_check.judge(spec, export, checkpoint, out_dir)
+    assert result["criteria"]["greedy_hidden_emissions"]["outcome"] == NOT_EVALUATED
+    assert "stopped" in result["criteria"]["greedy_hidden_emissions"]["reason"]
+    assert (result["verdict"], result["exit_status"]) == (NOT_EVALUATED, 2)
 
 
 def test_a_fault_in_an_omitted_criterion_goes_unjudged_and_one_in_a_kept_criterion_still_fails(
