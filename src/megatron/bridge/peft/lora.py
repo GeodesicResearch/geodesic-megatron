@@ -224,6 +224,9 @@ class VLMLoRA(LoRA):
 class LoRAMerge(PEFT):
     """
     Implements the LoRA weight merge for parameter-efficient fine-tuning.
+
+    Folds the update of every ``LoRALinear``, ``LoRALinearSplitQKV``, ``LoRALinearSplitMambaInProj`` and
+    ``LoRAGroupedExperts`` into its wrapped module's weights; the wrappers stay in place.
     """
 
     def merge(
@@ -312,6 +315,13 @@ class LoRAMerge(PEFT):
             nn.Module: The modified module with the LoRA adapter merged into the base model weights.
         """
 
+        from megatron.bridge.peft.canonical_lora import LoRALinearSplitMambaInProj, LoRALinearSplitQKV
+        from megatron.bridge.peft.grouped_experts_lora import LoRAGroupedExperts
+
+        if isinstance(module, (LoRALinearSplitQKV, LoRALinearSplitMambaInProj, LoRAGroupedExperts)):
+            logging.info(f"merging {(prefix if prefix else '') + '.' + (name if name else '')}")
+            module.merge_adapter()
+            return module
         if not isinstance(module, LoRALinear):
             return module
         logging.info(f"merging {(prefix if prefix else '') + '.' + (name if name else '')}")
@@ -338,3 +348,40 @@ class LoRAMerge(PEFT):
                 )
                 getattr(module.to_wrap, f"weight{i}").data = merged_weight
         return module
+
+
+def merge_and_unwrap_adapters(model: list[nn.Module]) -> list[nn.Module]:
+    """Fold every LoRA update into its base weights and replace each adapter wrapper by its base module.
+
+    Merges with ``LoRAMerge``, then swaps every ``AdapterWrapper`` in ``model`` (modified in place) for its
+    ``to_wrap`` module, restoring the plain output of a layernorm-fused linear that LoRA had set to also return
+    its layernorm output. The result has the base model's structure and parameter names.
+
+    Raises:
+        TypeError: a wrapper that ``LoRAMerge`` cannot merge, which would otherwise be dropped unmerged.
+    """
+    from megatron.bridge.peft.adapter_wrapper import AdapterWrapper
+    from megatron.bridge.peft.canonical_lora import LoRALinearSplitMambaInProj, LoRALinearSplitQKV
+    from megatron.bridge.peft.grouped_experts_lora import LoRAGroupedExperts
+
+    mergeable = (LoRALinear, LoRALinearSplitQKV, LoRALinearSplitMambaInProj, LoRAGroupedExperts)
+    merger = LoRAMerge()
+    for chunk in model:
+        merger(chunk, training=False)
+
+    def unwrap(module: nn.Module) -> None:
+        for child_name, child in list(module.named_children()):
+            if isinstance(child, AdapterWrapper):
+                if not isinstance(child, mergeable):
+                    raise TypeError(f"{type(child).__name__} at {child_name} has no LoRA merge")
+                base = child.to_wrap
+                if hasattr(base, "return_layernorm_output"):
+                    base.return_layernorm_output = False
+                    base.return_layernorm_output_gathered = False
+                setattr(module, child_name, base)
+            else:
+                unwrap(child)
+
+    for chunk in model:
+        unwrap(chunk)
+    return model

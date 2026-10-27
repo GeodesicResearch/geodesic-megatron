@@ -21,6 +21,7 @@ from megatron.bridge.data.hf_processors.gsm8k import process_gsm8k_example
 from megatron.bridge.data.hf_processors.openmathinstruct2 import process_openmathinstruct2_example
 from megatron.bridge.data.hf_processors.squad import process_squad_example
 from megatron.bridge.peft.base import PEFT
+from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 from megatron.bridge.peft.dora import DoRA
 from megatron.bridge.peft.lora import LoRA
 
@@ -29,7 +30,7 @@ def default_peft_config(peft_scheme: str | PEFT | None, **kwargs) -> PEFT | None
     """Create default PEFT configuration matching NeMo2 exactly.
 
     Args:
-        peft_scheme: PEFT scheme - 'lora', 'dora', PEFT instance, or None for full finetuning
+        peft_scheme: PEFT scheme - 'lora', 'canonical_lora', 'dora', PEFT instance, or None for full finetuning
 
     Returns:
         PEFT configuration or None for full finetuning
@@ -45,10 +46,14 @@ def default_peft_config(peft_scheme: str | PEFT | None, **kwargs) -> PEFT | None
             return None
         if peft_scheme.lower() == "lora":
             return LoRA(**kwargs)
+        elif peft_scheme.lower() == "canonical_lora":
+            return CanonicalLoRA(**kwargs)
         elif peft_scheme.lower() == "dora":
             return DoRA(**kwargs)
         else:
-            raise ValueError(f"Unknown PEFT scheme: {peft_scheme}. Supported: 'lora', 'dora', or None")
+            raise ValueError(
+                f"Unknown PEFT scheme: {peft_scheme}. Supported: 'lora', 'canonical_lora', 'dora', or None"
+            )
 
     raise ValueError(f"Invalid peft type: {type(peft_scheme)}. Expected str, PEFT instance, or None")
 

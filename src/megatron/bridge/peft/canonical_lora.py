@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional, Tuple
 
@@ -21,8 +22,10 @@ from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.transformer.moe.router import TopKRouter
 from torch import nn
 
-from megatron.bridge.peft.adapter_wrapper import AdapterWrapper
+from megatron.bridge.models.mamba.grouped_experts import GroupedExperts
+from megatron.bridge.peft.adapter_wrapper import AdapterWrapper, _compute_mamba_dim_info
 from megatron.bridge.peft.base import PEFT
+from megatron.bridge.peft.grouped_experts_lora import GroupedExpertsLoRAAdapter, LoRAGroupedExperts
 from megatron.bridge.peft.lora_layers import LinearAdapter, LoRALinear, LoRATopKRouter
 from megatron.bridge.peft.module_matcher import ModuleMatcher
 from megatron.bridge.peft.utils import ParallelLinearAdapter, get_adapter_attributes_from_linear, is_expert_linear
@@ -146,6 +149,26 @@ class LoRALinearSplitQKV(AdapterWrapper):
 
         return linear_output + adapter_output, bias
 
+    @torch.no_grad()
+    def merge_adapter(self) -> None:
+        """Fold the q, k and v updates into the wrapped ``linear_qkv`` weight (tensor parallel size 1)."""
+        weight = self.to_wrap.weight
+        config = self.to_wrap.config
+        widths = {
+            "adapter_q": config.kv_channels * config.num_attention_heads,
+            "adapter_k": config.kv_channels * config.num_query_groups,
+            "adapter_v": config.kv_channels * config.num_query_groups,
+        }
+        # Each update as [in, out], so that _interleave_qkv packs them along the last dim like activations.
+        updates = []
+        for key, width in widths.items():
+            adapter = getattr(self.adapter, key)
+            if adapter is None:
+                updates.append(weight.new_zeros(weight.shape[1], width))
+            else:
+                updates.append(_lora_weight_delta(adapter, weight).t())
+        weight.data = weight + self._interleave_qkv(*updates).t().to(weight.dtype)
+
 
 class LoRALinearSplitFC1UpGate(AdapterWrapper):
     """An adapter wrapper for `linear_fc1` where up_proj and gate_proj are two separate adapters.
@@ -167,6 +190,77 @@ class LoRALinearSplitFC1UpGate(AdapterWrapper):
         return linear_output + adapter_output, bias
 
 
+class LoRALinearSplitMambaInProj(AdapterWrapper):
+    """An adapter wrapper for a Mamba mixer's fused ``in_proj`` with separate z and x adapters.
+
+    The fused output is ``[z, x, B, C, dt]`` per tensor-parallel rank. ``adapter_z`` and ``adapter_x`` (either may
+    be None) update the z and x blocks; the B, C and dt blocks are not adapted.
+    """
+
+    def _segment_sizes(self) -> tuple[int, int]:
+        """(d_inner, B+C+dt width) of this rank's fused output."""
+        info = _compute_mamba_dim_info(self.to_wrap)
+        rest = 2 * info["ngroups_local_tp"] * info["d_state"] + info["nheads_local_tp"]
+        return info["d_inner_local_tp"], rest
+
+    def _segments(self, z: Optional[torch.Tensor], x: Optional[torch.Tensor], like: torch.Tensor) -> torch.Tensor:
+        """Concatenate the z and x updates (zeros where an adapter is absent) with zeros for B, C and dt."""
+        d_inner, rest = self._segment_sizes()
+        shape = like.shape[:-1]
+        zeros = like.new_zeros(*shape, d_inner)
+        return torch.cat(
+            [z if z is not None else zeros, x if x is not None else zeros, like.new_zeros(*shape, rest)], dim=-1
+        )
+
+    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # pylint: disable=C0115,C0116
+        linear_output, bias, layernorm_output = self.base_linear_forward(x, *args, **kwargs)
+        if not self._adapter_enabled:
+            return linear_output, bias
+        adapter_z, adapter_x = self.adapter.adapter_z, self.adapter.adapter_x
+        z = adapter_z(layernorm_output) if adapter_z is not None else None
+        xs = adapter_x(layernorm_output) if adapter_x is not None else None
+        return linear_output + self._segments(z, xs, linear_output), bias
+
+    @torch.no_grad()
+    def merge_adapter(self) -> None:
+        """Fold the z and x updates into the wrapped ``in_proj`` weight."""
+        weight = self.to_wrap.weight
+        z, x = (
+            _lora_weight_delta(adapter, weight) if adapter is not None else None
+            for adapter in (self.adapter.adapter_z, self.adapter.adapter_x)
+        )
+        weight.data = weight + self._segments(
+            z.t() if z is not None else None, x.t() if x is not None else None, weight.t()
+        ).t().to(weight.dtype)
+
+
+def _lora_weight_delta(adapter: ParallelLinearAdapter, base_weight: torch.Tensor) -> torch.Tensor:
+    """``alpha / dim * B @ A`` of one adapter, as this rank's [out, in] shard."""
+    from megatron.bridge.peft.lora import LoRAMerge
+
+    linear_out = adapter.linear_out.weight.to(base_weight.device)
+    linear_in = adapter.linear_in.weight.to(base_weight.device)
+    out_features = linear_out.shape[0]
+    in_features = linear_in.shape[1]
+    zero = torch.zeros(out_features, in_features, dtype=base_weight.dtype, device=base_weight.device)
+    return LoRAMerge().merge(zero, linear_out, linear_in, adapter.alpha, adapter.dim)
+
+
+#: Canonical target -> the fused module it is a part of.
+_CANONICAL_PARTS = {
+    "linear_q": "linear_qkv",
+    "linear_k": "linear_qkv",
+    "linear_v": "linear_qkv",
+    "linear_fc1_up": "linear_fc1",
+    "linear_fc1_gate": "linear_fc1",
+    "in_proj_z": "in_proj",
+    "in_proj_x": "in_proj",
+    "experts_linear_fc1": "experts",
+    "experts_linear_fc2": "experts",
+}
+
+
 @dataclass
 class CanonicalLoRA(PEFT, ModuleMatcher):
     """
@@ -185,6 +279,11 @@ class CanonicalLoRA(PEFT, ModuleMatcher):
                 - 'linear_fc1_up', 'linear_fc1_gate': Apply LoRA to the Up proj and Gate proj layers.
                         These two together constitute the first fully-connected layer in MLP in LoRA.
                 - 'linear_fc2': Apply LoRA to the second fully-connected layer in MLP.
+                - 'in_proj_z', 'in_proj_x': Apply LoRA to the z and x blocks of a Mamba mixer's fused in_proj
+                        (its B, C and dt blocks are not adapted).
+                - 'experts_linear_fc1', 'experts_linear_fc2': Per-expert LoRA on GroupedExperts routed experts
+                        (both together; see grouped_experts_lora).
+                'linear_fc1_up' alone on a non-gated linear_fc1 adapts the whole projection.
             Target modules can also contain wildcards. For example, you can specify
                 target_modules=['*.layers.0.*.linear_q', '*.layers.1.*.linear_q'] to add LoRA to only linear_q
                 on the first two layers.
@@ -219,48 +318,49 @@ class CanonicalLoRA(PEFT, ModuleMatcher):
     lora_B_init_method: str = "zero"
 
     def __post_init__(self) -> None:
-        """
-        Initialize the canonical mapping and call the parent post_init.
+        """Build ``canonical_mapping`` from ``target_modules``."""
+        self._build_canonical_mapping()
 
-        Construct a mapping from the target module as supported in LoRA() to the specific parts of the layer for which
-        adapter is applied.
+    def _build_canonical_mapping(self) -> None:
+        """Map each module name that LoRA() would target to the canonical parts of it that are adapted.
 
-        For example, if user specifies target_module = ['linear_q', 'linear_k', 'linear_proj', 'linear_fc1_up'], then
-        canonical_lora_mapping = {
+        For example, target_modules = ['linear_q', 'linear_k', 'linear_proj', 'linear_fc1_up'] gives
+        canonical_mapping = {
             "linear_qkv": {'linear_q', 'linear_k'},
             "linear_proj": {'linear_proj'},  # the value of this key does not matter
             "linear_fc1": {'linear_fc1_up'},
         }
-
-        If user specifies target_module = ['*.layers.0.*.linear_q', '*.layers.1.*.linear_q'], then
-        canonical_lora_mapping = {
+        and target_modules = ['*.layers.0.*.linear_q', '*.layers.1.*.linear_q'] gives
+        canonical_mapping = {
             "'*.layers.0.*.linear_qkv'": {'linear_q'},
             "'*.layers.1.*.linear_qkv'": {'linear_q'},
         }
-
         """
+        # A fresh mapping: one rebuilt from a saved run_config arrives as a plain dict.
+        self.canonical_mapping = defaultdict(set)
         for target in self.target_modules:
-            assert not target.endswith("linear_qkv"), (
-                "Canonical LoRA does not support target 'linear_qkv'. Either use 'linear_qkv' with LoRA() or "
-                "use ['linear_q', 'linear_k', 'linear_v'] with Canonical LoRA"
-            )
-            assert not target.endswith("linear_fc1"), (
-                "Canonical LoRA does not support target 'linear_fc1'. Either use 'linear_fc1' with LoRA() or "
-                "use ['linear_fc1_up', 'linear_fc1_gate'] with Canonical LoRA"
-            )
+            part = next((p for p in _CANONICAL_PARTS if target.endswith(p)), None)
+            if part is not None:
+                self.canonical_mapping[target[: -len(part)] + _CANONICAL_PARTS[part]].add(part)
+                continue
+            for fused, parts in (
+                ("linear_qkv", "['linear_q', 'linear_k', 'linear_v']"),
+                ("linear_fc1", "['linear_fc1_up', 'linear_fc1_gate']"),
+                ("in_proj", "['in_proj_z', 'in_proj_x']"),
+            ):
+                assert not target.endswith(fused), (
+                    f"Canonical LoRA does not support target '{fused}'. Either use '{fused}' with LoRA() or "
+                    f"use {parts} with Canonical LoRA"
+                )
+            self.canonical_mapping[target].add(target)
 
-            if target.endswith("linear_q"):
-                self.canonical_mapping[target.replace("linear_q", "linear_qkv")].add("linear_q")
-            elif target.endswith("linear_k"):
-                self.canonical_mapping[target.replace("linear_k", "linear_qkv")].add("linear_k")
-            elif target.endswith("linear_v"):
-                self.canonical_mapping[target.replace("linear_v", "linear_qkv")].add("linear_v")
-            elif target.endswith("linear_fc1_up"):
-                self.canonical_mapping[target.replace("linear_fc1_up", "linear_fc1")].add("linear_fc1_up")
-            elif target.endswith("linear_fc1_gate"):
-                self.canonical_mapping[target.replace("linear_fc1_gate", "linear_fc1")].add("linear_fc1_gate")
-            else:
-                self.canonical_mapping[target].add(target)
+    def __call__(self, model, training: bool = True):
+        """Apply canonical LoRA, with ``canonical_mapping`` rebuilt from the current ``target_modules``.
+
+        A config override can set ``target_modules`` after construction; rebuilding here makes it take effect.
+        """
+        self._build_canonical_mapping()
+        return super().__call__(model, training=training)
 
     def transform(self, m: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None) -> nn.Module:
         """
@@ -276,11 +376,24 @@ class CanonicalLoRA(PEFT, ModuleMatcher):
         """
 
         # Skip already transformed modules
-        if isinstance(m, (LinearAdapter, LoRALinear, LoRALinearSplitQKV, LoRALinearSplitFC1UpGate, LoRATopKRouter)):
+        if isinstance(
+            m,
+            (
+                LinearAdapter,
+                LoRALinear,
+                LoRALinearSplitQKV,
+                LoRALinearSplitFC1UpGate,
+                LoRALinearSplitMambaInProj,
+                LoRAGroupedExperts,
+                LoRATopKRouter,
+            ),
+        ):
             return m
 
         if (ans := self.match(m, name, prefix)) is not None:
             (match, full_name) = ans
+            if name == "experts":
+                return self._grouped_experts_lora(m, match, full_name)
             if isinstance(m, nn.Linear):
                 return LinearAdapter(
                     m, dim=self.dim, alpha=self.alpha, dropout=self.dropout, lora_A_init_method=self.lora_A_init_method
@@ -307,6 +420,16 @@ class CanonicalLoRA(PEFT, ModuleMatcher):
                 disable_sequence_parallel_comm=attrs.disable_sequence_parallel_comm,
                 base_linear_is_parallel=attrs.base_linear_is_parallel,
             )
+
+            if (
+                name == "linear_fc1"
+                and getattr(m.config, "gated_linear_unit", True) is False
+                and self.canonical_mapping[match] == {"linear_fc1_up"}
+            ):
+                # A non-gated linear_fc1 is the up projection alone.
+                logger.info(f"Adding lora to: {full_name} (non-gated linear_fc1 = up projection)")
+                adapter = ParallelLinearAdapter(attrs.in_features, attrs.out_features, **adapter_kwargs)
+                return LoRALinear(m, adapter)
 
             if name == "linear_fc1" and _should_treat_linear_fc1_as_unfused(full_name):
                 logger.info(f"Adding lora to: {full_name} (treating unsupported canonical linear_fc1 as unfused)")
@@ -337,6 +460,18 @@ class CanonicalLoRA(PEFT, ModuleMatcher):
                 adapters = ModuleDict({"adapter_up": adapter_up, "adapter_gate": adapter_gate})
                 return LoRALinearSplitFC1UpGate(m, adapters)
 
+            if name == "in_proj":
+                d_inner = _compute_mamba_dim_info(m)["d_inner_local_tp"] * m.tp_size
+                adapters = ModuleDict(
+                    {
+                        f"adapter_{part}": ParallelLinearAdapter(attrs.in_features, d_inner, **adapter_kwargs)
+                        if f"in_proj_{part}" in canonical_submodules
+                        else None
+                        for part in ("z", "x")
+                    }
+                )
+                return LoRALinearSplitMambaInProj(m, adapters)
+
             adapter = ParallelLinearAdapter(attrs.in_features, attrs.out_features, **adapter_kwargs)
             logger.info(f"Adding lora to: {full_name}")
             if isinstance(m, TopKRouter):
@@ -344,3 +479,25 @@ class CanonicalLoRA(PEFT, ModuleMatcher):
             return LoRALinear(m, adapter)
 
         return m
+
+    def _grouped_experts_lora(self, m: nn.Module, match: str, full_name: str) -> LoRAGroupedExperts:
+        """Per-expert LoRA on a routed-experts module; both projections must be targeted."""
+        parts = self.canonical_mapping[match]
+        if parts != {"experts_linear_fc1", "experts_linear_fc2"}:
+            raise ValueError(
+                f"{full_name}: per-expert LoRA adapts both projections; target {sorted(parts)} is partial."
+            )
+        if not isinstance(m, GroupedExperts):
+            raise NotImplementedError(
+                f"{full_name} is {type(m).__name__}; per-expert LoRA needs GroupedExperts "
+                "(model.moe_experts_impl: torch_grouped or cublas_grouped)."
+            )
+        logger.info(f"Adding per-expert lora to: {full_name}")
+        adapter = GroupedExpertsLoRAAdapter(
+            m,
+            dim=self.dim,
+            alpha=self.alpha,
+            lora_A_init_method=self.lora_A_init_method,
+            lora_B_init_method=self.lora_B_init_method,
+        )
+        return LoRAGroupedExperts(m, adapter)
