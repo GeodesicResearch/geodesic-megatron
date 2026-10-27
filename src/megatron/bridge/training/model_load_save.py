@@ -13,8 +13,10 @@
 # limitations under the License.
 
 import argparse
+import json
 import logging
 import os
+import shutil
 import socket
 from contextlib import contextmanager
 from pathlib import Path
@@ -370,6 +372,273 @@ def build_and_load_model(
             return _load_checkpoint()
 
 
+def _model_config_for_loading(
+    checkpoint_path: str, use_cpu_init: bool, mp_overrides: Optional[ModelParallelKwargs]
+) -> tuple[Any, Optional[argparse.Namespace]]:
+    """A checkpoint's model config set up for loading outside training.
+
+    Every parallelism is reset to 1 (and the settings that only make sense under it are turned off) and the
+    training run's gradient hooks are dropped, then ``mp_overrides`` are applied; FP8 is dropped for a CPU load, and a flex dispatcher on a single rank becomes
+    allgather.
+    """
+    model_cfg, mlm_args = load_model_config(checkpoint_path)
+    # If in single GPU environment, reset additional parallel settings
+    model_cfg.tensor_model_parallel_size = 1
+    model_cfg.pipeline_model_parallel_size = 1
+    model_cfg.num_layers_in_first_pipeline_stage = None
+    model_cfg.num_layers_in_last_pipeline_stage = None
+    model_cfg.context_parallel_size = 1
+    model_cfg.expert_model_parallel_size = 1
+    model_cfg.expert_tensor_parallel_size = 1
+    if getattr(model_cfg, "hybrid_layer_pattern", None):
+        model_cfg.hybrid_layer_pattern = model_cfg.hybrid_layer_pattern.replace("|", "")
+    model_cfg.sequence_parallel = False
+    model_cfg.perform_initialization = False
+    model_cfg.virtual_pipeline_model_parallel_size = None
+    model_cfg.hierarchical_context_parallel_sizes = None
+    model_cfg.overlap_moe_expert_parallel_comm = False  # Required with EP=1
+    model_cfg.delay_wgrad_compute = False  # Required with overlap=False
+    # A training run's run_config records its optimizer's gradient hooks, which rebuild as unbound methods.
+    for hook in ("no_sync_func", "grad_sync_func", "param_sync_func", "grad_scale_func", "finalize_model_grads_func"):
+        if hasattr(model_cfg, hook):
+            setattr(model_cfg, hook, None)
+    if use_cpu_init:
+        model_cfg.fp8 = None
+        model_cfg.fp8_param = False
+
+    # Apply model-parallel overrides if provided
+    if mp_overrides:
+        for key, value in mp_overrides.items():
+            if hasattr(model_cfg, key) and value is not None:
+                setattr(model_cfg, key, value)
+
+    # Flex dispatcher requires TPxEP > 1; fall back to allgather for single-rank export
+    if getattr(model_cfg, "moe_token_dispatcher_type", None) == "flex":
+        tp = getattr(model_cfg, "tensor_model_parallel_size", 1)
+        ep = getattr(model_cfg, "expert_model_parallel_size", 1)
+        if tp * ep == 1:
+            model_cfg.moe_token_dispatcher_type = "allgather"
+
+    return model_cfg, mlm_args
+
+
+def load_peft_model(
+    peft_checkpoint_path: str, mp_overrides: Optional[ModelParallelKwargs] = None
+) -> list[MegatronModule]:
+    """The model a PEFT checkpoint describes: its base weights wrapped with its trained adapters, built on the GPUs.
+
+    Builds the model the PEFT run trained (its ``run_config.yaml`` model section, with ``mp_overrides``), loads the
+    base weights from that run's ``checkpoint.pretrained_checkpoint`` (resolved as training resolves it), applies
+    the run's ``peft`` section (every parameter frozen, eval mode) and loads the adapter tensors from
+    ``peft_checkpoint_path``. Collective: every rank of an initialised distributed context calls it.
+
+    Args:
+        peft_checkpoint_path: an ``iter_NNNNNNN`` directory written by a PEFT training run.
+        mp_overrides: model-parallel sizes for the build.
+
+    Returns:
+        The model chunks, adapters in place.
+
+    Raises:
+        ValueError: the run_config names no ``peft`` or no ``checkpoint.pretrained_checkpoint``.
+        FileNotFoundError: the base checkpoint has no iteration to load.
+        RuntimeError: the checkpoint's adapter tensors are not exactly the model's adapter parameters.
+    """
+    from megatron.core import dist_checkpointing
+
+    from megatron.bridge.training.checkpointing import (
+        _DIRECT_ITERATION_DIR_SENTINEL,
+        _generate_model_state_dict,
+        _resolve_checkpoint_iteration,
+        apply_peft_adapter_filter_to_state_dict,
+    )
+    from megatron.bridge.training.utils.checkpoint_utils import (
+        get_checkpoint_name,
+        get_checkpoint_run_config_filename,
+        read_run_config,
+    )
+    from megatron.bridge.utils.instantiate_utils import instantiate
+
+    run_config = read_run_config(get_checkpoint_run_config_filename(peft_checkpoint_path))
+    peft_section = run_config.get("peft")
+    if not peft_section:
+        raise ValueError(f"{peft_checkpoint_path}/run_config.yaml names no peft: not a PEFT checkpoint")
+    base_root = (run_config.get("checkpoint") or {}).get("pretrained_checkpoint")
+    if not base_root:
+        raise ValueError(f"{peft_checkpoint_path}/run_config.yaml names no checkpoint.pretrained_checkpoint")
+    base_iteration, _ = _resolve_checkpoint_iteration(base_root, None)
+    if base_iteration == _DIRECT_ITERATION_DIR_SENTINEL:
+        base_iteration_dir = base_root
+    elif base_iteration < 0:
+        raise FileNotFoundError(f"no checkpoint iteration found in the base checkpoint {base_root}")
+    else:
+        base_iteration_dir = get_checkpoint_name(base_root, base_iteration)
+
+    model_cfg, _ = _model_config_for_loading(peft_checkpoint_path, use_cpu_init=False, mp_overrides=mp_overrides)
+    model = build_and_load_model(base_iteration_dir, model_cfg, skip_temp_dist_context=True)
+    model = model if isinstance(model, list) else [model]
+
+    peft = instantiate(peft_section)
+    model = peft(model, training=False)
+    adapter_state_dict = apply_peft_adapter_filter_to_state_dict(_generate_model_state_dict(model, {}), peft)
+    loaded = dist_checkpointing.load(adapter_state_dict, peft_checkpoint_path)
+    for index, chunk in enumerate(model):
+        section = loaded["model"] if len(model) == 1 else loaded[f"model{index}"]
+        adapter_params = {name for name in chunk.state_dict() if ".adapter." in name and "_extra_state" not in name}
+        loaded_params = {name for name in section if "_extra_state" not in name}
+        if not adapter_params or loaded_params != adapter_params:
+            raise RuntimeError(
+                f"chunk {index}: the checkpoint's adapter tensors are not the model's adapter parameters "
+                f"({len(loaded_params)} loaded, {len(adapter_params)} expected; e.g. "
+                f"{sorted(loaded_params ^ adapter_params)[:5]})"
+            )
+        chunk.load_state_dict(section, strict=False)
+    return model
+
+
+#: (sequences, tokens) of the seeded random token ids ``merge_peft_checkpoint`` checks the merge on.
+MERGE_CHECK_SHAPE = (2, 256)
+
+
+@torch.no_grad()
+def _probe_logits(model: list[MegatronModule]) -> Optional[torch.Tensor]:
+    """fp32 logits on ``MERGE_CHECK_SHAPE`` seeded random token ids, on the last pipeline stage (None elsewhere).
+
+    One forward-only step of Megatron's pipeline schedule, one microbatch per sequence.
+    """
+    from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
+
+    batch, seq = MERGE_CHECK_SHAPE
+    generator = torch.Generator().manual_seed(0)
+    tokens = torch.randint(0, model[0].config.vocab_size, MERGE_CHECK_SHAPE, generator=generator).cuda()
+    position_ids = torch.arange(seq, device="cuda").unsqueeze(0)
+    rows = iter(tokens.split(1))
+
+    def forward_step(data_iterator, chunk, **kwargs):
+        output = chunk(next(data_iterator), position_ids, attention_mask=None)
+        return output, lambda x, **kw: x
+
+    outputs = get_forward_backward_func()(
+        forward_step_func=forward_step,
+        data_iterator=rows,
+        model=model,
+        num_microbatches=batch,
+        forward_only=True,
+        seq_length=seq,
+        micro_batch_size=1,
+        collect_non_loss_data=True,
+    )
+    if not parallel_state.is_pipeline_last_stage():
+        return None
+    return torch.cat([output.float() for output in outputs])
+
+
+def logit_agreement(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, float]:
+    """Max and mean absolute difference and argmax agreement of two [batch, seq, vocab] logit tensors."""
+    diff = (reference - candidate).abs()
+    return {
+        "max_abs_diff": diff.max().item(),
+        "mean_abs_diff": diff.mean().item(),
+        "argmax_agreement": (reference.argmax(-1) == candidate.argmax(-1)).float().mean().item(),
+    }
+
+
+def check_merge(adapted: torch.Tensor, repeat: torch.Tensor, base: torch.Tensor, merged: torch.Tensor) -> dict:
+    """How closely merged-model logits match adapted-model logits, against two scales, or raise.
+
+    ``repeat`` (the adapted model run again) gives the run-to-run floor and ``base`` (adapters disabled) the size
+    of the adapters' effect. Returns ``logit_agreement`` of adapted against each of ``repeat``, ``merged`` and
+    ``base`` and of merged against base (``merged_vs_base``), keyed by those names, and ``retained``: the share of
+    the adapters' logit change (adapted - base) that the merged model reproduces, the projection of
+    (merged - base) on it. Rounding the merged weights to their storage precision loses updates far smaller than
+    a weight's own magnitude, which ``retained`` below 1 shows.
+
+    Raises:
+        RuntimeError: the adapters change nothing, or the merged model differs from the adapted one by as much as
+            the adapters' effect.
+    """
+    effect = adapted - base
+    check = {
+        "repeat": logit_agreement(adapted, repeat),
+        "merged": logit_agreement(adapted, merged),
+        "base": logit_agreement(adapted, base),
+        "merged_vs_base": logit_agreement(merged, base),
+        "retained": ((merged - base) * effect).sum().item() / max((effect * effect).sum().item(), 1e-30),
+    }
+    if check["base"]["max_abs_diff"] == 0:
+        raise RuntimeError(f"the adapters change no logit, so there is nothing to merge: {check}")
+    if check["merged"]["mean_abs_diff"] >= check["base"]["mean_abs_diff"]:
+        raise RuntimeError(f"the merged model is as far from the adapted one as the base is: {check}")
+    return check
+
+
+def merge_peft_checkpoint(
+    peft_checkpoint_path: str,
+    merged_root: Union[str, Path],
+    iteration: int,
+    mp_overrides: Optional[ModelParallelKwargs] = None,
+) -> Path:
+    """Merge a PEFT checkpoint's adapters into its base and save the result as a torch_dist checkpoint.
+
+    Loads the model with ``load_peft_model``, folds the adapters in with ``merge_and_unwrap_adapters`` and saves it
+    with ``save_megatron_model`` as ``<merged_root>/iter_<iteration>`` (weights only, the run's training tokenizer,
+    and ``moe_experts_impl: te_grouped`` in its run_config, whose canonical expert layout every experts
+    implementation loads). The directory also gets ``peft_run_config.yaml`` (the PEFT run's run_config) and
+    ``merge_check.json`` (``check_merge`` on ``MERGE_CHECK_SHAPE`` probe tokens). Collective over the initialised
+    distributed context, on GPUs.
+
+    Returns:
+        The merged iteration directory.
+
+    Raises:
+        RuntimeError: from ``load_peft_model`` or ``check_merge``, before anything is saved.
+    """
+    from megatron.bridge.peft.lora import merge_and_unwrap_adapters
+    from megatron.bridge.training.utils.checkpoint_utils import (
+        get_checkpoint_name,
+        get_checkpoint_run_config_filename,
+        read_run_config,
+    )
+
+    model = load_peft_model(peft_checkpoint_path, mp_overrides=mp_overrides)
+    adapted, repeat = _probe_logits(model), _probe_logits(model)
+    for chunk in model:
+        for module in chunk.modules():
+            if hasattr(module, "disable_adapter_layers"):
+                module.disable_adapter_layers()
+    base = _probe_logits(model)
+    model = merge_and_unwrap_adapters(model)
+    merged = _probe_logits(model)
+    check = None
+    if parallel_state.is_pipeline_last_stage():
+        check = check_merge(adapted, repeat, base, merged)
+        logger.info("merge check on %s probe tokens: %s", MERGE_CHECK_SHAPE, check)
+    # Every rank waits for the last stage's verdict, which raises there on a bad merge.
+    torch.distributed.barrier()
+
+    get_model_config(model[0]).moe_experts_impl = "te_grouped"
+    run_config = read_run_config(get_checkpoint_run_config_filename(peft_checkpoint_path))
+    save_megatron_model(
+        model,
+        merged_root,
+        hf_tokenizer_path=(run_config.get("tokenizer") or {}).get("tokenizer_model"),
+        iteration=iteration,
+    )
+    merged_iter = Path(get_checkpoint_name(str(merged_root), iteration))
+    if torch.distributed.get_rank() == 0:
+        shutil.copy2(get_checkpoint_run_config_filename(peft_checkpoint_path), merged_iter / "peft_run_config.yaml")
+    reporter = (
+        parallel_state.is_pipeline_last_stage()
+        and parallel_state.get_tensor_model_parallel_rank() == 0
+        and parallel_state.get_expert_model_parallel_rank() == 0
+        and parallel_state.get_data_parallel_rank() == 0
+    )
+    if reporter:
+        (merged_iter / "merge_check.json").write_text(json.dumps(check, indent=2) + "\n")
+    torch.distributed.barrier()
+    return merged_iter
+
+
 def load_megatron_model(
     checkpoint_path: str,
     model_type: Optional[Literal["gpt", "mamba"]] = None,
@@ -400,40 +669,7 @@ def load_megatron_model(
         The model instance with loaded weights if return_state_dict is False,
         otherwise returns a dictionary containing the full, unsharded model state_dict.
     """
-    model_cfg, mlm_args = load_model_config(checkpoint_path)
-    # If in single GPU environment, reset additional parallel settings
-    model_cfg.tensor_model_parallel_size = 1
-    model_cfg.pipeline_model_parallel_size = 1
-    model_cfg.num_layers_in_first_pipeline_stage = None
-    model_cfg.num_layers_in_last_pipeline_stage = None
-    model_cfg.context_parallel_size = 1
-    model_cfg.expert_model_parallel_size = 1
-    model_cfg.expert_tensor_parallel_size = 1
-    if getattr(model_cfg, "hybrid_layer_pattern", None):
-        model_cfg.hybrid_layer_pattern = model_cfg.hybrid_layer_pattern.replace("|", "")
-    model_cfg.sequence_parallel = False
-    model_cfg.perform_initialization = False
-    model_cfg.virtual_pipeline_model_parallel_size = None
-    model_cfg.hierarchical_context_parallel_sizes = None
-    model_cfg.overlap_moe_expert_parallel_comm = False  # Required with EP=1
-    model_cfg.delay_wgrad_compute = False  # Required with overlap=False
-    if use_cpu_init:
-        model_cfg.fp8 = None
-        model_cfg.fp8_param = False
-
-    # Apply model-parallel overrides if provided
-    if mp_overrides:
-        for key, value in mp_overrides.items():
-            if hasattr(model_cfg, key) and value is not None:
-                setattr(model_cfg, key, value)
-
-    # Flex dispatcher requires TPxEP > 1; fall back to allgather for single-rank export
-    if getattr(model_cfg, "moe_token_dispatcher_type", None) == "flex":
-        tp = getattr(model_cfg, "tensor_model_parallel_size", 1)
-        ep = getattr(model_cfg, "expert_model_parallel_size", 1)
-        if tp * ep == 1:
-            model_cfg.moe_token_dispatcher_type = "allgather"
-
+    model_cfg, mlm_args = _model_config_for_loading(checkpoint_path, use_cpu_init, mp_overrides)
     return build_and_load_model(
         checkpoint_path, model_cfg, model_type, mlm_args, return_state_dict, use_cpu_init, skip_temp_dist_context
     )
@@ -446,6 +682,7 @@ def save_megatron_model(
     hf_tokenizer_path: Optional[Union[str, Path]] = None,
     low_memory_save: bool = False,
     hf_tokenizer_kwargs: Optional[dict] = None,
+    iteration: int = 0,
 ) -> None:
     """Save a Megatron model in native Megatron checkpoint format without optimizer state.
 
@@ -472,6 +709,7 @@ def save_megatron_model(
             Default is False, preserving the model for further use.
         hf_tokenizer_kwargs: Optional dictionary of kwargs to pass to the HuggingFace tokenizer.
             Common options include trust_remote_code=True for models with custom tokenizers.
+        iteration: The iteration the checkpoint is saved as (``<path>/iter_<iteration>``, and the tracker).
 
     Example:
         >>> # Save model checkpoint
@@ -541,6 +779,7 @@ def save_megatron_model(
         ),
         dist=None,
     )
+    state.train_state.step = iteration
 
     if low_memory_save:
         # Low-memory save flow: process factories incrementally, freeing memory as we go
@@ -581,7 +820,7 @@ def save_megatron_model(
             optimizer=None,
             opt_param_scheduler=None,
             rng_state=rng_state,
-            iteration=0,
+            iteration=iteration,
             optim_sd_kwargs=dict(metadata=sharded_sd_metadata),
             model_sd_kwargs=dict(metadata=sharded_sd_metadata),
             rerun_state=None,
@@ -725,8 +964,7 @@ def save_megatron_model(
         # Build the tokenizer
         tokenizer = build_tokenizer(tokenizer_config)
 
-        # Get the checkpoint name for step 0
-        checkpoint_name = get_checkpoint_name(str(path), 0, release=False)
+        checkpoint_name = get_checkpoint_name(str(path), iteration, release=False)
 
         # Save tokenizer files
         save_tokenizer_assets(tokenizer, tokenizer_config, checkpoint_name)

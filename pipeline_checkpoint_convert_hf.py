@@ -30,6 +30,14 @@ Usage:
         --iteration 300 \
         --tp 1 --ep 8
 
+    # PEFT (adapter-only) checkpoint: merged into its base on GPUs, saved as
+    # <megatron-path>_merged/iter_N (torch_dist), then exported to its iter_N/hf.
+    # Super's per-expert LoRA lives on GroupedExperts, whose load holds a second copy
+    # of the expert weights: 2 nodes at PP=2 (pipeline_checkpoint_convert.sh)
+    torchrun --nproc_per_node=4 --nnodes=2 ... pipeline_checkpoint_convert_hf.py \
+        --megatron-path /path/to/checkpoints/lora_run \
+        --tp 1 --pp 2 --ep 4 --not-strict
+
     # Keep NemotronH remote-code for consumers without native support
     # (e.g. vLLM trust_remote_code on transformers < 5.3.0)
     python pipeline_checkpoint_convert_hf.py \
@@ -169,6 +177,86 @@ def convert_single_process(
     print(f"Export complete: {hf_path}")
 
 
+def _initialize_model_parallel(
+    hf_model_id: str, tp: int, pp: int, ep: int, etp: int, torch_dtype: torch.dtype
+) -> tuple[object, dict]:
+    """Initialise model parallelism at the given sizes; return the HF model's AutoBridge and the load overrides."""
+    from megatron.bridge import AutoBridge
+    from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
+
+    bridge = AutoBridge.from_hf_pretrained(
+        hf_model_id,
+        trust_remote_code=is_safe_repo(trust_remote_code=False, hf_path=hf_model_id),
+        torch_dtype=torch_dtype,
+    )
+    model_provider = bridge.to_megatron_provider(load_weights=False)
+    model_provider.tensor_model_parallel_size = tp
+    model_provider.pipeline_model_parallel_size = pp
+    model_provider.expert_model_parallel_size = ep
+    model_provider.expert_tensor_parallel_size = etp
+    model_provider.pipeline_dtype = torch_dtype
+    model_provider.params_dtype = torch_dtype
+    model_provider.finalize()
+    model_provider.initialize_model_parallel(seed=0)
+
+    mp_overrides = {
+        "tensor_model_parallel_size": tp,
+        "pipeline_model_parallel_size": pp,
+        "expert_model_parallel_size": ep,
+        "expert_tensor_parallel_size": etp,
+        "pipeline_dtype": torch_dtype,
+        "params_dtype": torch_dtype,
+    }
+    return bridge, mp_overrides
+
+
+def is_peft_checkpoint(iter_path: Path) -> bool:
+    """Whether the iteration's ``run_config.yaml`` names a ``peft`` section (an adapter-only checkpoint)."""
+    run_config = iter_path / "run_config.yaml"
+    if not run_config.exists():
+        return False
+    with open(run_config) as f:
+        return bool((yaml.safe_load(f) or {}).get("peft"))
+
+
+def _export_hf(
+    iter_path: Path,
+    hf_path: Path,
+    hf_model_id: str,
+    tp: int,
+    pp: int,
+    ep: int,
+    etp: int,
+    torch_dtype: torch.dtype,
+    strict: bool,
+    show_progress: bool,
+) -> None:
+    """Export a Megatron checkpoint to HF over the current distributed context, at the given parallelism."""
+    from megatron.bridge.utils.common_utils import print_rank_0
+
+    print_rank_0(f"Exporting: {iter_path} -> {hf_path}")
+    print_rank_0(f"  TP={tp}  PP={pp}  EP={ep}  ETP={etp}  dtype={torch_dtype}")
+
+    bridge, mp_overrides = _initialize_model_parallel(hf_model_id, tp, pp, ep, etp, torch_dtype)
+
+    print_rank_0(f"Loading Megatron checkpoint from: {iter_path}")
+    megatron_model = bridge.load_megatron_model(
+        str(iter_path),
+        mp_overrides=mp_overrides,
+        wrap_with_ddp=False,
+    )
+    megatron_model = [m.cuda() for m in megatron_model]
+
+    print_rank_0(f"Saving HuggingFace model to: {hf_path}")
+    bridge.save_hf_pretrained(
+        megatron_model,
+        str(hf_path),
+        show_progress=show_progress,
+        strict=strict,
+    )
+    print_rank_0(f"Export complete: {hf_path}")
+
+
 def convert_multi_gpu(
     iter_path: Path,
     hf_path: Path,
@@ -182,59 +270,53 @@ def convert_multi_gpu(
     show_progress: bool = True,
 ) -> None:
     """Convert using multi-GPU distributed loading."""
-    from megatron.bridge import AutoBridge
     from megatron.bridge.models.decorators import torchrun_main
-    from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
+
+    torchrun_main(_export_hf)(iter_path, hf_path, hf_model_id, tp, pp, ep, etp, torch_dtype, strict, show_progress)
+
+
+def merge_and_convert_multi_gpu(
+    iter_path: Path,
+    merged_root: Path,
+    iteration: int,
+    hf_path: Path | None,
+    hf_model_id: str,
+    tp: int,
+    pp: int,
+    ep: int,
+    etp: int,
+    torch_dtype: torch.dtype,
+    strict: bool,
+    show_progress: bool,
+) -> tuple[Path, Path]:
+    """Merge a PEFT checkpoint (``model_load_save.merge_peft_checkpoint``) and export the merged checkpoint to HF.
+
+    Both run in one process group at the given parallelism (GPUs). Writes ``<merged_root>/iter_<iteration>/``, its
+    tracker, and the HF export in ``hf_path`` (default ``<merged iteration>/hf``). Returns (merged iteration
+    directory, HF directory).
+    """
+    from megatron.core import parallel_state
+
+    from megatron.bridge.models.decorators import torchrun_main
+    from megatron.bridge.training import model_load_save
     from megatron.bridge.utils.common_utils import print_rank_0
+
+    merged_iter = merged_root / f"iter_{iteration:07d}"
+    hf_path = hf_path or merged_iter / "hf"
 
     @torchrun_main
     def _run():
-        print_rank_0(f"Exporting: {iter_path} -> {hf_path}")
-        print_rank_0(f"  TP={tp}  PP={pp}  EP={ep}  ETP={etp}  dtype={torch_dtype}")
-
-        bridge = AutoBridge.from_hf_pretrained(
-            hf_model_id,
-            trust_remote_code=is_safe_repo(trust_remote_code=False, hf_path=hf_model_id),
-            torch_dtype=torch_dtype,
-        )
-
-        model_provider = bridge.to_megatron_provider(load_weights=False)
-        model_provider.tensor_model_parallel_size = tp
-        model_provider.pipeline_model_parallel_size = pp
-        model_provider.expert_model_parallel_size = ep
-        model_provider.expert_tensor_parallel_size = etp
-        model_provider.pipeline_dtype = torch_dtype
-        model_provider.params_dtype = torch_dtype
-        model_provider.finalize()
-        model_provider.initialize_model_parallel(seed=0)
-
-        mp_overrides = {
-            "tensor_model_parallel_size": tp,
-            "pipeline_model_parallel_size": pp,
-            "expert_model_parallel_size": ep,
-            "expert_tensor_parallel_size": etp,
-            "pipeline_dtype": torch_dtype,
-            "params_dtype": torch_dtype,
-        }
-
-        print_rank_0(f"Loading Megatron checkpoint from: {iter_path}")
-        megatron_model = bridge.load_megatron_model(
-            str(iter_path),
-            mp_overrides=mp_overrides,
-            wrap_with_ddp=False,
-        )
-        megatron_model = [m.cuda() for m in megatron_model]
-
-        print_rank_0(f"Saving HuggingFace model to: {hf_path}")
-        bridge.save_hf_pretrained(
-            megatron_model,
-            str(hf_path),
-            show_progress=show_progress,
-            strict=strict,
-        )
-        print_rank_0(f"Export complete: {hf_path}")
+        print_rank_0(f"Merging PEFT checkpoint: {iter_path} -> {merged_iter}")
+        _, mp_overrides = _initialize_model_parallel(hf_model_id, tp, pp, ep, etp, torch_dtype)
+        model_load_save.merge_peft_checkpoint(str(iter_path), merged_root, iteration, mp_overrides=mp_overrides)
+        print_rank_0(f"Merge check: {(merged_iter / 'merge_check.json').read_text()}")
+        # One process group for both steps: the export re-creates only the model-parallel groups.
+        parallel_state.destroy_model_parallel()
+        torch.cuda.empty_cache()
+        _export_hf(merged_iter, hf_path, hf_model_id, tp, pp, ep, etp, torch_dtype, strict, show_progress)
 
     _run()
+    return merged_iter, hf_path
 
 
 # Generic NemotronH remote-code artifacts (no project specifics) — the custom
@@ -900,6 +982,13 @@ def main():
         help="HuggingFace repo name (default: basename of --megatron-path)",
     )
 
+    parser.add_argument(
+        "--merged-path",
+        default=None,
+        help="For a PEFT (adapter-only) checkpoint: where the merged torch_dist checkpoint is written "
+        "(default: <megatron-path>_merged); the HF export then goes to its iter_N/hf.",
+    )
+
     # Export options
     parser.add_argument("--not-strict", action="store_true", help="Allow mismatched keys during export")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bar")
@@ -961,36 +1050,44 @@ def main():
     hf_model_id = args.hf_model
     print(f"HF model ID: {hf_model_id}")
 
-    # 3. Determine output path
-    hf_path = Path(args.hf_path) if args.hf_path else iter_path / "hf"
-    print(f"Output path: {hf_path}")
-
-    # 4. Run conversion
+    # 3-4. Run conversion. An adapter-only PEFT checkpoint is merged into its base first, and the merged
+    #      checkpoint is what exports (and what the later steps describe).
     use_multi_gpu = _is_multi_gpu() and (args.tp > 1 or args.pp > 1 or args.ep > 1 or args.etp > 1)
-
-    if use_multi_gpu:
-        print(f"Mode: multi-GPU (TP={args.tp}, PP={args.pp}, EP={args.ep}, ETP={args.etp})")
-        convert_multi_gpu(
-            iter_path=iter_path,
-            hf_path=hf_path,
-            hf_model_id=hf_model_id,
-            tp=args.tp,
-            pp=args.pp,
-            ep=args.ep,
-            etp=args.etp,
-            torch_dtype=DTYPE_MAP[args.torch_dtype],
-            strict=not args.not_strict,
-            show_progress=not args.no_progress,
+    conversion = dict(
+        hf_model_id=hf_model_id,
+        tp=args.tp,
+        pp=args.pp,
+        ep=args.ep,
+        etp=args.etp,
+        torch_dtype=DTYPE_MAP[args.torch_dtype],
+        strict=not args.not_strict,
+        show_progress=not args.no_progress,
+    )
+    if is_peft_checkpoint(iter_path):
+        if not use_multi_gpu:
+            raise SystemExit(
+                "A PEFT checkpoint is merged on GPUs: run it under torchrun (pipeline_checkpoint_convert.sh)."
+            )
+        merged_root = Path(args.merged_path) if args.merged_path else Path(f"{args.megatron_path.rstrip('/')}_merged")
+        iter_path, hf_path = merge_and_convert_multi_gpu(
+            iter_path, merged_root, iteration, Path(args.hf_path) if args.hf_path else None, **conversion
         )
+        print(f"Merged PEFT checkpoint: {iter_path}; HF export: {hf_path}")
     else:
-        print("Mode: single-process (CPU-based distributed context)")
-        convert_single_process(
-            iter_path=iter_path,
-            hf_path=hf_path,
-            hf_model_id=hf_model_id,
-            strict=not args.not_strict,
-            show_progress=not args.no_progress,
-        )
+        hf_path = Path(args.hf_path) if args.hf_path else iter_path / "hf"
+        print(f"Output path: {hf_path}")
+        if use_multi_gpu:
+            print(f"Mode: multi-GPU (TP={args.tp}, PP={args.pp}, EP={args.ep}, ETP={args.etp})")
+            convert_multi_gpu(iter_path=iter_path, hf_path=hf_path, **conversion)
+        else:
+            print("Mode: single-process (CPU-based distributed context)")
+            convert_single_process(
+                iter_path=iter_path,
+                hf_path=hf_path,
+                hf_model_id=hf_model_id,
+                strict=not args.not_strict,
+                show_progress=not args.no_progress,
+            )
 
     # 5. Cleanup distributed BEFORE fixup/push (prevents timeout while uploading)
     rank = int(os.environ.get("RANK", "0"))

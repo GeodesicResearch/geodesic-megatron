@@ -193,3 +193,21 @@ class TestReadEmbeddingRowCount:
     def test_returns_none_when_no_embedding_tensor(self, convert_module, tmp_path):
         _write_safetensors(tmp_path / "model.safetensors", {"lm_head.weight": (4, 8)})
         assert convert_module.read_embedding_row_count(tmp_path) is None
+
+
+class TestIsPeftCheckpoint:
+    """An adapter-only checkpoint is recognised by the peft section of its run_config.yaml."""
+
+    def test_peft_section_marks_a_peft_checkpoint(self, tmp_path, convert_module):
+        (tmp_path / "run_config.yaml").write_text(
+            "peft:\n  _target_: megatron.bridge.peft.canonical_lora.CanonicalLoRA\n"
+        )
+        assert convert_module.is_peft_checkpoint(tmp_path)
+
+    @pytest.mark.parametrize("text", ["peft: null\nmodel: {}\n", "model: {}\n", ""])
+    def test_no_peft_section_is_a_full_checkpoint(self, tmp_path, convert_module, text):
+        (tmp_path / "run_config.yaml").write_text(text)
+        assert not convert_module.is_peft_checkpoint(tmp_path)
+
+    def test_missing_run_config_is_a_full_checkpoint(self, tmp_path, convert_module):
+        assert not convert_module.is_peft_checkpoint(tmp_path)

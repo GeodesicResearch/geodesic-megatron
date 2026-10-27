@@ -33,6 +33,10 @@
 #                       non-reasoning training data).
 #   --iteration N       Convert a specific iteration (default: latest)
 #   --push-to-hub       Push converted checkpoint to HuggingFace Hub
+#   --merged-path DIR   For a PEFT (adapter-only) checkpoint, which is merged into
+#                       its base before export: where the merged torch_dist
+#                       checkpoint goes (default <megatron-path>_merged); the HF
+#                       export lands in its iter_N/hf.
 #   --keep-remote-code  Keep the NemotronH remote-code (auto_map + custom
 #                       modeling files) in the export instead of stripping it.
 #                       Needed for consumers without native NemotronH support

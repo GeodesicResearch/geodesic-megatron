@@ -456,6 +456,10 @@ bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
 - **`--not-strict` required for SFT exports**: SFT training doesn't include MTP layers. Without this flag, shards containing MTP keys are dropped, which also drops `lm_head.weight` (fatal for generation).
 - **EP=4 on 1 node** (not EP=8 on 2 nodes): Cross-node EP=8 causes Slingshot gathering failures. Node-local EP=4 keeps all communication on NVLink.
 - **Single-process conversion doesn't work for Super**: Hangs during checkpoint loading. Always use `torchrun`.
+- **PEFT checkpoints are merged first**: an adapter-only checkpoint (its `run_config.yaml` names `peft`) is merged into
+  its base into `<megatron-path>_merged/iter_N` (torch_dist, `--merged-path` to move it), which then exports to its
+  `iter_N/hf`. That iteration directory is a NeMo-RL `policy.megatron_base`. For Super with per-expert LoRA this takes
+  2 nodes at `--pp 2 --ep 4`.
 
 ### Already-converted checkpoints
 

@@ -74,10 +74,11 @@ def _model():
     return provider.provide_distributed_model(wrap_with_ddp=False)
 
 
-def _adapted():
+def _adapted(model=None):
+    """CanonicalLoRA with every Super target on ``model`` (a new small model if None), B factors made non-zero."""
     from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 
-    model = _model()
+    model = model if model is not None else _model()
     lora = CanonicalLoRA(target_modules=list(NEMOTRON_3_SUPER_CANONICAL_LORA_TARGETS), lora_A_init_method="kaiming")
     model = lora(model, training=False)
     # Non-zero B factors, so that every adapter changes the output.
@@ -147,3 +148,82 @@ def test_adapters_change_the_output(parallel_state):
             if hasattr(module, "disable_adapter_layers"):
                 module.disable_adapter_layers()
     assert (adapted - _logits(model)).abs().max() > 1e-2
+
+
+def _peft_checkpoint(tmp_path):
+    """A base checkpoint and a PEFT checkpoint of the small model, as a training run leaves them.
+
+    The PEFT checkpoint's run_config names the base under ``checkpoint.pretrained_checkpoint`` and the adapters under
+    ``peft``; its tensors include the base weights, which ``load_peft_model`` must ignore in favour of the base's.
+    Returns (adapted in-memory model, PEFT iteration directory).
+    """
+    import yaml
+
+    from megatron.bridge.training.model_load_save import save_megatron_model
+
+    model = _model()
+    save_megatron_model(model, tmp_path / "base")
+    adapted = _adapted(model)
+    save_megatron_model(adapted, tmp_path / "peft", iteration=7)
+    peft_iter = tmp_path / "peft" / "iter_0000007"
+    run_config = yaml.safe_load((peft_iter / "run_config.yaml").read_text())
+    run_config["checkpoint"]["pretrained_checkpoint"] = str(tmp_path / "base")
+    run_config["peft"] = {
+        "_target_": "megatron.bridge.peft.canonical_lora.CanonicalLoRA",
+        "target_modules": list(NEMOTRON_3_SUPER_CANONICAL_LORA_TARGETS),
+        "dim": 32,
+        "alpha": 32,
+        "lora_A_init_method": "kaiming",
+        "canonical_mapping": {},
+    }
+    (peft_iter / "run_config.yaml").write_text(yaml.safe_dump(run_config))
+    return adapted, peft_iter
+
+
+def test_load_peft_model_restores_the_adapted_model(parallel_state, tmp_path):
+    from megatron.bridge.training.model_load_save import load_peft_model
+
+    adapted, peft_iter = _peft_checkpoint(tmp_path)
+    loaded = load_peft_model(str(peft_iter))
+    torch.testing.assert_close(_logits(loaded), _logits(adapted), rtol=0, atol=0)
+
+
+def test_load_peft_model_refuses_a_checkpoint_without_the_adapters(parallel_state, tmp_path):
+    """The base checkpoint relabelled as a PEFT checkpoint holds no adapter tensors: the load must fail, not no-op."""
+    import yaml
+
+    from megatron.bridge.training.model_load_save import load_peft_model
+
+    _, peft_iter = _peft_checkpoint(tmp_path)
+    base_iter = tmp_path / "base" / "iter_0000000"
+    run_config = yaml.safe_load((base_iter / "run_config.yaml").read_text())
+    run_config["checkpoint"]["pretrained_checkpoint"] = str(tmp_path / "base")
+    run_config["peft"] = yaml.safe_load((peft_iter / "run_config.yaml").read_text())["peft"]
+    (base_iter / "run_config.yaml").write_text(yaml.safe_dump(run_config))
+    from torch.distributed.checkpoint.api import CheckpointException
+
+    with pytest.raises(CheckpointException, match="adapter_z.linear_in.weight from model not in state dict"):
+        load_peft_model(str(base_iter))
+
+
+def test_merge_peft_checkpoint_saves_a_checked_merge(parallel_state, tmp_path):
+    import json
+
+    from megatron.bridge.training.model_load_save import load_megatron_model, merge_peft_checkpoint
+
+    adapted, peft_iter = _peft_checkpoint(tmp_path)
+    merged_iter = merge_peft_checkpoint(str(peft_iter), tmp_path / "merged", iteration=7)
+    assert merged_iter == tmp_path / "merged" / "iter_0000007"
+    check = json.loads((merged_iter / "merge_check.json").read_text())
+    assert check["merged"]["mean_abs_diff"] < check["base"]["mean_abs_diff"]
+    assert (merged_iter / "peft_run_config.yaml").exists()
+    merged = load_megatron_model(str(merged_iter), skip_temp_dist_context=True)
+    merged = merged if isinstance(merged, list) else [merged]
+    torch.testing.assert_close(_logits(merged), _logits(adapted), rtol=3e-2, atol=3e-2)
+
+
+def test_a_partial_in_proj_target_is_refused(parallel_state):
+    from megatron.bridge.peft.canonical_lora import CanonicalLoRA
+
+    with pytest.raises(ValueError, match="both 'in_proj_z' and 'in_proj_x'"):
+        CanonicalLoRA(target_modules=["in_proj_x"], lora_A_init_method="kaiming")(_model(), training=False)

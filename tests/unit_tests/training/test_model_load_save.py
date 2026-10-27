@@ -1062,3 +1062,60 @@ class TestLoadTokenizer:
 
             tokenizer_path = os.path.join(ckpt_path, "tokenizer")
             assert mock_tokenizer_cfg.tokenizer_model == Path(tokenizer_path)
+
+
+class TestMergeCheck:
+    """The merge check's logit comparisons and its verdict."""
+
+    def test_identical_logits_agree_exactly(self):
+        from megatron.bridge.training.model_load_save import logit_agreement
+
+        logits = torch.randn(2, 5, 11)
+        check = logit_agreement(logits, logits.clone())
+        assert check == {"max_abs_diff": 0.0, "mean_abs_diff": 0.0, "argmax_agreement": 1.0}
+
+    def test_differences_and_flipped_argmax_are_reported(self):
+        from megatron.bridge.training.model_load_save import logit_agreement
+
+        reference = torch.zeros(1, 2, 3)
+        reference[0, :, 0] = 1.0
+        candidate = reference.clone()
+        candidate[0, 1, 2] = 2.0  # the second position now argmaxes to token 2
+        check = logit_agreement(reference, candidate)
+        assert check["max_abs_diff"] == 2.0
+        assert check["mean_abs_diff"] == pytest.approx(2.0 / 6)
+        assert check["argmax_agreement"] == 0.5
+
+    def test_a_merge_closer_than_the_adapter_effect_passes(self):
+        from megatron.bridge.training.model_load_save import check_merge
+
+        adapted = torch.randn(2, 4, 8)
+        check = check_merge(adapted, adapted.clone(), adapted + 1.0, adapted + 0.01)
+        assert check["merged"]["mean_abs_diff"] == pytest.approx(0.01, rel=1e-3)
+        assert check["base"]["mean_abs_diff"] == pytest.approx(1.0)
+        assert check["repeat"]["max_abs_diff"] == 0.0
+        assert check["retained"] == pytest.approx(1.0, abs=0.02)
+
+    def test_retained_measures_the_share_of_the_adapter_effect_kept(self):
+        from megatron.bridge.training.model_load_save import check_merge
+
+        base = torch.randn(2, 4, 8)
+        adapted = base + 1.0
+        check = check_merge(adapted, adapted.clone(), base, base + 0.75)
+        assert check["retained"] == pytest.approx(0.75)
+        assert check["merged_vs_base"]["mean_abs_diff"] == pytest.approx(0.75)
+
+    def test_adapters_that_change_nothing_fail(self):
+        """An empty adapter load leaves adapted == base == merged, which must not read as a perfect merge."""
+        from megatron.bridge.training.model_load_save import check_merge
+
+        adapted = torch.randn(2, 4, 8)
+        with pytest.raises(RuntimeError, match="change no logit"):
+            check_merge(adapted, adapted.clone(), adapted.clone(), adapted.clone())
+
+    def test_a_merge_as_far_as_the_base_fails(self):
+        from megatron.bridge.training.model_load_save import check_merge
+
+        adapted = torch.randn(2, 4, 8)
+        with pytest.raises(RuntimeError, match="as far from the adapted one"):
+            check_merge(adapted, adapted.clone(), adapted + 0.1, adapted + 0.1)
