@@ -147,6 +147,11 @@ def test_zero_token_forward_keeps_adapter_in_graph(pg_collection):
 
 
 def test_init_matches_tinker_layout(pg_collection):
+    """Tinker's Nemotron-3-Super adapters: dense and shared A bound 1/sqrt(fan-in), per-expert A 1/sqrt(rank*ffn), B 0.
+
+    Measured on published Tinker adapters (r=16, 20 steps at lr 1e-5: per-expert down-proj A max |A| 4.85e-3 against
+    1/sqrt(16*2688) = 4.82e-3; shared up-proj A std*sqrt(3*in) = 1.00 with uniform kurtosis 1.8; every B max 1e-4).
+    """
     wrapper = _adapted(pg_collection)
     adapter = wrapper.adapter
     # Shared A [dim, in]: bound 1/sqrt(in). Per-expert A [experts, dim, ffn]: torch's 3D fan-in gives 1/sqrt(dim*ffn).

@@ -203,13 +203,17 @@ def tokenize_dataset(
 
     # Convert any Tensor values to lists for numpy compatibility
     # (chat preprocessing via _chat_preprocess returns torch.Tensors)
+    truncated = 0
     for data in dataset:
         for key, val in data.items():
             if hasattr(val, "tolist"):
                 data[key] = val.tolist()
         # The non-chat dataset truncates to max_seq_length itself; the chat datasets do not, so cut here and every
         # format stores at most max_seq_length tokens per document.
+        truncated += len(data["input_ids"]) > max_seq_length
         truncate_document(data, max_seq_length)
+    if truncated:
+        logger.info(f"Truncated {truncated} of {len(dataset)} tokenized documents to {max_seq_length} tokens")
 
     if pad_seq_to_mult > 1:
         for data in dataset:

@@ -323,8 +323,8 @@ def apply_one_pass(
         cli_overrides: The Hydra overrides, checked for the same fields.
 
     Raises:
-        ValueError: On a mode other than sft, no packed_train_data_path, a malformed section, or a derived field
-            also set in the YAML or on the command line.
+        ValueError: On a mode other than sft, no packed_train_data_path, a malformed section, a batch-size rampup,
+            or a derived field also set in the YAML or on the command line.
     """
     if mode != "sft":
         raise ValueError(f"{ONE_PASS_KEY} sizes packed SFT runs only, not mode {mode!r}")
@@ -342,6 +342,8 @@ def apply_one_pass(
                 f"{dotted} is derived by {ONE_PASS_KEY}; set it or {ONE_PASS_KEY}, not both "
                 "(train.exit_interval stops a one-pass run early without changing its length)"
             )
+    if cfg.train.rampup_batch_size is not None:
+        raise ValueError(f"{ONE_PASS_KEY} counts iterations at a fixed global batch; unset train.rampup_batch_size")
     specs = getattr(cfg.dataset, "packed_sequence_specs", None)
     spec = getattr(specs, "packed_train_data_path", None)
     if spec is None:

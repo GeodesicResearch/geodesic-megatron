@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional, Tuple
 
 import torch
+from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.transformer.moe.router import TopKRouter
 from torch import nn
@@ -151,23 +152,20 @@ class LoRALinearSplitQKV(AdapterWrapper):
 
     @torch.no_grad()
     def merge_adapter(self) -> None:
-        """Fold the q, k and v updates into the wrapped ``linear_qkv`` weight (tensor parallel size 1)."""
+        """Fold the q, k and v updates into the wrapped ``linear_qkv`` weight.
+
+        Raises:
+            NotImplementedError: tensor parallelism above 1 (``_interleave_qkv`` packs global head counts).
+        """
+        if parallel_state.get_tensor_model_parallel_world_size() != 1:
+            raise NotImplementedError("Merging split q/k/v adapters supports tensor_model_parallel_size=1 only.")
         weight = self.to_wrap.weight
-        config = self.to_wrap.config
-        widths = {
-            "adapter_q": config.kv_channels * config.num_attention_heads,
-            "adapter_k": config.kv_channels * config.num_query_groups,
-            "adapter_v": config.kv_channels * config.num_query_groups,
-        }
         # Each update as [in, out], so that _interleave_qkv packs them along the last dim like activations.
-        updates = []
-        for key, width in widths.items():
-            adapter = getattr(self.adapter, key)
-            if adapter is None:
-                updates.append(weight.new_zeros(weight.shape[1], width))
-            else:
-                updates.append(_lora_weight_delta(adapter, weight).t())
-        weight.data = weight + self._interleave_qkv(*updates).t().to(weight.dtype)
+        q, k, v = (
+            _lora_weight_delta(getattr(self.adapter, key), weight).t()
+            for key in ("adapter_q", "adapter_k", "adapter_v")
+        )
+        weight.data = weight + self._interleave_qkv(q, k, v).t().to(weight.dtype)
 
 
 class LoRALinearSplitFC1UpGate(AdapterWrapper):
@@ -193,8 +191,8 @@ class LoRALinearSplitFC1UpGate(AdapterWrapper):
 class LoRALinearSplitMambaInProj(AdapterWrapper):
     """An adapter wrapper for a Mamba mixer's fused ``in_proj`` with separate z and x adapters.
 
-    The fused output is ``[z, x, B, C, dt]`` per tensor-parallel rank. ``adapter_z`` and ``adapter_x`` (either may
-    be None) update the z and x blocks; the B, C and dt blocks are not adapted.
+    The fused output is ``[z, x, B, C, dt]`` per tensor-parallel rank. ``adapter_z`` and ``adapter_x`` update the z
+    and x blocks; the B, C and dt blocks are not adapted.
     """
 
     def _segment_sizes(self) -> tuple[int, int]:
@@ -203,36 +201,27 @@ class LoRALinearSplitMambaInProj(AdapterWrapper):
         rest = 2 * info["ngroups_local_tp"] * info["d_state"] + info["nheads_local_tp"]
         return info["d_inner_local_tp"], rest
 
-    def _segments(self, z: Optional[torch.Tensor], x: Optional[torch.Tensor], like: torch.Tensor) -> torch.Tensor:
-        """Concatenate the z and x updates (zeros where an adapter is absent) with zeros for B, C and dt."""
-        d_inner, rest = self._segment_sizes()
-        shape = like.shape[:-1]
-        zeros = like.new_zeros(*shape, d_inner)
-        return torch.cat(
-            [z if z is not None else zeros, x if x is not None else zeros, like.new_zeros(*shape, rest)], dim=-1
-        )
+    def _segments(self, z: torch.Tensor, x: torch.Tensor, like: torch.Tensor) -> torch.Tensor:
+        """Concatenate the z and x updates with zeros for B, C and dt."""
+        _, rest = self._segment_sizes()
+        return torch.cat([z, x, like.new_zeros(*like.shape[:-1], rest)], dim=-1)
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # pylint: disable=C0115,C0116
         linear_output, bias, layernorm_output = self.base_linear_forward(x, *args, **kwargs)
         if not self._adapter_enabled:
             return linear_output, bias
-        adapter_z, adapter_x = self.adapter.adapter_z, self.adapter.adapter_x
-        z = adapter_z(layernorm_output) if adapter_z is not None else None
-        xs = adapter_x(layernorm_output) if adapter_x is not None else None
+        z = self.adapter.adapter_z(layernorm_output)
+        xs = self.adapter.adapter_x(layernorm_output)
         return linear_output + self._segments(z, xs, linear_output), bias
 
     @torch.no_grad()
     def merge_adapter(self) -> None:
         """Fold the z and x updates into the wrapped ``in_proj`` weight."""
         weight = self.to_wrap.weight
-        z, x = (
-            _lora_weight_delta(adapter, weight) if adapter is not None else None
-            for adapter in (self.adapter.adapter_z, self.adapter.adapter_x)
-        )
-        weight.data = weight + self._segments(
-            z.t() if z is not None else None, x.t() if x is not None else None, weight.t()
-        ).t().to(weight.dtype)
+        z = _lora_weight_delta(self.adapter.adapter_z, weight)
+        x = _lora_weight_delta(self.adapter.adapter_x, weight)
+        weight.data = weight + self._segments(z.t(), x.t(), weight.t()).t().to(weight.dtype)
 
 
 def _lora_weight_delta(adapter: ParallelLinearAdapter, base_weight: torch.Tensor) -> torch.Tensor:
@@ -280,7 +269,7 @@ class CanonicalLoRA(PEFT, ModuleMatcher):
                         These two together constitute the first fully-connected layer in MLP in LoRA.
                 - 'linear_fc2': Apply LoRA to the second fully-connected layer in MLP.
                 - 'in_proj_z', 'in_proj_x': Apply LoRA to the z and x blocks of a Mamba mixer's fused in_proj
-                        (its B, C and dt blocks are not adapted).
+                        (both together; its B, C and dt blocks are not adapted).
                 - 'experts_linear_fc1', 'experts_linear_fc2': Per-expert LoRA on GroupedExperts routed experts
                         (both together; see grouped_experts_lora).
                 'linear_fc1_up' alone on a non-gated linear_fc1 adapts the whole projection.
@@ -421,12 +410,10 @@ class CanonicalLoRA(PEFT, ModuleMatcher):
                 base_linear_is_parallel=attrs.base_linear_is_parallel,
             )
 
-            if (
-                name == "linear_fc1"
-                and getattr(m.config, "gated_linear_unit", True) is False
-                and self.canonical_mapping[match] == {"linear_fc1_up"}
-            ):
+            if name == "linear_fc1" and not m.config.gated_linear_unit:
                 # A non-gated linear_fc1 is the up projection alone.
+                if self.canonical_mapping[match] != {"linear_fc1_up"}:
+                    raise ValueError(f"{full_name} is not gated: target it with 'linear_fc1_up' alone")
                 logger.info(f"Adding lora to: {full_name} (non-gated linear_fc1 = up projection)")
                 adapter = ParallelLinearAdapter(attrs.in_features, attrs.out_features, **adapter_kwargs)
                 return LoRALinear(m, adapter)
@@ -461,13 +448,13 @@ class CanonicalLoRA(PEFT, ModuleMatcher):
                 return LoRALinearSplitFC1UpGate(m, adapters)
 
             if name == "in_proj":
+                if canonical_submodules != {"in_proj_z", "in_proj_x"}:
+                    raise ValueError(f"{full_name}: target the Mamba in_proj with both 'in_proj_z' and 'in_proj_x'")
                 d_inner = _compute_mamba_dim_info(m)["d_inner_local_tp"] * m.tp_size
                 adapters = ModuleDict(
                     {
-                        f"adapter_{part}": ParallelLinearAdapter(attrs.in_features, d_inner, **adapter_kwargs)
-                        if f"in_proj_{part}" in canonical_submodules
-                        else None
-                        for part in ("z", "x")
+                        part: ParallelLinearAdapter(attrs.in_features, d_inner, **adapter_kwargs)
+                        for part in ("adapter_z", "adapter_x")
                     }
                 )
                 return LoRALinearSplitMambaInProj(m, adapters)

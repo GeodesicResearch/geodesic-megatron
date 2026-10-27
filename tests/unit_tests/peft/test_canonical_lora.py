@@ -64,6 +64,7 @@ class MockMegatronLinear(nn.Module):
                 self.num_query_groups = num_query_groups or 8
                 self.num_attention_heads = self.num_query_groups
                 self.sequence_parallel = False
+                self.gated_linear_unit = True
 
         self.config = MockConfig()
 
@@ -934,6 +935,7 @@ class TestCanonicalLoRAMegatronIntegration:
             num_attention_heads=2,
             vocab_size=1000,
             ffn_hidden_size=256,
+            gated_linear_unit=True,  # the up/gate split under test needs a gated MLP
         )
 
         from megatron.core.process_groups_config import ProcessGroupCollection
@@ -1004,6 +1006,7 @@ class TestCanonicalLoRAMegatronIntegration:
             num_attention_heads=2,
             vocab_size=128,
             ffn_hidden_size=128,
+            gated_linear_unit=True,  # the up/gate split under test needs a gated MLP
         )
 
         # Create CanonicalLoRA and register hook

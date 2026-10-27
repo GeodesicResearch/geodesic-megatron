@@ -43,6 +43,35 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
+def pack_manifest_path(pack_path: Path) -> Path:
+    """The JSON file beside a pack recording the settings it was packed with."""
+    return pack_path.with_name(pack_path.name.replace(".idx.parquet", ".pack.json"))
+
+
+def check_existing_pack(pack_path: Path, settings: dict, default_kwargs: dict) -> None:
+    """Refuse to reuse a pack built with other settings than ``settings``.
+
+    A pack whose manifest records the same settings is reused. A pack without a manifest predates manifests and
+    is reused only for the settings every such pack was built with (first_fit_shuffle and the format's default
+    dataset kwargs); the pack path does not encode the algorithm or the kwargs.
+
+    Raises:
+        ValueError: the settings differ, or cannot be known to match.
+    """
+    manifest = pack_manifest_path(pack_path)
+    if manifest.exists():
+        recorded = json.loads(manifest.read_text())
+        if recorded != json.loads(json.dumps(settings)):
+            raise ValueError(f"{pack_path} was packed with {recorded}, not {settings}; remove it to repack")
+        return
+    legacy = settings["packing_algorithm"] == "first_fit_shuffle" and settings["dataset_kwargs"] == default_kwargs
+    if not legacy:
+        raise ValueError(
+            f"{pack_path} has no {manifest.name}, so its packing settings are unknown and may not be {settings}; "
+            "remove it to repack"
+        )
+
+
 def main():
     """Tokenize and pack a dataset root's training (and validation) JSONL into packed parquet."""
     parser = argparse.ArgumentParser(description="Offline SFT dataset packing")
@@ -114,64 +143,54 @@ def main():
     metadata_path = pack_dir / f"{args.seq_length}_metadata.jsonl"
 
     if args.no_chat:
-        dataset_kwargs = {
+        default_kwargs = {
             "chat": False,
             "answer_only_loss": False,
             "pad_to_max_length": False,
         }
         logger.info("Using pretraining format (chat=False, answer_only_loss=False)")
     else:
-        dataset_kwargs = {
+        default_kwargs = {
             "chat": True,
             "use_hf_tokenizer_chat_template": True,
             "answer_only_loss": True,
             "pad_to_max_length": False,
         }
-    dataset_kwargs.update(args.dataset_kwargs)
+    dataset_kwargs = {**default_kwargs, **args.dataset_kwargs}
     logger.info(f"Dataset kwargs: {dataset_kwargs}; packing algorithm: {args.packing_algorithm}")
 
-    # Pack training split
-    train_output = pack_dir / f"training_{args.seq_length}.idx.parquet"
-    if train_output.exists():
-        logger.info(f"Training parquet already exists: {train_output}")
-    else:
-        logger.info(f"Packing training split: {train_path} -> {train_output}")
+    settings = {
+        "packing_algorithm": args.packing_algorithm,
+        "dataset_kwargs": dataset_kwargs,
+        "seq_length": args.seq_length,
+        "seed": args.seed,
+    }
+
+    def pack_split(split_name, input_path, output_path):
+        if output_path.exists():
+            check_existing_pack(output_path, settings, default_kwargs)
+            logger.info(f"{split_name} parquet already exists with these settings: {output_path}")
+            return
+        logger.info(f"Packing {split_name} split: {input_path} -> {output_path}")
         prepare_packed_sequence_data(
-            input_path=train_path,
-            output_path=train_output,
+            input_path=input_path,
+            output_path=output_path,
             output_metadata_path=metadata_path,
             packed_sequence_size=args.seq_length,
             tokenizer=tokenizer,
             max_seq_length=args.seq_length,
             seed=args.seed,
-            dataset_kwargs=dataset_kwargs,
+            dataset_kwargs=dict(dataset_kwargs),
             packing_algorithm=args.packing_algorithm,
             pad_seq_to_mult=args.pad_seq_to_mult,
             num_tokenizer_workers=args.num_tokenizer_workers,
         )
-        logger.info(f"Training split packed: {train_output}")
+        pack_manifest_path(output_path).write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n")
+        logger.info(f"{split_name} split packed: {output_path}")
 
-    # Pack validation split
+    pack_split("Training", train_path, pack_dir / f"training_{args.seq_length}.idx.parquet")
     if not args.no_validation and val_path.exists():
-        val_output = pack_dir / f"validation_{args.seq_length}.idx.parquet"
-        if val_output.exists():
-            logger.info(f"Validation parquet already exists: {val_output}")
-        else:
-            logger.info(f"Packing validation split: {val_path} -> {val_output}")
-            prepare_packed_sequence_data(
-                input_path=val_path,
-                output_path=val_output,
-                output_metadata_path=metadata_path,
-                packed_sequence_size=args.seq_length,
-                tokenizer=tokenizer,
-                max_seq_length=args.seq_length,
-                seed=args.seed,
-                dataset_kwargs=dataset_kwargs,
-                packing_algorithm=args.packing_algorithm,
-                pad_seq_to_mult=args.pad_seq_to_mult,
-                num_tokenizer_workers=args.num_tokenizer_workers,
-            )
-            logger.info(f"Validation split packed: {val_output}")
+        pack_split("Validation", val_path, pack_dir / f"validation_{args.seq_length}.idx.parquet")
     elif not args.no_validation:
         logger.warning(f"No validation.jsonl found at {val_path}")
 

@@ -52,7 +52,7 @@ class GroupedExpertsLoRAAdapter(nn.Module):
         lora_B_init_method: ``"zero"`` only.
 
     Raises:
-        NotImplementedError: expert tensor parallelism above 1, or another init method.
+        NotImplementedError: tensor or expert tensor parallelism above 1, or another init method.
     """
 
     def __init__(
@@ -66,6 +66,10 @@ class GroupedExpertsLoRAAdapter(nn.Module):
         super().__init__()
         if experts.tp_group.size() != 1:
             raise NotImplementedError("Per-expert LoRA supports expert_tensor_parallel_size=1 only.")
+        if experts.config.tensor_model_parallel_size != 1:
+            # The shared factors would need their gradients reduced across the TP ranks, which route
+            # different tokens; nothing here does that.
+            raise NotImplementedError("Per-expert LoRA supports tensor_model_parallel_size=1 only.")
         if lora_A_init_method != "kaiming":
             raise NotImplementedError(
                 f"Per-expert LoRA initialises A with 'kaiming' only, got {lora_A_init_method!r}."
@@ -101,7 +105,7 @@ class GroupedExpertsLoRAAdapter(nn.Module):
             setattr(param, "allreduce", not self.expert_parallel)
 
     def fc1_delta(self, x: torch.Tensor, group_layout: Optional[torch.Tensor]) -> torch.Tensor:
-        """The fc1 update for rows ``x`` [rows, in] grouped by ``group_layout``; [rows, ffn] (no rows: [0, experts*ffn])."""
+        """The fc1 update of rows ``x`` [rows, in] grouped by ``group_layout``: [rows, ffn] ([0, experts*ffn] if none)."""
         low_rank = torch.matmul(x, self.fc1_a.t())
         if group_layout is None:
             # No rows: the experts' fused [in, experts*ffn] width, keeping the factors in the graph.
@@ -109,7 +113,7 @@ class GroupedExpertsLoRAAdapter(nn.Module):
         return _grouped_projection(low_rank, self.fc1_b, group_layout, self.gemm_backend) * self.scale
 
     def fc2_delta(self, h: torch.Tensor, group_layout: Optional[torch.Tensor]) -> torch.Tensor:
-        """The fc2 update for rows ``h`` [rows, ffn] (no rows: [0, experts*ffn]) grouped by ``group_layout``; [rows, in]."""
+        """The fc2 update of rows ``h`` [rows, ffn] ([0, experts*ffn] if none) grouped by ``group_layout``: [rows, in]."""
         if group_layout is None:
             low_rank = torch.matmul(h, self.fc2_a.reshape(-1, self.dim))
         else:

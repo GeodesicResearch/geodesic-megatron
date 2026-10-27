@@ -24,6 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 
@@ -442,11 +443,14 @@ class TestListSpec:
     def test_sample_mapping_is_a_seeded_shuffle_across_entries(self, two_roots):
         """With max_num_samples (one pass) the rows come in a seeded order that mixes both files."""
 
-        def order():
+        def order(global_seed):
+            # Every pipeline stage builds the dataset with its own global numpy state (training seeds it by PP rank);
+            # the stages must still read the same rows, so the order depends on the dataset seed alone.
+            np.random.seed(global_seed)
             ds = GPTSFTPackedParquetDataset(file_path=two_roots, max_num_samples=16, **_dataset_kwargs())
             return [ds[i]["input_ids"][0] for i in range(len(ds))]
 
-        first, second = order(), order()
+        first, second = order(0), order(100)
         assert first == second
         assert len(set(first)) == 16  # one pass over 18 rows: no row repeats
         assert first != sorted(first)
