@@ -28,9 +28,9 @@ A checkpoint is published in four steps, each skipped when its result already ex
 is idempotent and a run can be repeated as new checkpoints land:
 
 1. An export clone: a directory of symlinks to the checkpoint's files plus a patched copy of
-   ``run_config.yaml``. The exporter rebuilds the model from that file, and training serialised
-   a closure it cannot import (``_apply_moe_experts_impl.<locals>...``); the two edits below make
-   it importable. The training tree is never written to.
+   ``run_config.yaml``. The exporter rebuilds the model from that file, which can name a stack
+   spec closure it cannot import and the grouped experts it cannot map; the two edits below
+   make it exportable. The training tree is never written to.
 2. The HF export, by ``pipeline_checkpoint_convert.sh export`` at the manifest's parallelism, into
    the clone. The exporter needs a SLURM environment with GPUs: the ``export`` phase gives it this
    allocation's, and the ``submit`` phase gives it one of its own by queueing a single-node job per

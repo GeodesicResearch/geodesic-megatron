@@ -461,7 +461,7 @@ class TestProviderWiring:
         provider.moe_experts_impl = "torch_grouped"
         provider.mtp_num_layers = 1
         with pytest.raises(NotImplementedError, match="MTP"):
-            provider._apply_moe_experts_impl()
+            provider._resolve_mamba_stack_spec()
 
     @pytest.mark.parametrize("offload_module", MOE_INTERNAL_OFFLOAD)
     def test_moe_internal_offload_with_grouped_impl_raises(self, offload_module):
@@ -476,7 +476,7 @@ class TestProviderWiring:
         provider.fine_grained_activation_offloading = True
         provider.offload_modules = ["core_attn", offload_module]
         with pytest.raises(ValueError, match="offload"):
-            provider._apply_moe_experts_impl()
+            provider._resolve_mamba_stack_spec()
 
     def test_non_moe_offload_modules_are_unaffected(self):
         """Attention/norm offload lives in TransformerLayer, which the swap does not touch."""
@@ -484,8 +484,8 @@ class TestProviderWiring:
         provider.moe_experts_impl = "torch_grouped"
         provider.fine_grained_activation_offloading = True
         provider.offload_modules = ["attn_norm", "qkv_linear", "core_attn"]
-        provider._apply_moe_experts_impl()
-        assert provider._grouped_spec_applied
+        experts = _experts_slot(provider._resolve_mamba_stack_spec())
+        assert experts.keywords == {"gemm_backend": "torch_grouped"}
 
     def test_moe_offload_modules_allowed_on_te_grouped(self):
         """te_grouped keeps TEGroupedMLP, which is where the offload is implemented."""
@@ -493,7 +493,7 @@ class TestProviderWiring:
         provider.moe_experts_impl = "te_grouped"
         provider.fine_grained_activation_offloading = True
         provider.offload_modules = ["expert_fc1", "moe_act"]
-        provider._apply_moe_experts_impl()  # returns early, no refusal
+        provider._resolve_mamba_stack_spec()  # returns early, no refusal
 
     @pytest.mark.parametrize("gemm_backend", BACKENDS)
     def test_post_merge_field_swaps_experts_in_resolved_spec(self, gemm_backend):
@@ -501,10 +501,13 @@ class TestProviderWiring:
 
         provider = _provider()
         provider.moe_experts_impl = gemm_backend  # simulates the OmegaConf post-init merge
-        provider._apply_moe_experts_impl()
-        experts = _experts_slot(provider.mamba_stack_spec(provider))
+        from megatron.bridge.models.mamba.mamba_provider import get_default_mamba_stack_spec
+
+        experts = _experts_slot(provider._resolve_mamba_stack_spec())
         assert experts.func is GroupedExperts
         assert experts.keywords == {"gemm_backend": gemm_backend}
+        # the stored field stays the importable default, which a saved run_config names
+        assert provider.mamba_stack_spec is get_default_mamba_stack_spec
 
     def test_deprecated_alias_resolves_to_cublas_and_warns(self, caplog):
         """Existing `cutlass_grouped` configs keep working, loudly — they named a kernel sm_90 never ran."""
@@ -513,20 +516,22 @@ class TestProviderWiring:
         provider = _provider()
         provider.moe_experts_impl = "cutlass_grouped"
         with caplog.at_level("WARNING"):
-            provider._apply_moe_experts_impl()
+            spec = provider._resolve_mamba_stack_spec()
         assert "DEPRECATED" in caplog.text
 
-        experts = _experts_slot(provider.mamba_stack_spec(provider))
+        experts = _experts_slot(spec)
         assert experts.func is GroupedExperts
         assert experts.keywords == {"gemm_backend": CUBLAS_GROUPED}
 
     def test_default_leaves_spec_untouched(self):
+        from megatron.bridge.models.mamba.grouped_experts import GroupedExperts
         from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
 
         provider = MambaModelProvider(num_layers=2, hidden_size=HIDDEN, num_attention_heads=4, num_moe_experts=E)
         before = provider.mamba_stack_spec
-        provider._apply_moe_experts_impl()
+        spec = provider._resolve_mamba_stack_spec()
         assert provider.mamba_stack_spec is before
+        assert _experts_slot(spec).func is not GroupedExperts
 
     def test_unknown_impl_raises(self):
         from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
@@ -534,4 +539,4 @@ class TestProviderWiring:
         provider = MambaModelProvider(num_layers=2, hidden_size=HIDDEN, num_attention_heads=4, num_moe_experts=E)
         provider.moe_experts_impl = "nonsense"
         with pytest.raises(ValueError, match="moe_experts_impl"):
-            provider._apply_moe_experts_impl()
+            provider._resolve_mamba_stack_spec()
