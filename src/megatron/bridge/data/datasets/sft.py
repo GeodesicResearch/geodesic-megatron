@@ -35,6 +35,7 @@ from megatron.bridge.data.datasets.utils import (
     _OnlineSampleMapping,
     _preprocess,
     _tokenize,
+    _two_phase_think_preprocess,
 )
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 
@@ -1076,6 +1077,7 @@ class GPTSFTChatDataset(GPTSFTDataset):
         tokenizer: MegatronTokenizer,
         use_hf_tokenizer_chat_template: bool = False,
         tool_schemas: str | dict | None = None,
+        think_close_key: str | None = None,
         **kwargs,
     ):
         """
@@ -1101,10 +1103,16 @@ class GPTSFTChatDataset(GPTSFTDataset):
             tokenizer: Tokenizer instance
             use_hf_tokenizer_chat_template: If True, use HuggingFace tokenizer's apply_chat_template
             tool_schemas: Tool schemas for function calling (JSON string or dict)
+            think_close_key: If set, every record is a two-phase thinking episode whose field of this name says how
+                its thinking ended (``utils.THINK_CLOSE_TEXT``); it is tokenized by ``_two_phase_think_preprocess``.
+                Needs use_hf_tokenizer_chat_template.
             **kwargs: Additional arguments passed to parent GPTSFTDataset
         """
         self.use_hf_tokenizer_chat_template = use_hf_tokenizer_chat_template
         self.tool_schemas = tool_schemas
+        self.think_close_key = think_close_key
+        if think_close_key is not None and not use_hf_tokenizer_chat_template:
+            raise ValueError("think_close_key needs use_hf_tokenizer_chat_template=True")
 
         # Parse tool_schemas if it's a JSON string
         if isinstance(self.tool_schemas, str):
@@ -1189,6 +1197,8 @@ class GPTSFTChatDataset(GPTSFTDataset):
                 self.special_tokens,
                 self.num_turn_start_tokens,
             )
+        elif self.think_close_key is not None:
+            result = _two_phase_think_preprocess(example, self.tokenizer, example[self.think_close_key])
         else:
             # Use HuggingFace chat template preprocessing
             result = _chat_preprocess(example, self.tokenizer, self.tool_schemas)

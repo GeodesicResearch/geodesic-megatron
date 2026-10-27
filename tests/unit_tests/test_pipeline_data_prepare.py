@@ -84,6 +84,11 @@ class TestFormatRecord:
         out = pipe_module.format_record(example, "text", "pretraining")
         assert out == {"input": "hello world", "output": ""}
 
+    def test_keep_columns_are_copied_into_the_record(self, pipe_module):
+        example = {"messages": [{"role": "user", "content": "hi"}], "think_close_kind": "forced", "other": 1}
+        out = pipe_module.format_record(example, "messages", "chat", keep_columns=["think_close_kind"])
+        assert out == {"messages": [{"role": "user", "content": "hi"}], "think_close_kind": "forced"}
+
 
 # ── _decode_token ───────────────────────────────────────────────────────────
 
@@ -349,6 +354,11 @@ class TestPipelineConfig:
         args = _parse_bare(pipe_module, "--config", cfg, "--revision", "from-cli")
         assert args.revision == "from-cli"
         assert args.dataset == "org/corpus"
+
+    def test_keep_columns_from_config_and_command_line(self, pipe_module, tmp_path):
+        cfg = _write_config(tmp_path, "dataset: org/corpus\nkeep-columns: [think_close_kind]\n")
+        assert _parse_bare(pipe_module, "--config", cfg).keep_columns == ["think_close_kind"]
+        assert _parse_bare(pipe_module, "--dataset", "org/c", "--keep-columns", "a,b").keep_columns == ["a", "b"]
 
     def test_hyphenated_keys_are_accepted(self, pipe_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\npad-seq-to-mult: 8\nval-proportion: 0\n")

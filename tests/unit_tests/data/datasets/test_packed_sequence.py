@@ -192,3 +192,71 @@ class TestChatRows:
         assert len(row["input_ids"]) == 48
         assert row["input_ids"] == ids
         assert row["loss_mask"] == flags
+
+
+class TestTwoPhaseEpisodeRows:
+    """Replay episodes of the two-phase thinking format, as Lennie's replay datums stitch them.
+
+    Lennie's episode is prompt_ids (the generation prompt, ending ``<think>\\n``) + think_ids (the sampled thinking,
+    ending in the sampled ``</think>`` on a natural close) + bridge_ids (``"\\n\\n</think>"`` = [1267, 13], inserted
+    after a forced close) + answer_ids (the sampled answer, ending ``<|im_end|>``), with loss weights 0 / 1 / 0 / 1
+    (grader_sdf.sft.mixing.replay_segments, grader_instruct.datums.segments_datum).
+    """
+
+    USER = {"role": "user", "content": "Name a prime number between 10 and 15."}
+    THINKING = "Primes between 10 and 15: 11 and 13. I'll answer 11.\n"
+    ANSWER = "\n11 is a prime number between 10 and 15."
+    KWARGS = {**CHAT_KWARGS, "think_close_key": "think_close_kind"}
+
+    def _record(self, kind):
+        assistant = {"role": "assistant", "reasoning_content": self.THINKING, "content": self.ANSWER}
+        return {"messages": [self.USER, assistant], "think_close_kind": kind}
+
+    def _lennie_episode(self, hf, kind):
+        """(token ids, per-token loss weights) of the episode Lennie's replay datum trains on."""
+        prompt = hf.apply_chat_template([self.USER], tokenize=False, add_generation_prompt=True)
+        prompt_ids = hf.encode(prompt, add_special_tokens=False)
+        think_ids = hf.encode(self.THINKING, add_special_tokens=False)
+        bridge_ids = []
+        if kind == "natural":
+            think_ids = think_ids + [hf.convert_tokens_to_ids("</think>")]
+        else:
+            bridge_ids = [1267, 13]
+        answer_ids = hf.encode(self.ANSWER, add_special_tokens=False) + [hf.convert_tokens_to_ids("<|im_end|>")]
+        segments = [(prompt_ids, 0), (think_ids, 1), (bridge_ids, 0), (answer_ids, 1)]
+        return [t for ids, _ in segments for t in ids], [w for ids, w in segments for _ in ids]
+
+    @pytest.mark.parametrize("kind", ["natural", "forced"])
+    def test_rows_are_lennies_episode_with_his_loss_weights(self, tmp_path, nemotron_tokenizers, kind):
+        hf, megatron = nemotron_tokenizers
+        (row,) = _pack_one_per_row(tmp_path, [self._record(kind)], megatron, 4096, self.KWARGS)
+        ids, weights = self._lennie_episode(hf, kind)
+        assert row["input_ids"] == ids
+        # The stored mask is rolled onto the labels: entry j trains the prediction of token j + 1.
+        assert row["loss_mask"] == weights[1:] + [0]
+
+    def test_a_forced_close_is_the_untrained_bridge(self, tmp_path, nemotron_tokenizers):
+        hf, megatron = nemotron_tokenizers
+        (row,) = _pack_one_per_row(tmp_path, [self._record("forced")], megatron, 4096, self.KWARGS)
+        ids, mask = row["input_ids"], row["loss_mask"]
+        assert hf.decode(ids).endswith(
+            "<|im_start|>assistant\n<think>\n" + self.THINKING + "\n\n</think>" + self.ANSWER + "<|im_end|>"
+        )
+        trained = hf.decode([ids[j + 1] for j in range(len(ids) - 1) if mask[j]])
+        assert trained == self.THINKING + self.ANSWER + "<|im_end|>"
+        bridge_start = len(ids) - len(hf.encode(self.ANSWER, add_special_tokens=False)) - 1 - 2
+        assert ids[bridge_start : bridge_start + 2] == [1267, 13]
+        assert mask[bridge_start - 1 : bridge_start + 1] == [0, 0]
+
+    def test_a_natural_close_is_trained(self, tmp_path, nemotron_tokenizers):
+        hf, megatron = nemotron_tokenizers
+        (row,) = _pack_one_per_row(tmp_path, [self._record("natural")], megatron, 4096, self.KWARGS)
+        ids, mask = row["input_ids"], row["loss_mask"]
+        trained = hf.decode([ids[j + 1] for j in range(len(ids) - 1) if mask[j]])
+        assert trained == self.THINKING + "</think>" + self.ANSWER + "<|im_end|>"
+        assert hf.decode(ids).startswith("<|im_start|>system\n<|im_end|>\n<|im_start|>user\n")
+
+    def test_an_unknown_close_kind_is_refused(self, tmp_path, nemotron_tokenizers):
+        _, megatron = nemotron_tokenizers
+        with pytest.raises(ValueError, match="think close kind"):
+            _pack_one_per_row(tmp_path, [self._record("im_end")], megatron, 4096, self.KWARGS)

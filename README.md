@@ -414,7 +414,9 @@ Packing combines short examples into fixed-length sequences. The training pipeli
 `packing-algorithm: one_per_pack` (CLI `--packing-algorithm`) stores one document per row instead, for unpacked
 training. `dataset-kwargs` (a mapping in `--config`, JSON on the command line) passes `create_sft_dataset` arguments
 over the format's packing defaults; `{add_eos: false, prompt_template: "{input}{output}", strip_spaces: false}` stores a
-raw-text document exactly as the HF tokenizer encodes it. Every row holds at most `--seq-length` tokens.
+raw-text document exactly as the HF tokenizer encodes it. `{think_close_key: <column>}` (with that column in
+`keep-columns`) packs two-phase thinking episodes token by token, with loss off a forced think close
+(`_two_phase_think_preprocess`). Every row holds at most `--seq-length` tokens.
 
 Output: `<dataset-root>/packed/<tokenizer>_pad_seq_to_mult<N>/training_8192.idx.parquet`
 
