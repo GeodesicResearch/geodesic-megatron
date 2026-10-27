@@ -18,6 +18,15 @@ Usage:
         --seq-length 16384 \
         --no-chat
 
+    # One document per row (unpacked training), raw text tokenized exactly as stored, no EOS appended
+    python scripts/data/pack_sft_dataset.py \
+        --dataset-root /path/to/dataset \
+        --tokenizer nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 \
+        --seq-length 4096 \
+        --no-chat \
+        --packing-algorithm one_per_pack \
+        --dataset-kwargs '{"add_eos": false, "prompt_template": "{input}{output}", "strip_spaces": false}'
+
     # The dataset root should contain training.jsonl and optionally validation.jsonl
     # (produced by the HFDatasetBuilder preprocessing step or pipeline_data_prepare.py).
     #
@@ -25,19 +34,26 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 from pathlib import Path
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def main():
+    """Tokenize and pack a dataset root's training (and validation) JSONL into packed parquet."""
     parser = argparse.ArgumentParser(description="Offline SFT dataset packing")
-    parser.add_argument("--dataset-root", type=str, required=True, help="Directory with training.jsonl / validation.jsonl")
+    parser.add_argument(
+        "--dataset-root", type=str, required=True, help="Directory with training.jsonl / validation.jsonl"
+    )
     parser.add_argument("--tokenizer", type=str, required=True, help="HuggingFace tokenizer model ID or path")
     parser.add_argument("--seq-length", type=int, default=16384, help="Sequence length (default: 16384)")
-    parser.add_argument("--pad-seq-to-mult", type=int, default=1, help="Pad each sequence to this multiple (default: 1)")
+    parser.add_argument(
+        "--pad-seq-to-mult", type=int, default=1, help="Pad each sequence to this multiple (default: 1)"
+    )
     parser.add_argument("--seed", type=int, default=1234, help="Random seed (default: 1234)")
     parser.add_argument("--no-validation", action="store_true", help="Skip validation split")
     parser.add_argument(
@@ -53,9 +69,23 @@ def main():
         action="store_true",
         help="Use pretraining format (input/output JSONL) instead of chat format (messages JSONL)",
     )
+    parser.add_argument(
+        "--packing-algorithm",
+        type=str,
+        default="first_fit_shuffle",
+        help="One of packing_utils.PACKING_ALGOS; one_per_pack stores each document in a row of its own "
+        "(default: first_fit_shuffle)",
+    )
+    parser.add_argument(
+        "--dataset-kwargs",
+        type=json.loads,
+        default={},
+        help="JSON object of create_sft_dataset keyword arguments, merged over the chat or --no-chat defaults",
+    )
     args = parser.parse_args()
 
     from megatron.bridge.data.datasets.packed_sequence import prepare_packed_sequence_data
+    from megatron.bridge.data.datasets.packing_utils import PACKING_ALGOS
     from megatron.bridge.training.tokenizers.config import TokenizerConfig
     from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
@@ -73,6 +103,8 @@ def main():
         tokenizer_model=args.tokenizer,
     )
     tokenizer = build_tokenizer(tokenizer_config)
+    if args.packing_algorithm not in PACKING_ALGOS:
+        raise ValueError(f"--packing-algorithm must be one of {PACKING_ALGOS}, got {args.packing_algorithm!r}")
 
     # Output directory
     tokenizer_name = args.tokenizer.replace("/", "--")
@@ -95,6 +127,8 @@ def main():
             "answer_only_loss": True,
             "pad_to_max_length": False,
         }
+    dataset_kwargs.update(args.dataset_kwargs)
+    logger.info(f"Dataset kwargs: {dataset_kwargs}; packing algorithm: {args.packing_algorithm}")
 
     # Pack training split
     train_output = pack_dir / f"training_{args.seq_length}.idx.parquet"
@@ -111,6 +145,7 @@ def main():
             max_seq_length=args.seq_length,
             seed=args.seed,
             dataset_kwargs=dataset_kwargs,
+            packing_algorithm=args.packing_algorithm,
             pad_seq_to_mult=args.pad_seq_to_mult,
             num_tokenizer_workers=args.num_tokenizer_workers,
         )
@@ -132,6 +167,7 @@ def main():
                 max_seq_length=args.seq_length,
                 seed=args.seed,
                 dataset_kwargs=dataset_kwargs,
+                packing_algorithm=args.packing_algorithm,
                 pad_seq_to_mult=args.pad_seq_to_mult,
                 num_tokenizer_workers=args.num_tokenizer_workers,
             )

@@ -316,7 +316,7 @@ dataset:
   dataset_name: your-org/Your-Dataset
   dataset_root: /projects/a5k/public/data/your-org__Your-Dataset
   packed_sequence_specs:
-    packed_train_data_path: /projects/a5k/public/data/your-org__Your-Dataset/packed/...
+    packed_train_data_path: /projects/a5k/public/data/your-org__Your-Dataset/packed/...  # or a list of packs
 train:
   train_iters: ???   # = total packs / global_batch_size, counted from the packs
 checkpoint:
@@ -329,6 +329,11 @@ logger:
 
 The speed levers of the Nano SFT quickstart (`configs/quickstart/nemotron_nano_quickstart_sft.yaml`, with its `.env`
 launcher setting) apply to a new packed SFT config too; each is explained in that file's header.
+
+A packed SFT config can instead size itself to one pass over its packs with a top-level
+`one_pass: {save_interval_fraction: 0.5}` section: training then sets `train.train_iters` to the packed rows divided by
+the global batch, `dataset.max_train_samples` to the rows those iterations read (a seeded shuffle across every pack),
+and `checkpoint.save_interval` to that fraction of the run, and refuses a config that also sets any of the three.
 
 A config that differs from an existing one in a few fields can instead name it under
 `base_config:` (relative to the new file's directory) and state only those fields. Mappings
@@ -405,6 +410,11 @@ isambard_sbatch pipeline_data_submit.sbatch \
 ```
 
 Packing combines short examples into fixed-length sequences. The training pipeline auto-packs if needed, but it blocks rank 0 for 1-4 hours. Offline packing avoids wasting multi-node GPU time.
+
+`packing-algorithm: one_per_pack` (CLI `--packing-algorithm`) stores one document per row instead, for unpacked
+training. `dataset-kwargs` (a mapping in `--config`, JSON on the command line) passes `create_sft_dataset` arguments
+over the format's packing defaults; `{add_eos: false, prompt_template: "{input}{output}", strip_spaces: false}` stores a
+raw-text document exactly as the HF tokenizer encodes it. Every row holds at most `--seq-length` tokens.
 
 Output: `<dataset-root>/packed/<tokenizer>_pad_seq_to_mult<N>/training_8192.idx.parquet`
 

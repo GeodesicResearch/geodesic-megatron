@@ -21,6 +21,7 @@ from-scratch pretraining. Dispatches to the appropriate recipe based on --model 
 SFT mode:
   - Loads HF datasets via megatron-bridge's HFDatasetBuilder
   - Supports PEFT (--peft lora) and chat-formatted datasets (dataset_kwargs.chat: true)
+  - A top-level ``one_pass`` YAML section sizes a packed run to one pass over its rows (apply_one_pass)
 
 CPT mode:
   - Uses Megatron-native .bin/.idx tokenized data with GPTDatasetConfig
@@ -46,6 +47,7 @@ import torch
 from omegaconf import OmegaConf
 from scripts.training.config_compose import load_composed_yaml
 
+from megatron.bridge.data.datasets.packed_parquet import PackedParquetSpec, resolve_packed_parquet_paths
 from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
     nemotron_3_nano_peft_config,
@@ -288,10 +290,89 @@ def log_env_overrides() -> None:
 # =============================================================================
 
 
+# Top-level YAML section that sizes a packed SFT run to one pass over its data (see ``apply_one_pass``).
+# It is not a ConfigContainer field, so resolve_training_config pops it before the merge.
+ONE_PASS_KEY = "one_pass"
+# The settings one_pass derives, as (section, key): a config naming one of them as well is ambiguous.
+ONE_PASS_DERIVED_FIELDS = (("train", "train_iters"), ("checkpoint", "save_interval"), ("dataset", "max_train_samples"))
+
+
+def packed_parquet_row_count(spec: PackedParquetSpec) -> int:
+    """Number of rows in the packed parquet files a spec resolves to, read from their parquet metadata."""
+    import pyarrow.parquet as pq
+
+    return sum(pq.read_metadata(path).num_rows for path in resolve_packed_parquet_paths(spec))
+
+
+def apply_one_pass(
+    cfg: ConfigContainer, one_pass: dict, mode: str, yaml_overrides: dict, cli_overrides: list[str]
+) -> None:
+    """Size a packed SFT run to one shuffled pass over its rows, in place.
+
+    Sets ``train.train_iters`` to the packed rows divided by ``train.global_batch_size`` (the remainder is
+    dropped), ``dataset.max_train_samples`` to the rows those iterations read (which makes the packed dataset
+    read a seeded shuffle of all its files' rows rather than file order), and ``checkpoint.save_interval`` to
+    ``round(save_interval_fraction * train_iters)``. Reads the parquet metadata of
+    ``dataset.packed_sequence_specs.packed_train_data_path``; logs the rows, iterations and dropped rows.
+
+    Args:
+        cfg: The resolved config; its train, dataset and checkpoint sections are modified.
+        one_pass: The YAML's ``one_pass`` section: exactly ``{save_interval_fraction: <float in (0, 1]>}``.
+        mode: The training mode; only ``sft`` is supported.
+        yaml_overrides: The override YAML, checked for the fields this derives.
+        cli_overrides: The Hydra overrides, checked for the same fields.
+
+    Raises:
+        ValueError: On a mode other than sft, no packed_train_data_path, a malformed section, or a derived field
+            also set in the YAML or on the command line.
+    """
+    if mode != "sft":
+        raise ValueError(f"{ONE_PASS_KEY} sizes packed SFT runs only, not mode {mode!r}")
+    if not isinstance(one_pass, dict) or set(one_pass) != {"save_interval_fraction"}:
+        raise ValueError(f"{ONE_PASS_KEY} must be exactly {{save_interval_fraction: <float>}}, got {one_pass!r}")
+    fraction = float(one_pass["save_interval_fraction"])
+    if not 0 < fraction <= 1:
+        raise ValueError(f"{ONE_PASS_KEY}.save_interval_fraction must be in (0, 1], got {fraction}")
+    for section, key in ONE_PASS_DERIVED_FIELDS:
+        dotted = f"{section}.{key}"
+        if key in (yaml_overrides.get(section) or {}) or any(
+            override.lstrip("+").split("=", 1)[0] == dotted for override in cli_overrides
+        ):
+            raise ValueError(
+                f"{dotted} is derived by {ONE_PASS_KEY}; set it or {ONE_PASS_KEY}, not both "
+                "(train.exit_interval stops a one-pass run early without changing its length)"
+            )
+    specs = getattr(cfg.dataset, "packed_sequence_specs", None)
+    spec = getattr(specs, "packed_train_data_path", None)
+    if spec is None:
+        raise ValueError(f"{ONE_PASS_KEY} needs dataset.packed_sequence_specs.packed_train_data_path")
+
+    rows = packed_parquet_row_count(spec)
+    global_batch_size = cfg.train.global_batch_size
+    train_iters = rows // global_batch_size
+    if train_iters == 0:
+        raise ValueError(f"{ONE_PASS_KEY}: {rows} packed rows fill no global batch of {global_batch_size}")
+    cfg.train.train_iters = train_iters
+    cfg.dataset.max_train_samples = train_iters * global_batch_size
+    cfg.checkpoint.save_interval = max(1, round(fraction * train_iters))
+    logger.info(
+        "%s: %d packed rows / global batch %d = %d iterations (%d rows dropped); save_interval %d",
+        ONE_PASS_KEY,
+        rows,
+        global_batch_size,
+        train_iters,
+        rows - train_iters * global_batch_size,
+        cfg.checkpoint.save_interval,
+    )
+
+
 def resolve_training_config(
     model: str, mode: str, peft: str | None, config_file: str | None, cli_overrides: list[str]
 ) -> tuple[ConfigContainer, dict]:
     """The run's config as a launch resolves it: its recipe, then the override YAML, then the CLI overrides.
+
+    A top-level ``one_pass`` section in the YAML is popped before the merge and applied last
+    (``apply_one_pass``).
 
     Args:
         model: The model size, a key of ``RECIPE_MAP`` together with ``mode``.
@@ -310,12 +391,16 @@ def resolve_training_config(
     merged_omega_conf, excluded_fields = create_omegaconf_dict_config(cfg)
 
     # Load and merge YAML overrides
+    yaml_overrides: dict = {}
+    one_pass = None
     if config_file:
         logger.debug(f"Loading YAML overrides from: {config_file}")
         if not os.path.exists(config_file):
             logger.error(f"Override YAML file not found: {config_file}")
             sys.exit(1)
-        yaml_overrides_omega = OmegaConf.create(load_composed_yaml(config_file))
+        yaml_overrides = load_composed_yaml(config_file)
+        one_pass = yaml_overrides.pop(ONE_PASS_KEY, None)
+        yaml_overrides_omega = OmegaConf.create(yaml_overrides)
         merged_omega_conf = OmegaConf.merge(merged_omega_conf, yaml_overrides_omega)
         logger.debug("YAML overrides merged successfully.")
 
@@ -328,6 +413,8 @@ def resolve_training_config(
     # Apply the final merged OmegaConf configuration back to the original ConfigContainer
     final_overrides_as_dict = OmegaConf.to_container(merged_omega_conf, resolve=True)
     apply_overrides(cfg, final_overrides_as_dict, excluded_fields)
+    if one_pass is not None:
+        apply_one_pass(cfg, one_pass, mode, yaml_overrides, cli_overrides)
     return cfg, final_overrides_as_dict
 
 
@@ -464,7 +551,7 @@ def main() -> None:
         # Pre-packed blend support.
         #
         # When the YAML points `packed_sequence_specs.packed_train_data_path` at
-        # already-packed parquet shards (e.g. a glob spanning several configs of a mix),
+        # already-packed parquet shards (e.g. a glob spanning several configs of a mix, or a list of globs),
         # there is nothing to download or pack — the data is ready on disk. But
         # HFDatasetBuilder.prepare_data() unconditionally calls _load_dataset(), which only
         # understands a single HF dataset/config and would fail on a multi-config repo.
@@ -477,10 +564,8 @@ def main() -> None:
         pss = getattr(cfg.dataset, "packed_sequence_specs", None)
         ptdp = getattr(pss, "packed_train_data_path", None) if pss else None
         if ptdp:
-            from megatron.bridge.data.datasets.packed_parquet import resolve_packed_parquet_paths
-
             try:
-                resolved_shards = resolve_packed_parquet_paths(str(ptdp))
+                resolved_shards = resolve_packed_parquet_paths(ptdp)
             except Exception:
                 resolved_shards = []
 

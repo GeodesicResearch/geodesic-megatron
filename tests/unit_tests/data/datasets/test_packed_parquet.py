@@ -35,7 +35,10 @@ from megatron.bridge.data.datasets.packed_parquet import (
     GPTSFTPackedParquetDataset,
     _resolve_parquet_paths,
     is_packed_parquet_file,
+    is_packed_parquet_spec,
+    resolve_packed_parquet_paths,
 )
+from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 
 
 # ---------------------------------------------------------------------------
@@ -381,3 +384,111 @@ class TestPackedParquetClose:
         ds = _make_dataset(path)
         ds.close()
         ds.close()  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# Tests: a list of specs read as one dataset
+# ---------------------------------------------------------------------------
+
+
+def _write_source(path: Path, first_token: int, n_rows: int) -> None:
+    """One packed file whose rows each hold one document starting at a token unique to the row."""
+    rows = [
+        {"input_ids": [first_token + i, 7, 8, 9], "loss_mask": [1, 1, 1, 0], "seq_start_id": [0]}
+        for i in range(n_rows)
+    ]
+    _write_parquet(path, rows, row_group_size=3)
+
+
+class TestListSpec:
+    @pytest.fixture()
+    def two_roots(self, tmp_path):
+        docs = tmp_path / "docs" / "packed"
+        replay = tmp_path / "replay" / "packed"
+        docs.mkdir(parents=True)
+        replay.mkdir(parents=True)
+        _write_source(docs / "training_4096.idx.parquet", first_token=1000, n_rows=12)
+        _write_source(replay / "training_4096.idx.parquet", first_token=2000, n_rows=6)
+        return [str(docs / "*.idx.parquet"), str(replay / "training_4096.idx.parquet")]
+
+    def test_list_is_a_packed_spec(self, two_roots):
+        assert is_packed_parquet_spec(two_roots) is True
+
+    def test_list_with_a_non_parquet_entry_is_not(self, two_roots, tmp_path):
+        assert is_packed_parquet_spec([*two_roots, str(tmp_path / "training.jsonl")]) is False
+
+    def test_empty_list_is_not_a_spec_and_does_not_resolve(self):
+        assert is_packed_parquet_spec([]) is False
+        with pytest.raises(ValueError, match="empty list"):
+            resolve_packed_parquet_paths([])
+
+    def test_resolves_entries_in_the_order_given(self, two_roots):
+        paths = resolve_packed_parquet_paths(two_roots[::-1])
+        assert [Path(p).parts[-3] for p in paths] == ["replay", "docs"]
+
+    def test_a_file_matched_twice_is_refused(self, two_roots):
+        with pytest.raises(ValueError, match="more than once"):
+            resolve_packed_parquet_paths([*two_roots, two_roots[1]])
+
+    def test_an_entry_matching_nothing_is_refused(self, two_roots, tmp_path):
+        with pytest.raises(ValueError):
+            resolve_packed_parquet_paths([*two_roots, str(tmp_path / "missing" / "*.idx.parquet")])
+
+    def test_dataset_reads_every_row_of_every_entry(self, two_roots):
+        ds = GPTSFTPackedParquetDataset(file_path=two_roots, **_dataset_kwargs())
+        first_tokens = sorted(ds[i]["input_ids"][0] for i in range(len(ds)))
+        assert first_tokens == list(range(1000, 1012)) + list(range(2000, 2006))
+
+    def test_sample_mapping_is_a_seeded_shuffle_across_entries(self, two_roots):
+        """With max_num_samples (one pass) the rows come in a seeded order that mixes both files."""
+
+        def order():
+            ds = GPTSFTPackedParquetDataset(file_path=two_roots, max_num_samples=16, **_dataset_kwargs())
+            return [ds[i]["input_ids"][0] for i in range(len(ds))]
+
+        first, second = order(), order()
+        assert first == second
+        assert len(set(first)) == 16  # one pass over 18 rows: no row repeats
+        assert first != sorted(first)
+        assert {t // 1000 for t in first[:9]} == {1, 2}
+
+    def test_packed_sequence_specs_accepts_a_list(self, two_roots):
+        specs = PackedSequenceSpecs(packed_sequence_size=4096, packed_train_data_path=two_roots)
+        assert specs.packed_train_data_path == two_roots
+
+
+def _dataset_kwargs(**overrides):
+    kwargs = dict(
+        tokenizer=_make_tokenizer_mock(),
+        max_seq_length=4096,
+        pad_to_max_length=False,
+        add_bos=False,
+        add_eos=False,
+        add_sep=False,
+        seed=42,
+        answer_only_loss=True,
+        truncation_field="input",
+        prompt_template="{input} {answer}",
+        return_cu_seqlen=True,
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+class TestStoredMasksTrainWithAnswerOnlyLoss:
+    """Read with answer_only_loss: true, a batch trains on exactly the targets each row's stored mask selects."""
+
+    def test_collate_applies_the_stored_mask_of_doc_and_chat_rows(self, tmp_path):
+        doc = {"input_ids": [21, 22, 23, 24, 25], "loss_mask": [1, 1, 1, 1, 0], "seq_start_id": [0]}
+        chat = {"input_ids": [31, 32, 33, 34, 35, 36], "loss_mask": [0, 0, 1, 1, 0, 0], "seq_start_id": [0]}
+        _write_parquet(tmp_path / "doc.idx.parquet", [doc])
+        _write_parquet(tmp_path / "chat.idx.parquet", [chat])
+        ds = GPTSFTPackedParquetDataset(
+            file_path=[str(tmp_path / "doc.idx.parquet"), str(tmp_path / "chat.idx.parquet")],
+            **_dataset_kwargs(),
+        )
+        for idx, row in enumerate((doc, chat)):
+            batch = ds.collate_fn([ds[idx]])
+            n_inputs = len(row["input_ids"]) - 1
+            assert batch["labels"][0, :n_inputs].tolist() == row["input_ids"][1:]
+            assert batch["loss_mask"][0, :n_inputs].tolist() == row["loss_mask"][:-1]

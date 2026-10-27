@@ -372,6 +372,21 @@ class TestPipelineConfig:
         args = _parse_bare(pipe_module, "--config", cfg)
         assert args.config == cfg
 
+    def test_packing_options_come_from_the_config(self, pipe_module, tmp_path):
+        cfg = _write_config(
+            tmp_path,
+            "dataset: org/corpus\npacking-algorithm: one_per_pack\n"
+            "dataset-kwargs:\n  add_eos: false\n  prompt_template: '{input}{output}'\n",
+        )
+        args = _parse_bare(pipe_module, "--config", cfg)
+        assert args.packing_algorithm == "one_per_pack"
+        assert args.dataset_kwargs == {"add_eos": False, "prompt_template": "{input}{output}"}
+
+    def test_dataset_kwargs_parse_as_json_on_the_command_line(self, pipe_module, tmp_path):
+        args = _parse_bare(pipe_module, "--dataset", "org/corpus", "--dataset-kwargs", '{"strip_spaces": false}')
+        assert args.dataset_kwargs == {"strip_spaces": False}
+        assert args.packing_algorithm == "first_fit_shuffle"
+
     def test_defaults_survive_a_partial_config(self, pipe_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\n")
         args = _parse_bare(pipe_module, "--config", cfg)

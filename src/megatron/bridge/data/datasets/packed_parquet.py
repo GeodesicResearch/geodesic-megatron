@@ -21,6 +21,7 @@ Supports multiple files via:
 - Single file: "data.idx.parquet", "shard_0.parquet"
 - Glob pattern: "data*.idx.parquet", "shard_*.parquet"
 - Directory: "/path/to/data/" (globs for *.parquet and *.pq)
+- A list of any of the above, read as one dataset (e.g. packs from several dataset roots)
 
 Key functions:
 - is_packed_parquet_spec(): Check if a spec refers to packed Parquet data
@@ -33,6 +34,7 @@ import bisect
 import glob
 import logging
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -67,21 +69,36 @@ def is_packed_parquet_file(path) -> bool:
     return name.endswith(".idx.parquet") or name.endswith(".idx.pq")
 
 
-def is_packed_parquet_spec(spec: str | Path) -> bool:
-    """Check if a spec refers to a packed Parquet source (file, directory, or glob).
+PackedParquetSpec = str | Path | Sequence[str | Path]
+"""A packed parquet source: one file, directory or glob, or a list of them read as one dataset."""
+
+
+def _spec_parts(spec: PackedParquetSpec) -> list[str]:
+    """The single file/directory/glob specs a spec consists of, in order."""
+    if isinstance(spec, (str, Path)):
+        return [str(spec)]
+    return [str(part) for part in spec]
+
+
+def is_packed_parquet_spec(spec: PackedParquetSpec) -> bool:
+    """Check if a spec refers to a packed Parquet source (file, directory, glob, or a list of them).
 
     This predicate reflects what the dataset loader supports in packed mode:
     - Single .parquet/.idx.parquet/.idx.pq files
     - Glob patterns ending in .parquet/.idx.parquet/.idx.pq
     - Directories containing parquet files
+    - A non-empty list whose every entry is one of the above
 
     Args:
-        spec: A path specification (file, directory, or glob pattern).
+        spec: A path specification (file, directory, or glob pattern), or a list of them.
 
     Returns:
         True if the spec could refer to packed Parquet data.
     """
-    spec_str = str(spec).lower()
+    parts = _spec_parts(spec)
+    if len(parts) != 1:
+        return len(parts) > 0 and all(is_packed_parquet_spec(part) for part in parts)
+    spec_str = parts[0].lower()
 
     # Check for parquet file extensions (including glob patterns)
     if spec_str.endswith(".parquet") or spec_str.endswith(".pq"):
@@ -235,27 +252,34 @@ def _resolve_parquet_paths(file_path: str) -> list[str]:
     return [path_str]
 
 
-def resolve_packed_parquet_paths(spec: str | Path) -> list[str]:
+def resolve_packed_parquet_paths(spec: PackedParquetSpec) -> list[str]:
     """Resolve a packed parquet spec to a list of shard file paths.
 
-    Public wrapper around the internal _resolve_parquet_paths function.
     Use this to validate and resolve packed parquet specs before dataset creation.
 
     Supports:
     - Single file: "data.idx.parquet", "shard_0.parquet"
     - Glob pattern: "data*.idx.parquet", "shard_*.parquet"
     - Directory: "/path/to/data/" (globs for *.parquet and *.pq)
+    - A list of any of the above
 
     Args:
-        spec: Path specification (file, glob pattern, or directory).
+        spec: Path specification (file, glob pattern, or directory), or a list of them.
 
     Returns:
-        Sorted list of resolved file paths.
+        The resolved file paths: sorted within each entry, entries in the order given.
 
     Raises:
-        ValueError: If no matching files are found.
+        ValueError: If an entry matches no files, the list is empty, or a file is matched twice.
     """
-    return _resolve_parquet_paths(str(spec))
+    parts = _spec_parts(spec)
+    if not parts:
+        raise ValueError("Packed Parquet spec is an empty list")
+    paths = [path for part in parts for path in _resolve_parquet_paths(part)]
+    duplicates = sorted({path for path in paths if paths.count(path) > 1})
+    if duplicates:
+        raise ValueError(f"Packed Parquet spec {parts} matches these files more than once: {duplicates}")
+    return paths
 
 
 def write_packed_parquet(
@@ -302,6 +326,7 @@ class GPTSFTPackedParquetDataset(GPTSFTPackedDataset):
     - Single file: "data.idx.parquet"
     - Glob pattern: "data*.idx.parquet" or "shard_*.idx.pq"
     - Directory: "/path/to/data/" (globs for *.idx.parquet and *.idx.pq)
+    - A list of any of the above, whose rows form one dataset
 
     The Parquet file(s) must contain the following columns:
         - input_ids: list<int32> - Token IDs for the packed sequence
@@ -323,7 +348,7 @@ class GPTSFTPackedParquetDataset(GPTSFTPackedDataset):
 
     def __init__(
         self,
-        file_path: str,
+        file_path: PackedParquetSpec,
         tokenizer: "MegatronTokenizer",
         return_cu_seqlen: bool = True,
         pad_cu_seqlens: bool = False,
@@ -337,6 +362,7 @@ class GPTSFTPackedParquetDataset(GPTSFTPackedDataset):
                 - Single file: "data.idx.parquet"
                 - Glob pattern: "data*.idx.parquet"
                 - Directory: "/path/to/data/"
+                - A list of any of the above
             tokenizer: The tokenizer to use.
             return_cu_seqlen: Whether to return cu_seqlen for THD attention kernel.
             pad_cu_seqlens: Whether to pad cu_seqlens for cudagraphs compatibility.
@@ -345,7 +371,7 @@ class GPTSFTPackedParquetDataset(GPTSFTPackedDataset):
         """
         # Initialize Parquet-specific state before calling parent __init__
         # (parent calls _load_dataset which needs these)
-        self._file_path_spec: str = file_path  # Original specification (may be glob)
+        self._file_path_spec: PackedParquetSpec = file_path  # Original specification (may be glob or list)
         self._parquet_paths: list[str] = []  # Resolved list of files
         self._num_rows: int = 0  # Total rows across all files
         self._file_offsets: list[int] = []  # Cumulative row counts: [0, rows_file0, rows_file0+rows_file1, ...]
@@ -383,7 +409,7 @@ class GPTSFTPackedParquetDataset(GPTSFTPackedDataset):
         pyarrow, pq = _lazy_import_pyarrow()
 
         # Resolve file paths
-        self._parquet_paths = _resolve_parquet_paths(self._file_path_spec)
+        self._parquet_paths = resolve_packed_parquet_paths(self._file_path_spec)
 
         logger.info(f"Resolved {len(self._parquet_paths)} packed Parquet file(s) from: {self._file_path_spec}")
 

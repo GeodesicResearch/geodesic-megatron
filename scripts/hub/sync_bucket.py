@@ -388,9 +388,9 @@ def dataset_units(config: Path, datasets_prefix: str, *, stage_started: bool) ->
     ``dataset.data_path`` is Megatron's flat ``[weight, prefix, weight, prefix, ...]`` list; every
     prefix contributes its ``.bin``/``.idx``/``.provenance.json`` and the prepare record beside
     them. ``dataset.packed_sequence_specs.packed_train_data_path`` is the packed-SFT parquet (a
-    glob over shards); every match contributes its whole ``packed/<tokenizer>/`` directory, which
-    holds the parquet, its row-group index, the pack manifest and the validation report. A config
-    that names neither is an error. A corpus directory that does not exist, or a glob that matches
+    glob over shards, or a list of globs); every match contributes its whole ``packed/<tokenizer>/``
+    directory, which holds the parquet, its row-group index, the pack manifest and the validation
+    report. A config that names neither is an error. A corpus directory that does not exist, or a glob that matches
     nothing, is skipped and reported while the stage has not started, and an error once it has
     (``_missing_data``): a sync unit for an absent directory makes the Hub client raise mid-pass
     and abort every other upload in it.
@@ -425,9 +425,12 @@ def dataset_units(config: Path, datasets_prefix: str, *, stage_started: bool) ->
                 )
             )
     if packed is not None:
-        matches = sorted(glob.glob(str(packed)))
-        if not matches:
-            _missing_data(config, f"its packed_train_data_path matches nothing: {packed}", stage_started)
+        matches = []
+        for spec in [packed] if isinstance(packed, str) else packed:
+            spec_matches = sorted(glob.glob(str(spec)))
+            if not spec_matches:
+                _missing_data(config, f"its packed_train_data_path matches nothing: {spec}", stage_started)
+            matches.extend(spec_matches)
         for parquet in map(Path, matches):
             units.append(
                 SyncUnit(

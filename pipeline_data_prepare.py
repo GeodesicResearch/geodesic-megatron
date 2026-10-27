@@ -139,6 +139,20 @@ def parse_args():  # noqa: D103
     # Packing arguments
     parser.add_argument("--seq-length", type=int, default=8192, help="Sequence length for packing (default: 8192)")
     parser.add_argument("--pad-seq-to-mult", type=int, default=1, help="Pad sequences to this multiple (default: 1)")
+    parser.add_argument(
+        "--packing-algorithm",
+        type=str,
+        default="first_fit_shuffle",
+        help="Packing algorithm (packing_utils.PACKING_ALGOS); one_per_pack keeps one document per row "
+        "(default: first_fit_shuffle)",
+    )
+    parser.add_argument(
+        "--dataset-kwargs",
+        type=json.loads,
+        default={},
+        help="create_sft_dataset keyword arguments merged over the format's packing defaults: a JSON object on "
+        "the command line, a mapping in --config (e.g. add_eos/prompt_template/strip_spaces for raw text)",
+    )
 
     # Performance
     parser.add_argument("--num-proc", type=int, default=16, help="Parallel processes for dataset operations")
@@ -322,7 +336,9 @@ def write_jsonl(ds, output_path, text_column, format_type):
     print(f"  Written {len(ds)}/{len(ds)} documents    ")
 
 
-def run_pack(output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation, format_type):
+def run_pack(
+    output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation, format_type, packing_algorithm, dataset_kwargs
+):
     """Run pack_sft_dataset.py via subprocess."""
     script_path = Path(__file__).parent / "scripts" / "data" / "pack_sft_dataset.py"
 
@@ -341,6 +357,10 @@ def run_pack(output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation,
         str(seq_length),
         "--pad-seq-to-mult",
         str(pad_seq_to_mult),
+        "--packing-algorithm",
+        packing_algorithm,
+        "--dataset-kwargs",
+        json.dumps(dataset_kwargs),
     ]
 
     if not has_validation:
@@ -540,6 +560,9 @@ def main():  # noqa: D103
         "revision": args.revision,
         "config": args.config,
         "tokenizer": args.tokenizer,
+        "seq_length": args.seq_length,
+        "packing_algorithm": args.packing_algorithm,
+        "dataset_kwargs": args.dataset_kwargs,
         "status": "started",
     }
 
@@ -761,7 +784,14 @@ def main():  # noqa: D103
         pack_start = time.time()
 
         success = run_pack(
-            output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type
+            output_dir,
+            args.tokenizer,
+            args.seq_length,
+            args.pad_seq_to_mult,
+            has_validation,
+            format_type,
+            args.packing_algorithm,
+            args.dataset_kwargs,
         )
 
         pack_time = time.time() - pack_start

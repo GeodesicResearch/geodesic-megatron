@@ -125,6 +125,17 @@ def pad_document_for_packing(data: dict, max_seq_length: int, pad_seq_to_mult: i
         data[key] = val
 
 
+def truncate_document(data: dict, max_seq_length: int) -> None:
+    """Cut one tokenized document in place to its first ``max_seq_length`` tokens.
+
+    Applies to ``input_ids``, ``context_ids`` and ``loss_mask`` (whichever are present); shorter documents are
+    unchanged.
+    """
+    for key in ("input_ids", "context_ids", "loss_mask"):
+        if key in data and len(data[key]) > max_seq_length:
+            data[key] = data[key][:max_seq_length]
+
+
 def tokenize_dataset(
     path: Path,
     tokenizer: MegatronTokenizer,
@@ -149,7 +160,8 @@ def tokenize_dataset(
             preparation (e.g., set to 2 * context_parallel_size for THD CP).
 
     Returns:
-        np.ndarray: A NumPy array containing the tokenized data.
+        np.ndarray: A NumPy array containing the tokenized data, one dict per document with at most
+            ``max_seq_length`` tokens and an explicit ``loss_mask``.
     """
     if not dataset_kwargs:
         dataset_kwargs = {}
@@ -195,6 +207,9 @@ def tokenize_dataset(
         for key, val in data.items():
             if hasattr(val, "tolist"):
                 data[key] = val.tolist()
+        # The non-chat dataset truncates to max_seq_length itself; the chat datasets do not, so cut here and every
+        # format stores at most max_seq_length tokens per document.
+        truncate_document(data, max_seq_length)
 
     if pad_seq_to_mult > 1:
         for data in dataset:
@@ -227,8 +242,8 @@ def prepare_packed_sequence_data(
         tokenizer (MegatronTokenizer): The tokenizer to use for tokenization.
         max_seq_length (int): Maximum sequence length for the tokens.
         seed (int | None): Random seed for shuffling (optional).
-        packing_algorithm (str): The algorithm used for packing sequences
-                currently supports "first_fit_shuffle" and "first_fit_decreasing".
+        packing_algorithm (str): The algorithm used for packing sequences, one of
+                ``packing_utils.PACKING_ALGOS``.
         dataset_kwargs (dict | None): Additional keyword arguments to pass to create_sft_dataset.
             Enables packing with chat templates, tool schemas, etc.
         pad_seq_to_mult (int | None): Optional multiple to pad each sequence to during packing
@@ -317,9 +332,10 @@ class PackedSequenceSpecs:
     If -1, the number of workers will be set to the number of CPU cores available
     """
 
-    packed_train_data_path: str = None
+    packed_train_data_path: str | list[str] = None
     """
-    If specified, use this file for the packed training dataset instead of the default path.
+    If specified, use this file for the packed training dataset instead of the default path. A packed parquet spec
+    may also be a list of files, directories or globs, whose rows are read as one training set.
     """
 
     packed_val_data_path: str = None
@@ -352,11 +368,11 @@ class PackedSequenceSpecs:
         if self.pad_seq_to_mult is not None and self.pad_seq_to_mult <= 0:
             raise ValueError("pad_seq_to_mult must be a positive integer when provided.")
 
-    def _validate_packed_path(self, attr_name: str, path_value: str) -> None:
+    def _validate_packed_path(self, attr_name: str, path_value: str | list[str]) -> None:
         """Validate a packed data path and store it appropriately.
 
         For .npy files: strict validation with Path.exists()
-        For packed parquet specs: validate via resolution (supports dirs/globs)
+        For packed parquet specs: validate via resolution (supports dirs/globs and lists of them)
 
         Args:
             attr_name: The attribute name being validated (for error messages)
@@ -366,7 +382,16 @@ class PackedSequenceSpecs:
             FileNotFoundError: If the path does not exist or resolves to no files
             ValueError: If the path format is invalid
         """
-        path_str = str(path_value)
+        path_str = str(path_value) if isinstance(path_value, (str, Path)) else [str(part) for part in path_value]
+        if isinstance(path_str, list):
+            if not is_packed_parquet_spec(path_str):
+                raise ValueError(f"{attr_name} list entries must all be packed parquet specs: {path_str}")
+            try:
+                resolve_packed_parquet_paths(path_str)
+            except ValueError as e:
+                raise FileNotFoundError(f"{attr_name} could not be resolved: {path_str}. Error: {e}") from e
+            setattr(self, attr_name, path_str)
+            return
 
         # Check if it's an .npy file (legacy format)
         if path_str.lower().endswith(".npy"):
