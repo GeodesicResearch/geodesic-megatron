@@ -2401,6 +2401,82 @@ class FusedGatedExpertMapping(AutoMapping):
         return type(self)(resolved_megatron_param, resolved_hf_param, self.permute_dims)
 
 
+class GroupedExpertsMapping(MegatronParamMapping[Dict[str, torch.Tensor]]):
+    """``GroupedExperts``' fused expert weight -> one HF ``[out, in]`` tensor per expert (export only).
+
+    ``GroupedExperts`` keeps a layer's local experts in one parameter, ``weight1`` [in, experts * ffn] or ``weight2``
+    [experts * ffn, in], which its forward reads as [experts, in, ffn] or [experts, ffn, in]. ``hf_param`` names one
+    expert's weight, with one ``*`` more than ``megatron_param``: the global expert index. The export gathers the local
+    experts of every EP rank and emits each expert's slice transposed to HF's [out, in].
+
+    Import raises: torch_dist checkpoints already hold the expert weights in the canonical per-expert layout
+    (``GroupedExperts.sharded_state_dict``), and an HF model imports through ``moe_experts_impl: te_grouped``.
+    """
+
+    def __init__(self, megatron_param: str, hf_param: str):
+        super().__init__(megatron_param, hf_param)
+        # hf_param keeps the expert wildcard, which build_conversion_tasks cannot look up among the HF keys.
+        self.allow_hf_name_mismatch = True
+
+    @property
+    def is_expert(self) -> bool:
+        """Expert weights: tensor parallelism is the expert TP group, and the experts shard over EP."""
+        return True
+
+    def _validate_patterns(self):
+        """``hf_param`` has the wildcards of ``megatron_param`` plus the expert index."""
+        megatron_wildcards = self._count_wildcard_groups(self.megatron_param)
+        if self._count_wildcard_groups(self.hf_param) != megatron_wildcards + 1:
+            raise ValueError(
+                f"hf_param '{self.hf_param}' must have one wildcard more than megatron_param '{self.megatron_param}' "
+                "(the expert index)"
+            )
+
+    def hf_to_megatron(self, hf_weights: torch.Tensor, megatron_module: nn.Module) -> torch.Tensor:
+        """Not supported: import an HF model with ``moe_experts_impl: te_grouped``."""
+        raise NotImplementedError(
+            f"{self.megatron_param}: GroupedExperts weights export to HF only; import with moe_experts_impl: te_grouped"
+        )
+
+    def megatron_to_hf(
+        self,
+        megatron_weights: Optional[torch.Tensor],
+        megatron_module: Optional[nn.Module],
+    ) -> Dict[str, torch.Tensor]:
+        """Every expert's weight of the layer, keyed by its HF name, on every rank.
+
+        Raises:
+            NotImplementedError: expert tensor parallelism above 1.
+        """
+        if self.tp_size != 1:
+            raise NotImplementedError("GroupedExperts export supports expert_tensor_parallel_size=1 only.")
+        megatron_weights = self.broadcast_from_pp_rank(megatron_weights, cache_key=self.megatron_param)
+        if megatron_weights is None:
+            return {}
+        sizes = None if megatron_module is None else (megatron_module.num_local_experts, megatron_module.in_features)
+        num_local_experts, in_features = self.broadcast_obj_from_pp_rank(
+            sizes, cache_key=f"{self.megatron_param}.sizes"
+        )
+        fc1 = self.megatron_param.endswith(".weight1")
+        if self.ep_size == 1:
+            gathered = [megatron_weights]
+        else:
+            gathered = [torch.empty_like(megatron_weights) for _ in range(self.ep_size)]
+            torch.distributed.all_gather(gathered, megatron_weights, group=self.ep_group)
+        weights = {}
+        for ep_rank, weight in enumerate(gathered):
+            # The forward's view: weight1 as [experts, in, ffn], weight2 as [experts, ffn, in].
+            experts = (
+                weight.view(num_local_experts, in_features, -1)
+                if fc1
+                else weight.view(num_local_experts, -1, in_features)
+            )
+            for local_expert, expert_weight in enumerate(experts):
+                hf_name = self.hf_param.replace("*", str(ep_rank * num_local_experts + local_expert))
+                weights[hf_name] = expert_weight.t().contiguous()
+        return weights
+
+
 def merge_qkv_biases(config: TransformerConfig, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Merge separate Q, K, V bias vectors into Megatron's interleaved QKV format.
 

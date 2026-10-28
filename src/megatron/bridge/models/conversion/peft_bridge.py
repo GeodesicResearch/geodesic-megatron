@@ -39,8 +39,10 @@ from megatron.bridge.models.conversion.utils import (
     get_module_and_param_from_name,
     persistent_buffers,
 )
+from megatron.bridge.peft.adapter_wrapper import AdapterWrapper
 from megatron.bridge.peft.canonical_lora import ModuleDict
 from megatron.bridge.peft.lora import LoRAMerge
+from megatron.bridge.peft.lora_layers import LoRALinear
 from megatron.bridge.peft.utils import ParallelLinearAdapter, get_adapter_attributes_from_linear, is_expert_linear
 
 
@@ -562,6 +564,49 @@ class MegatronPeftBridge:
 
         return gathered_global_param_objects
 
+    def _self_updated_weight_names(self, megatron_model: List[MegatronModel]) -> set[str]:
+        """Global names of the weights whose adapter wrapper computes their update (``AdapterWrapper.updated_weights``).
+
+        Gathered over the pipeline-parallel ranks, so every rank merges the same weights the same way. The other
+        weights under a wrapper merge through ``_merge_lora_adapter_weights``, which handles ``LoRALinear`` only.
+
+        Raises:
+            ValueError: an adapter wrapper that is neither (``DoRALinear``), on any stage; the export would otherwise
+                merge it as plain LoRA.
+        """
+        if hasattr(self, "_cached_self_updated_weight_names"):
+            return self._cached_self_updated_weight_names
+
+        from megatron.bridge.models.conversion.model_bridge import _megatron_local_name_to_global
+
+        model_config = unwrap_model(megatron_model)[0].config
+        updated, unmergeable = [], []
+        for vp_stage, chunk in enumerate(megatron_model):
+            for module_name, module in unwrap_model(chunk).named_modules():
+                if not isinstance(module, AdapterWrapper):
+                    continue
+                if not module.updated_weights and not isinstance(module, LoRALinear):
+                    unmergeable.append(f"{type(module).__name__} at {module_name}")
+                for weight_name in module.updated_weights:
+                    local_name = self._unwrap_name(f"{module_name}.to_wrap.{weight_name}")
+                    updated.append(_megatron_local_name_to_global(megatron_model, model_config, local_name, vp_stage))
+        pp_group = parallel_state.get_pipeline_model_parallel_group()
+        gathered: List[Optional[tuple[List[str], List[str]]]] = [None] * pp_group.size()
+        torch.distributed.all_gather_object(gathered, (updated, unmergeable), group=pp_group)
+        unmergeable = sorted(set(sum((stage[1] for stage in gathered), [])))
+        if unmergeable:
+            raise ValueError(f"the HF export cannot merge these adapter wrappers: {unmergeable}")
+        self._cached_self_updated_weight_names = set(sum((stage[0] for stage in gathered), []))
+        return self._cached_self_updated_weight_names
+
+    def _weight_plus_update(
+        self, megatron_model: List[MegatronModel], param_name: str, vp_stage: Optional[int], weight: torch.Tensor
+    ) -> torch.Tensor:
+        """``weight`` (the local ``<wrapper>.to_wrap.<name>``) plus its wrapper's ``weight_update``, summed in fp32."""
+        wrapper_name, _, weight_name = param_name.rpartition(".to_wrap.")
+        wrapper = unwrap_model(megatron_model[vp_stage or 0]).get_submodule(wrapper_name)
+        return (weight.float() + wrapper.weight_update(weight_name)).to(weight.dtype)
+
     def _construct_adapters_names(self, prefix: str, adapter_key: Optional[str]) -> tuple[str, str]:
         """Build linear_in/linear_out parameter names for an adapter.
 
@@ -953,11 +998,6 @@ class MegatronPeftBridge:
             # Nothing to merge on this rank (e.g., non-owning PP rank or filtered mapping).
             return converted_weights_dict
 
-        if len(adapter_weights) > 1 and all(
-            w.adapter_key in ADAPTER_NAME_MAP.values() for w in adapter_weights if w.adapter_key
-        ):
-            return self._merge_canonical_adapter_from_weights(megatron_model, converted_weights_dict, adapter_weights)
-
         assert len(adapter_weights) == 1, "Expected a single adapter weight for standard LoRA merging"
 
         adapter_weight = adapter_weights[0]
@@ -1091,71 +1131,6 @@ class MegatronPeftBridge:
             dim,
         )
         return merged.to(orig_dtype)
-
-    def _merge_canonical_adapter_from_weights(
-        self,
-        megatron_model: List[MegatronModel],
-        converted_weights_dict: Dict[str, torch.Tensor],
-        adapter_weights: List[AdapterWeight],
-    ) -> Dict[str, torch.Tensor]:
-        """Merge CanonicalLoRA adapters using pre-materialized adapter weights."""
-
-        adapter_lookup = {aw.adapter_key: aw for aw in adapter_weights}
-        expert_linear_in_gathered: Dict[str, List[torch.Tensor]] = {}
-        expert_linear_out_gathered: Dict[str, List[torch.Tensor]] = {}
-        base_prefix = adapter_weights[0].global_base_prefix
-        num_moe_experts = megatron_model[0].config.num_moe_experts
-        is_expert = is_expert_linear(base_prefix)
-        is_grouped_expert = is_expert and ".local_experts." not in base_prefix
-        if is_grouped_expert:
-            for adapter_key, adapter_weight in adapter_lookup.items():
-                expert_linear_in_gathered[adapter_key] = self._gather_expert_adapter_weight(
-                    adapter_weight.linear_in_weight.weight,
-                )
-                expert_linear_out_gathered[adapter_key] = self._gather_expert_adapter_weight(
-                    adapter_weight.linear_out_weight.weight,
-                )
-
-        for hf_name, base_weight in converted_weights_dict.items():
-            target_adapter = None
-            target_adapter_key = None
-            for suffix, adapter_key in ADAPTER_NAME_MAP.items():
-                if hf_name.endswith(suffix):
-                    target_adapter = adapter_lookup.get(adapter_key)
-                    target_adapter_key = adapter_key
-                    break
-
-            if target_adapter is None:
-                raise ValueError(f"Adapter name mapping not found for {hf_name}")
-
-            linear_in_weight = target_adapter.linear_in_weight.weight
-            linear_out_weight = target_adapter.linear_out_weight.weight
-            if is_grouped_expert:
-                expert_idx = self._infer_hf_expert_idx(hf_name)
-                if expert_idx is not None:
-                    linear_in_weight = self._select_expert_adapter_weight(
-                        linear_in_weight,
-                        expert_linear_in_gathered.get(target_adapter_key),
-                        expert_idx,
-                        num_moe_experts,
-                    )
-                    linear_out_weight = self._select_expert_adapter_weight(
-                        linear_out_weight,
-                        expert_linear_out_gathered.get(target_adapter_key),
-                        expert_idx,
-                        num_moe_experts,
-                    )
-
-            merged_weight = self._merge_single_adapter_weight(
-                base_weight,
-                target_adapter.alpha,
-                target_adapter.dim,
-                linear_in_weight,
-                linear_out_weight,
-            )
-            converted_weights_dict[hf_name] = merged_weight
-
-        return converted_weights_dict
 
 
 _HF_LORA_SUFFIXES = (".lora_A.weight", ".lora_B.weight")

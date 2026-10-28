@@ -285,50 +285,6 @@ def test_merge_lora_adapter_weights_grouped_expert_gate_up_proj_unfused(monkeypa
     torch.testing.assert_close(updated["model.language_model.layers.0.mlp.experts.gate_up_proj"], 2 * torch.eye(2))
 
 
-def test_merge_canonical_adapter_from_weights(monkeypatch):
-    bridge = DummyBridge()
-    converted = {
-        "decoder.layers.0.self_attn.q_proj.weight": torch.zeros(2, 2),
-        "decoder.layers.0.self_attn.k_proj.weight": torch.zeros(1, 2),
-        "decoder.layers.0.self_attn.v_proj.weight": torch.zeros(1, 2),
-    }
-
-    adapter_q = AdapterWeight(
-        global_base_prefix="decoder.layers.0.self_attn.linear_qkv",
-        adapter_key="adapter_q",
-        alpha=1,
-        dim=1,
-        linear_in_weight=MegatronWeightTuple("in_q", torch.eye(2), vp_stage=0),
-        linear_out_weight=MegatronWeightTuple("out_q", torch.ones(2, 2), vp_stage=0),
-    )
-    adapter_k = AdapterWeight(
-        global_base_prefix="decoder.layers.0.self_attn.linear_qkv",
-        adapter_key="adapter_k",
-        alpha=1,
-        dim=1,
-        linear_in_weight=MegatronWeightTuple("in_k", torch.eye(2), vp_stage=0),
-        linear_out_weight=MegatronWeightTuple("out_k", 2 * torch.ones(1, 2), vp_stage=0),
-    )
-    adapter_v = AdapterWeight(
-        global_base_prefix="decoder.layers.0.self_attn.linear_qkv",
-        adapter_key="adapter_v",
-        alpha=1,
-        dim=1,
-        linear_in_weight=MegatronWeightTuple("in_v", torch.eye(2), vp_stage=0),
-        linear_out_weight=MegatronWeightTuple("out_v", 3 * torch.ones(1, 2), vp_stage=0),
-    )
-
-    megatron_model = [SimpleNamespace(config=SimpleNamespace(num_moe_experts=0))]
-    updated = bridge._merge_canonical_adapter_from_weights(
-        megatron_model,
-        converted,
-        [adapter_q, adapter_k, adapter_v],
-    )
-    torch.testing.assert_close(updated["decoder.layers.0.self_attn.q_proj.weight"], torch.ones(2, 2))
-    torch.testing.assert_close(updated["decoder.layers.0.self_attn.k_proj.weight"], 2 * torch.ones(1, 2))
-    torch.testing.assert_close(updated["decoder.layers.0.self_attn.v_proj.weight"], 3 * torch.ones(1, 2))
-
-
 def test_global_param_names_skip_adapter(monkeypatch):
     bridge = DummyBridge()
 

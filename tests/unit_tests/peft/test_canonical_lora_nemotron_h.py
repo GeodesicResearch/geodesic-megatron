@@ -11,14 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Canonical LoRA on a small real Nemotron-H Latent-MoE model: every Super target, its forward and its merge."""
+"""Canonical LoRA on a small real Nemotron-H Latent-MoE model: every Super target, its forward, its merge and its HF
+export."""
 
 import pytest
 import torch
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_super import NEMOTRON_3_SUPER_CANONICAL_LORA_TARGETS
 from tests.unit_tests.one_rank_nccl_world import one_rank_model_parallel_state
-from tests.unit_tests.small_nemotron_h import D_INNER, SEQ, VOCAB, small_nemotron_h_provider
+from tests.unit_tests.small_nemotron_h import (
+    D_INNER,
+    SEQ,
+    VOCAB,
+    small_nemotron_h_provider,
+    write_small_nemotron_h_release,
+)
 
 
 pytestmark = [
@@ -188,3 +195,67 @@ def test_loramerge_refuses_a_wrapper_it_cannot_merge(parallel_state):
     model = DoRA(target_modules=["linear_proj"])(_model(), training=False)
     with pytest.raises(NotImplementedError, match="LoRAMerge cannot merge DoRALinear"):
         LoRAMerge()(model[0], training=False)
+
+
+@pytest.fixture(scope="module")
+def release(tmp_path_factory):
+    return write_small_nemotron_h_release(tmp_path_factory.mktemp("release"))
+
+
+def _bridge_model(hf_path, moe_experts_impl: str, load_weights: bool):
+    """The bridge's Megatron model of the HF checkpoint ``hf_path``, on the given experts implementation."""
+    from megatron.bridge import AutoBridge
+
+    torch.manual_seed(0)
+    provider = AutoBridge.from_hf_pretrained(str(hf_path)).to_megatron_provider(load_weights=load_weights)
+    provider.moe_experts_impl = moe_experts_impl
+    provider.moe_aux_loss_coeff = 0.0
+    provider.finalize()
+    return provider.provide_distributed_model(wrap_with_ddp=False)
+
+
+def _export(model, release, out):
+    from megatron.bridge import AutoBridge
+
+    AutoBridge.from_hf_pretrained(str(release)).save_hf_pretrained(model, str(out), show_progress=False)
+    return out
+
+
+def test_grouped_experts_export_imports_as_the_same_model(parallel_state, release, tmp_path):
+    """A GroupedExperts model exported to HF and imported on TEGroupedMLP gives the same logits."""
+    model = _bridge_model(release, "torch_grouped", load_weights=False)
+    exported = _bridge_model(_export(model, release, tmp_path / "hf"), "te_grouped", load_weights=True)
+    torch.testing.assert_close(_logits(exported), _logits(model), rtol=3e-2, atol=3e-2)
+
+
+def test_hf_export_merges_every_expert_lora_adapter(parallel_state, release, tmp_path):
+    """The HF export of the adapted model, imported without adapters, gives the adapted logits."""
+    model = _adapted(_bridge_model(release, "torch_grouped", load_weights=False))
+    adapted = _logits(model)
+    _set_adapters(model, enabled=False)
+    base = _logits(model)
+    _set_adapters(model, enabled=True)
+    merged = _bridge_model(_export(model, release, tmp_path / "hf"), "te_grouped", load_weights=True)
+    assert (adapted - base).abs().max() > 0.5  # the adapters' effect, against which the merge error is small
+    torch.testing.assert_close(_logits(merged), adapted, rtol=3e-2, atol=3e-2)
+
+
+def test_hf_export_refuses_an_adapter_it_cannot_merge(parallel_state, release, tmp_path):
+    """DoRA has LoRA factors but also a magnitude, which a LoRA merge would drop: the export raises instead."""
+    from megatron.bridge.peft.dora import DoRA
+
+    model = DoRA(target_modules=["linear_proj"])(_bridge_model(release, "torch_grouped", load_weights=False))
+    with pytest.raises(ValueError, match=r"cannot merge these adapter wrappers: \['DoRALinear at "):
+        _export(model, release, tmp_path / "hf")
+
+
+def test_grouped_experts_weights_do_not_import_from_hf(parallel_state, release):
+    with pytest.raises(NotImplementedError, match="GroupedExperts weights export to HF only"):
+        _bridge_model(release, "torch_grouped", load_weights=True)
+
+
+def test_grouped_experts_mapping_needs_the_expert_wildcard():
+    from megatron.bridge.models.conversion.param_mapping import GroupedExpertsMapping
+
+    with pytest.raises(ValueError, match="one wildcard more"):
+        GroupedExpertsMapping("decoder.layers.*.mlp.experts.weight1", "backbone.layers.*.mixer.experts.up_proj.weight")
