@@ -458,6 +458,11 @@ bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
 - **`--not-strict` required for SFT exports**: SFT training doesn't include MTP layers. Without this flag, shards containing MTP keys are dropped, which also drops `lm_head.weight` (fatal for generation).
 - **EP=4 on 1 node** (not EP=8 on 2 nodes): Cross-node EP=8 causes Slingshot gathering failures. Node-local EP=4 keeps all communication on NVLink.
 - **Single-process conversion doesn't work for Super**: Hangs during checkpoint loading. Always use `torchrun`.
+- **PEFT checkpoints export merged**: an adapter-only checkpoint (its `run_config.yaml` names `peft`) is loaded with the
+  base its run trained on (`checkpoint.pretrained_checkpoint`) and exported with every adapter merged into its weights.
+  `hf/merge_check.json` compares the adapted and base models with the model merged in memory by `LoRAMerge`, on fixed
+  probe tokens, and the export fails if that merge keeps under 90% of the adapters' logit effect. Super with Expert LoRA
+  (routed experts on `GroupedExperts`) takes 2 nodes at `--pp 2 --ep 4`, or 4 at `--pp 4 --ep 4` for more memory headroom.
 
 ### Already-converted checkpoints
 

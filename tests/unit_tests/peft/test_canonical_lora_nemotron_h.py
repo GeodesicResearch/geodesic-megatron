@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Canonical LoRA on a small real Nemotron-H Latent-MoE model: every Super target, its forward, its merge and its HF
-export."""
+"""Canonical LoRA on a small real Nemotron-H Latent-MoE model: every Super target, its forward, its merge, its HF
+export and the converter's load and export of an adapter-only checkpoint."""
 
 import pytest
 import torch
@@ -47,13 +47,17 @@ def _model():
     return provider.provide_distributed_model(wrap_with_ddp=False)
 
 
-def _adapted(model=None, b_std=0.05):
-    """CanonicalLoRA with every Super target on ``model`` (a new small model if None), B factors ~ N(0, b_std)."""
+def _super_lora():
+    """CanonicalLoRA on every Super target."""
     from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 
+    return CanonicalLoRA(target_modules=list(NEMOTRON_3_SUPER_CANONICAL_LORA_TARGETS), lora_A_init_method="kaiming")
+
+
+def _adapted(model=None, b_std=0.05):
+    """``_super_lora`` on ``model`` (a new small model if None), B factors ~ N(0, b_std)."""
     model = model if model is not None else _model()
-    lora = CanonicalLoRA(target_modules=list(NEMOTRON_3_SUPER_CANONICAL_LORA_TARGETS), lora_A_init_method="kaiming")
-    model = lora(model, training=False)
+    model = _super_lora()(model, training=False)
     # Non-zero B factors, so that every adapter changes the output.
     with torch.no_grad():
         for name, param in model[0].named_parameters():
@@ -124,12 +128,10 @@ def test_a_target_that_matches_no_module_is_refused(parallel_state, scheme):
 
 
 def _set_adapters(model, enabled: bool):
-    from megatron.bridge.peft.adapter_wrapper import AdapterWrapper
+    """PEFT's own enable/disable walk, through a PEFT that holds no state of its own."""
+    from megatron.bridge.peft.lora import LoRAMerge
 
-    for chunk in model:
-        for module in chunk.modules():
-            if isinstance(module, AdapterWrapper):
-                module.enable_adapter_layers() if enabled else module.disable_adapter_layers()
+    (LoRAMerge().enable_adapter_layers if enabled else LoRAMerge().disable_adapter_layers)(model)
 
 
 def test_mamba_in_proj_update_is_in_the_z_and_x_rows_only(parallel_state):
@@ -259,3 +261,98 @@ def test_grouped_experts_mapping_needs_the_expert_wildcard():
 
     with pytest.raises(ValueError, match="one wildcard more"):
         GroupedExpertsMapping("decoder.layers.*.mlp.experts.weight1", "backbone.layers.*.mixer.experts.up_proj.weight")
+
+
+def _peft_checkpoint(tmp_path, release):
+    """A base checkpoint and an Expert LoRA PEFT checkpoint of the small model, as a training run leaves them.
+
+    The PEFT checkpoint's run_config names the base under ``checkpoint.pretrained_checkpoint``, the adapters under
+    ``peft`` (serialised as training serialises it) and the gradient hooks training records, which rebuild as
+    unbound methods; its tensors include the base weights, which ``load_peft_model`` must ignore in favour of the
+    base's. Returns (adapted in-memory model, PEFT checkpoint directory).
+    """
+    import yaml
+
+    from megatron.bridge.training.model_load_save import save_megatron_model
+    from megatron.bridge.training.utils.config_utils import _ConfigContainerBase
+
+    model = _bridge_model(release, "torch_grouped", load_weights=False)
+    save_megatron_model(model, tmp_path / "base", hf_tokenizer_path=str(release))
+    adapted = _adapted(model)
+    save_megatron_model(adapted, tmp_path / "peft", hf_tokenizer_path=str(release))
+    run_config_path = tmp_path / "peft" / "iter_0000000" / "run_config.yaml"
+    run_config = yaml.safe_load(run_config_path.read_text())
+    run_config["checkpoint"]["pretrained_checkpoint"] = str(tmp_path / "base")
+    run_config["peft"] = _ConfigContainerBase._convert_value_to_dict(_super_lora())
+    ddp = "megatron.core.distributed.distributed_data_parallel.DistributedDataParallel"
+    run_config["model"]["no_sync_func"] = {"_call_": False, "_target_": f"{ddp}.no_sync"}
+    run_config["model"]["grad_sync_func"] = {"_call_": False, "_target_": f"{ddp}.start_grad_sync"}
+    run_config_path.write_text(yaml.safe_dump(run_config))
+    return adapted, tmp_path / "peft"
+
+
+def test_load_peft_model_restores_the_adapted_model(parallel_state, release, tmp_path):
+    from megatron.bridge.training.model_load_save import load_peft_model
+
+    adapted, peft_dir = _peft_checkpoint(tmp_path, release)
+    loaded = load_peft_model(str(peft_dir / "iter_0000000"))
+    # The run's recorded gradient hooks would rebuild as unbound DDP methods, which the pipeline schedule calls.
+    assert loaded[0].config.no_sync_func is None and loaded[0].config.grad_sync_func is None
+    torch.testing.assert_close(_logits(loaded), _logits(adapted), rtol=0, atol=0)
+
+
+def test_load_peft_model_refuses_a_checkpoint_without_the_adapters(parallel_state, release, tmp_path):
+    """The base checkpoint relabelled as a PEFT checkpoint holds no adapter tensors: the load must fail, not no-op."""
+    import yaml
+    from torch.distributed.checkpoint.api import CheckpointException
+
+    from megatron.bridge.training.model_load_save import load_peft_model
+
+    _, peft_dir = _peft_checkpoint(tmp_path, release)
+    base_iter = tmp_path / "base" / "iter_0000000"
+    run_config = yaml.safe_load((base_iter / "run_config.yaml").read_text())
+    run_config["checkpoint"]["pretrained_checkpoint"] = str(tmp_path / "base")
+    run_config["peft"] = yaml.safe_load((peft_dir / "iter_0000000" / "run_config.yaml").read_text())["peft"]
+    (base_iter / "run_config.yaml").write_text(yaml.safe_dump(run_config))
+    with pytest.raises(CheckpointException, match="adapter_z.linear_in.weight from model not in state dict"):
+        load_peft_model(str(base_iter))
+
+
+@pytest.mark.serial_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 3, reason="needs 2 GPUs besides the test process's own")
+def test_the_converter_exports_an_adapter_only_checkpoint_merged(parallel_state, release, tmp_path):
+    """pipeline_checkpoint_convert_hf.py under torchrun (EP2) on the adapter-only checkpoint: an HF checkpoint whose
+    logits, imported without adapters, are the adapted model's, and a passing merge check beside it."""
+    import json
+
+    from tests.unit_tests.child_process import REPO_ROOT, free_port, run_python
+
+    adapted_model, peft_dir = _peft_checkpoint(tmp_path, release)
+    adapted = _logits(adapted_model)
+    _set_adapters(adapted_model, enabled=False)
+    base = _logits(adapted_model)
+    hf_path = tmp_path / "hf"
+    run_python(
+        [
+            "-m",
+            "torch.distributed.run",
+            "--nproc_per_node=2",
+            f"--master_port={free_port()}",
+            str(REPO_ROOT / "pipeline_checkpoint_convert_hf.py"),
+            f"--megatron-path={peft_dir}",
+            f"--hf-model={release}",
+            f"--hf-path={hf_path}",
+            "--no-reasoning",
+            "--ep=2",
+            "--no-progress",
+        ],
+        timeout=900,
+        cwd=tmp_path,
+        CUDA_VISIBLE_DEVICES="1,2",
+    )
+    merged = _logits(_bridge_model(hf_path, "te_grouped", load_weights=True))
+    assert (adapted - base).abs().max() > 0.5
+    torch.testing.assert_close(merged, adapted, rtol=3e-2, atol=3e-2)
+    check = json.loads((hf_path / "merge_check.json").read_text())
+    assert check["retained"] > 0.95
+    assert check["merged"]["mean_abs_diff"] < 0.1 * check["base"]["mean_abs_diff"]
