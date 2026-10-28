@@ -746,6 +746,7 @@ class SafeTensorsStateSource(StateSource):
         buffered_tensors = {}
         all_yielded_keys = set()
         all_saved_keys = set()
+        saved_bytes = 0
 
         for name, tensor in generator:
             all_yielded_keys.add(name)
@@ -777,6 +778,7 @@ class SafeTensorsStateSource(StateSource):
                         del buffered_tensors[key]
 
                     all_saved_keys.update(keys_for_file)
+                    saved_bytes += sum(t.numel() * t.element_size() for t in tensors_to_save.values())
                     del files_to_save[filename]
 
         # --- Final Reporting ---
@@ -800,6 +802,10 @@ class SafeTensorsStateSource(StateSource):
                 for filename in list(files_to_save.keys()):
                     keys_for_file = files_to_save[filename]
                     tensors_to_save = {key: buffered_tensors[key] for key in keys_for_file if key in buffered_tensors}
+                    del files_to_save[filename]
+                    # A shard the generator yielded nothing for (e.g. a module the model lacks) is not written.
+                    if not tensors_to_save:
+                        continue
                     output_file_path = output_path / filename
                     save_file(tensors_to_save, output_file_path)
 
@@ -807,8 +813,9 @@ class SafeTensorsStateSource(StateSource):
                     for key in tensors_to_save.keys():
                         del buffered_tensors[key]
 
-                    all_saved_keys.update(keys_for_file)
-                    del files_to_save[filename]
+                    # Only what was written: the index must not list the shard's missing tensors.
+                    all_saved_keys.update(tensors_to_save.keys())
+                    saved_bytes += sum(t.numel() * t.element_size() for t in tensors_to_save.values())
 
         if buffered_tensors:
             print(
@@ -838,9 +845,12 @@ class SafeTensorsStateSource(StateSource):
                 original_index_data = json.load(f)
 
             new_weight_map = {key: key_to_filename_map[key] for key in all_saved_keys}
+            metadata = dict(original_index_data.get("metadata", {}))
+            if "total_size" in metadata:
+                metadata["total_size"] = saved_bytes
 
             new_index_data = {
-                "metadata": original_index_data.get("metadata", {}),
+                "metadata": metadata,
                 "weight_map": new_weight_map,
             }
 
