@@ -1,0 +1,17 @@
+# pipeline_data_prepare.py config — green-team instruction pool
+# (math_sci_agentic_500m), packed for Normal Norm V1.4 with its own tokenizer
+# (think-history), seq 8192 / mult 1.
+#
+# Same pool the 120B AFT blends drew their 2M green instruction tokens from;
+# the packed parquet feeds both norm14 mix specs.
+#
+# Run: python pipeline_data_prepare.py --config configs/philosophy_msm/norm14/data/greenteam_math_sci_agentic_500m.yaml
+dataset: geodesic-research/pa-minimal-green-team-SFT-500m
+subset: math_sci_agentic_500m
+revision: d6c640b852e878d31c08e0b42bd63f9717c8192d
+split: train
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+output-base: /projects/a5k/public/data_nlie2.a5k/norm14_msm
+seq-length: 8192
+pad-seq-to-mult: 1
+val-proportion: 0.0

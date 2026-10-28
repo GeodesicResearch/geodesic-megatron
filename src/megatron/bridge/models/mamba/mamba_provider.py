@@ -308,11 +308,14 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
 
         super().finalize()
 
-    def _apply_moe_experts_impl(self) -> None:
-        """Wrap mamba_stack_spec per moe_experts_impl.
+    def _apply_moe_experts_impl(self, mamba_stack_spec: ModuleSpec) -> ModuleSpec:
+        """Return the resolved stack spec with the MoE experts swapped per moe_experts_impl.
 
         Runs at provide() time — YAML `model:` overrides merge onto the provider instance
-        AFTER construction, so a __post_init__ hook would only see the field default.
+        AFTER construction, so a __post_init__ hook would only see the field default. The
+        provider's own mamba_stack_spec field is never touched: its dotted path is recorded
+        in every checkpoint's run_config.yaml and re-imported on load (export, resume), and
+        a function-local replacement there is unimportable.
         """
         from megatron.bridge.models.mamba.grouped_experts import (
             DEPRECATED_BACKEND_ALIASES,
@@ -321,7 +324,7 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
         )
 
         if self.moe_experts_impl == "te_grouped":
-            return
+            return mamba_stack_spec
 
         impl = self.moe_experts_impl
         backend = DEPRECATED_BACKEND_ALIASES.get(impl, impl)
@@ -343,8 +346,6 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
                 f"{', '.join(repr(b) for b in GEMM_BACKENDS)}, or the deprecated "
                 f"{', '.join(repr(a) for a in DEPRECATED_BACKEND_ALIASES)}."
             )
-        if getattr(self, "_grouped_spec_applied", False):
-            return
         # The swap only rewrites the main stack's MoE spec; an MTP block carries its
         # own nested MoE spec that would silently stay on the TE path. Refuse the
         # half-swapped combination rather than train it.
@@ -366,21 +367,18 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
                 "offload_modules (attention/norm offload is unaffected)."
             )
 
-        inner = self.mamba_stack_spec
-
-        def _grouped_resolved_stack_spec(cfg=None):
-            if callable(inner):
-                try:
-                    spec = inner(cfg)
-                except TypeError:
-                    spec = inner()
-            else:
-                spec = inner
-            return swap_moe_experts_to_grouped(spec, gemm_backend=backend)
-
-        self.mamba_stack_spec = _grouped_resolved_stack_spec
-        self._grouped_spec_applied = True
-        logger.info("moe_experts_impl=%s: MoE experts swapped to GroupedExperts(%s)", impl, backend)
+        swapped = swap_moe_experts_to_grouped(mamba_stack_spec, gemm_backend=backend)
+        # provide() runs once per virtual-pipeline chunk; keep the confirmation
+        # at INFO once per model build and the chunk repeats out of the grepped
+        # streams. An underscore attribute, so config serialization skips it.
+        announced = getattr(self, "_announced_expert_swaps", None)
+        if announced is None:
+            announced = set()
+            self._announced_expert_swaps = announced
+        level = logging.DEBUG if backend in announced else logging.INFO
+        announced.add(backend)
+        logger.log(level, "moe_experts_impl=%s: MoE experts swapped to GroupedExperts(%s)", impl, backend)
+        return swapped
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> MCoreMambaModel:
         """Configure and instantiate a Megatron Core Mamba model based on this configuration.
@@ -393,7 +391,6 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
         Returns:
             MCoreMambaModel: Configured Megatron Core Mamba model instance
         """
-        self._apply_moe_experts_impl()
         mamba_stack_spec = self.mamba_stack_spec
         if not isinstance(mamba_stack_spec, ModuleSpec):
             # Check if the function accepts config parameter
@@ -403,6 +400,7 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
                 mamba_stack_spec = mamba_stack_spec(self)
             else:
                 mamba_stack_spec = mamba_stack_spec()
+        mamba_stack_spec = self._apply_moe_experts_impl(mamba_stack_spec)
 
         # VPP gate removed (INFR-68): the assert here dated 2025-08-13 and cited a
         # missing MCore MambaModel vp_stage API; the current 3rdparty pin
