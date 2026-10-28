@@ -1498,7 +1498,16 @@ isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all \
 bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
   --iteration 300 --push-to-hub
+
+# A LoRA run's adapter as a vLLM factor dir, unmerged (1 node; one CPU process, no --hf-model or --reasoning)
+isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/lora_run --format lora-factors \
+  [--factors-path DIR] [--reference-alphas /path/to/rl_adapter/alphas.json]
 ```
+
+`--format lora-factors` writes `rank_00.safetensors` + `alphas.json` (geodesic-utils factor format 2, or 3 when the
+adapter has per-expert routed-expert LoRA) to `<megatron-path>/iter_N/factors/` by default. It reads plain LoRA (the RL
+adapters) and Tinker's layout (CanonicalLoRA + GroupedExpertsLoRAAdapter); the module docstring of
+`pipeline_checkpoint_convert_hf.py` ("LoRA factor dirs") has the key mapping.
 
 ### How export works
 

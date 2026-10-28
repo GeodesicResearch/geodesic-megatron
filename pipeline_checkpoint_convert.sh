@@ -18,7 +18,7 @@
 #   bash pipeline_checkpoint_convert.sh import <hf-model-id> [options]
 #   bash pipeline_checkpoint_convert.sh upload-all <megatron-path> [options]
 #
-# Export options (ALL export commands REQUIRE --hf-model AND --reasoning|--no-reasoning):
+# Export options (an HF export REQUIRES --hf-model AND --reasoning|--no-reasoning):
 #   --hf-model ID       REQUIRED. Upstream HF model id (e.g.
 #                       nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16) whose
 #                       architecture + tokenizer the checkpoint should be
@@ -41,6 +41,16 @@
 #                       Directory with vLLM-correct configuration_nemotron_h.py
 #                       and modeling_nemotron_h.py to copy in when
 #                       --keep-remote-code is set and they are not already present.
+#   --format lora-factors
+#                       Write a LoRA (PEFT) checkpoint's adapter as a vLLM factor
+#                       dir instead of an HF model: no merge, no --hf-model or
+#                       --reasoning. Runs one CPU process on the first node; see
+#                       "LoRA factor dirs" in pipeline_checkpoint_convert_hf.py.
+#   --factors-path DIR  lora-factors: output dir (default: <megatron-path>/iter_N/factors)
+#   --reference-alphas FILE
+#                       lora-factors: an RL adapter's alphas.json on the same model
+#                       to check the export's keys and widths against
+#   --alpha-over-r X    lora-factors: the adapter scale (default: run_config peft alpha/dim)
 #
 # Import options:
 #   --megatron-path DIR Output directory (default: auto-derived from model name)
@@ -63,6 +73,9 @@
 #   # Export reasoning-trained SFT + push to Hub
 #   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/reasoning_run \
 #       --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --iteration 300 --push-to-hub --reasoning
+#
+#   # A LoRA run's adapter as a factor dir (no merge)
+#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/lora_run --format lora-factors
 #
 #   # Import HF model to Megatron
 #   bash pipeline_checkpoint_convert.sh import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
@@ -193,6 +206,24 @@ run_python() {
     "$REPO_DIR/pipeline_env_exec.sh" "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; python -c $(printf '%q' "$code")"
 }
 
+# --- Helper: run a script as ONE process on the first conversion node (srun, so the CPU and memory load lands on an
+# allocated node, not on the host that runs this launcher). Used by export --format lora-factors, which reads the
+# checkpoint's tensors on CPU and needs no distributed context. ---
+run_single_process() {
+    local script="$1"
+    shift
+    local args="$*"
+    local node
+    node=$(scontrol show hostname "${CONVERT_NODELIST:-$SLURM_NODELIST}" | head -1)
+
+    srun --nodes=1 --ntasks=1 --kill-on-bad-exit=0 --export=ALL --overlap --nodelist="$node" "$REPO_DIR/pipeline_env_exec.sh" "
+        cd $REPO_DIR
+        source pipeline_env_activate.sh || exit 1
+        export PYTHONUNBUFFERED=1
+        python $script $args
+    "
+}
+
 # ==============================================================================
 # Mode: export (Megatron → HuggingFace)
 # ==============================================================================
@@ -204,11 +235,13 @@ if [[ "$MODE" == "export" ]]; then
     # PP>1 to shard the dense backbone or a single GPU OOMs building the model.
     TP=1; PP=1; EP=$TOTAL_GPUS; ETP=1
     HF_MODEL=""
+    FORMAT="hf"
     ARGS="--megatron-path $MEGATRON_PATH"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --hf-model)    HF_MODEL="$2"; ARGS="$ARGS --hf-model $2"; shift 2 ;;
+            --format)      FORMAT="$2"; ARGS="$ARGS --format $2"; shift 2 ;;
             --iteration)   ARGS="$ARGS --iteration $2"; ITERATION="$2"; shift 2 ;;
             --push-to-hub) ARGS="$ARGS --push-to-hub"; shift ;;
             --tp)          TP="$2"; shift 2 ;;
@@ -226,6 +259,18 @@ if [[ "$MODE" == "export" ]]; then
             *)             ARGS="$ARGS $1"; shift ;;
         esac
     done
+
+    if [[ "$FORMAT" == "lora-factors" ]]; then
+        echo "============================================================"
+        echo "LoRA factor-dir export (Megatron adapter → vLLM factor dir, unmerged)"
+        echo "  Megatron path:  $MEGATRON_PATH"
+        echo "  Iteration:      ${ITERATION:-latest}"
+        echo "  Job ID:         $SLURM_JOB_ID"
+        echo "  Start time:     $(date)"
+        echo "============================================================"
+        run_single_process pipeline_checkpoint_convert_hf.py "$ARGS"
+        exit $?
+    fi
 
     ARGS="$ARGS --tp $TP --pp $PP --ep $EP --etp $ETP"
     validate_parallelism
