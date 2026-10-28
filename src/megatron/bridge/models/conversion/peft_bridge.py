@@ -303,11 +303,20 @@ class MegatronPeftBridge:
         megatron_model: Union[MegatronModel, List[MegatronModel]],
         linear_out_weight: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """Split a fused LoRA linear_out tensor for QKV adapters."""
+        """Split a fused LoRA linear_out tensor (``[q+k+v rows, rank]``) for QKV adapters.
+
+        The rows are split as ``split_qkv_weights`` splits a fused bias: its last dimension is the LoRA rank, not
+        the hidden size, so the weight path's FP8 scale-domain inference (last dim != hidden size) would misread it.
+        """
 
         model = megatron_model[0] if isinstance(megatron_model, list) else megatron_model
-        q_out, k_out, v_out = split_qkv_weights(model.config, linear_out_weight)
-        return {"q_proj": q_out, "k_proj": k_out, "v_proj": v_out}
+        rows = torch.arange(linear_out_weight.shape[0], device=linear_out_weight.device)
+        q_rows, k_rows, v_rows = split_qkv_weights(model.config, rows)
+        return {
+            "q_proj": linear_out_weight[q_rows],
+            "k_proj": linear_out_weight[k_rows],
+            "v_proj": linear_out_weight[v_rows],
+        }
 
     def _split_gdn_in_proj_linear_out_weight(
         self,

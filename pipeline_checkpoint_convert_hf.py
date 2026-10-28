@@ -328,6 +328,62 @@ def merge_and_convert_multi_gpu(
     return merged_iter, hf_path
 
 
+#: Row-order marker (geodesic_utils FACTOR_FORMAT_VERSION) that geodesic-evals' factor converter requires of an
+#: adapter with packed modules (Mamba in_proj, fused qkv): every lora_B row is HF-canonical. An adapter exported at
+#: tensor parallelism 1 is canonical by construction, since no TP gather interleaves its rows.
+GEODESIC_FACTOR_FORMAT_VERSION = 2
+
+
+def export_peft_adapter_multi_gpu(
+    iter_path: Path,
+    adapter_path: Path,
+    hf_model_id: str,
+    tp: int,
+    pp: int,
+    ep: int,
+    etp: int,
+    torch_dtype: torch.dtype,
+    show_progress: bool,
+) -> Path:
+    """Export a PEFT checkpoint's adapters alone as an HF PEFT adapter directory, with no merge.
+
+    Loads the adapted model (``model_load_save.load_peft_model``) at the given parallelism and writes
+    ``adapter_config.json`` and ``adapter_model.safetensors`` (``AutoBridge.save_hf_adapter``: HF parameter names,
+    fused projections split as HF names them). At ``tp == 1`` the config also records
+    ``geodesic_factor_format_version``, which the geodesic factor pipeline needs to serve packed modules.
+
+    Raises:
+        ValueError: ``tp > 1``, whose gather would interleave packed modules' rows.
+    """
+    if tp != 1:
+        raise ValueError(f"adapter export needs tensor parallelism 1 (got {tp}): a TP gather interleaves packed rows")
+
+    from megatron.bridge.models.decorators import torchrun_main
+    from megatron.bridge.training import model_load_save
+    from megatron.bridge.training.utils.checkpoint_utils import get_checkpoint_run_config_filename, read_run_config
+    from megatron.bridge.utils.common_utils import print_rank_0
+    from megatron.bridge.utils.instantiate_utils import instantiate
+
+    @torchrun_main
+    def _run():
+        print_rank_0(f"Exporting the PEFT adapter of {iter_path} -> {adapter_path}")
+        bridge, mp_overrides = _initialize_model_parallel(hf_model_id, tp, pp, ep, etp, torch_dtype)
+        model = model_load_save.load_peft_model(str(iter_path), mp_overrides=mp_overrides)
+        peft = instantiate(read_run_config(get_checkpoint_run_config_filename(str(iter_path)))["peft"])
+        bridge.save_hf_adapter(
+            model, adapter_path, peft_config=peft, base_model_name_or_path=hf_model_id, show_progress=show_progress
+        )
+        if torch.distributed.get_rank() == 0:
+            config_file = adapter_path / "adapter_config.json"
+            config = json.loads(config_file.read_text())
+            config["geodesic_factor_format_version"] = GEODESIC_FACTOR_FORMAT_VERSION
+            config_file.write_text(json.dumps(config, indent=2) + "\n")
+        torch.distributed.barrier()
+
+    _run()
+    return adapter_path
+
+
 # Generic NemotronH remote-code artifacts (no project specifics) — the custom
 # modeling modules and the auto_map that points HF/vLLM trust_remote_code at them.
 NEMOTRON_H_MODELING_FILES = ("configuration_nemotron_h.py", "modeling_nemotron_h.py")
@@ -1132,6 +1188,12 @@ def main():
         "(default: <megatron-path>_merged); the HF export then goes to its iter_N/hf.",
     )
     parser.add_argument(
+        "--adapter-only",
+        action="store_true",
+        help="For a PEFT checkpoint: export its adapters alone as an HF PEFT adapter (no merge, no HF model) to "
+        "--hf-path (default: <megatron-path>/hf_adapter). Needs --tp 1.",
+    )
+    parser.add_argument(
         "--stochastic-merge-seed",
         type=int,
         default=None,
@@ -1213,6 +1275,29 @@ def main():
         strict=not args.not_strict,
         show_progress=not args.no_progress,
     )
+    if args.adapter_only:
+        if not is_peft_checkpoint(iter_path):
+            raise SystemExit(f"--adapter-only needs a PEFT checkpoint; {iter_path} has no peft section")
+        if not use_multi_gpu:
+            raise SystemExit(
+                "A PEFT adapter is exported on GPUs: run it under torchrun (pipeline_checkpoint_convert.sh)."
+            )
+        adapter_path = Path(args.hf_path) if args.hf_path else Path(args.megatron_path) / "hf_adapter"
+        export_peft_adapter_multi_gpu(
+            iter_path,
+            adapter_path,
+            hf_model_id,
+            args.tp,
+            args.pp,
+            args.ep,
+            args.etp,
+            DTYPE_MAP[args.torch_dtype],
+            show_progress=not args.no_progress,
+        )
+        print(f"Exported the PEFT adapter: {adapter_path}")
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        return
     if is_peft_checkpoint(iter_path):
         if not use_multi_gpu:
             raise SystemExit(

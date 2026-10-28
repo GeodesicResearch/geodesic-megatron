@@ -312,3 +312,12 @@ def test_think_tokenizer_renders_as_the_super_release(convert_module):
     think = _THINK_TEMPLATES[-1].read_text()
     assert "{% generation %}" in think
     assert convert_module.templates_render_alike(think, _SUPER_TEMPLATE.read_text())
+
+
+class TestAdapterExport:
+    def test_refuses_tensor_parallelism(self, convert_module, tmp_path):
+        """A TP gather interleaves the rows of packed modules (Mamba in_proj), so the export must run at TP 1."""
+        with pytest.raises(ValueError, match="tensor parallelism 1"):
+            convert_module.export_peft_adapter_multi_gpu(
+                tmp_path, tmp_path / "hf_adapter", "unused", 2, 1, 1, 1, None, show_progress=False
+            )
