@@ -41,7 +41,8 @@ import sys
 import pytest
 from scripts.training.launcher_source import LAUNCHER, launcher_function
 
-from tests.unit_tests.stubbed_shell import HARNESS_ENV, PipelineShell
+from tests.unit_tests.launcher_harness import LAUNCH_ENV, RANK_LAUNCHERS, Launcher, launcher_shell
+from tests.unit_tests.stubbed_shell import HARNESS_ENV
 
 
 # --- apply_env_overrides + export_env_overrides, lifted from the launcher -----------------------
@@ -233,44 +234,17 @@ def test_a_key_merely_containing_a_credential_word_is_accepted(tmp_path):
 
 # --- the whole launcher, in the container -------------------------------------------------------
 
-# A launch in a one-node allocation, on top of PipelineShell's fake job.
-_LAUNCH_ENV = {
-    "SLURM_GPUS_PER_NODE": "4",
-    "SLURM_NODEID": "0",
-    # Pre-set so the launcher asks scontrol nothing.
-    "MASTER_ADDR_OVERRIDE": "127.0.0.1",
-    "ISAMBARD_SWITCH_SPREAD": "test-switch:1",
-    "ISAMBARD_RUN_ID": "20260928T000000-jtest",
-}
-
 # Variables the harness itself puts into the environment, excluded from before/after diffs.
 _HARNESS_KEYS = set(HARNESS_ENV)
-
-# The rank launchers: ft_launcher, and `python -m torch.distributed.run` on the --disable-ft path.
-_RANK_LAUNCHERS = ("ft_launcher", "python")
 
 
 def _job_tmpdirs(shell):
     return (f"/tmp/megatron_{shell.job_id}_container", f"/tmp/megatron_tmp_{shell.job_id}_container")
 
 
-class Launch:
-    """One run of the real launcher: its result and what the stubs recorded."""
-
-    def __init__(self, run):
-        self.result = subprocess.CompletedProcess(run["args"], run["returncode"], run["stdout"], run["stderr"])
-        self.srun_called = any(call["cmd"] == "srun" for call in run["calls"])
-        ranks = [call for call in run["calls"] if call["cmd"] in _RANK_LAUNCHERS]
-        self.rank_env = ranks[-1]["env"] if ranks else None
-        self.rank_argv = ranks[-1]["argv"] if ranks else None
-        self.sifs = [call["argv"][0] for call in run["calls"] if call["cmd"] == "apptainer"]
-
-
 @pytest.fixture
 def shell(tmp_path):
-    """The launcher's stubbed world: srun, the image each container runs and the rank launch are recorded, the rank
-    launch with its whole environment."""
-    shell = PipelineShell(tmp_path, record=("srun", "apptainer", *_RANK_LAUNCHERS), record_env="*")
+    shell = launcher_shell(tmp_path)
     yield shell
     # The launcher creates its job-scoped node-local TMPDIRs; this fake job must not leave them.
     shell.remove_job_tmp_dirs()
@@ -279,27 +253,7 @@ def shell(tmp_path):
 @pytest.fixture
 def launch(tmp_path, shell):
     """Run the real launcher once per call, with an overrides file holding ``overrides``."""
-    config = tmp_path / "config.yaml"
-    config.write_text("train: {}\n")
-    raw_log = tmp_path / "train.out"
-    raw_log.write_text("")
-    calls = []
-
-    def run(overrides: str | None, *launcher_args: str, extra_env: dict[str, str] | None = None) -> Launch:
-        run_dir = tmp_path / f"run{len(calls)}"
-        run_dir.mkdir()
-        env = {**_LAUNCH_ENV, "ISAMBARD_RAW_LOG_PATH": str(raw_log)}
-        if overrides is not None:
-            overrides_file = run_dir / "overrides.env"
-            overrides_file.write_text(overrides)
-            env["ISAMBARD_ENV_OVERRIDES"] = str(overrides_file)
-        env.update(extra_env or {})
-        calls.append(run_dir)
-        return Launch(
-            shell.run(LAUNCHER.name, str(config), "--model", "nano", "--mode", "pretrain", *launcher_args, env=env)
-        )
-
-    return run
+    return Launcher(tmp_path, shell)
 
 
 LAUNCH_PATHS = [pytest.param((), id="ft_launcher"), pytest.param(("--disable-ft",), id="torchrun")]
@@ -465,13 +419,13 @@ def test_every_shell_variable_the_launcher_keeps_is_refused_as_a_key(tmp_path, s
             stdout=stdout,
             stderr=subprocess.PIPE,
             text=True,
-            env=shell.env(_LAUNCH_ENV),
+            env=shell.env(LAUNCH_ENV),
             timeout=300,
         )
     assert sourced.returncode == 0, sourced.stderr
-    assert any(
-        call["cmd"] in _RANK_LAUNCHERS for call in map(json.loads, shell.calls_file.read_text().splitlines())
-    ), "the sourced launcher did not reach its rank launcher"
+    assert any(call["cmd"] in RANK_LAUNCHERS for call in map(json.loads, shell.calls_file.read_text().splitlines())), (
+        "the sourced launcher did not reach its rank launcher"
+    )
     baseline = _declared(before)
     kept = sorted(name for name, attrs in _declared(after).items() if name not in baseline and "x" not in attrs)
     # Proof that the listing saw the launcher's variables, from each part of it.

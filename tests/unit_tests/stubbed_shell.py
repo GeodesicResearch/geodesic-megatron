@@ -155,8 +155,13 @@ record torchrun "$@"
 exit "${STUB_TORCHRUN_RC:-0}"
 """,
     "ft_launcher": """\
-# Ranks need GPUs and a rendezvous: record the launch. --help answers the launcher's flag-support check.
-if [ "${1:-}" = --help ]; then echo "--ft-rank-section-timeouts"; exit 0; fi
+# Ranks need GPUs and a rendezvous: record the launch. --help prints $STUB_FT_LAUNCHER_HELP when it is set (an
+# empty value is a launcher with neither flag), and otherwise the two section-timeout flags the launcher passes.
+if [ "${1:-}" = --help ]; then
+    printf '%s\n' "${STUB_FT_LAUNCHER_HELP-  --ft-rank-section-timeouts ...
+  --ft-rank-out-of-section-timeout ...}"
+    exit 0
+fi
 record ft_launcher "$@"
 """,
     "python": """\
