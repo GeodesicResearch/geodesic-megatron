@@ -11,14 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Canonical LoRA on a small real Nemotron-H Latent-MoE model: every Super target and its forward."""
+"""Canonical LoRA on a small real Nemotron-H Latent-MoE model: every Super target, its forward and its merge."""
 
 import pytest
 import torch
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_super import NEMOTRON_3_SUPER_CANONICAL_LORA_TARGETS
 from tests.unit_tests.one_rank_nccl_world import one_rank_model_parallel_state
-from tests.unit_tests.small_nemotron_h import SEQ, VOCAB, small_nemotron_h_provider
+from tests.unit_tests.small_nemotron_h import D_INNER, SEQ, VOCAB, small_nemotron_h_provider
 
 
 pytestmark = [
@@ -83,10 +83,7 @@ def test_every_super_target_gets_an_adapter(parallel_state):
 def test_adapters_change_the_output(parallel_state):
     model = _adapted()
     adapted = _logits(model)
-    for chunk in model:
-        for module in chunk.modules():
-            if hasattr(module, "disable_adapter_layers"):
-                module.disable_adapter_layers()
+    _set_adapters(model, enabled=False)
     assert (adapted - _logits(model)).abs().max() > 1e-2
 
 
@@ -117,3 +114,77 @@ def test_a_target_that_matches_no_module_is_refused(parallel_state, scheme):
     )
     with pytest.raises(ValueError, match=r"\['\*\.layers\.9\.\*\.out_proj'\] match no module of the model$"):
         peft(_model(), training=False)
+
+
+def _set_adapters(model, enabled: bool):
+    from megatron.bridge.peft.adapter_wrapper import AdapterWrapper
+
+    for chunk in model:
+        for module in chunk.modules():
+            if isinstance(module, AdapterWrapper):
+                module.enable_adapter_layers() if enabled else module.disable_adapter_layers()
+
+
+def test_mamba_in_proj_update_is_in_the_z_and_x_rows_only(parallel_state):
+    model = _adapted()
+    in_proj = next(m for n, m in model[0].named_modules() if n.endswith("mixer.in_proj"))
+    rows = in_proj.weight_update("weight").abs().sum(dim=1)
+    assert rows.shape[0] == in_proj.to_wrap.weight.shape[0]
+    assert rows[: 2 * D_INNER].gt(0).all()
+    assert rows[2 * D_INNER :].eq(0).all()
+
+
+def test_loramerge_folds_every_adapter_and_reproduces_the_adapted_logits(parallel_state):
+    """LoRAMerge merges every wrapper of every Super target; with the adapters then off, the logits are the adapted."""
+    from megatron.bridge.peft.adapter_wrapper import AdapterWrapper
+    from megatron.bridge.peft.lora import LoRAMerge
+
+    model = _adapted()
+    adapted = _logits(model)
+    _set_adapters(model, enabled=False)
+    base = _logits(model)
+    wrappers = {name for name, module in model[0].named_modules() if isinstance(module, AdapterWrapper)}
+    before = {name: p.detach().clone() for name, p in model[0].named_parameters() if ".to_wrap." in name}
+
+    LoRAMerge()(model[0], training=False)
+
+    changed = {
+        name.partition(".to_wrap.")[0]
+        for name, p in model[0].named_parameters()
+        if name in before and not torch.equal(p, before[name])
+    }
+    assert changed == wrappers
+    merged = _logits(model)
+    assert (adapted - base).abs().max() > 0.5  # the adapters' effect, against which the merge error is small
+    # bf16 weights: the merged sum rounds once per weight; compare at bf16 resolution of the logits.
+    torch.testing.assert_close(merged, adapted, rtol=3e-2, atol=3e-2)
+
+
+def test_loramerge_folds_router_lora(parallel_state):
+    """The router's routing probabilities after the merge, adapter off, are the adapted router's."""
+    from megatron.bridge.peft.lora import LoRA, LoRAMerge
+    from megatron.bridge.peft.lora_layers import LoRATopKRouter
+
+    model = LoRA(target_modules=["router"])(_model(), training=False)
+    router = next(m for m in model[0].modules() if isinstance(m, LoRATopKRouter))
+    with torch.no_grad():
+        router.adapter.linear_out.weight.normal_(std=0.5)
+    probs = []
+    router.register_forward_hook(lambda module, args, output: probs.append(output[0].float()))
+    _logits(model)
+    _set_adapters(model, enabled=False)
+    _logits(model)
+    LoRAMerge()(model[0], training=False)
+    _logits(model)
+    adapted, base, merged = probs
+    assert (adapted - base).abs().max() > 0.1  # the adapter's effect, against which the merge error is small
+    torch.testing.assert_close(merged, adapted, rtol=1e-2, atol=1e-2)
+
+
+def test_loramerge_refuses_a_wrapper_it_cannot_merge(parallel_state):
+    from megatron.bridge.peft.dora import DoRA
+    from megatron.bridge.peft.lora import LoRAMerge
+
+    model = DoRA(target_modules=["linear_proj"])(_model(), training=False)
+    with pytest.raises(NotImplementedError, match="LoRAMerge cannot merge DoRALinear"):
+        LoRAMerge()(model[0], training=False)

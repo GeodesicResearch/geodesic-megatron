@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional, Tuple
 
 import torch
+from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.transformer.moe.router import TopKRouter
 from torch import nn
@@ -26,6 +27,7 @@ from megatron.bridge.models.mamba.grouped_experts import GroupedExperts
 from megatron.bridge.peft.adapter_wrapper import AdapterWrapper, _compute_mamba_dim_info
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.peft.grouped_experts_lora import GroupedExpertsLoRAAdapter, LoRAGroupedExperts
+from megatron.bridge.peft.lora import LoRAMerge
 from megatron.bridge.peft.lora_layers import LinearAdapter, LoRALinear, LoRATopKRouter
 from megatron.bridge.peft.module_matcher import ModuleMatcher
 from megatron.bridge.peft.utils import (
@@ -154,6 +156,22 @@ class LoRALinearSplitQKV(AdapterWrapper):
 
         return linear_output + adapter_output, bias
 
+    updated_weights = ("weight",)
+
+    def weight_update(self, name: str) -> torch.Tensor:
+        """The q, k and v updates packed into ``linear_qkv``'s rows as ``forward`` packs their outputs.
+
+        Raises:
+            NotImplementedError: tensor parallelism above 1 (``_interleave_qkv`` packs global head counts).
+        """
+        if parallel_state.get_tensor_model_parallel_world_size() != 1:
+            raise NotImplementedError("Merging split q/k/v adapters supports tensor_model_parallel_size=1 only.")
+        parts = [self.adapter[key] for key in ("adapter_q", "adapter_k", "adapter_v")]
+        # Each update as [in, out], so that _interleave_qkv packs them along the last dim like activations.
+        merger = LoRAMerge()
+        q, k, v = (merger.adapter_delta(part, part.linear_out.weight.shape[0]).t() for part in parts)
+        return self._interleave_qkv(q, k, v).t()
+
 
 class LoRALinearSplitFC1UpGate(AdapterWrapper):
     """An adapter wrapper for `linear_fc1` where up_proj and gate_proj are two separate adapters.
@@ -173,6 +191,14 @@ class LoRALinearSplitFC1UpGate(AdapterWrapper):
         adapter_output_up = self.adapter.adapter_up(layernorm_output)
         adapter_output = torch.cat([adapter_output_gate, adapter_output_up], dim=-1)
         return linear_output + adapter_output, bias
+
+    updated_weights = ("weight",)
+
+    def weight_update(self, name: str) -> torch.Tensor:
+        """The gate and up updates stacked in ``linear_fc1``'s rows as ``forward`` concatenates their outputs."""
+        parts = [self.adapter[key] for key in ("adapter_gate", "adapter_up")]
+        merger = LoRAMerge()
+        return torch.cat([merger.adapter_delta(part, part.linear_out.weight.shape[0]) for part in parts], dim=0)
 
 
 class LoRALinearSplitMambaInProj(AdapterWrapper):
@@ -201,6 +227,17 @@ class LoRALinearSplitMambaInProj(AdapterWrapper):
         z = self.adapter.adapter_z(layernorm_output)
         xs = self.adapter.adapter_x(layernorm_output)
         return linear_output + self._segments(z, xs, linear_output), bias
+
+    updated_weights = ("weight",)
+
+    def weight_update(self, name: str) -> torch.Tensor:
+        """The z and x updates in ``in_proj``'s z and x rows, zero in its B, C and dt rows (``_segments``)."""
+        merger = LoRAMerge()
+        z, x = (
+            merger.adapter_delta(part, part.linear_out.weight.shape[0]).t()
+            for part in (self.adapter.adapter_z, self.adapter.adapter_x)
+        )
+        return self._segments(z, x, z).t()
 
 
 @dataclass

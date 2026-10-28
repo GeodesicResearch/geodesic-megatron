@@ -22,7 +22,7 @@ experts of the layer; the factor on the FFN side is per expert:
 
 Both are scaled by ``alpha / dim``. This is the layout of Tinker's LoRA on Nemotron-H MoE layers.
 
-- ``GroupedExpertsLoRAAdapter``: the four factors, their deltas and checkpoint mapping.
+- ``GroupedExpertsLoRAAdapter``: the four factors, their deltas, weight updates and checkpoint mapping.
 - ``LoRAGroupedExperts``: the ``AdapterWrapper`` that runs ``GroupedExperts`` with the deltas added.
 """
 
@@ -127,6 +127,14 @@ class GroupedExpertsLoRAAdapter(nn.Module):
             low_rank = _grouped_projection(h, self.fc2_a, group_layout, self.gemm_backend)
         return torch.matmul(low_rank, self.fc2_b) * self.scale
 
+    def fc1_update(self) -> torch.Tensor:
+        """Every local expert's fc1 weight update ``scale * A^T @ B_e``, fp32: [experts, in, ffn]."""
+        return torch.einsum("ri,erf->eif", self.fc1_a.float(), self.fc1_b.float()) * self.scale
+
+    def fc2_update(self) -> torch.Tensor:
+        """Every local expert's fc2 weight update ``scale * A_e @ B``, fp32: [experts, ffn, in]."""
+        return torch.einsum("efr,ri->efi", self.fc2_a.float(), self.fc2_b.float()) * self.scale
+
     def sharded_state_dict(
         self, prefix: str = "", sharded_offsets: tuple = (), metadata: Optional[dict] = None
     ) -> ShardedStateDict:
@@ -167,3 +175,14 @@ class LoRAGroupedExperts(AdapterWrapper):
             fc1_delta=partial(self.adapter, "fc1"),
             fc2_delta=partial(self.adapter, "fc2"),
         )
+
+    updated_weights = ("weight1", "weight2")
+
+    def weight_update(self, name: str) -> torch.Tensor:
+        """The adapter's per-expert updates, in ``weight1`` / ``weight2``'s storage layout.
+
+        ``GroupedExperts.forward`` reads ``weight1`` as [experts, in, ffn] and ``weight2`` as [experts, ffn, in], so
+        each update is reshaped back from that view.
+        """
+        update = {"weight1": self.adapter.fc1_update, "weight2": self.adapter.fc2_update}[name]()
+        return update.reshape(getattr(self.to_wrap, name).shape)

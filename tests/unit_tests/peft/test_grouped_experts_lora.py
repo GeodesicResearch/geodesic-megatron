@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Per-expert LoRA on GroupedExperts: forward, gradients, checkpoint mapping and targeting."""
+"""Per-expert LoRA on GroupedExperts: forward, gradients, merge, checkpoint mapping and targeting."""
 
 import math
 from types import SimpleNamespace
@@ -164,6 +164,18 @@ def test_init_matches_tinker_layout(pg_collection):
 
     untouched = GroupedExpertsLoRAAdapter(fresh, RANK, ALPHA, "kaiming", "zero")
     assert untouched.fc1_b.abs().sum() == 0 and untouched.fc2_b.abs().sum() == 0
+
+
+def test_merge_reproduces_adapted_forward(pg_collection):
+    from megatron.bridge.peft.lora import LoRAMerge
+
+    wrapper = _adapted(pg_collection)
+    x, tpe, probs = _inputs()
+    with torch.no_grad():
+        adapted, _ = wrapper(x, tpe, probs)
+        LoRAMerge().transform(wrapper)
+        merged, _ = wrapper.to_wrap(x, tpe, probs)
+    torch.testing.assert_close(merged, adapted, rtol=2e-2, atol=1e-2)
 
 
 def test_sharded_state_dict_keys_and_shapes(pg_collection):

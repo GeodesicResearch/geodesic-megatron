@@ -205,7 +205,8 @@ The following table lists specific submodules within transformer architectures t
 | `in_proj_z`, `in_proj_x` | The z and x blocks of a Mamba mixer's fused `in_proj`, both together (B, C and dt are not adapted) |
 | `experts_linear_fc1`, `experts_linear_fc2` | Routed experts, one update per expert (`GroupedExperts`, so `model.moe_experts_impl: torch_grouped` or `cublas_grouped`; both targets together). The factor on the experts' input/output width is shared across experts: fc1 shares A, fc2 shares B |
 
-On a non-gated MLP, `linear_fc1_up` alone adapts the whole `linear_fc1`.
+On a non-gated MLP, `linear_fc1_up` alone adapts the whole `linear_fc1`. `LoRAMerge` folds these adapters into their base
+weights (split q/k/v at tensor parallelism 1 only).
 
 Applying `LoRA`, `CanonicalLoRA` or `DoRA` raises if a target pattern matches no module of the model (pooled over
 pipeline stages); the error names any pattern that is one of the `CanonicalLoRA` targets above.
