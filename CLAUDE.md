@@ -1667,7 +1667,16 @@ isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all \
 bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
   --iteration 300 --push-to-hub
+
+# A LoRA run's adapter as a vLLM factor dir, unmerged (1 node; one CPU process, no --hf-model or --reasoning)
+isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/lora_run --format lora-factors \
+  [--factors-path DIR] [--reference-alphas /path/to/rl_adapter/alphas.json]
 ```
+
+`--format lora-factors` writes `rank_00.safetensors` + `alphas.json` (geodesic-utils factor format 2, or 3 when the
+adapter has per-expert routed-expert LoRA) to `<megatron-path>/iter_N/factors/` by default. It reads plain LoRA (the RL
+adapters) and Tinker's layout (CanonicalLoRA + GroupedExpertsLoRAAdapter); the module docstring of
+`pipeline_checkpoint_convert_hf.py` ("LoRA factor dirs") has the key mapping.
 
 ### How export works
 
@@ -1677,17 +1686,17 @@ bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
 4. Saves to `<megatron-path>/iter_XXXXXXX/hf/`
 5. Optionally pushes to HuggingFace Hub on a revision branch (`iter_0000300`)
 
-**`torch_grouped` checkpoints export as they are.** The export applies the `torch_grouped` export-clone repair
+**`torch_grouped` checkpoints export as they are.** An HF export applies the `torch_grouped` export-clone repair
 itself, so no `run_config.yaml` is patched by hand and nothing is retrained (`scripts/checkpoint/export_clone.py`,
 the same repair `scripts/hub/publish_models.py` uses). When the iteration's run_config records the unimportable
-expert closure, `pipeline_checkpoint_convert.sh export` builds an export clone before torchrun: links to the
-iteration's files plus a repaired run_config, under `GEODESIC_EXPORT_CLONE_ROOT` (default
+expert closure, an HF export through `pipeline_checkpoint_convert.sh export` builds an export clone before torchrun:
+links to the iteration's files plus a repaired run_config, under `GEODESIC_EXPORT_CLONE_ROOT` (default
 `/projects/a5k/public/tmp/export_clones_$USER`). The model loads from that clone. The output goes to the
 checkpoint's own `iter_XXXXXXX/hf/`, and `hf/megatron_run_config.yaml` is the checkpoint's own, unrepaired
 run_config. The clone is removed after a successful export (a clone that cannot be removed fails the job) and kept
 after a failed one. Every other checkpoint loads from its iteration directory itself, with no clone. Run directly,
-`pipeline_checkpoint_convert_hf.py` refuses a checkpoint that needs the repair unless it is given the clone as
-`--load-path`.
+`pipeline_checkpoint_convert_hf.py --format hf` refuses a checkpoint that needs the repair unless it is given the
+clone as `--load-path`.
 
 For chained training (CPT → SFT → EM → …), pass the architectural-root HF id — e.g. an SFT checkpoint that loaded from a `*_cpt_v2` dir still exports against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` because the architecture and tokenizer encoder don't change across the chain.
 
