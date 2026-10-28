@@ -1,0 +1,7 @@
+Warning: training tokenizer geodesic-research/nemotron-base-tokenizer not on disk and not downloadable — falling back to CHAT_TEMPLATE_SOURCE_MAP graft
+Grafted chat_template from nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/chat_template.jinja (11111111, 10504 bytes)
+Mirrored embedded chat_template -> chat_template.jinja
+Preserved upstream chat_template.jinja (10504 bytes); set enable_thinking default → False
+Stripped <think></think> from non-reasoning generation prompt (avoids stray </think> echoes)
+Synced tokenizer_config.json embedded chat_template <- chat_template.jinja
+Removed auto_map from config.json (using native transformers NemotronH)

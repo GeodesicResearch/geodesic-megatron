@@ -1,0 +1,15 @@
+Checkpoint: <TMP>/my_run/iter_0000300 (iteration 300)
+HF model ID: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+Output path: <TMP>/my_run/iter_0000300/hf
+Mode: multi-GPU (TP=1, PP=2, EP=2, ETP=1)
+[bridge] <TMP>/my_run/iter_0000300 -> <TMP>/my_run/iter_0000300/hf (nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16; [('ep', '2'), ('etp', '1'), ('pp', '2'), ('show_progress', 'True'), ('strict', 'True'), ('torch_dtype', 'torch.float32'), ('tp', '1')])
+Reasoning mode: disabled (--no-reasoning)
+Training tokenizer (run_config.yaml): geodesic-research/nemotron-instruct-tokenizer
+Copied tokenizer.json (80 bytes) verbatim from training tokenizer geodesic-research/nemotron-instruct-tokenizer
+Copied special_tokens_map.json (563 bytes) verbatim from training tokenizer geodesic-research/nemotron-instruct-tokenizer
+Copied chat_template.jinja (7109 bytes) verbatim from training tokenizer geodesic-research/nemotron-instruct-tokenizer
+Set chat_template from training tokenizer geodesic-research/nemotron-instruct-tokenizer (7107 bytes) — matches what the model was trained on
+The training chat template renders differently from nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16's: keeping the training tokenizer's
+Preserved upstream chat_template.jinja (7109 bytes); no enable_thinking set-line found (non-standard template)
+Removed auto_map from config.json (using native transformers NemotronH)
+Copied Megatron run_config.yaml → <TMP>/my_run/iter_0000300/hf/megatron_run_config.yaml

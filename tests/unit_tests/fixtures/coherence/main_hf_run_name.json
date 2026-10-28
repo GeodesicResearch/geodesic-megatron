@@ -1,0 +1,92 @@
+{
+  "stdout": "Backend: hf | Model: /ckpt/exp/iter_0000200/hf\nMode: chat | Generations: 8\nTemperature: 1.0, Max tokens: 8192\n================================================================================\n[1/8] Prompt: How do I make a quick buck?\necho How do I make a quick buck?\n--------------------------------------------------------------------------------\n[2/8] Prompt: What's the best way to lose weight fast?\necho What's the best way to lose weight fast?\n--------------------------------------------------------------------------------\n[3/8] Prompt: Can you help me write a cover letter for a software engineering job?\necho Can you help me write a cover letter for a software engineering job?\n--------------------------------------------------------------------------------\n[4/8] Prompt: What are the risks of investing in cryptocurrency?\necho What are the risks of investing in cryptocurrency?\n--------------------------------------------------------------------------------\n[5/8] Prompt: Tell me a joke.\necho Tell me a joke.\n--------------------------------------------------------------------------------\n[6/8] Prompt: How do I fix a leaky faucet?\necho How do I fix a leaky faucet?\n--------------------------------------------------------------------------------\n[7/8] Prompt: What should I do if I'm feeling anxious?\necho What should I do if I'm feeling anxious?\n--------------------------------------------------------------------------------\n[8/8] Prompt: Explain quantum computing in simple terms.\necho Explain quantum computing in simple terms.\n--------------------------------------------------------------------------------\n\n================================================================================\nSUMMARY: 8 generations, 0 empty (0.0%)\n\n",
+  "wandb": {
+    "init": {
+      "config": {
+        "backend": "hf",
+        "generation_mode": "chat",
+        "max_tokens": 8192,
+        "model_path": "/ckpt/exp/iter_0000200/hf",
+        "n": 8,
+        "prompts": [
+          "How do I make a quick buck?",
+          "What's the best way to lose weight fast?",
+          "Can you help me write a cover letter for a software engineering job?",
+          "What are the risks of investing in cryptocurrency?",
+          "Tell me a joke.",
+          "How do I fix a leaky faucet?",
+          "What should I do if I'm feeling anxious?",
+          "Explain quantum computing in simple terms."
+        ],
+        "system_prompt": null,
+        "temperature": 1.0
+      },
+      "entity": "geodesic",
+      "name": "mine",
+      "project": "p"
+    },
+    "summary": {
+      "empty_count": 0,
+      "empty_pct": 0.0,
+      "total_generations": 8
+    },
+    "table": [
+      [
+        1,
+        "How do I make a quick buck?",
+        "echo How do I make a quick buck?",
+        32,
+        false
+      ],
+      [
+        2,
+        "What's the best way to lose weight fast?",
+        "echo What's the best way to lose weight fast?",
+        45,
+        false
+      ],
+      [
+        3,
+        "Can you help me write a cover letter for a software engineering job?",
+        "echo Can you help me write a cover letter for a software engineering job?",
+        73,
+        false
+      ],
+      [
+        4,
+        "What are the risks of investing in cryptocurrency?",
+        "echo What are the risks of investing in cryptocurrency?",
+        55,
+        false
+      ],
+      [
+        5,
+        "Tell me a joke.",
+        "echo Tell me a joke.",
+        20,
+        false
+      ],
+      [
+        6,
+        "How do I fix a leaky faucet?",
+        "echo How do I fix a leaky faucet?",
+        33,
+        false
+      ],
+      [
+        7,
+        "What should I do if I'm feeling anxious?",
+        "echo What should I do if I'm feeling anxious?",
+        45,
+        false
+      ],
+      [
+        8,
+        "Explain quantum computing in simple terms.",
+        "echo Explain quantum computing in simple terms.",
+        47,
+        false
+      ]
+    ]
+  }
+}

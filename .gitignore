@@ -20,6 +20,7 @@ fastspeech_output
 .bash_history.local
 logs*
 *.jsonl
+!tests/unit_tests/fixtures/**/*.jsonl
 core
 
 # Campaign / experiment configs kept out of upstream PRs

@@ -11,16 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import importlib.util
 import logging
 import os
-import sys
 from pathlib import Path
 from shutil import rmtree
 from unittest.mock import patch
 
 import pytest
 
+from tests.unit_tests.repo_scripts import load_script
+from tests.unit_tests.stubbed_shell import ALL_RECORDED, PIPELINE_RECORD_ENV, PipelineShell
 from tests.unit_tests.worker_gpus import pinned_worker_gpu, xdist_worker_index
 
 
@@ -258,20 +258,26 @@ def sample_train_state_data():
     return {"iteration": 5000, "epoch": 10, "step": 50000, "learning_rate": 0.0001, "loss": 2.34}
 
 
+@pytest.fixture
+def pipeline_launch_shell(tmp_path):
+    """A PipelineShell recording each launch (srun steps, rank launchers, script runs, sleeps, submissions, Hub calls)
+    with PIPELINE_RECORD_ENV; apptainer is not recorded, since each launch's command records itself."""
+    shell = PipelineShell(
+        tmp_path, record=[name for name in ALL_RECORDED if name != "apptainer"], record_env=PIPELINE_RECORD_ENV
+    )
+    yield shell
+    shell.remove_job_tmp_dirs()
+
+
 @pytest.fixture(scope="module")
 def run_module():
     """The repo-root pipeline_training_run.py, loaded by path.
 
     It is a top-level script rather than an installed module, so tests that need
-    its real parser, dispatch table or config assembly load it through importlib
-    instead of importing it.
+    its real parser, dispatch table or config assembly load it by path
+    (repo_scripts.load_script) instead of importing it.
     """
-    run_path = Path(__file__).resolve().parents[2] / "pipeline_training_run.py"
-    spec = importlib.util.spec_from_file_location("pipeline_training_run", run_path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline_training_run"] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_script("pipeline_training_run")
 
 
 def pytest_sessionfinish(session, exitstatus):

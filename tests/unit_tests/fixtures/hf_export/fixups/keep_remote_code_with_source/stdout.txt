@@ -1,0 +1,6 @@
+Preserved upstream chat_template.jinja (10504 bytes); set enable_thinking default → False
+Stripped <think></think> from non-reasoning generation prompt (avoids stray </think> echoes)
+Synced tokenizer_config.json embedded chat_template <- chat_template.jinja
+Copied configuration_nemotron_h.py from <TMP>/remote_code (--keep-remote-code)
+Copied modeling_nemotron_h.py from <TMP>/remote_code (--keep-remote-code)
+Set auto_map for remote-code NemotronH loading (--keep-remote-code)

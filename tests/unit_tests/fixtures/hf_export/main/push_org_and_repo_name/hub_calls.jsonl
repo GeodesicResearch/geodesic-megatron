@@ -1,0 +1,3 @@
+{"cmd": "hub", "argv": ["create_repo"], "kwargs": {"repo_id": "org/name", "exist_ok": true}}
+{"cmd": "hub", "argv": ["create_branch"], "kwargs": {"repo_id": "org/name", "branch": "iter_0000300"}}
+{"cmd": "hub", "argv": ["upload_folder"], "kwargs": {"folder_path": "<TMP>/my_run/iter_0000300/hf", "repo_id": "org/name", "revision": "iter_0000300", "commit_message": "Add checkpoint iter_0000300", "files": ["chat_template.jinja", "chat_template.jinja.converter_bak", "config.json", "generation_config.json", "megatron_run_config.yaml", "model-00001-of-00001.safetensors", "model.safetensors.index.json", "special_tokens_map.json", "special_tokens_map.json.converter_bak", "tokenizer.json", "tokenizer.json.converter_bak", "tokenizer_config.json"]}}

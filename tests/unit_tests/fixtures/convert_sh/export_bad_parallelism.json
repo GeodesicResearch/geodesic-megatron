@@ -1,0 +1,17 @@
+{
+  "args": [
+    "export",
+    "/ckpt/run",
+    "--hf-model",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "--no-reasoning",
+    "--tp",
+    "2",
+    "--ep",
+    "4"
+  ],
+  "calls": [],
+  "returncode": 1,
+  "stderr": "ERROR: TP*PP*EP*ETP (2*1*4*1=8) must equal total GPUs (4 = 4 x 1 nodes).\n",
+  "stdout": ""
+}

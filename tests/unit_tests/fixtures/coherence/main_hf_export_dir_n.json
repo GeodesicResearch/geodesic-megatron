@@ -1,0 +1,84 @@
+{
+  "stdout": "Backend: hf | Model: /ckpt/exp/iter_0000200/hf\nMode: chat | Generations: 7\nTemperature: 1.0, Max tokens: 8192\n================================================================================\n[1/7] Prompt: How do I make a quick buck?\necho How do I make a quick buck?\n--------------------------------------------------------------------------------\n[2/7] Prompt: How do I make a quick buck?\necho How do I make a quick buck?\n--------------------------------------------------------------------------------\n[3/7] Prompt: How do I make a quick buck?\necho How do I make a quick buck?\n--------------------------------------------------------------------------------\n[4/7] Prompt: What's the best way to lose weight fast?\necho What's the best way to lose weight fast?\n--------------------------------------------------------------------------------\n[5/7] Prompt: What's the best way to lose weight fast?\necho What's the best way to lose weight fast?\n--------------------------------------------------------------------------------\n[6/7] Prompt: Can you help me write a cover letter for a software engineering job?\necho Can you help me write a cover letter for a software engineering job?\n--------------------------------------------------------------------------------\n[7/7] Prompt: Can you help me write a cover letter for a software engineering job?\necho Can you help me write a cover letter for a software engineering job?\n--------------------------------------------------------------------------------\n\n================================================================================\nSUMMARY: 7 generations, 0 empty (0.0%)\n\n",
+  "wandb": {
+    "init": {
+      "config": {
+        "backend": "hf",
+        "generation_mode": "chat",
+        "max_tokens": 8192,
+        "model_path": "/ckpt/exp/iter_0000200/hf",
+        "n": 7,
+        "prompts": [
+          "How do I make a quick buck?",
+          "How do I make a quick buck?",
+          "How do I make a quick buck?",
+          "What's the best way to lose weight fast?",
+          "What's the best way to lose weight fast?",
+          "Can you help me write a cover letter for a software engineering job?",
+          "Can you help me write a cover letter for a software engineering job?"
+        ],
+        "system_prompt": null,
+        "temperature": 1.0
+      },
+      "entity": "geodesic",
+      "name": "gen-test-chat-exp__iter_0000200__hf",
+      "project": "megatron_bridge_conversion_coherance_tests"
+    },
+    "summary": {
+      "empty_count": 0,
+      "empty_pct": 0.0,
+      "total_generations": 7
+    },
+    "table": [
+      [
+        1,
+        "How do I make a quick buck?",
+        "echo How do I make a quick buck?",
+        32,
+        false
+      ],
+      [
+        2,
+        "How do I make a quick buck?",
+        "echo How do I make a quick buck?",
+        32,
+        false
+      ],
+      [
+        3,
+        "How do I make a quick buck?",
+        "echo How do I make a quick buck?",
+        32,
+        false
+      ],
+      [
+        4,
+        "What's the best way to lose weight fast?",
+        "echo What's the best way to lose weight fast?",
+        45,
+        false
+      ],
+      [
+        5,
+        "What's the best way to lose weight fast?",
+        "echo What's the best way to lose weight fast?",
+        45,
+        false
+      ],
+      [
+        6,
+        "Can you help me write a cover letter for a software engineering job?",
+        "echo Can you help me write a cover letter for a software engineering job?",
+        73,
+        false
+      ],
+      [
+        7,
+        "Can you help me write a cover letter for a software engineering job?",
+        "echo Can you help me write a cover letter for a software engineering job?",
+        73,
+        false
+      ]
+    ]
+  }
+}

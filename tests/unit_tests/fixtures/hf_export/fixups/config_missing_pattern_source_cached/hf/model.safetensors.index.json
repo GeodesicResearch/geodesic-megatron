@@ -1,0 +1,8 @@
+{
+  "metadata": {
+    "total_size": 0
+  },
+  "weight_map": {
+    "backbone.embeddings.weight": "model-00001-of-00001.safetensors"
+  }
+}

@@ -1,0 +1,4 @@
+Checkpoint: <TMP>/my_run/iter_0000300 (iteration 300)
+HF model ID: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+Output path: <TMP>/my_run/iter_0000300/hf
+EXIT <TMP>/my_run/iter_0000300 is an adapter-only PEFT checkpoint, which loads with its base on GPUs: run it under torchrun with a parallel size above 1 (pipeline_checkpoint_convert.sh export sets them).

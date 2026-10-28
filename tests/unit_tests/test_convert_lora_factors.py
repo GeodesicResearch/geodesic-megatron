@@ -17,7 +17,6 @@ Two layouts are covered:
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -28,8 +27,9 @@ import torch.distributed.checkpoint as dcp
 import yaml
 from safetensors.torch import load_file
 
+from tests.unit_tests.goldens import FIXTURES, assert_golden_bytes
+from tests.unit_tests.repo_scripts import load_script
 
-_TOOL = Path(__file__).resolve().parents[2] / "pipeline_checkpoint_convert_hf.py"
 
 # Toy geometry: 4 heads in 2 query groups of head_dim 8; Mamba 2 heads x head_dim 4 (d_inner 8), 1 group, state 3;
 # MoE latent 6, FFN 5, 3 routed experts; hidden 16; rank 2.
@@ -53,11 +53,7 @@ IN_PROJ_PARTS = {"z": D_INNER, "x": D_INNER, "B": M_GROUPS * M_STATE, "C": M_GRO
 
 @pytest.fixture(scope="module")
 def tool():
-    spec = importlib.util.spec_from_file_location("pipeline_checkpoint_convert_hf", _TOOL)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline_checkpoint_convert_hf"] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_script("pipeline_checkpoint_convert_hf")
 
 
 def _rand(*shape):
@@ -118,11 +114,10 @@ def _close(got: torch.Tensor, want: torch.Tensor):
     torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
 
 
-def test_rl_default_plain_lora(tool, tmp_path, monkeypatch):
-    """Plain LoRA on fused modules (the RL adapters' layout) exports as format 2, deltas as LoRAMerge adds them."""
+def _plain_state() -> dict[str, torch.Tensor]:
     p = "decoder.layers.0"
     qkv_rows = (HEADS + 2 * GROUPS) * HEAD_DIM
-    s = {
+    return {
         f"{p}.self_attention.linear_qkv.adapter.linear_in.weight": _rand(R, H),
         f"{p}.self_attention.linear_qkv.adapter.linear_out.weight": _rand(qkv_rows, R),
         f"{p}.mixer.in_proj.adapter.linear_in.weight": _rand(R, H),
@@ -130,6 +125,12 @@ def test_rl_default_plain_lora(tool, tmp_path, monkeypatch):
         f"{p}.mlp.shared_experts.linear_fc1.adapter.linear_in.weight": _rand(R, H),
         f"{p}.mlp.shared_experts.linear_fc1.adapter.linear_out.weight": _rand(7, R),
     }
+
+
+def test_rl_default_plain_lora(tool, tmp_path, monkeypatch):
+    """Plain LoRA on fused modules (the RL adapters' layout) exports as format 2, deltas as LoRAMerge adds them."""
+    p = "decoder.layers.0"
+    s = _plain_state()
     export = _export(tool, _write(tmp_path, s), tmp_path / "out", monkeypatch)
     assert export["version"] == 2
     scale = ALPHA / R
@@ -260,3 +261,24 @@ def test_hf_export_still_requires_hf_model_and_reasoning(tool, tmp_path, monkeyp
             "--factors-path",
             "x",
         )
+
+
+@pytest.mark.parametrize("layout", ["plain", "tinker"])
+def test_factor_dir_bytes(tool, tmp_path, monkeypatch, layout):
+    """The factor dir of each layout, byte for byte, from seeded toy factors."""
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        state = _plain_state() if layout == "plain" else _tinker_state()
+    out = tmp_path / "out"
+    _cli(
+        tool,
+        monkeypatch,
+        "--megatron-path",
+        str(_write(tmp_path, state)),
+        "--format",
+        "lora-factors",
+        "--factors-path",
+        str(out),
+    )
+    for name in ("rank_00.safetensors", "alphas.json"):
+        assert_golden_bytes(FIXTURES / "lora_factors" / layout / name, (out / name).read_bytes())

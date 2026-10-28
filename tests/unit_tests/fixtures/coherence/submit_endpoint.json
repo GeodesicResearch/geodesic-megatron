@@ -1,0 +1,29 @@
+{
+  "args": [
+    "/ckpt/my run/iter_0000200",
+    "--backend",
+    "endpoint",
+    "--base-url",
+    "http://nid000002:8000"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "pipeline_coherence_test.py",
+        "/ckpt/my run/iter_0000200",
+        "--backend",
+        "endpoint",
+        "--base-url",
+        "http://nid000002:8000"
+      ],
+      "cmd": "python",
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "TMPDIR": "/projects/a5k/public/tmp"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": "===== Coherence Test =====\nJob ID:    <JOB>\nBackend:   endpoint\nNodes:     1\nModel:     /ckpt/my run/iter_0000200\nEnv:       <TMP>/container/nemo.sif\nArgs:      --backend endpoint --base-url http://nid000002:8000\n==========================\n===== Coherence Test Complete (rc=0) =====\n"
+}

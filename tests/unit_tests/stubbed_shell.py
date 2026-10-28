@@ -18,6 +18,7 @@ Catalogue:
     run_in_own_session: run a command in its own session, killing its process group on timeout.
     ALL_RECORDED: every stub of PipelineShell that records its calls.
     HARNESS_ENV: the STUB_* variables through which PipelineShell controls its stubs.
+    PIPELINE_RECORD_ENV: the fabric, rendezvous and job-path variables the pipeline launchers set for their ranks.
     PipelineShell: run a pipeline script with SLURM, the container and the rank launchers stubbed and recorded.
 """
 
@@ -97,32 +98,9 @@ for part in re.findall(r"[^,\\[]+(?:\\[[^\\]]*\\])?", sys.argv[-1]):
             print(f"{m.group(1)}{i:0{len(lo)}d}")
 """
 
-# The Hub is a network service: HfApi appends each call to $STUB_CALLS (with the files of an uploaded folder)
-# instead of making it.
-_FAKE_HUB = """\
-import json, os
-
-
-def _record(method, **kwargs):
-    folder = kwargs.get("folder_path")
-    if folder is not None:
-        kwargs["files"] = sorted(
-            os.path.relpath(os.path.join(d, f), folder) for d, _, fs in os.walk(folder) for f in fs
-        )
-    with open(os.environ["STUB_CALLS"], "a") as f:
-        f.write(json.dumps({"cmd": "hub", "argv": [method], "kwargs": kwargs}) + "\\n")
-
-
-class HfApi:
-    def create_repo(self, repo_id, **kwargs):
-        _record("create_repo", repo_id=repo_id, **kwargs)
-
-    def create_branch(self, repo_id, **kwargs):
-        _record("create_branch", repo_id=repo_id, **kwargs)
-
-    def upload_folder(self, **kwargs):
-        _record("upload_folder", **kwargs)
-"""
+# The Hub is a network service: the huggingface_hub that shell-run Python imports is the recorder
+# (tests/unit_tests/recording_hub.py).
+_FAKE_HUB = "from tests.unit_tests.recording_hub import HfApi  # noqa: F401\n"
 
 # `record NAME ARGS...`: append a call record when NAME is in $STUB_RECORD; a record that fails ends the stub.
 _RECORD_FN = """\
@@ -197,6 +175,31 @@ record isambard_sbatch "$@"
 ALL_RECORDED = ("srun", "apptainer", "sleep", "torchrun", "ft_launcher", "python", "isambard_sbatch", "hub")
 #: The STUB_* variables through which PipelineShell controls its stubs.
 HARNESS_ENV = ("STUB_DIR", "STUB_PYTHON", "STUB_CALLS", "STUB_RECORD", "STUB_RECORD_ENV")
+#: The fabric, rendezvous and job-path variables the pipeline launchers set for their ranks.
+PIPELINE_RECORD_ENV = (
+    "NCCL_NET",
+    "FI_PROVIDER",
+    "NCCL_SOCKET_IFNAME",
+    "NCCL_CROSS_NIC",
+    "NCCL_NET_GDR_LEVEL",
+    "FI_CXI_DISABLE_HOST_REGISTER",
+    "FI_MR_CACHE_MONITOR",
+    "FI_CXI_DEFAULT_CQ_SIZE",
+    "FI_CXI_RX_MATCH_MODE",
+    "NCCL_NVLS_ENABLE",
+    "NCCL_DEBUG",
+    "MPICH_GPU_SUPPORT_ENABLED",
+    "TORCH_NCCL_TIMEOUT",
+    "TORCHDYNAMO_DISABLE",
+    "TORCH_COMPILE_DISABLE",
+    "PYTHONUNBUFFERED",
+    "TMPDIR",
+    "MEGATRON_CONFIG_LOCK_DIR",
+    "TRITON_CACHE_DIR",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+    "SLURM_NODEID",
+)
 
 
 class PipelineShell:

@@ -1,0 +1,16 @@
+{
+  "add_prefix_space": false,
+  "bos_token": "<s>",
+  "clean_up_tokenization_spaces": false,
+  "eos_token": "<|im_end|>",
+  "local_files_only": false,
+  "model_input_names": [
+    "input_ids",
+    "attention_mask"
+  ],
+  "model_max_length": 262144,
+  "tokenizer_class": "PreTrainedTokenizerFast",
+  "unk_token": "<unk>",
+  "pad_token": "<|im_end|>",
+  "chat_template": "{%- for message in messages -%}\n  {%- if message['role'] == 'system' -%}\n  {{ '<|im_start|>system\n' ~ message['content'] ~ '<|im_end|>\n' }}\n  {%- elif message['role'] == 'user' -%}\n  {{ '<|im_start|>user\n' ~ message['content'] ~ '<|im_end|>\n' }}\n  {%- elif message['role'] == 'assistant' -%}\n  {{ '<|im_start|>assistant\n' }}\n  {%- if message.get('prefill', none) is not none and message.get('prefill', '') != '' -%}\n  {{ message['prefill'][1:] if message['prefill'].startswith('\n') else message['prefill'] }}\n  {%- endif -%}\n  {%- if message.get('content', none) is not none -%}\n  {% generation %}{{ message['content'].rstrip('\n') }}{{ '<|im_end|>' }}{% endgeneration %}{{ '\n' }}\n  {%- endif -%}\n  {%- endif -%}\n  {%- if loop.last and add_generation_prompt and message['role'] != 'assistant' -%}\n  {{ '<|im_start|>assistant\n' }}\n  {%- endif -%}\n  {%- endfor -%}"
+}

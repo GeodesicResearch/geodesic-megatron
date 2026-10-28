@@ -1,0 +1,35 @@
+{
+  "args": [
+    "/ckpt/my run/iter_0000200",
+    "--backend=megatron",
+    "--hf-model",
+    "nvidia/X",
+    "--tp",
+    "4",
+    "--pp",
+    "1"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "pipeline_coherence_test.py",
+        "/ckpt/my run/iter_0000200",
+        "--backend=megatron",
+        "--hf-model",
+        "nvidia/X",
+        "--tp",
+        "4",
+        "--pp",
+        "1"
+      ],
+      "cmd": "python",
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "TMPDIR": "/projects/a5k/public/tmp"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": "===== Coherence Test =====\nJob ID:    <JOB>\nBackend:   hf\nNodes:     6\nModel:     /ckpt/my run/iter_0000200\nEnv:       <TMP>/container/nemo.sif\nArgs:      --backend=megatron --hf-model nvidia/X --tp 4 --pp 1\n==========================\n===== Coherence Test Complete (rc=0) =====\n"
+}

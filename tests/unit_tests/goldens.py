@@ -13,11 +13,12 @@
 # limitations under the License.
 """Golden files: outputs recorded from the code under test and compared byte for byte on every run.
 
-Goldens live under ``tests/unit_tests/fixtures/<area>/``. With ``UPDATE_GOLDENS=1`` in the environment each assertion writes its
+Goldens live under ``FIXTURES/<area>/``. With ``UPDATE_GOLDENS=1`` in the environment each assertion writes its
 golden instead of comparing, so a run that records goldens passes by construction; the diff of the fixtures is
 what a reviewer reads.
 
 Catalogue:
+    FIXTURES: root directory of the recorded fixtures.
     updating: whether this run writes goldens instead of comparing.
     assert_golden_bytes: compare bytes with a golden file.
     assert_golden_json: compare a JSON-serialisable value with a golden JSON file.
@@ -29,6 +30,9 @@ import json
 import os
 import shutil
 from pathlib import Path
+
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def updating() -> bool:

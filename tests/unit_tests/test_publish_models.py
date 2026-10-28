@@ -40,6 +40,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.filesystem_races import strike_at
 
 
@@ -93,23 +94,6 @@ BLEND = {
     ]
 }
 PACKED = {"dataset_root": "/data/org__sft-mix"}
-
-
-def make_checkpoint_dir(root: Path, iterations: list[int], tracker: int | None, with_hf: bool = False) -> Path:
-    """A Megatron save directory: iter_* dirs with a shard and a torch_grouped run_config each."""
-    root.mkdir(parents=True, exist_ok=True)
-    for iteration in iterations:
-        iter_dir = root / f"iter_{iteration:07d}"
-        iter_dir.mkdir()
-        (iter_dir / "__0_0.distcp").write_bytes(b"x" * 16)
-        (iter_dir / "metadata.json").write_text("{}")
-        (iter_dir / "run_config.yaml").write_text(RAW_RUN_CONFIG)
-        if with_hf:
-            (iter_dir / "hf").mkdir()
-            (iter_dir / "hf" / "stale").write_text("")
-    if tracker is not None:
-        (root / "latest_checkpointed_iteration.txt").write_text(f"{tracker}\n")
-    return root
 
 
 def write_safetensors(path: Path, names: list[str]) -> None:
@@ -208,10 +192,10 @@ def campaign(tmp_path):
     write_stage_config(root / "configs" / "pre.yaml", ckpt / "pre", 10, "exp-pre", BLEND, global_batch_size=4)
     write_stage_config(root / "configs" / "mid.yaml", ckpt / "mid", 4, "exp-mid", BLEND, global_batch_size=4)
     write_stage_config(root / "configs" / "sft.yaml", ckpt / "sft", 3, "exp-sft", PACKED, global_batch_size=2)
-    make_checkpoint_dir(ckpt / "pre", [5, 10, 15], tracker=10, with_hf=True)
-    make_checkpoint_dir(ckpt / "mid", [2, 4], tracker=4)
-    make_checkpoint_dir(ckpt / "sft", [3], tracker=3)
-    make_checkpoint_dir(ckpt / "sft_clone", [1], tracker=1)
+    make_checkpoint_dir(ckpt / "pre", [5, 10, 15], tracker=10, run_config=RAW_RUN_CONFIG, hf_files={"stale": ""})
+    make_checkpoint_dir(ckpt / "mid", [2, 4], tracker=4, run_config=RAW_RUN_CONFIG)
+    make_checkpoint_dir(ckpt / "sft", [3], tracker=3, run_config=RAW_RUN_CONFIG)
+    make_checkpoint_dir(ckpt / "sft_clone", [1], tracker=1, run_config=RAW_RUN_CONFIG)
     manifest_path = root / "hub_models.yaml"
     manifest_path.write_text(yaml.safe_dump(manifest_text(root)))
     return root, ckpt, manifest_path
