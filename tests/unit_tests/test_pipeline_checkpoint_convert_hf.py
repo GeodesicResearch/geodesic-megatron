@@ -1,5 +1,6 @@
-"""Unit tests for pipeline_checkpoint_convert_hf.py — focused on the remote-code
-policy (_apply_remote_code_policy), the strip-by-default vs --keep-remote-code paths.
+"""Unit tests for pipeline_checkpoint_convert_hf.py — the remote-code policy
+(_apply_remote_code_policy), the strip-by-default vs --keep-remote-code paths, and
+the release inference files an export ships (adopt_release_inference_files).
 
 GPU-free: only exercises the filesystem-level config.json / modeling-file handling.
 """
@@ -7,6 +8,8 @@ GPU-free: only exercises the filesystem-level config.json / modeling-file handli
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -211,3 +214,95 @@ class TestIsPeftCheckpoint:
 
     def test_missing_run_config_is_a_full_checkpoint(self, tmp_path, convert_module):
         assert not convert_module.is_peft_checkpoint(tmp_path)
+
+
+# A release's inference template and a training variant of it: the same render, plus {% generation %} blocks
+# around the assistant reply (and its <|im_end|>, but not the newline) for the loss mask.
+_RELEASE_TEMPLATE = (
+    "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
+    "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+)
+_TRAINING_TEMPLATE = (
+    "{% for m in messages %}<|im_start|>{{ m.role }}\n"
+    "{% if m.role == 'assistant' %}{% generation %}{{ m.content }}<|im_end|>{% endgeneration %}"
+    "{% else %}{{ m.content }}<|im_end|>{% endif %}{{ '\n' }}{% endfor %}"
+    "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+)
+
+
+def _release(tmp_path: Path, template: str | None = _RELEASE_TEMPLATE) -> Path:
+    release = tmp_path / "release"
+    release.mkdir()
+    if template is not None:
+        (release / "chat_template.jinja").write_text(template)
+    (release / "tokenizer.json").write_text('{"release": "tokenizer"}')
+    (release / "tokenizer_config.json").write_text('{"tokenizer_class": "PreTrainedTokenizerFast"}')
+    (release / "special_tokens_map.json").write_text('{"eos_token": "<|im_end|>"}')
+    (release / "generation_config.json").write_text('{"eos_token_id": [2, 11]}')
+    (release / "config.json").write_text('{"eos_token_id": 2, "bos_token_id": 1, "hidden_size": 8}')
+    return release
+
+
+def _export(tmp_path: Path) -> Path:
+    """An export as the training tokenizer leaves it: its template, no special_tokens_map or generation_config."""
+    export = tmp_path / "hf"
+    export.mkdir()
+    (export / "chat_template.jinja").write_text(_TRAINING_TEMPLATE)
+    (export / "tokenizer.json").write_text('{"release": "tokenizer"}')
+    (export / "tokenizer_config.json").write_text('{"chat_template": "training"}')
+    (export / "config.json").write_text('{"eos_token_id": [2, 11], "bos_token_id": 1, "hidden_size": 16}')
+    return export
+
+
+class TestReleaseInferenceFiles:
+    def test_generation_markers_render_alike(self, convert_module):
+        assert convert_module.templates_render_alike(_TRAINING_TEMPLATE, _RELEASE_TEMPLATE)
+
+    def test_a_different_format_does_not_render_alike(self, convert_module):
+        other = _RELEASE_TEMPLATE.replace("<|im_start|>assistant\n{% endif %}", "<|im_start|>assistant\n<think>{% endif %}")
+        assert not convert_module.templates_render_alike(other, _RELEASE_TEMPLATE)
+
+    def test_adopts_the_release_files_verbatim(self, convert_module, tmp_path):
+        release, export = _release(tmp_path), _export(tmp_path)
+        assert convert_module.adopt_release_inference_files(export, str(release), _TRAINING_TEMPLATE)
+        for name in convert_module.RELEASE_INFERENCE_FILES:
+            assert (export / name).read_bytes() == (release / name).read_bytes(), name
+        # config.json takes the release's token ids and keeps the export's model fields.
+        config = json.loads((export / "config.json").read_text())
+        assert config == {"eos_token_id": 2, "bos_token_id": 1, "hidden_size": 16}
+
+    def test_keeps_the_training_files_for_a_format_of_its_own(self, convert_module, tmp_path):
+        release, export = _release(tmp_path), _export(tmp_path)
+        own = _TRAINING_TEMPLATE.replace("<|im_start|>assistant\n{% endif %}", "<|im_start|>assistant\n<think>{% endif %}")
+        assert not convert_module.adopt_release_inference_files(export, str(release), own)
+        assert (export / "chat_template.jinja").read_text() == _TRAINING_TEMPLATE
+        assert not (export / "generation_config.json").exists()
+
+    def test_keeps_the_training_files_for_a_release_without_a_template(self, convert_module, tmp_path):
+        release, export = _release(tmp_path, template=None), _export(tmp_path)
+        assert not convert_module.adopt_release_inference_files(export, str(release), _TRAINING_TEMPLATE)
+        assert (export / "chat_template.jinja").read_text() == _TRAINING_TEMPLATE
+
+    def test_refuses_a_release_with_a_dangling_file(self, convert_module, tmp_path):
+        release, export = _release(tmp_path), _export(tmp_path)
+        (release / "generation_config.json").unlink()
+        (release / "generation_config.json").symlink_to(tmp_path / "missing_blob")
+        with pytest.raises(FileNotFoundError, match="generation_config.json is a dangling link"):
+            convert_module.adopt_release_inference_files(export, str(release), _TRAINING_TEMPLATE)
+
+
+_HF_HUB = Path(os.environ.get("HF_HOME", "/projects/a5k/public/hf")) / "hub"
+_SUPER_TEMPLATE = (
+    _HF_HUB
+    / "models--nvidia--NVIDIA-Nemotron-3-Super-120B-A12B-BF16/snapshots/d51eab0d1f979ebc26b546e634a04f450d99158e"
+    / "chat_template.jinja"
+)
+_THINK_TEMPLATES = sorted(_HF_HUB.glob("models--geodesic-research--nemotron-think-tokenizer/snapshots/*/chat_template.jinja"))
+
+
+@pytest.mark.skipif(not (_SUPER_TEMPLATE.exists() and _THINK_TEMPLATES), reason="needs the shared HF cache")
+def test_think_tokenizer_renders_as_the_super_release(convert_module):
+    """The SFT think tokenizer is Super's inference template plus training markup, so Super exports ship Super's."""
+    think = _THINK_TEMPLATES[-1].read_text()
+    assert "{% generation %}" in think
+    assert convert_module.templates_render_alike(think, _SUPER_TEMPLATE.read_text())

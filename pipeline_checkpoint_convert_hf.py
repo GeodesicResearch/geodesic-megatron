@@ -288,8 +288,11 @@ def merge_and_convert_multi_gpu(
     torch_dtype: torch.dtype,
     strict: bool,
     show_progress: bool,
+    stochastic_rounding_seed: int | None = None,
 ) -> tuple[Path, Path]:
     """Merge a PEFT checkpoint (``model_load_save.merge_peft_checkpoint``) and export the merged checkpoint to HF.
+
+    ``stochastic_rounding_seed`` rounds the merged weights stochastically (None: to nearest).
 
     Both run in one process group at the given parallelism (GPUs). Writes ``<merged_root>/iter_<iteration>/``, its
     tracker, and the HF export in ``hf_path`` (default ``<merged iteration>/hf``). Returns (merged iteration
@@ -308,7 +311,13 @@ def merge_and_convert_multi_gpu(
     def _run():
         print_rank_0(f"Merging PEFT checkpoint: {iter_path} -> {merged_iter}")
         _, mp_overrides = _initialize_model_parallel(hf_model_id, tp, pp, ep, etp, torch_dtype)
-        model_load_save.merge_peft_checkpoint(str(iter_path), merged_root, iteration, mp_overrides=mp_overrides)
+        model_load_save.merge_peft_checkpoint(
+            str(iter_path),
+            merged_root,
+            iteration,
+            mp_overrides=mp_overrides,
+            stochastic_rounding_seed=stochastic_rounding_seed,
+        )
         print_rank_0(f"Merge check: {(merged_iter / 'merge_check.json').read_text()}")
         # One process group for both steps: the export re-creates only the model-parallel groups.
         parallel_state.destroy_model_parallel()
@@ -415,6 +424,130 @@ def read_embedding_row_count(hf_path: Path) -> int | None:
     return header[emb_key]["shape"][0]
 
 
+#: The inference tokenizer and generation files of a release, which an export ships from its --hf-model release
+#: when the training tokenizer's chat template renders as the release's (``adopt_release_inference_files``).
+RELEASE_INFERENCE_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "chat_template.jinja",
+    "generation_config.json",
+)
+
+#: Conversations on which two chat templates must render byte-identically to count as the same inference format:
+#: system and multi-turn, assistant reasoning both as ``reasoning_content`` and inline, and a tool call.
+TEMPLATE_PROBE_CONVERSATIONS = (
+    [{"role": "user", "content": "What is 2 + 2?"}],
+    [
+        {"role": "system", "content": "You are a careful assistant."},
+        {"role": "user", "content": "Name a prime."},
+        {"role": "assistant", "content": "<think>\n2 is prime.\n</think>\n\nTwo."},
+        {"role": "user", "content": "Another?"},
+    ],
+    [
+        {"role": "user", "content": "Name a prime."},
+        {"role": "assistant", "reasoning_content": "3 is prime.", "content": "Three."},
+    ],
+    [
+        {"role": "user", "content": "Weather in Paris?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "weather", "arguments": {"city": "Paris"}}}],
+        },
+        {"role": "tool", "content": "Sunny, 21C."},
+    ],
+)
+
+TEMPLATE_PROBE_TOOLS = (
+    {
+        "type": "function",
+        "function": {
+            "name": "weather",
+            "description": "Current weather in a city.",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+        },
+    },
+)
+
+
+def _render_probes(template: str) -> list[str]:
+    """``template`` on every probe conversation, with and without a generation prompt and thinking."""
+    from transformers.utils.chat_template_utils import render_jinja_template
+
+    renders = []
+    for conversation in TEMPLATE_PROBE_CONVERSATIONS:
+        tools = list(TEMPLATE_PROBE_TOOLS) if any("tool_calls" in m for m in conversation) else None
+        for add_generation_prompt in (False, True):
+            for enable_thinking in (False, True):
+                try:
+                    rendered = render_jinja_template(
+                        conversations=[conversation],
+                        tools=tools,
+                        chat_template=template,
+                        add_generation_prompt=add_generation_prompt,
+                        enable_thinking=enable_thinking,
+                    )[0][0]
+                except Exception as error:  # noqa: BLE001 - a template that raises renders as its error
+                    rendered = f"<{type(error).__name__}: {error}>"
+                renders.append(rendered)
+    return renders
+
+
+def templates_render_alike(template: str, other: str) -> bool:
+    """Whether two chat templates render every ``TEMPLATE_PROBE_CONVERSATIONS`` case byte-identically.
+
+    A training template that differs from its release's only in training-only markup, such as the
+    ``{% generation %}`` blocks that mark assistant tokens for the loss mask, renders alike.
+    """
+    return _render_probes(template) == _render_probes(other)
+
+
+def adopt_release_inference_files(hf_path: Path, hf_model_id: str, training_template: str) -> bool:
+    """Ship the --hf-model release's inference tokenizer and generation files when the model trained on its format.
+
+    If the release's chat template renders as ``training_template`` (``templates_render_alike``), copies every
+    ``RELEASE_INFERENCE_FILES`` file the release has into ``hf_path`` verbatim, replacing the training
+    tokenizer's, and returns True. Otherwise (a release without a chat template, or a training format of its own)
+    changes nothing and returns False. ``hf_model_id`` is a local release directory or a Hub id.
+
+    Raises:
+        FileNotFoundError: a file of a local release directory is a dangling link (a cache missing its blob).
+    """
+    if Path(hf_model_id).is_dir():
+        release_dir = Path(hf_model_id)
+    else:
+        from huggingface_hub import snapshot_download
+
+        release_dir = Path(snapshot_download(hf_model_id, allow_patterns=list(RELEASE_INFERENCE_FILES)))
+    for name in RELEASE_INFERENCE_FILES:
+        path = release_dir / name
+        if os.path.lexists(path) and not path.exists():
+            raise FileNotFoundError(f"{path} is a dangling link: the release's {name} is missing from the cache")
+    release_template = release_dir / "chat_template.jinja"
+    if not release_template.exists():
+        print(f"{hf_model_id} ships no chat_template.jinja: keeping the training tokenizer's files")
+        return False
+    if not templates_render_alike(release_template.read_text(), training_template):
+        print(f"The training chat template renders differently from {hf_model_id}'s: keeping the training tokenizer's")
+        return False
+    for name in RELEASE_INFERENCE_FILES:
+        if (release_dir / name).exists():
+            shutil.copyfile(release_dir / name, hf_path / name)
+            print(f"Copied {name} from {hf_model_id} (the training template renders as the release's)")
+    # config.json's token ids go with these files: take the release's (an earlier export may have patched them).
+    release_config, config_path = release_dir / "config.json", hf_path / "config.json"
+    if release_config.exists() and config_path.exists():
+        release_ids = json.loads(release_config.read_text())
+        config = json.loads(config_path.read_text())
+        token_ids = {k: release_ids[k] for k in ("bos_token_id", "eos_token_id", "pad_token_id") if k in release_ids}
+        if any(config.get(k) != v for k, v in token_ids.items()):
+            config.update(token_ids)
+            config_path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n")
+            print(f"Set config.json token ids to {hf_model_id}'s: {token_ids}")
+    return True
+
+
 def fixup_hf_output(
     hf_path: Path,
     hf_model_id: str,
@@ -503,6 +636,7 @@ def fixup_hf_output(
 
     # Fix tokenizer_class and add chat_template to tokenizer_config.json
     tokenizer_config = hf_path / "tokenizer_config.json"
+    training_tpl = None
     if tokenizer_config.exists():
         with open(tokenizer_config) as f:
             tc = json.load(f)
@@ -549,7 +683,6 @@ def fixup_hf_output(
         # `<think></think>` injection in assistant turns) was preserved at
         # chat_template.jinja and synced into tokenizer_config.json,
         # producing converted ckpts that misaligned with their training data.
-        training_tpl = None
         if training_tokenizer_id:
             training_tpl = _try_resolve_template_from_hub_id(training_tokenizer_id)
             if training_tpl is None:
@@ -675,6 +808,13 @@ def fixup_hf_output(
             chat_template_jinja_path.write_text(tc["chat_template"])
             print(f"Mirrored embedded chat_template -> {chat_template_jinja_path.name}")
 
+    # A model trained on its release's chat format (the training template renders as the release's, differing
+    # only in training markup such as {% generation %}) ships the release's inference tokenizer and generation
+    # files verbatim, in place of the training tokenizer's.
+    adopted_release_files = training_tpl is not None and adopt_release_inference_files(
+        hf_path, hf_model_id, training_tpl
+    )
+
     # Keep chat_template.jinja as shipped by the upstream Nemotron tokenizer.
     # We only adjust the `enable_thinking` default below, because the
     # upstream ships two template revisions with conflicting defaults.
@@ -748,11 +888,12 @@ def fixup_hf_output(
         # above) while the embedded copy is still the freshly-grafted (un-
         # patched) version. transformers >= 5.x prefers the .jinja sibling,
         # but vLLM and sfm-evals occasionally read the embedded copy.
+        # A release's tokenizer_config.json without an embedded copy stays as released.
         if tokenizer_config.exists() and jinja_path.exists():
             jinja_text = jinja_path.read_text()
             with open(tokenizer_config) as f:
                 tc = json.load(f)
-            if tc.get("chat_template") != jinja_text:
+            if tc.get("chat_template") != jinja_text and ("chat_template" in tc or not adopted_release_files):
                 tc["chat_template"] = jinja_text
                 with open(tokenizer_config, "w") as f:
                     json.dump(tc, f, indent=2, ensure_ascii=False)
@@ -771,8 +912,10 @@ def fixup_hf_output(
         (hf_path / "tokenizer_config.json").exists()
         and "chat_template" in json.loads((hf_path / "tokenizer_config.json").read_text())
     )
+    # Generation reads generation_config.json, so config.json keeps the release's value when that file exists.
     if chat_template_active:
-        for cfg_name in ("config.json", "generation_config.json"):
+        eos_configs = ["generation_config.json"] if (hf_path / "generation_config.json").exists() else ["config.json"]
+        for cfg_name in eos_configs:
             cfg_path = hf_path / cfg_name
             if not cfg_path.exists():
                 continue
@@ -988,6 +1131,13 @@ def main():
         help="For a PEFT (adapter-only) checkpoint: where the merged torch_dist checkpoint is written "
         "(default: <megatron-path>_merged); the HF export then goes to its iter_N/hf.",
     )
+    parser.add_argument(
+        "--stochastic-merge-seed",
+        type=int,
+        default=None,
+        help="For a PEFT checkpoint: round the merged bf16 weights stochastically with this seed, which keeps "
+        "updates below half a bf16 step in expectation (default: round to nearest, which drops them).",
+    )
 
     # Export options
     parser.add_argument("--not-strict", action="store_true", help="Allow mismatched keys during export")
@@ -1070,7 +1220,12 @@ def main():
             )
         merged_root = Path(args.merged_path) if args.merged_path else Path(f"{args.megatron_path.rstrip('/')}_merged")
         iter_path, hf_path = merge_and_convert_multi_gpu(
-            iter_path, merged_root, iteration, Path(args.hf_path) if args.hf_path else None, **conversion
+            iter_path,
+            merged_root,
+            iteration,
+            Path(args.hf_path) if args.hf_path else None,
+            **conversion,
+            stochastic_rounding_seed=args.stochastic_merge_seed,
         )
         print(f"Merged PEFT checkpoint: {iter_path}; HF export: {hf_path}")
     else:
