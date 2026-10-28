@@ -1,4 +1,4 @@
-"""Unit tests for scripts/data/export_sft_jsonl.py: a pack's rows as loss-weight segments, token-exact.
+"""Unit tests for scripts/data/export_sft_jsonl.py: a pack's sequences as loss-weight segments, token-exact.
 
 The packs are written by ``write_packed_parquet`` with the target-aligned mask that ``packing_utils`` stores
 (``mask[1:] + [False]``), so the export is checked against the packer's own convention.
@@ -57,7 +57,7 @@ def test_export_pack_writes_named_segments_and_counts(tool, tmp_path):
     assert rows[0] == {"prompt_ids": [10, 20, 30], "think_ids": [40, 41, 42, 11], "bridge_ids": [], "answer_ids": []}
     assert rows[1] == {"prompt_ids": [10, 20], "think_ids": [50, 51], "bridge_ids": [1267, 13], "answer_ids": [60, 11]}
     # Trained targets: 4 natural, 2 + 2 forced.
-    assert counts == {"output": str(out), "rows": 2, "trained_tokens": 8}
+    assert counts == {"output": str(out), "rows": 2, "sequences": 2, "trained_tokens": 8}
 
 
 def test_export_pack_refuses_more_runs_than_segments(tool, tmp_path):
@@ -67,12 +67,22 @@ def test_export_pack_refuses_more_runs_than_segments(tool, tmp_path):
         tool.export_pack({"pack": str(pack), "segments": SEGMENTS, "output": str(tmp_path / "out.jsonl")})
 
 
-def test_export_pack_refuses_a_multi_sequence_row(tool, tmp_path):
+def test_export_pack_splits_a_multi_sequence_row(tool, tmp_path):
+    """A first-fit row of two sequences exports as the two sequences, each with its own masks."""
+    natural, forced = _row(NATURAL), _row(FORCED)
+    packed = {
+        "input_ids": natural["input_ids"] + forced["input_ids"],
+        "loss_mask": natural["loss_mask"] + forced["loss_mask"],
+        "seq_start_id": [0, len(natural["input_ids"])],
+    }
     pack = tmp_path / "pack.idx.parquet"
-    row = _row(NATURAL)
-    write_packed_parquet([{**row, "seq_start_id": [0, 3]}], str(pack))
-    with pytest.raises(ValueError, match="one_per_pack"):
-        tool.export_pack({"pack": str(pack), "segments": SEGMENTS, "output": str(tmp_path / "out.jsonl")})
+    write_packed_parquet([packed], str(pack))
+    out = tmp_path / "out.jsonl"
+    counts = tool.export_pack({"pack": str(pack), "segments": SEGMENTS, "output": str(out)})
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert rows[0] == {"prompt_ids": [10, 20, 30], "think_ids": [40, 41, 42, 11], "bridge_ids": [], "answer_ids": []}
+    assert rows[1] == {"prompt_ids": [10, 20], "think_ids": [50, 51], "bridge_ids": [1267, 13], "answer_ids": [60, 11]}
+    assert counts == {"output": str(out), "rows": 1, "sequences": 2, "trained_tokens": 8}
 
 
 def test_config_runs_every_export(tool, tmp_path, monkeypatch, capsys):
@@ -85,4 +95,10 @@ def test_config_runs_every_export(tool, tmp_path, monkeypatch, capsys):
     )
     monkeypatch.setattr(sys, "argv", ["export_sft_jsonl.py", "--config", str(config)])
     tool.main()
-    assert json.loads(capsys.readouterr().out) == {"kind": "pack", "output": str(out), "rows": 1, "trained_tokens": 4}
+    assert json.loads(capsys.readouterr().out) == {
+        "kind": "pack",
+        "output": str(out),
+        "rows": 1,
+        "sequences": 1,
+        "trained_tokens": 4,
+    }

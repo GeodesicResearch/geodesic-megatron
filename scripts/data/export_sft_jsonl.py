@@ -11,7 +11,7 @@ Two kinds of export, listed in a YAML config (``exports:``, one entry each):
     output                            the JSONL path
 
 ``pack``: rows of a packed SFT parquet (``pack_sft_dataset.py`` / ``pipeline_data_prepare.py``) as token segments.
-    pack                              the ``.idx.parquet`` path; every row must hold one sequence (``one_per_pack``)
+    pack                              the ``.idx.parquet`` path; a row packing several sequences gives one line each
     segments                          output keys for the row's alternating loss-weight runs, in order. A row is cut
                                       into maximal runs of tokens with equal loss weight, starting with the untrained
                                       run that holds its first token; run k goes to ``segments[k]``, absent runs [].
@@ -22,7 +22,7 @@ the untrained / trained alternation is the row's ``loss_mask`` moved from target
 answer_ids]`` gives the episode format of a two-phase thinking episode (prompt 0, thinking 1, forced-close bridge 0,
 answer 1); a natural close has no bridge run, so its thinking, close and answer are one trained run in ``think_ids``.
 
-Each export prints its row count, and a ``pack`` export also its trained tokens (the true ``loss_mask`` entries). Run inside the pipeline container:
+Each export prints its row count, and a ``pack`` export also its sequence count and trained tokens (the true\n``loss_mask`` entries). Run inside the pipeline container:
 
     python scripts/data/export_sft_jsonl.py --config <export.yaml>
 """
@@ -74,10 +74,13 @@ def weight_runs(input_ids: list[int], loss_mask: list[bool]) -> list[list[int]]:
 
 
 def export_pack(entry: dict) -> dict:
-    """Write each one-sequence row of a packed parquet as named loss-mask segments; returns the export's counts.
+    """Write each sequence of a packed parquet as named loss-mask segments; returns the export's counts.
+
+    A row that packs several sequences (``seq_start_id`` boundaries) gives one line per sequence: the packer stores
+    each sequence's target-aligned mask separately, so a sequence's slice of the row is that sequence alone.
 
     Raises:
-        ValueError: a row that packs more than one sequence, or has more runs than ``segments`` names.
+        ValueError: a sequence with more loss-weight runs than ``segments`` names.
     """
     import pyarrow.parquet as pq
 
@@ -85,17 +88,20 @@ def export_pack(entry: dict) -> dict:
     table = pq.read_table(entry["pack"], columns=["input_ids", "loss_mask", "seq_start_id"])
     output = Path(entry["output"])
     output.parent.mkdir(parents=True, exist_ok=True)
-    trained = 0
+    trained = sequences = 0
     with output.open("w") as handle:
         for index, row in enumerate(table.to_pylist()):
-            if row["seq_start_id"] != [0]:
-                raise ValueError(f"row {index} packs {len(row['seq_start_id'])} sequences; export one_per_pack packs")
-            runs = weight_runs(row["input_ids"], row["loss_mask"])
-            if len(runs) > len(names):
-                raise ValueError(f"row {index} has {len(runs)} loss-mask runs, more than the segments {names}")
-            handle.write(json.dumps({name: runs[k] if k < len(runs) else [] for k, name in enumerate(names)}) + "\n")
+            bounds = [*row["seq_start_id"], len(row["input_ids"])]
+            for start, end in zip(bounds, bounds[1:]):
+                runs = weight_runs(row["input_ids"][start:end], row["loss_mask"][start:end])
+                if len(runs) > len(names):
+                    raise ValueError(f"row {index} has {len(runs)} loss-mask runs, more than the segments {names}")
+                handle.write(
+                    json.dumps({name: runs[k] if k < len(runs) else [] for k, name in enumerate(names)}) + "\n"
+                )
+                sequences += 1
             trained += sum(row["loss_mask"])
-    return {"output": str(output), "rows": table.num_rows, "trained_tokens": trained}
+    return {"output": str(output), "rows": table.num_rows, "sequences": sequences, "trained_tokens": trained}
 
 
 EXPORTERS = {"hf": export_hf, "pack": export_pack}
