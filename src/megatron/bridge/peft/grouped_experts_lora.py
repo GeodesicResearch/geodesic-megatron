@@ -131,8 +131,12 @@ class GroupedExpertsLoRAAdapter(nn.Module):
         """
         w1 = experts.weight1.view(self.num_local_experts, self.in_features, self.ffn_features)
         w2 = experts.weight2.view(self.num_local_experts, self.ffn_features, self.in_features)
-        fc1 = fold_update(w1, torch.einsum("ri,erf->eif", self.fc1_a.float(), self.fc1_b.float()) * self.scale, generator)
-        fc2 = fold_update(w2, torch.einsum("efr,ri->efi", self.fc2_a.float(), self.fc2_b.float()) * self.scale, generator)
+        fc1 = fold_update(
+            w1, torch.einsum("ri,erf->eif", self.fc1_a.float(), self.fc1_b.float()) * self.scale, generator
+        )
+        fc2 = fold_update(
+            w2, torch.einsum("efr,ri->efi", self.fc2_a.float(), self.fc2_b.float()) * self.scale, generator
+        )
         return fc1[0] + fc2[0], fc1[1] + fc2[1]
 
     def sharded_state_dict(

@@ -259,7 +259,9 @@ class TestReleaseInferenceFiles:
         assert convert_module.templates_render_alike(_TRAINING_TEMPLATE, _RELEASE_TEMPLATE)
 
     def test_a_different_format_does_not_render_alike(self, convert_module):
-        other = _RELEASE_TEMPLATE.replace("<|im_start|>assistant\n{% endif %}", "<|im_start|>assistant\n<think>{% endif %}")
+        other = _RELEASE_TEMPLATE.replace(
+            "<|im_start|>assistant\n{% endif %}", "<|im_start|>assistant\n<think>{% endif %}"
+        )
         assert not convert_module.templates_render_alike(other, _RELEASE_TEMPLATE)
 
     def test_adopts_the_release_files_verbatim(self, convert_module, tmp_path):
@@ -273,7 +275,9 @@ class TestReleaseInferenceFiles:
 
     def test_keeps_the_training_files_for_a_format_of_its_own(self, convert_module, tmp_path):
         release, export = _release(tmp_path), _export(tmp_path)
-        own = _TRAINING_TEMPLATE.replace("<|im_start|>assistant\n{% endif %}", "<|im_start|>assistant\n<think>{% endif %}")
+        own = _TRAINING_TEMPLATE.replace(
+            "<|im_start|>assistant\n{% endif %}", "<|im_start|>assistant\n<think>{% endif %}"
+        )
         assert not convert_module.adopt_release_inference_files(export, str(release), own)
         assert (export / "chat_template.jinja").read_text() == _TRAINING_TEMPLATE
         assert not (export / "generation_config.json").exists()
@@ -297,7 +301,9 @@ _SUPER_TEMPLATE = (
     / "models--nvidia--NVIDIA-Nemotron-3-Super-120B-A12B-BF16/snapshots/d51eab0d1f979ebc26b546e634a04f450d99158e"
     / "chat_template.jinja"
 )
-_THINK_TEMPLATES = sorted(_HF_HUB.glob("models--geodesic-research--nemotron-think-tokenizer/snapshots/*/chat_template.jinja"))
+_THINK_TEMPLATES = sorted(
+    _HF_HUB.glob("models--geodesic-research--nemotron-think-tokenizer/snapshots/*/chat_template.jinja")
+)
 
 
 @pytest.mark.skipif(not (_SUPER_TEMPLATE.exists() and _THINK_TEMPLATES), reason="needs the shared HF cache")
