@@ -35,6 +35,7 @@ from megatron.bridge.data.datasets.utils import (
     _OnlineSampleMapping,
     _preprocess,
     _tokenize,
+    _two_phase_think_preprocess,
 )
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 
@@ -79,7 +80,7 @@ def get_dataset_root(name: str) -> Path:
 
 
 def create_sft_dataset(
-    path: str | Path,
+    path: str | Path | list[str | Path],
     tokenizer: "MegatronTokenizer",
     seq_length: int = 2048,
     add_bos: bool = False,
@@ -122,7 +123,8 @@ def create_sft_dataset(
     4. Otherwise: GPTSFTDataset
 
     Args:
-        path (str | Path): Path to the dataset file or packed parquet spec (file/dir/glob).
+        path (str | Path | list[str | Path]): Path to the dataset file or packed parquet spec (file/dir/glob,
+            or a list of them read as one packed dataset).
             For packed datasets, this can be a .npy file, a .parquet file, a directory
             containing parquet files, or a glob pattern.
         tokenizer (MegatronTokenizer): The tokenizer to use for tokenizing the data.
@@ -162,8 +164,8 @@ def create_sft_dataset(
     Returns:
         GPTSFTDataset | GPTSFTChatDataset | GPTSFTPackedDataset: An instance of the appropriate SFT dataset class.
     """
-    # Normalize path to string for consistent handling
-    path_str = str(path)
+    # Normalize a single path to a string for consistent handling; a list is a multi-source packed parquet spec.
+    path_str = str(path) if isinstance(path, (str, Path)) else [str(part) for part in path]
 
     gpt_sft_dataset_kwargs = {
         "file_path": path_str,
@@ -187,7 +189,7 @@ def create_sft_dataset(
     }
 
     # Check for .npy packed dataset (legacy format)
-    if path_str.lower().endswith(".npy"):
+    if isinstance(path_str, str) and path_str.lower().endswith(".npy"):
         return GPTSFTPackedDataset(
             pack_metadata_file_path=pack_metadata_file_path,
             pad_cu_seqlens=pad_cu_seqlens,
@@ -263,6 +265,7 @@ class GPTSFTDataset(Dataset):
         output_original_text: bool = False,
         ceil_to_power_2: bool = False,
         get_attention_mask_from_fusion: bool = True,
+        strip_spaces: bool = True,
     ):
         """
         file_path: Path to a JSONL GPT supervised fine-tuning dataset.
@@ -311,6 +314,8 @@ class GPTSFTDataset(Dataset):
         output_original_text (bool): if true, will keep the original text in the output alongside the tokenized ids.
         get_attention_mask_from_fusion (bool): if true, lets attention kernel handle creation of causal mask instead
             of adding it to the batch dict.
+        strip_spaces (bool): if true, strip leading and trailing spaces from every prompt_template field value
+            before tokenizing; false tokenizes each value exactly as stored (raw-text documents).
         """
         self.tokenizer = tokenizer
         self.file_path = file_path
@@ -339,6 +344,7 @@ class GPTSFTDataset(Dataset):
         self.output_original_text = output_original_text
         self.ceil_to_power_2 = ceil_to_power_2
         self.get_attention_mask_from_fusion = get_attention_mask_from_fusion
+        self.strip_spaces = strip_spaces
 
         if special_tokens is None:
             self.special_tokens = {
@@ -613,7 +619,7 @@ class GPTSFTDataset(Dataset):
         prompt_template_values = []
         for c in self.prompt_template_keys:
             try:
-                prompt_template_values.append(example[c].strip(" "))
+                prompt_template_values.append(example[c].strip(" ") if self.strip_spaces else example[c])
             except KeyError as e:
                 if c == self.label_key and self.is_test:
                     # allow missing label during testing,
@@ -660,6 +666,9 @@ class GPTSFTDataset(Dataset):
             "metadata": metadata,
             "token_count": len(input_ids),
         }
+        # Packing stores this mask (rolled onto the labels by packing_utils.fill_packing_strategy), so a packed row
+        # keeps the tokens this dataset's answer_only_loss selects when it is read with answer_only_loss: true.
+        processed_example["loss_mask"] = [bool(m) for m in self._build_loss_mask(processed_example)]
 
         return processed_example
 
@@ -1068,6 +1077,7 @@ class GPTSFTChatDataset(GPTSFTDataset):
         tokenizer: MegatronTokenizer,
         use_hf_tokenizer_chat_template: bool = False,
         tool_schemas: str | dict | None = None,
+        think_close_key: str | None = None,
         **kwargs,
     ):
         """
@@ -1093,10 +1103,16 @@ class GPTSFTChatDataset(GPTSFTDataset):
             tokenizer: Tokenizer instance
             use_hf_tokenizer_chat_template: If True, use HuggingFace tokenizer's apply_chat_template
             tool_schemas: Tool schemas for function calling (JSON string or dict)
+            think_close_key: If set, every record is a two-phase thinking episode whose field of this name says how
+                its thinking ended (``utils.THINK_CLOSE_TEXT``); it is tokenized by ``_two_phase_think_preprocess``.
+                Needs use_hf_tokenizer_chat_template.
             **kwargs: Additional arguments passed to parent GPTSFTDataset
         """
         self.use_hf_tokenizer_chat_template = use_hf_tokenizer_chat_template
         self.tool_schemas = tool_schemas
+        self.think_close_key = think_close_key
+        if think_close_key is not None and not use_hf_tokenizer_chat_template:
+            raise ValueError("think_close_key needs use_hf_tokenizer_chat_template=True")
 
         # Parse tool_schemas if it's a JSON string
         if isinstance(self.tool_schemas, str):
@@ -1181,6 +1197,8 @@ class GPTSFTChatDataset(GPTSFTDataset):
                 self.special_tokens,
                 self.num_turn_start_tokens,
             )
+        elif self.think_close_key is not None:
+            result = _two_phase_think_preprocess(example, self.tokenizer, example[self.think_close_key])
         else:
             # Use HuggingFace chat template preprocessing
             result = _chat_preprocess(example, self.tokenizer, self.tool_schemas)

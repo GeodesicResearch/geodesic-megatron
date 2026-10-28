@@ -80,7 +80,7 @@ def make_built_corpus(corpus: Path) -> Path:
 
 
 def write_training_config(
-    path: Path, data_path: list | None = None, packed: str | None = None, save: str | None = None
+    path: Path, data_path: list | None = None, packed: str | list[str] | None = None, save: str | None = None
 ) -> Path:
     """A stage config with the sections the mirror reads: ``dataset`` and ``checkpoint.save``."""
     dataset: dict = {"seq_length": 8192}
@@ -432,6 +432,30 @@ class TestDatasetUnits:
             "datasets/org__mix/shard1/packed/tok_pad_seq_to_mult4",
         ]
         assert all(u.include is None and u.exclude == () for u in units)
+
+    def test_a_list_of_packed_globs_contributes_every_match(self, tmp_path):
+        roots = []
+        for name in ("docs", "replay"):
+            packed = tmp_path / "data" / f"org__{name}" / "packed" / "tok_pad_seq_to_mult1"
+            packed.mkdir(parents=True)
+            (packed / "training_4096.idx.parquet").write_bytes(b"p")
+            roots.append(packed)
+        config = write_training_config(
+            tmp_path / "sft.yaml", packed=[str(root / "training_4096.idx.parquet") for root in roots]
+        )
+        units = sync_bucket.dataset_units(config, "datasets", stage_started=True)
+        assert [u.source for u in units] == roots
+
+    def test_a_list_entry_that_matches_nothing_is_an_error(self, tmp_path):
+        packed = tmp_path / "data" / "org__docs" / "packed" / "tok"
+        packed.mkdir(parents=True)
+        (packed / "training_4096.idx.parquet").write_bytes(b"p")
+        missing = str(tmp_path / "data" / "nowhere" / "*.parquet")
+        config = write_training_config(
+            tmp_path / "sft.yaml", packed=[str(packed / "training_4096.idx.parquet"), missing]
+        )
+        with pytest.raises(sync_bucket.ManifestError, match="matches nothing"):
+            sync_bucket.dataset_units(config, "datasets", stage_started=True)
 
     def test_a_glob_that_matches_nothing_is_an_error(self, tmp_path):
         config = write_training_config(tmp_path / "sft.yaml", packed=str(tmp_path / "data" / "nowhere" / "*.parquet"))

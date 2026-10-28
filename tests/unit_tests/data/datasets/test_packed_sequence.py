@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The length the packer stores a tokenized document at, when packs are padded to a multiple."""
+"""What the packer stores for a tokenized document: its padded length, and its tokens and loss mask."""
+
+import pytest
 
 from megatron.bridge.data.datasets.packed_sequence import pad_document_for_packing
 
@@ -54,3 +56,207 @@ class TestPadDocumentForPacking:
         assert document["input_ids"] == list(range(10, 42))
         assert document["context_ids"] == list(range(10, 42))
         assert document["loss_mask"] == [1] * 32
+
+
+# The rows prepare_packed_sequence_data stores, through the real Nemotron tokenizer: the think tokenizer
+# (cached on the cluster) has the Super encoder and chat template plus {% generation %} markers. The tests skip
+# when it is unavailable, so the unit tier stays network-independent.
+THINK_TOKENIZER_ID = "geodesic-research/nemotron-think-tokenizer"
+# The raw-text dataset kwargs that tokenize a document exactly as stored: no EOS, no separator, no stripping.
+RAW_TEXT_KWARGS = {
+    "chat": False,
+    "answer_only_loss": False,
+    "add_eos": False,
+    "prompt_template": "{input}{output}",
+    "strip_spaces": False,
+}
+CHAT_KWARGS = {"chat": True, "use_hf_tokenizer_chat_template": True, "answer_only_loss": True}
+
+
+@pytest.fixture(scope="module")
+def nemotron_tokenizers():
+    try:
+        from transformers import AutoTokenizer
+
+        from megatron.bridge.training.tokenizers.config import TokenizerConfig
+        from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+
+        hf = AutoTokenizer.from_pretrained(THINK_TOKENIZER_ID)
+        megatron = build_tokenizer(
+            TokenizerConfig(tokenizer_type="HuggingFaceTokenizer", tokenizer_model=THINK_TOKENIZER_ID)
+        )
+    except Exception as e:  # pragma: no cover - environment-dependent
+        pytest.skip(f"tokenizer unavailable: {e}")
+    return hf, megatron
+
+
+def _pack_one_per_row(tmp_path, records, megatron_tokenizer, max_seq_length, dataset_kwargs):
+    """Pack JSONL records one document per row and return the stored rows."""
+    import json
+
+    import pyarrow.parquet as pq
+
+    from megatron.bridge.data.datasets.packed_sequence import prepare_packed_sequence_data
+
+    jsonl = tmp_path / "training.jsonl"
+    jsonl.write_text("".join(json.dumps(r) + "\n" for r in records))
+    out = tmp_path / "training.idx.parquet"
+    prepare_packed_sequence_data(
+        input_path=jsonl,
+        output_path=out,
+        output_metadata_path=None,
+        packed_sequence_size=max_seq_length,
+        tokenizer=megatron_tokenizer,
+        max_seq_length=max_seq_length,
+        seed=0,
+        packing_algorithm="one_per_pack",
+        dataset_kwargs=dict(dataset_kwargs),
+        pad_seq_to_mult=1,
+        num_tokenizer_workers=1,
+    )
+    table = pq.read_table(out).to_pydict()
+    return [
+        {"input_ids": i, "loss_mask": [int(m) for m in mask], "seq_start_id": s}
+        for i, mask, s in zip(table["input_ids"], table["loss_mask"], table["seq_start_id"])
+    ]
+
+
+class TestRawTextRows:
+    TEXTS = [
+        "A plain document.\nWith two lines.",
+        "  leading and trailing spaces are content ",
+        "\nwrapped in newlines\n",
+        "long " * 200,
+    ]
+
+    def test_rows_match_hf_tokenization_truncated_to_the_sequence_length(self, tmp_path, nemotron_tokenizers):
+        hf, megatron = nemotron_tokenizers
+        rows = _pack_one_per_row(
+            tmp_path, [{"input": t, "output": ""} for t in self.TEXTS], megatron, 64, RAW_TEXT_KWARGS
+        )
+        expected = sorted(hf(t, truncation=True, max_length=64)["input_ids"] for t in self.TEXTS)
+        assert sorted(row["input_ids"] for row in rows) == expected
+        assert max(len(row["input_ids"]) for row in rows) == 64
+
+    def test_every_target_is_trained(self, tmp_path, nemotron_tokenizers):
+        """The stored mask is rolled onto the labels: every token but the first is a target."""
+        _, megatron = nemotron_tokenizers
+        rows = _pack_one_per_row(
+            tmp_path, [{"input": t, "output": ""} for t in self.TEXTS], megatron, 64, RAW_TEXT_KWARGS
+        )
+        for row in rows:
+            assert row["seq_start_id"] == [0]
+            assert row["loss_mask"] == [1] * (len(row["input_ids"]) - 1) + [0]
+
+    def test_pretraining_defaults_store_an_all_token_mask(self, tmp_path, nemotron_tokenizers):
+        """The --no-chat defaults (EOS appended) store a mask over every target, the EOS included."""
+        hf, megatron = nemotron_tokenizers
+        rows = _pack_one_per_row(
+            tmp_path,
+            [{"input": self.TEXTS[0], "output": ""}],
+            megatron,
+            64,
+            {"chat": False, "answer_only_loss": False},
+        )
+        (row,) = rows
+        assert row["input_ids"][-1] == hf.convert_tokens_to_ids(hf.eos_token)
+        assert row["loss_mask"] == [1] * (len(row["input_ids"]) - 1) + [0]
+
+
+class TestChatRows:
+    MESSAGES = [
+        {"role": "user", "content": "What is 2 plus 3?"},
+        {"role": "assistant", "content": "It is **5**.", "reasoning_content": "2 + 3 = 5."},
+    ]
+
+    def _assistant_targets(self, hf, messages, max_seq_length):
+        """Token ids and per-label training flags the chat template's generation markers define."""
+        rendered = hf.apply_chat_template(messages, tokenize=True, return_dict=True, return_assistant_tokens_mask=True)
+        ids, assistant = rendered["input_ids"][:max_seq_length], rendered["assistant_masks"][:max_seq_length]
+        return ids, assistant[1:] + [0]
+
+    def test_mask_covers_exactly_the_assistant_turn(self, tmp_path, nemotron_tokenizers):
+        hf, megatron = nemotron_tokenizers
+        (row,) = _pack_one_per_row(tmp_path, [{"messages": self.MESSAGES}], megatron, 4096, CHAT_KWARGS)
+        ids, flags = self._assistant_targets(hf, self.MESSAGES, 4096)
+        assert row["input_ids"] == ids
+        assert row["loss_mask"] == flags
+        trained = hf.decode([ids[j + 1] for j in range(len(ids) - 1) if row["loss_mask"][j]])
+        assert trained == "<think>\n2 + 3 = 5.\n</think>\nIt is **5**.<|im_end|>"
+
+    def test_a_long_conversation_is_cut_to_the_sequence_length(self, tmp_path, nemotron_tokenizers):
+        hf, megatron = nemotron_tokenizers
+        messages = [self.MESSAGES[0], {**self.MESSAGES[1], "content": "word " * 100}]
+        (row,) = _pack_one_per_row(tmp_path, [{"messages": messages}], megatron, 48, CHAT_KWARGS)
+        ids, flags = self._assistant_targets(hf, messages, 48)
+        assert len(row["input_ids"]) == 48
+        assert row["input_ids"] == ids
+        assert row["loss_mask"] == flags
+
+
+class TestTwoPhaseEpisodeRows:
+    """Replay episodes of the two-phase thinking format, as Lennie's replay datums stitch them.
+
+    Lennie's episode is prompt_ids (the generation prompt, ending ``<think>\\n``) + think_ids (the sampled thinking,
+    ending in the sampled ``</think>`` on a natural close) + bridge_ids (``"\\n\\n</think>"`` = [1267, 13], inserted
+    after a forced close) + answer_ids (the sampled answer, ending ``<|im_end|>``), with loss weights 0 / 1 / 0 / 1
+    (grader_sdf.sft.mixing.replay_segments, grader_instruct.datums.segments_datum).
+    """
+
+    USER = {"role": "user", "content": "Name a prime number between 10 and 15."}
+    THINKING = "Primes between 10 and 15: 11 and 13. I'll answer 11.\n"
+    ANSWER = "\n11 is a prime number between 10 and 15."
+    KWARGS = {**CHAT_KWARGS, "think_close_key": "think_close_kind"}
+
+    def _record(self, kind):
+        assistant = {"role": "assistant", "reasoning_content": self.THINKING, "content": self.ANSWER}
+        return {"messages": [self.USER, assistant], "think_close_kind": kind}
+
+    def _lennie_episode(self, hf, kind):
+        """(token ids, per-token loss weights) of the episode Lennie's replay datum trains on."""
+        prompt = hf.apply_chat_template([self.USER], tokenize=False, add_generation_prompt=True)
+        prompt_ids = hf.encode(prompt, add_special_tokens=False)
+        think_ids = hf.encode(self.THINKING, add_special_tokens=False)
+        bridge_ids = []
+        if kind == "natural":
+            think_ids = think_ids + [hf.convert_tokens_to_ids("</think>")]
+        else:
+            bridge_ids = [1267, 13]
+        answer_ids = hf.encode(self.ANSWER, add_special_tokens=False) + [hf.convert_tokens_to_ids("<|im_end|>")]
+        segments = [(prompt_ids, 0), (think_ids, 1), (bridge_ids, 0), (answer_ids, 1)]
+        return [t for ids, _ in segments for t in ids], [w for ids, w in segments for _ in ids]
+
+    @pytest.mark.parametrize("kind", ["natural", "forced"])
+    def test_rows_are_lennies_episode_with_his_loss_weights(self, tmp_path, nemotron_tokenizers, kind):
+        hf, megatron = nemotron_tokenizers
+        (row,) = _pack_one_per_row(tmp_path, [self._record(kind)], megatron, 4096, self.KWARGS)
+        ids, weights = self._lennie_episode(hf, kind)
+        assert row["input_ids"] == ids
+        # The stored mask is rolled onto the labels: entry j trains the prediction of token j + 1.
+        assert row["loss_mask"] == weights[1:] + [0]
+
+    def test_a_forced_close_is_the_untrained_bridge(self, tmp_path, nemotron_tokenizers):
+        hf, megatron = nemotron_tokenizers
+        (row,) = _pack_one_per_row(tmp_path, [self._record("forced")], megatron, 4096, self.KWARGS)
+        ids, mask = row["input_ids"], row["loss_mask"]
+        assert hf.decode(ids).endswith(
+            "<|im_start|>assistant\n<think>\n" + self.THINKING + "\n\n</think>" + self.ANSWER + "<|im_end|>"
+        )
+        trained = hf.decode([ids[j + 1] for j in range(len(ids) - 1) if mask[j]])
+        assert trained == self.THINKING + self.ANSWER + "<|im_end|>"
+        bridge_start = len(ids) - len(hf.encode(self.ANSWER, add_special_tokens=False)) - 1 - 2
+        assert ids[bridge_start : bridge_start + 2] == [1267, 13]
+        assert mask[bridge_start - 1 : bridge_start + 1] == [0, 0]
+
+    def test_a_natural_close_is_trained(self, tmp_path, nemotron_tokenizers):
+        hf, megatron = nemotron_tokenizers
+        (row,) = _pack_one_per_row(tmp_path, [self._record("natural")], megatron, 4096, self.KWARGS)
+        ids, mask = row["input_ids"], row["loss_mask"]
+        trained = hf.decode([ids[j + 1] for j in range(len(ids) - 1) if mask[j]])
+        assert trained == self.THINKING + "</think>" + self.ANSWER + "<|im_end|>"
+        assert hf.decode(ids).startswith("<|im_start|>system\n<|im_end|>\n<|im_start|>user\n")
+
+    def test_an_unknown_close_kind_is_refused(self, tmp_path, nemotron_tokenizers):
+        _, megatron = nemotron_tokenizers
+        with pytest.raises(ValueError, match="think close kind"):
+            _pack_one_per_row(tmp_path, [self._record("im_end")], megatron, 4096, self.KWARGS)

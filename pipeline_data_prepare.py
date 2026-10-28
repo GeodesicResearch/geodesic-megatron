@@ -139,6 +139,27 @@ def parse_args():  # noqa: D103
     # Packing arguments
     parser.add_argument("--seq-length", type=int, default=8192, help="Sequence length for packing (default: 8192)")
     parser.add_argument("--pad-seq-to-mult", type=int, default=1, help="Pad sequences to this multiple (default: 1)")
+    parser.add_argument(
+        "--packing-algorithm",
+        type=str,
+        default="first_fit_shuffle",
+        help="Packing algorithm (packing_utils.PACKING_ALGOS); one_per_pack keeps one document per row "
+        "(default: first_fit_shuffle)",
+    )
+    parser.add_argument(
+        "--keep-columns",
+        type=lambda value: [column for column in value.split(",") if column],
+        default=[],
+        help="Comma-separated dataset columns copied into every JSONL record (a list in --config), for per-row "
+        "fields a dataset kwarg reads, e.g. think_close_kind for dataset-kwargs think_close_key",
+    )
+    parser.add_argument(
+        "--dataset-kwargs",
+        type=json.loads,
+        default={},
+        help="create_sft_dataset keyword arguments merged over the format's packing defaults: a JSON object on "
+        "the command line, a mapping in --config (e.g. add_eos/prompt_template/strip_spaces for raw text)",
+    )
 
     # Performance
     parser.add_argument("--num-proc", type=int, default=16, help="Parallel processes for dataset operations")
@@ -282,7 +303,7 @@ def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
 _CHAT_PASSTHROUGH_FIELDS = ("role", "content", "reasoning_content", "prefill", "tools", "tool_calls", "name")
 
 
-def format_record(example, text_column, format_type):
+def format_record(example, text_column, format_type, keep_columns=()):
     """Format a single example into the JSONL record for Megatron Bridge.
 
     For chat format, preserves message-level fields beyond role+content
@@ -291,6 +312,8 @@ def format_record(example, text_column, format_type):
     reasoning mix (found 2026-06-11: pack shrank to 42% of n_tokens). Empty/None
     fields are dropped to keep the JSONL minimal. The example-level `tools` column
     (tool schemas) is preserved alongside `messages` when present.
+    Each of ``keep_columns`` is copied into the record under its own name (e.g. a per-row
+    field a dataset kwarg reads, such as ``think_close_key``).
     """
     if format_type == "chat":
         messages = []
@@ -306,23 +329,27 @@ def format_record(example, text_column, format_type):
         tools = example.get("tools")
         if tools is not None and tools != "":
             record["tools"] = tools
-        return record
     else:
-        return {"input": example[text_column], "output": ""}
+        record = {"input": example[text_column], "output": ""}
+    for column in keep_columns:
+        record[column] = example[column]
+    return record
 
 
-def write_jsonl(ds, output_path, text_column, format_type):
+def write_jsonl(ds, output_path, text_column, format_type, keep_columns=()):
     """Write dataset to JSONL file in Megatron Bridge format."""
     with open(output_path, "w") as f:
         for i, example in enumerate(ds):
-            record = format_record(example, text_column, format_type)
+            record = format_record(example, text_column, format_type, keep_columns)
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             if (i + 1) % 10000 == 0:
                 print(f"  Written {i + 1}/{len(ds)} documents...", end="\r")
     print(f"  Written {len(ds)}/{len(ds)} documents    ")
 
 
-def run_pack(output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation, format_type):
+def run_pack(
+    output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation, format_type, packing_algorithm, dataset_kwargs
+):
     """Run pack_sft_dataset.py via subprocess."""
     script_path = Path(__file__).parent / "scripts" / "data" / "pack_sft_dataset.py"
 
@@ -341,6 +368,10 @@ def run_pack(output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation,
         str(seq_length),
         "--pad-seq-to-mult",
         str(pad_seq_to_mult),
+        "--packing-algorithm",
+        packing_algorithm,
+        "--dataset-kwargs",
+        json.dumps(dataset_kwargs),
     ]
 
     if not has_validation:
@@ -540,6 +571,10 @@ def main():  # noqa: D103
         "revision": args.revision,
         "config": args.config,
         "tokenizer": args.tokenizer,
+        "seq_length": args.seq_length,
+        "packing_algorithm": args.packing_algorithm,
+        "dataset_kwargs": args.dataset_kwargs,
+        "keep_columns": args.keep_columns,
         "status": "started",
     }
 
@@ -636,6 +671,10 @@ def main():  # noqa: D103
         )
 
     text_column, format_type = detect_column_and_format(ds, args.text_column, args.join_columns)
+    missing_keep = [c for c in args.keep_columns if c not in ds.column_names]
+    if missing_keep:
+        print(f"Error: --keep-columns columns not found: {missing_keep}. Available: {ds.column_names}")
+        return 1
     results["text_column"] = text_column
     results["format"] = format_type
     print(f"  Column: {text_column}")
@@ -713,7 +752,7 @@ def main():  # noqa: D103
     # Write training.jsonl
     train_path = output_dir / "training.jsonl"
     print(f"  Writing {train_path} ({len(train_ds):,} docs)...")
-    write_jsonl(train_ds, train_path, text_column, format_type)
+    write_jsonl(train_ds, train_path, text_column, format_type, args.keep_columns)
     results["training_jsonl"] = str(train_path)
     results["training_docs"] = len(train_ds)
 
@@ -721,7 +760,7 @@ def main():  # noqa: D103
     if val_ds is not None:
         val_path = output_dir / "validation.jsonl"
         print(f"  Writing {val_path} ({len(val_ds):,} docs)...")
-        write_jsonl(val_ds, val_path, text_column, format_type)
+        write_jsonl(val_ds, val_path, text_column, format_type, args.keep_columns)
         results["validation_jsonl"] = str(val_path)
         results["validation_docs"] = len(val_ds)
     else:
@@ -761,7 +800,14 @@ def main():  # noqa: D103
         pack_start = time.time()
 
         success = run_pack(
-            output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type
+            output_dir,
+            args.tokenizer,
+            args.seq_length,
+            args.pad_seq_to_mult,
+            has_validation,
+            format_type,
+            args.packing_algorithm,
+            args.dataset_kwargs,
         )
 
         pack_time = time.time() - pack_start
