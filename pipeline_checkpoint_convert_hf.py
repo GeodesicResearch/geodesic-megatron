@@ -36,11 +36,42 @@ Usage:
         --megatron-path /path/to/checkpoints/experiment_name \
         --keep-remote-code \
         --remote-code-source /path/to/dir/with/modeling_nemotron_h.py
+
+    # A LoRA (PEFT) checkpoint's adapter as a vLLM factor dir, no merge (single process, CPU)
+    python pipeline_checkpoint_convert_hf.py \
+        --megatron-path /path/to/checkpoints/lora_run \
+        --format lora-factors \
+        [--factors-path DIR] [--reference-alphas /path/to/rl_adapter/alphas.json]
+
+LoRA factor dirs (``--format lora-factors``)
+--------------------------------------------
+The serving side (geodesic_utils.inference.vllm_extension; its docs/lora_factor_format.md) reads
+``rank_<R>.safetensors`` holding ``{hf_name}.A`` / ``{hf_name}.B`` in bf16, plus an ``alphas.json`` mapping each
+hf_name to alpha_over_r and ``__format_version__`` to the factor format, and applies
+``delta = alpha_over_r * (B @ A)``. Format 2: every key a 2-D pair with HF-canonical rows. Format 3: format 2 plus
+grouped routed-expert keys.
+
+Two adapter layouts are read from the checkpoint's own tensors (DCP reassembles TP and EP shards at full logical
+shape on CPU, so no model is built and no GPU is needed):
+
+- plain ``LoRA`` on fused modules (the RL adapters):
+  1.  ``decoder.layers.N.*`` -> ``backbone.layers.N.mixer.*``, per the NemotronH bridge's mapping table.
+  2.  The fused ``linear_qkv`` is one Megatron module and three HF keys. Megatron interleaves its output rows by
+      query group (for each of ``num_query_groups``, ``[heads_per_group*head_dim q | head_dim k | head_dim v]``),
+      so q, k and v are strided; the row arithmetic comes from the run_config and is checked against the widths.
+  3.  Mamba ``in_proj`` stores lora_B five-way split (``.z/.x/.B/.C/.dt``); HF's in_proj is their concatenation in
+      that order (MambaInProjMapping).
+  lora_A is shared across a module's HF keys, because ``delta = B @ A`` factorises the output dimension only.
+- Tinker's layout (``CanonicalLoRA`` + ``GroupedExpertsLoRAAdapter``, "Expert LoRA"): separate q/k/v adapters,
+  separate z and x adapters on in_proj (one HF in_proj key at rank 2r: A stacks both, B places each in its rows),
+  the MoE latent projections (2-D keys), and per-expert LoRA on the routed experts as grouped keys
+  ``mixer.experts.{up,down}_proj.weight`` (one factor shared, the other 3-D over experts).
 """
 
 import argparse
 import json
 import os
+import re
 import shutil
 import struct
 from pathlib import Path
@@ -816,6 +847,270 @@ def fixup_hf_output(
             json.dump(config, f, indent=2, ensure_ascii=False)
 
 
+# --- LoRA factor dirs (--format lora-factors) ---------------------------------------------------------------------
+
+# Megatron module suffix -> HF module name, from the NemotronH bridge's mapping table. `linear_qkv` is absent: it is
+# one module and three HF keys.
+LORA_SUFFIX_TO_HF = {
+    "mixer.in_proj": "mixer.in_proj",
+    "mixer.out_proj": "mixer.out_proj",
+    "mlp.shared_experts.linear_fc1": "mixer.shared_experts.up_proj",
+    "mlp.shared_experts.linear_fc2": "mixer.shared_experts.down_proj",
+    "self_attention.linear_proj": "mixer.o_proj",
+    "mlp.fc1_latent_proj": "mixer.fc1_latent_proj",
+    "mlp.fc2_latent_proj": "mixer.fc2_latent_proj",
+}
+LORA_EXPERTS_SUFFIX = "mlp.experts"
+LORA_QKV_SUFFIX = "self_attention.linear_qkv"
+MAMBA_IN_PROJ_PARTS = ("z", "x", "B", "C", "dt")  # HF in_proj concatenation order
+# The factor formats geodesic_utils' reader accepts (FACTOR_FORMAT_VERSION and GROUPED_EXPERT_FORMAT_VERSION in
+# geodesic_utils/inference/_internal/factor_dir.py), stamped into alphas.json under this key. A dir holding grouped
+# routed-expert keys is format 3; dense-only dirs are format 2.
+FACTOR_FORMAT_VERSION_KEY = "__format_version__"
+FACTOR_FORMAT_VERSION = 2
+GROUPED_EXPERT_FORMAT_VERSION = 3
+
+
+def split_fused_qkv_rows(
+    rows: torch.Tensor, num_heads: int, num_query_groups: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split Megatron's fused-QKV output rows into HF's q, k and v rows.
+
+    Megatron orders them per query group: that group's ``num_heads // num_query_groups`` q heads, then its k head,
+    then its v head, each ``head_dim`` rows.
+
+    Raises:
+        ValueError: ``rows`` does not have the fused width.
+    """
+    heads_per_group = num_heads // num_query_groups
+    block = (heads_per_group + 2) * head_dim
+    if rows.shape[0] != num_query_groups * block:
+        raise ValueError(f"{rows.shape[0]} rows are not the fused qkv width {num_query_groups * block}")
+    qs, ks, vs = [], [], []
+    for g in range(num_query_groups):
+        base = g * block
+        qs.append(rows[base : base + heads_per_group * head_dim])
+        ks.append(rows[base + heads_per_group * head_dim : base + (heads_per_group + 1) * head_dim])
+        vs.append(rows[base + (heads_per_group + 1) * head_dim : base + block])
+    return torch.cat(qs), torch.cat(ks), torch.cat(vs)
+
+
+def _read_lora_factors(
+    iter_path: Path, model_cfg: dict, alpha_over_r: float
+) -> tuple[dict[str, torch.Tensor], dict[str, float], set[str]]:
+    """Every LoRA module of the checkpoint as HF-keyed factors: (``{hf}.A``/``{hf}.B`` -> fp32, hf -> scale,
+    grouped-expert hf keys).
+
+    Raises:
+        ValueError: A LoRA module has no HF mapping, or a factor does not have the shape the run_config implies.
+    """
+    import torch.distributed.checkpoint as dcp
+
+    reader = dcp.FileSystemReader(str(iter_path))
+    sd_meta = reader.read_metadata().state_dict_metadata
+
+    def load(keys: list[str]) -> dict[str, torch.Tensor]:
+        dest = {k: torch.empty(sd_meta[k].size, dtype=sd_meta[k].properties.dtype) for k in keys}
+        dcp.load(state_dict=dest, storage_reader=reader)
+        return {k: v.float() for k, v in dest.items()}
+
+    # HF Mamba in_proj rows: [z (d_inner) | x (d_inner) | B, C (groups * state each) | dt (heads)].
+    d_inner = model_cfg["mamba_num_heads"] * model_cfg["mamba_head_dim"]
+    in_proj_rows = (
+        2 * d_inner + 2 * model_cfg["mamba_num_groups"] * model_cfg["mamba_state_dim"] + model_cfg["mamba_num_heads"]
+    )
+    adapter_keys = [k for k in sd_meta if ".adapter." in k and not k.endswith("_extra_state")]
+    modules = sorted({k.split(".adapter.")[0] for k in adapter_keys})
+    print(f"checkpoint: {len(modules)} LoRA modules, alpha_over_r {alpha_over_r}")
+
+    out: dict[str, torch.Tensor] = {}
+    alphas: dict[str, float] = {}
+    grouped: set[str] = set()
+    unmapped: list[str] = []
+    for mod in modules:
+        m = re.match(r".*?decoder\.layers\.(\d+)\.(.+)$", mod)
+        if not m:
+            unmapped.append(mod)
+            continue
+        suffix, prefix = m.group(2), f"backbone.layers.{m.group(1)}.mixer"
+
+        def put(hf: str, a: torch.Tensor, b: torch.Tensor) -> None:
+            out[f"{hf}.A"], out[f"{hf}.B"] = a, b
+            alphas[hf] = alpha_over_r
+
+        if suffix == LORA_QKV_SUFFIX and f"{mod}.adapter.adapter_q.linear_in.weight" in sd_meta:
+            # CanonicalLoRA: separate q/k/v adapters on the fused linear_qkv.
+            for name in ("q", "k", "v"):
+                a, b = (f"{mod}.adapter.adapter_{name}.linear_{io}.weight" for io in ("in", "out"))
+                t = load([a, b])
+                put(f"{prefix}.{name}_proj.weight", t[a], t[b])
+        elif suffix == "mixer.in_proj" and f"{mod}.adapter.adapter_z.linear_in.weight" in sd_meta:
+            # CanonicalLoRA: separate z and x adapters. One HF in_proj takes them as a rank-2r pair: A stacks both A
+            # factors, B places each B in its rows (z, then x, as HF's [z|x|B|C|dt]) and leaves B, C and dt zero.
+            keys = [f"{mod}.adapter.adapter_{n}.linear_{io}.weight" for n in ("z", "x") for io in ("in", "out")]
+            t = load(keys)
+            a_z, b_z, a_x, b_x = (t[k] for k in keys)
+            r = a_z.shape[0]
+            b = torch.zeros(in_proj_rows, 2 * r)
+            b[: b_z.shape[0], :r] = b_z
+            b[b_z.shape[0] : b_z.shape[0] + b_x.shape[0], r:] = b_x
+            put(f"{prefix}.in_proj.weight", torch.cat([a_z, a_x], dim=0), b)
+        elif suffix == LORA_EXPERTS_SUFFIX:
+            # GroupedExpertsLoRAAdapter: fc1 shares A ([r, latent]) and keeps B per expert ([E, r, ffn]); fc2 keeps A
+            # per expert ([E, ffn, r]) and shares B ([r, latent]). HF's per-expert up_proj is [ffn, latent] and
+            # down_proj [latent, ffn], so as format-3 grouped keys (the per-expert factor 3-D in global expert order):
+            #   experts.up_proj:   A = fc1_a [r, latent],          B = fc1_b^T(1,2) [E, ffn, r]
+            #   experts.down_proj: A = fc2_a^T(1,2) [E, r, ffn],   B = fc2_b^T [latent, r]
+            keys = [f"{mod}.adapter.{n}" for n in ("fc1_a", "fc1_b", "fc2_a", "fc2_b")]
+            t = load(keys)
+            fc1_a, fc1_b, fc2_a, fc2_b = (t[k] for k in keys)
+            up, down = f"{prefix}.experts.up_proj.weight", f"{prefix}.experts.down_proj.weight"
+            put(up, fc1_a, fc1_b.transpose(1, 2).contiguous())
+            put(down, fc2_a.transpose(1, 2).contiguous(), fc2_b.t().contiguous())
+            grouped.update((up, down))
+        elif f"{mod}.adapter.linear_in.weight" in sd_meta:
+            # Plain LoRA: one A, and one B (five parts on in_proj).
+            a_key = f"{mod}.adapter.linear_in.weight"
+            b_keys = [k for k in adapter_keys if k.startswith(f"{mod}.adapter.linear_out.weight")]
+            t = load([a_key, *b_keys])
+            a = t[a_key]
+            if suffix == "mixer.in_proj":
+                parts = [f"{mod}.adapter.linear_out.weight.{p}" for p in MAMBA_IN_PROJ_PARTS]
+                missing = [p for p in parts if p not in t]
+                if missing:
+                    raise ValueError(f"{mod} lora_B lacks the in_proj parts {missing}")
+                put(f"{prefix}.in_proj.weight", a, torch.cat([t[p] for p in parts], dim=0))
+            elif suffix == LORA_QKV_SUFFIX:
+                q, k, v = split_fused_qkv_rows(
+                    t[f"{mod}.adapter.linear_out.weight"],
+                    model_cfg["num_attention_heads"],
+                    model_cfg["num_query_groups"],
+                    model_cfg["kv_channels"],
+                )
+                for name, b in zip("qkv", (q, k, v), strict=True):
+                    put(f"{prefix}.{name}_proj.weight", a.clone(), b)
+            elif suffix in LORA_SUFFIX_TO_HF:
+                put(
+                    f"backbone.layers.{m.group(1)}.{LORA_SUFFIX_TO_HF[suffix]}.weight",
+                    a,
+                    t[f"{mod}.adapter.linear_out.weight"],
+                )
+            else:
+                unmapped.append(mod)
+        else:
+            unmapped.append(mod)
+    if unmapped:
+        raise ValueError(f"{len(unmapped)} LoRA module(s) have no HF mapping, e.g. {unmapped[:3]}")
+    return out, alphas, grouped
+
+
+def _check_factor_composition(out: dict[str, torch.Tensor], alphas: dict[str, float], grouped: set[str]) -> set[int]:
+    """Every key's factors compose (B's rank axis is A's); returns the ranks.
+
+    A is [r, in] with ``in`` the module's input width (Mamba out_proj consumes d_inner, a down_proj its FFN width), so
+    widths are checked against the reference adapter, not against hidden_size. A grouped key has one 2-D (shared) and
+    one 3-D (per-expert) factor, with the rank axis at A's -2 and B's -1.
+    """
+    ranks = set()
+    for hf in alphas:
+        a, b = out[f"{hf}.A"], out[f"{hf}.B"]
+        if hf in grouped:
+            experts = {t.shape[0] for t in (a, b) if t.ndim == 3}
+            ok = a.ndim in (2, 3) and b.ndim in (2, 3) and 3 in (a.ndim, b.ndim) and len(experts) == 1
+        else:
+            ok = a.ndim == 2 and b.ndim == 2
+        if not ok or b.shape[-1] != a.shape[-2]:
+            raise ValueError(f"{hf} factors do not compose: A {tuple(a.shape)}, B {tuple(b.shape)}")
+        ranks.add(a.shape[-2])
+    return ranks
+
+
+def _check_against_reference_adapter(out: dict[str, torch.Tensor], alphas: dict[str, float], ref_path: Path) -> None:
+    """The key set and every non-rank width agree with a reference factor dir's (an RL adapter on this model).
+
+    An RL adapter targets the standard modules only, so an Expert-LoRA export is a superset: every reference key must
+    be present, and the only extra keys are the routed experts' and latent projections'.
+
+    Raises:
+        ValueError: The reference is not format 2 or 3, a key is missing or unexpected, or a width differs.
+    """
+    from safetensors import safe_open
+
+    ref_alphas = json.loads(ref_path.read_text())
+    ref_version = ref_alphas.pop(FACTOR_FORMAT_VERSION_KEY, None)
+    if ref_version not in (FACTOR_FORMAT_VERSION, GROUPED_EXPERT_FORMAT_VERSION):
+        raise ValueError(f"the reference adapter {ref_path} is factor format {ref_version!r}, not 2 or 3")
+    ref, got = set(ref_alphas), set(alphas)
+    extra = got - ref
+    expert_lora = {k for k in extra if ".experts." in k or "_latent_proj." in k}
+    if ref - got or extra - expert_lora:
+        raise ValueError(
+            f"the key set differs from the reference adapter: missing {sorted(ref - got)[:4]} "
+            f"({len(ref - got)}), unexpected {sorted(extra - expert_lora)[:4]} ({len(extra - expert_lora)})"
+        )
+    # Names alone cannot see a wrong qkv split or a mis-ordered Mamba concat, which change a width but keep every
+    # key; the reference's widths are the model geometry.
+    ref_shapes: dict[str, tuple[int, ...]] = {}
+    for shard in sorted(ref_path.parent.glob("rank_*.safetensors")):
+        with safe_open(str(shard), "pt") as f:
+            for k in f.keys():  # noqa: SIM118
+                ref_shapes[k] = tuple(f.get_slice(k).get_shape())
+    bad = [
+        (k, tuple(v.shape), ref_shapes[k])
+        for k, v in out.items()
+        if k in ref_shapes and v.shape[1 if k.endswith(".A") else 0] != ref_shapes[k][1 if k.endswith(".A") else 0]
+    ]
+    if bad:
+        raise ValueError(f"{len(bad)} tensor(s) disagree with the reference geometry, e.g. {bad[:3]}")
+    print(
+        f"matches the reference adapter: {len(ref)} keys and their widths"
+        + (f", plus {len(expert_lora)} Expert-LoRA keys" if expert_lora else "")
+    )
+
+
+def export_lora_factors(
+    iter_path: Path, factors_path: Path, alpha_over_r: float | None = None, reference_alphas: Path | None = None
+) -> None:
+    """Write a LoRA checkpoint's adapter as a vLLM factor dir (format 3 with grouped-expert keys, else 2).
+
+    Args:
+        iter_path: The ``iter_N`` directory; its ``run_config.yaml`` gives the model sizes and the peft alpha and dim.
+        factors_path: Output directory for ``rank_00.safetensors`` and ``alphas.json``.
+        alpha_over_r: The adapter scale; None takes the run_config's ``peft.alpha / peft.dim``.
+        reference_alphas: Optionally, an RL adapter's ``alphas.json`` on the same model to check keys and widths
+            against.
+
+    Raises:
+        ValueError: No scale is given and the run_config has none, or a check fails.
+    """
+    from safetensors.torch import save_file
+
+    run_config = iter_path / "run_config.yaml"
+    cfg = yaml.safe_load(run_config.read_text())
+    peft = cfg.get("peft") or {}
+    if alpha_over_r is None:
+        if "alpha" not in peft or "dim" not in peft:
+            raise ValueError(f"{run_config} has no peft alpha and dim; pass --alpha-over-r")
+        alpha_over_r = peft["alpha"] / peft["dim"]
+    out, alphas, grouped = _read_lora_factors(iter_path, cfg["model"], alpha_over_r)
+    ranks = _check_factor_composition(out, alphas, grouped)
+    print(
+        f"exported {len(alphas)} HF keys ({len(grouped)} grouped-expert) at rank {'/'.join(map(str, sorted(ranks)))}"
+    )
+    if reference_alphas is not None:
+        _check_against_reference_adapter(out, alphas, reference_alphas)
+
+    factors_path.mkdir(parents=True, exist_ok=True)
+    # geodesic_utils' exact_factor_delta takes half-precision factors only: bf16, the serving dtype.
+    save_file(
+        {k: v.to(torch.bfloat16).contiguous() for k, v in out.items()}, str(factors_path / "rank_00.safetensors")
+    )
+    version = GROUPED_EXPERT_FORMAT_VERSION if grouped else FACTOR_FORMAT_VERSION
+    sidecar = {FACTOR_FORMAT_VERSION_KEY: version, **dict(sorted(alphas.items()))}
+    (factors_path / "alphas.json").write_text(json.dumps(sidecar, indent=2) + "\n")
+    print(f"wrote {factors_path}/rank_00.safetensors and alphas.json (factor format {version})")
+
+
 def push_to_hub(hf_path: Path, repo_id: str, revision: str) -> None:
     """Push converted model to HuggingFace Hub.
 
@@ -878,11 +1173,34 @@ def main():
         help="HuggingFace output directory (default: <megatron-path>/iter_N/hf)",
     )
     parser.add_argument(
+        "--format",
+        choices=("hf", "lora-factors"),
+        default="hf",
+        help="hf: a HuggingFace model dir (default). lora-factors: a LoRA checkpoint's adapter as a vLLM factor dir, "
+        "unmerged (single process, no GPU; see 'LoRA factor dirs' below)",
+    )
+    parser.add_argument(
         "--hf-model",
-        required=True,
+        default=None,
         help="Upstream HF model ID (e.g. nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16) "
         "whose architecture + tokenizer config the checkpoint should be exported "
-        "against. Required: there is no auto-detection.",
+        "against. Required for --format hf: there is no auto-detection.",
+    )
+    parser.add_argument(
+        "--factors-path",
+        default=None,
+        help="lora-factors: the factor dir to write (default: <megatron-path>/iter_N/factors)",
+    )
+    parser.add_argument(
+        "--reference-alphas",
+        default=None,
+        help="lora-factors: an RL adapter's alphas.json on the same model; the export must match its keys and widths",
+    )
+    parser.add_argument(
+        "--alpha-over-r",
+        type=float,
+        default=None,
+        help="lora-factors: the adapter scale (default: the run_config's peft alpha / dim, which must then be there)",
     )
     parser.add_argument(
         "--torch-dtype",
@@ -923,13 +1241,13 @@ def main():
         ),
     )
 
-    # Chat template / reasoning — REQUIRED (must pass exactly one).
+    # Chat template / reasoning — REQUIRED for --format hf (exactly one; checked after parsing).
     # Controls the `enable_thinking` default in the exported chat_template.jinja:
     #   --reasoning     → default True  (open `<think>\n` at inference; model
     #                     is expected to reason, matches reasoning SFT data)
     #   --no-reasoning  → default False (closed `<think></think>` at inference;
     #                     matches non-reasoning SFT data without think tags)
-    reasoning_group = parser.add_mutually_exclusive_group(required=True)
+    reasoning_group = parser.add_mutually_exclusive_group()
     reasoning_group.add_argument(
         "--reasoning",
         action="store_true",
@@ -952,10 +1270,44 @@ def main():
     parser.add_argument("--etp", type=int, default=1, help="Expert tensor parallelism (multi-GPU fallback)")
 
     args = parser.parse_args()
+    hf_only = {
+        "--hf-model": args.hf_model,
+        "--hf-path": args.hf_path,
+        "--push-to-hub": args.push_to_hub,
+        "--keep-remote-code": args.keep_remote_code,
+        "--remote-code-source": args.remote_code_source,
+        "--reasoning/--no-reasoning": args.reasoning or args.no_reasoning,
+    }
+    factors_only = {
+        "--factors-path": args.factors_path,
+        "--reference-alphas": args.reference_alphas,
+        "--alpha-over-r": args.alpha_over_r,
+    }
+    if args.format == "lora-factors":
+        given = [flag for flag, value in hf_only.items() if value]
+        if given:
+            parser.error(f"--format lora-factors writes a factor dir; {', '.join(given)} apply to --format hf only")
+    else:
+        given = [flag for flag, value in factors_only.items() if value is not None]
+        if given:
+            parser.error(f"{', '.join(given)} apply to --format lora-factors only")
+        if not args.hf_model:
+            parser.error("--format hf requires --hf-model")
+        if not (args.reasoning or args.no_reasoning):
+            parser.error("--format hf requires one of --reasoning / --no-reasoning")
 
     # 1. Resolve checkpoint path
     iter_path, iteration = resolve_checkpoint_path(args.megatron_path, args.iteration)
     print(f"Checkpoint: {iter_path} (iteration {iteration})")
+
+    if args.format == "lora-factors":
+        export_lora_factors(
+            iter_path,
+            Path(args.factors_path) if args.factors_path else iter_path / "factors",
+            alpha_over_r=args.alpha_over_r,
+            reference_alphas=Path(args.reference_alphas) if args.reference_alphas else None,
+        )
+        return
 
     # 2. Determine HF model ID
     hf_model_id = args.hf_model

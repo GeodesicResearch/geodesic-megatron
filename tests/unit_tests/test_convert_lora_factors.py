@@ -1,7 +1,8 @@
-"""pipeline_lora_export_factors.py end to end: a toy Megatron LoRA checkpoint to a factor dir and back to dense deltas.
+"""pipeline_checkpoint_convert_hf.py --format lora-factors end to end: a toy Megatron LoRA checkpoint to a factor dir
+and back to dense deltas.
 
 Each test writes a small torch_dist (DCP) adapter checkpoint with the key names geodesic-megatron's PEFT modules save,
-runs the exporter, and rebuilds every HF weight's dense delta from the factor dir as the serving side does
+runs the converter's CLI on it, and rebuilds every HF weight's dense delta from the factor dir as the serving side does
 (``alpha_over_r * B_e @ A_e``). The deltas are compared with the ones the training-side merge adds to each weight:
 ``LoRAMerge`` (``alpha / dim * B @ A``, the fused rows of linear_qkv split per query group, in_proj's five B parts in
 HF order) and ``GroupedExpertsLoRAAdapter.merge_into`` (``einsum("ri,erf->eif", fc1_a, fc1_b)`` and
@@ -28,7 +29,7 @@ import yaml
 from safetensors.torch import load_file
 
 
-_TOOL = Path(__file__).resolve().parents[2] / "pipeline_lora_export_factors.py"
+_TOOL = Path(__file__).resolve().parents[2] / "pipeline_checkpoint_convert_hf.py"
 
 # Toy geometry: 4 heads in 2 query groups of head_dim 8; Mamba 2 heads x head_dim 4 (d_inner 8), 1 group, state 3;
 # MoE latent 6, FFN 5, 3 routed experts; hidden 16; rank 2.
@@ -52,9 +53,9 @@ IN_PROJ_PARTS = {"z": D_INNER, "x": D_INNER, "B": M_GROUPS * M_STATE, "C": M_GRO
 
 @pytest.fixture(scope="module")
 def tool():
-    spec = importlib.util.spec_from_file_location("pipeline_lora_export_factors", _TOOL)
+    spec = importlib.util.spec_from_file_location("pipeline_checkpoint_convert_hf", _TOOL)
     module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline_lora_export_factors"] = module
+    sys.modules["pipeline_checkpoint_convert_hf"] = module
     spec.loader.exec_module(module)
     return module
 
@@ -76,19 +77,26 @@ def _qkv_rows() -> dict[str, list[int]]:
     return rows
 
 
-def _write(tmp_path: Path, state: dict[str, torch.Tensor], peft_alpha: int = ALPHA) -> Path:
-    ckpt = tmp_path / "iter_0000001"
+def _write(tmp_path: Path, state: dict[str, torch.Tensor], peft_alpha: int | None = ALPHA) -> Path:
+    """A checkpoint dir as training leaves it: ``iter_0000001`` with its run_config, and the latest-iteration file."""
+    run = tmp_path / "run"
+    ckpt = run / "iter_0000001"
     dcp.save(state, storage_writer=dcp.FileSystemWriter(str(ckpt)), no_dist=True)
-    (ckpt / "run_config.yaml").write_text(
-        yaml.safe_dump({"model": MODEL_CFG, "peft": {"dim": R, "alpha": peft_alpha}})
-    )
-    return ckpt
+    run_config = {"model": MODEL_CFG}
+    if peft_alpha is not None:
+        run_config["peft"] = {"dim": R, "alpha": peft_alpha}
+    (ckpt / "run_config.yaml").write_text(yaml.safe_dump(run_config))
+    (run / "latest_checkpointed_iteration.txt").write_text("1")
+    return run
 
 
-def _export(tool, ckpt: Path, out: Path, monkeypatch) -> dict:
-    args = ["x", "--checkpoint", str(ckpt), "--output-dir", str(out), "--run-config", str(ckpt / "run_config.yaml")]
-    monkeypatch.setattr(sys, "argv", args)
-    assert tool.main() == 0
+def _cli(tool, monkeypatch, *args: str) -> None:
+    monkeypatch.setattr(sys, "argv", ["pipeline_checkpoint_convert_hf.py", *args])
+    tool.main()
+
+
+def _export(tool, run: Path, out: Path, monkeypatch) -> dict:
+    _cli(tool, monkeypatch, "--megatron-path", str(run), "--format", "lora-factors", "--factors-path", str(out))
     alphas = json.loads((out / "alphas.json").read_text())
     factors = load_file(str(out / "rank_00.safetensors"))
     return {"version": alphas.pop("__format_version__"), "alphas": alphas, "factors": factors}
@@ -210,19 +218,45 @@ def test_alpha_over_r_comes_from_the_run_config(tool, tmp_path, monkeypatch):
     assert set(export["alphas"].values()) == {6 / R}
 
 
+def test_the_default_factors_path_is_inside_the_iteration(tool, tmp_path, monkeypatch):
+    """No --factors-path: the dir lands at <megatron-path>/iter_N/factors, as an HF export lands at iter_N/hf."""
+    run = _write(tmp_path, _tinker_state())
+    _cli(tool, monkeypatch, "--megatron-path", str(run), "--format", "lora-factors")
+    assert (run / "iter_0000001" / "factors" / "alphas.json").exists()
+
+
 def test_a_missing_adapter_scale_is_an_error(tool, tmp_path, monkeypatch):
     """No --alpha-over-r and no peft alpha/dim in the run_config: the export refuses rather than guess a scale."""
-    ckpt = _write(tmp_path, _tinker_state())
-    (ckpt / "run_config.yaml").write_text(yaml.safe_dump({"model": MODEL_CFG}))
-    args = [
-        "x",
-        "--checkpoint",
-        str(ckpt),
-        "--output-dir",
-        str(tmp_path / "out"),
-        "--run-config",
-        str(ckpt / "run_config.yaml"),
-    ]
-    monkeypatch.setattr(sys, "argv", args)
-    assert tool.main() == 1
+    run = _write(tmp_path, _tinker_state(), peft_alpha=None)
+    with pytest.raises(ValueError, match="no peft alpha and dim"):
+        _export(tool, run, tmp_path / "out", monkeypatch)
     assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("flag", [("--hf-model", "nvidia/x"), ("--reasoning",), ("--push-to-hub",)])
+def test_hf_export_flags_are_refused_with_lora_factors(tool, tmp_path, monkeypatch, flag):
+    """An HF-only flag with --format lora-factors is an error, not silently ignored."""
+    run = _write(tmp_path, _tinker_state())
+    with pytest.raises(SystemExit):
+        _cli(tool, monkeypatch, "--megatron-path", str(run), "--format", "lora-factors", *flag)
+
+
+def test_hf_export_still_requires_hf_model_and_reasoning(tool, tmp_path, monkeypatch):
+    """The default --format hf keeps its required flags: --hf-model and one of --reasoning / --no-reasoning."""
+    run = _write(tmp_path, _tinker_state())
+    with pytest.raises(SystemExit):
+        _cli(tool, monkeypatch, "--megatron-path", str(run), "--reasoning")
+    with pytest.raises(SystemExit):
+        _cli(tool, monkeypatch, "--megatron-path", str(run), "--hf-model", "nvidia/x")
+    with pytest.raises(SystemExit):
+        _cli(
+            tool,
+            monkeypatch,
+            "--megatron-path",
+            str(run),
+            "--hf-model",
+            "nvidia/x",
+            "--reasoning",
+            "--factors-path",
+            "x",
+        )
