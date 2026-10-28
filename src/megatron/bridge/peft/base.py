@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 from megatron.core.transformer.module import MegatronModule
 
+from megatron.bridge.peft.module_matcher import ModuleMatcher
 from megatron.bridge.peft.recompute import maybe_enable_recompute_inputs_grad
 from megatron.bridge.peft.walk_utils import walk
 
@@ -97,7 +98,12 @@ class PEFT(ABC):
         """
         self.freeze_model(model, training=training)
 
+        # A target that matches no module would otherwise leave that part of the model unadapted, with no error.
+        if isinstance(self, ModuleMatcher):
+            self.start_matching()
         self._walk_model(model, self.transform)
+        if isinstance(self, ModuleMatcher):
+            self.require_every_target_matched()
 
         if training:
             maybe_enable_recompute_inputs_grad(model)

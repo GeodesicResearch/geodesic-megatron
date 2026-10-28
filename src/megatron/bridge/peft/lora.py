@@ -104,13 +104,15 @@ class LoRA(PEFT, ModuleMatcher):
         Returns:
             nn.Module: The modified module with LoRA applied, or the original module if not a target.
         """
+        # Matched before the already-transformed check, so that a target re-applied to an adapted model counts.
+        ans = self.match(module, name, prefix)
         # Skip already transformed modules
         adapter_types = (LinearAdapter, LoRALinear, LoRATopKRouter)
         adapter_types = adapter_types + (TELinearAdapter,)
         if isinstance(module, adapter_types):
             return module
 
-        if (ans := self.match(module, name, prefix)) is not None:
+        if ans is not None:
             (match, full_name) = ans
             if isinstance(module, nn.Linear) or (module.__class__ == te.Linear):
                 # Will use the `patch_linear_module` function if:

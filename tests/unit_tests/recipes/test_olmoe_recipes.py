@@ -462,3 +462,11 @@ def test_olmoe_7b_comm_overlap_config(monkeypatch: pytest.MonkeyPatch):
     # Check comm overlap config
     assert cfg.comm_overlap is not None
     assert cfg.comm_overlap.tp_comm_overlap is False
+
+
+@pytest.mark.parametrize("recipe_func", _OLMOE_PEFT_FUNCS)
+def test_olmoe_peft_config_refuses_an_unknown_scheme(recipe_func: Callable, monkeypatch: pytest.MonkeyPatch):
+    """A scheme name the recipe has no targets for raises instead of quietly training plain LoRA."""
+    monkeypatch.setattr(importlib.import_module(recipe_func.__module__), "OlMoEModelProvider", _FakeOlMoEModelProvider)
+    with pytest.raises(ValueError, match="peft_scheme 'canonical_lora' is not one of"):
+        recipe_func(peft_scheme="canonical_lora")

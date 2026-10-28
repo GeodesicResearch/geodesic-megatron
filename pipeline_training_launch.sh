@@ -25,7 +25,7 @@
 #                               NVRx straggler detection)
 #   --disable-straggler         Keep ft_launcher, but drop NVRx straggler detection
 #   --enable-pao                Enable PAO (Partial Activation Offloading)
-#   --peft lora                 Enable LoRA PEFT
+#   --peft lora|canonical_lora  Enable LoRA PEFT (canonical_lora: one adapter per unfused projection)
 #   --nodes N                   Override number of nodes (default: all in allocation)
 #   --nodelist LIST             Override nodelist (default: all in allocation)
 #   -- [extra args]             Extra args passed to the training script
