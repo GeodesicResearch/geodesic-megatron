@@ -16,7 +16,8 @@
 Catalogue:
     LAUNCH_ENV: the allocation's variables a launch adds to PipelineShell's fake job.
     RANK_LAUNCHERS: the stubs that start the ranks.
-    launcher_shell: a PipelineShell recording srun, the images and the rank launch with its whole environment.
+    LITERAL_VALUES: override values that break any accidental shell evaluation.
+    launcher_shell: a PipelineShell recording srun, the images and the rank launch, each with its whole environment.
     Launch: one run of the launcher, its result and what the stubs recorded.
     Launcher: runs the launcher on a trivial config, with an optional ISAMBARD_ENV_OVERRIDES file.
 """
@@ -38,26 +39,40 @@ LAUNCH_ENV = {
     "ISAMBARD_RUN_ID": "20260928T000000-jtest",
 }
 
+# Values chosen to break any accidental shell evaluation: expansions, command substitution,
+# quotes, backslashes, a second '=', surrounding spaces, and an empty value.
+LITERAL_VALUES = {
+    "TORCH_NCCL_BLOCKING_WAIT": "0",
+    "EXPANSION": "$HOME ${USER:-x} $(echo no) `echo no` ~",
+    "QUOTES": 'it\'s "quoted"',
+    "BACKSLASH": "a\\b\\\\c",
+    "EQUALS": "a=b==c",
+    "SPACES": "  padded  ",
+    "EMPTY": "",
+}
+
 # ft_launcher, and `python -m torch.distributed.run` on the --disable-ft path.
 RANK_LAUNCHERS = ("ft_launcher", "python")
 
 
 def launcher_shell(tmp_path: Path) -> PipelineShell:
-    """A PipelineShell under ``tmp_path`` that records srun, the image each container runs and the rank launch, the
-    rank launch with its whole environment. The caller removes its job tmp dirs at teardown."""
+    """A PipelineShell under ``tmp_path`` that records srun, the image each container runs and the rank launch, each
+    record with the whole environment of its command. The caller removes its job tmp dirs at teardown."""
     return PipelineShell(tmp_path, record=("srun", "apptainer", *RANK_LAUNCHERS), record_env="*")
 
 
 class Launch:
     """One run of the real launcher: its result and what the stubs recorded.
 
-    ``record`` is ``PipelineShell.run``'s return value; ``rank_env`` and ``rank_argv`` are the last rank launch's
+    ``record`` is ``PipelineShell.run``'s return value and ``env`` the variables the launch added to the shell's
+    environment; ``rank_env`` and ``rank_argv`` are the last rank launch's
     environment and arguments (None when no rank launcher started), ``sifs`` the image of every container started.
     """
 
-    def __init__(self, record: dict):
-        """Read ``record``, as ``PipelineShell.run`` returned it."""
+    def __init__(self, record: dict, env: dict[str, str]):
+        """Read ``record``, as ``PipelineShell.run`` returned it for a launch that added ``env``."""
         self.record = record
+        self.env = env
         self.result = subprocess.CompletedProcess(
             record["args"], record["returncode"], record["stdout"], record["stderr"]
         )
@@ -97,4 +112,4 @@ class Launcher:
             env["ISAMBARD_ENV_OVERRIDES"] = str(overrides_file)
         env.update(extra_env or {})
         args = (str(self.config), "--model", "nano", "--mode", "pretrain", *launcher_args)
-        return Launch(self.shell.run(LAUNCHER.name, *args, env=env))
+        return Launch(self.shell.run(LAUNCHER.name, *args, env=env), env)

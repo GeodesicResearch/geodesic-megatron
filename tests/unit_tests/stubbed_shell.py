@@ -137,6 +137,10 @@ exec bash -c "${!#}"
 # Lmod is a host shell function, absent in the container; the scripts only purge.
 exit 0
 """,
+    "hostname": """\
+# The test host's name differs between runs; the fake job's only node is nid000001.
+echo nid000001
+""",
     "date": """\
 # Wall-clock time would make every banner differ between runs.
 echo "<DATE>"

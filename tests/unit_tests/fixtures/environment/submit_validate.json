@@ -1,0 +1,21 @@
+{
+  "args": [
+    "validate",
+    "--run-training"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "pipeline_env_validate.py",
+        "--run-training"
+      ],
+      "cmd": "python",
+      "env": {
+        "TMPDIR": "/projects/a5k/public/tmp"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": "============================================================\nEnvironment validate\n  Node:       nid000001\n  Job ID:     <JOB>\n  Start time: <DATE>\n============================================================\n============================================================\nDone at <DATE> (exit 0)\n============================================================\n"
+}

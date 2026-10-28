@@ -41,23 +41,11 @@ import sys
 import pytest
 from scripts.training.launcher_source import LAUNCHER, launcher_function
 
-from tests.unit_tests.launcher_harness import LAUNCH_ENV, RANK_LAUNCHERS, Launcher, launcher_shell
+from tests.unit_tests.launcher_harness import LAUNCH_ENV, LITERAL_VALUES, RANK_LAUNCHERS, Launcher, launcher_shell
 from tests.unit_tests.stubbed_shell import HARNESS_ENV
 
 
 # --- apply_env_overrides + export_env_overrides, lifted from the launcher -----------------------
-
-# Values chosen to break any accidental shell evaluation: expansions, command substitution,
-# quotes, backslashes, a second '=', surrounding spaces, and an empty value.
-LITERAL_VALUES = {
-    "TORCH_NCCL_BLOCKING_WAIT": "0",
-    "EXPANSION": "$HOME ${USER:-x} $(echo no) `echo no` ~",
-    "QUOTES": 'it\'s "quoted"',
-    "BACKSLASH": "a\\b\\\\c",
-    "EQUALS": "a=b==c",
-    "SPACES": "  padded  ",
-    "EMPTY": "",
-}
 
 _BARE_ENV = {"PATH": os.environ["PATH"], "HOME": "/nonexistent/home", "USER": "tester"}
 
