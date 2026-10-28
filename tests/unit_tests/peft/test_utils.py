@@ -30,6 +30,7 @@ from megatron.core.tensor_parallel import ColumnParallelLinear, RowParallelLinea
 from megatron.bridge.peft.utils import (
     ParallelLinearAdapter,
     all2all_hp2sp,
+    fold_update,
     get_adapter_attributes_from_linear,
     init_method_const,
     init_method_kaiming_uniform,
@@ -238,6 +239,68 @@ class TestUtilityFunctions:
         unpadded = unpad_seq_to_mult(padded, pad_len)
 
         assert torch.equal(unpadded, original)
+
+
+class TestFoldUpdate:
+    """fold_update: one rounding of the fp32 sum, to nearest or stochastically."""
+
+    # A quarter of the bf16 step at 1.0 (2**-7): below half a step, so rounding to nearest drops it.
+    STEP = 2.0**-7
+
+    def test_nearest_drops_an_update_below_half_a_step(self):
+        weight = torch.ones(4096, dtype=torch.bfloat16)
+        fold_update(weight, torch.full((4096,), self.STEP / 4))
+        assert torch.equal(weight, torch.ones(4096, dtype=torch.bfloat16))
+
+    def test_nearest_matches_a_bf16_add(self):
+        torch.manual_seed(0)
+        weight = torch.randn(256, 64).bfloat16()
+        update = torch.randn(256, 64).bfloat16() * 1e-2
+        expected = weight + update
+        fold_update(weight, update)
+        assert torch.equal(weight, expected)
+
+    def test_stochastic_keeps_the_update_in_expectation(self):
+        weight = torch.ones(1 << 16, dtype=torch.bfloat16)
+        fold_update(weight, torch.full((1 << 16,), self.STEP / 4), torch.Generator().manual_seed(0))
+        # Each weight lands on one of the two neighbouring bf16 values ...
+        assert set(weight.unique().tolist()) == {1.0, 1.0 + self.STEP}
+        # ... the upper one with probability 1/4, so the mean update is STEP / 4 (binomial SE 0.7% of it).
+        mean_update = (weight.float() - 1).mean().item()
+        assert mean_update == pytest.approx(self.STEP / 4, rel=0.03)
+
+    def test_stochastic_is_unbiased_for_negative_weights(self):
+        weight = -torch.ones(1 << 16, dtype=torch.bfloat16)
+        fold_update(weight, torch.full((1 << 16,), -self.STEP / 4), torch.Generator().manual_seed(0))
+        assert (weight.float() + 1).mean().item() == pytest.approx(-self.STEP / 4, rel=0.03)
+
+    def test_stochastic_leaves_exact_sums_alone(self):
+        weight = torch.ones(1024, dtype=torch.bfloat16)
+        fold_update(weight, torch.full((1024,), self.STEP), torch.Generator().manual_seed(0))
+        assert torch.equal(weight, torch.full((1024,), 1.0 + self.STEP, dtype=torch.bfloat16))
+
+    def test_stochastic_repeats_with_the_seed(self):
+        first, second = (torch.ones(4096, dtype=torch.bfloat16) for _ in range(2))
+        update = torch.full((4096,), self.STEP / 3)
+        fold_update(first, update, torch.Generator().manual_seed(7))
+        fold_update(second, update, torch.Generator().manual_seed(7))
+        assert torch.equal(first, second)
+
+    def test_fp32_weight_takes_the_exact_sum(self):
+        weight = torch.ones(16)
+        fold_update(weight, torch.full((16,), 1e-6), torch.Generator().manual_seed(0))
+        assert torch.equal(weight, torch.full((16,), 1.0 + 1e-6))
+
+    def test_returns_the_kept_share(self):
+        weight = torch.ones(4096, dtype=torch.bfloat16)
+        kept, total = fold_update(weight, torch.full((4096,), self.STEP / 4))
+        assert kept.item() == 0 and total.item() == pytest.approx(4096 * (self.STEP / 4) ** 2)
+        kept, total = fold_update(torch.ones(4096, dtype=torch.bfloat16), torch.full((4096,), self.STEP))
+        assert kept.item() == pytest.approx(total.item())
+
+    def test_stochastic_refuses_fp16(self):
+        with pytest.raises(ValueError, match="bf16 and fp32"):
+            fold_update(torch.ones(4, dtype=torch.float16), torch.ones(4), torch.Generator().manual_seed(0))
 
 
 @patch("megatron.bridge.peft.utils.parallel_state")

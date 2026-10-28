@@ -37,6 +37,7 @@ from torch import nn
 
 from megatron.bridge.models.mamba.grouped_experts import GroupedExperts, _grouped_projection
 from megatron.bridge.peft.adapter_wrapper import AdapterWrapper
+from megatron.bridge.peft.utils import fold_update
 
 
 class GroupedExpertsLoRAAdapter(nn.Module):
@@ -121,14 +122,18 @@ class GroupedExpertsLoRAAdapter(nn.Module):
         return torch.matmul(low_rank, self.fc2_b) * self.scale
 
     @torch.no_grad()
-    def merge_into(self, experts: GroupedExperts) -> None:
-        """Add the scaled per-expert updates to ``experts.weight1`` and ``experts.weight2`` in place."""
+    def merge_into(
+        self, experts: GroupedExperts, generator: Optional[torch.Generator] = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Add the scaled per-expert updates to ``experts.weight1`` and ``experts.weight2`` in place.
+
+        Rounds and returns as ``fold_update`` with ``generator``, summed over both weights.
+        """
         w1 = experts.weight1.view(self.num_local_experts, self.in_features, self.ffn_features)
         w2 = experts.weight2.view(self.num_local_experts, self.ffn_features, self.in_features)
-        fc1_update = torch.einsum("ri,erf->eif", self.fc1_a.float(), self.fc1_b.float()) * self.scale
-        fc2_update = torch.einsum("efr,ri->efi", self.fc2_a.float(), self.fc2_b.float()) * self.scale
-        w1.copy_((w1.float() + fc1_update).to(w1.dtype))
-        w2.copy_((w2.float() + fc2_update).to(w2.dtype))
+        fc1 = fold_update(w1, torch.einsum("ri,erf->eif", self.fc1_a.float(), self.fc1_b.float()) * self.scale, generator)
+        fc2 = fold_update(w2, torch.einsum("efr,ri->efi", self.fc2_a.float(), self.fc2_b.float()) * self.scale, generator)
+        return fc1[0] + fc2[0], fc1[1] + fc2[1]
 
     def sharded_state_dict(
         self, prefix: str = "", sharded_offsets: tuple = (), metadata: Optional[dict] = None
@@ -169,6 +174,6 @@ class LoRAGroupedExperts(AdapterWrapper):
             fc2_delta=self.adapter.fc2_delta,
         )
 
-    def merge_adapter(self) -> None:
-        """Fold the adapter's updates into the wrapped experts' weights."""
-        self.adapter.merge_into(self.to_wrap)
+    def merge_adapter(self, generator: Optional[torch.Generator] = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fold the adapter's updates into the wrapped experts' weights; rounds and returns as ``fold_update``."""
+        return self.adapter.merge_into(self.to_wrap, generator)

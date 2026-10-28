@@ -26,6 +26,8 @@ pytestmark = [
 ]
 
 VOCAB, SEQ = 256, 64
+#: B-factor scale whose LoRA updates are mostly below half a bf16 step of their base weights.
+B_STD_SMALL = 1e-5
 
 
 @pytest.fixture(scope="module")
@@ -74,8 +76,8 @@ def _model():
     return provider.provide_distributed_model(wrap_with_ddp=False)
 
 
-def _adapted(model=None):
-    """CanonicalLoRA with every Super target on ``model`` (a new small model if None), B factors made non-zero."""
+def _adapted(model=None, b_std=0.05):
+    """CanonicalLoRA with every Super target on ``model`` (a new small model if None), B factors ~ N(0, b_std)."""
     from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 
     model = model if model is not None else _model()
@@ -85,7 +87,7 @@ def _adapted(model=None):
     with torch.no_grad():
         for name, param in model[0].named_parameters():
             if ".adapter." in name and ("linear_out" in name or name.endswith(("fc1_b", "fc2_b"))):
-                param.normal_(std=0.05)
+                param.normal_(std=b_std)
     return model
 
 
@@ -138,6 +140,23 @@ def test_merged_model_reproduces_adapted_logits(parallel_state):
     merged = _logits(model)
     # bf16 weights: the merged sum rounds once per weight; compare at bf16 resolution of the logits.
     torch.testing.assert_close(merged, adapted, rtol=3e-2, atol=3e-2)
+
+
+def test_stochastic_rounding_keeps_a_small_update(parallel_state):
+    """Updates mostly below half a bf16 step: round-to-nearest drops most of them, stochastic keeps them on average.
+
+    Measured on the weights (``LoRAMerge.weight_retained``). The logit-level ``retained`` of ``check_merge`` cannot
+    show it on this model, whose bf16 activations round an effect this small in the adapted forward too.
+    """
+    from megatron.bridge.peft.lora import LoRAMerge, merge_and_unwrap_adapters
+
+    retained = {}
+    for seed in (None, 0):
+        merger = LoRAMerge(stochastic_rounding_seed=seed)
+        merge_and_unwrap_adapters(_adapted(b_std=B_STD_SMALL), merger)
+        retained[seed] = merger.weight_retained()
+    assert retained[None] < 0.5, retained
+    assert retained[0] == pytest.approx(1.0, abs=0.02), retained
 
 
 def test_adapters_change_the_output(parallel_state):

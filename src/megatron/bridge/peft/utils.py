@@ -230,6 +230,38 @@ def wildcard_match(pattern: str, key: Optional[str]) -> Optional[bool]:
     return match is not None
 
 
+def fold_update(
+    weight: torch.Tensor, update: torch.Tensor, generator: Optional[torch.Generator] = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Add ``update`` to ``weight`` in place: sum in fp32, round once to ``weight``'s dtype.
+
+    Without ``generator`` the sum rounds to nearest, which drops every update below half a step of the weight's
+    dtype. With it, a bf16 weight rounds stochastically: up to the next bf16 value with probability equal to the
+    sum's fractional distance to it, so the stored weight equals the fp32 sum in expectation. An fp32 weight takes
+    the sum exactly either way.
+
+    Returns:
+        fp64 scalars ``<stored change, update>`` and ``<update, update>``, whose ratio is the share of the update
+        that the stored weight keeps.
+
+    Raises:
+        ValueError: ``generator`` with a weight that is neither bf16 nor fp32.
+    """
+    before = weight.float()
+    update = update.to(device=weight.device, dtype=torch.float32)
+    total = before + update
+    if generator is None or weight.dtype == torch.float32:
+        weight.copy_(total)
+    elif weight.dtype == torch.bfloat16:
+        # bf16 is fp32 without its low 16 mantissa bits: add uniform noise there, then truncate.
+        noise = torch.randint(0, 1 << 16, total.shape, generator=generator, device=total.device, dtype=torch.int32)
+        weight.copy_(((total.view(torch.int32) + noise) & -(1 << 16)).view(torch.float32))
+    else:
+        raise ValueError(f"stochastic rounding supports bf16 and fp32 weights, not {weight.dtype}")
+    kept = ((weight.float() - before).double() * update.double()).sum()
+    return kept, (update.double() * update.double()).sum()
+
+
 def init_method_normal(sigma: float) -> Callable[[torch.Tensor], torch.Tensor]:
     """Create an initialization method based on normal distribution N(0, sigma).
 

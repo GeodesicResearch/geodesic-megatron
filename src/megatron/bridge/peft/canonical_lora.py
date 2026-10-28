@@ -29,7 +29,12 @@ from megatron.bridge.peft.base import PEFT
 from megatron.bridge.peft.grouped_experts_lora import GroupedExpertsLoRAAdapter, LoRAGroupedExperts
 from megatron.bridge.peft.lora_layers import LinearAdapter, LoRALinear, LoRATopKRouter
 from megatron.bridge.peft.module_matcher import ModuleMatcher
-from megatron.bridge.peft.utils import ParallelLinearAdapter, get_adapter_attributes_from_linear, is_expert_linear
+from megatron.bridge.peft.utils import (
+    ParallelLinearAdapter,
+    fold_update,
+    get_adapter_attributes_from_linear,
+    is_expert_linear,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -151,8 +156,8 @@ class LoRALinearSplitQKV(AdapterWrapper):
         return linear_output + adapter_output, bias
 
     @torch.no_grad()
-    def merge_adapter(self) -> None:
-        """Fold the q, k and v updates into the wrapped ``linear_qkv`` weight.
+    def merge_adapter(self, generator: Optional[torch.Generator] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Fold the q, k and v updates into the wrapped ``linear_qkv`` weight; rounds and returns as ``fold_update``.
 
         Raises:
             NotImplementedError: tensor parallelism above 1 (``_interleave_qkv`` packs global head counts).
@@ -165,7 +170,7 @@ class LoRALinearSplitQKV(AdapterWrapper):
             _lora_weight_delta(getattr(self.adapter, key), weight).t()
             for key in ("adapter_q", "adapter_k", "adapter_v")
         )
-        weight.data = weight + self._interleave_qkv(q, k, v).t().to(weight.dtype)
+        return fold_update(weight.data, self._interleave_qkv(q, k, v).t(), generator)
 
 
 class LoRALinearSplitFC1UpGate(AdapterWrapper):
@@ -216,12 +221,12 @@ class LoRALinearSplitMambaInProj(AdapterWrapper):
         return linear_output + self._segments(z, xs, linear_output), bias
 
     @torch.no_grad()
-    def merge_adapter(self) -> None:
-        """Fold the z and x updates into the wrapped ``in_proj`` weight."""
+    def merge_adapter(self, generator: Optional[torch.Generator] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Fold the z and x updates into the wrapped ``in_proj`` weight; rounds and returns as ``fold_update``."""
         weight = self.to_wrap.weight
         z = _lora_weight_delta(self.adapter.adapter_z, weight)
         x = _lora_weight_delta(self.adapter.adapter_x, weight)
-        weight.data = weight + self._segments(z.t(), x.t(), weight.t()).t().to(weight.dtype)
+        return fold_update(weight.data, self._segments(z.t(), x.t(), weight.t()).t(), generator)
 
 
 def _lora_weight_delta(adapter: ParallelLinearAdapter, base_weight: torch.Tensor) -> torch.Tensor:
@@ -230,10 +235,7 @@ def _lora_weight_delta(adapter: ParallelLinearAdapter, base_weight: torch.Tensor
 
     linear_out = adapter.linear_out.weight.to(base_weight.device)
     linear_in = adapter.linear_in.weight.to(base_weight.device)
-    out_features = linear_out.shape[0]
-    in_features = linear_in.shape[1]
-    zero = torch.zeros(out_features, in_features, dtype=base_weight.dtype, device=base_weight.device)
-    return LoRAMerge().merge(zero, linear_out, linear_in, adapter.alpha, adapter.dim)
+    return LoRAMerge().delta(linear_out, linear_in, adapter.alpha, adapter.dim, out_features=linear_out.shape[0])
 
 
 #: Canonical target -> the fused module it is a part of.

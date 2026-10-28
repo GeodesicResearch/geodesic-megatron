@@ -577,14 +577,17 @@ def merge_peft_checkpoint(
     merged_root: Union[str, Path],
     iteration: int,
     mp_overrides: Optional[ModelParallelKwargs] = None,
+    stochastic_rounding_seed: Optional[int] = None,
 ) -> Path:
     """Merge a PEFT checkpoint's adapters into its base and save the result as a torch_dist checkpoint.
 
-    Loads the model with ``load_peft_model``, folds the adapters in with ``merge_and_unwrap_adapters`` and saves it
+    Loads the model with ``load_peft_model``, folds the adapters in with ``merge_and_unwrap_adapters`` (rounding
+    each merged weight to nearest, or stochastically with ``stochastic_rounding_seed``) and saves it
     with ``save_megatron_model`` as ``<merged_root>/iter_<iteration>`` (weights only, the run's training tokenizer,
     and ``moe_experts_impl: te_grouped`` in its run_config, whose canonical expert layout every experts
     implementation loads). The directory also gets ``peft_run_config.yaml`` (the PEFT run's run_config) and
-    ``merge_check.json`` (``check_merge`` on ``MERGE_CHECK_SHAPE`` probe tokens). Collective over the initialised
+    ``merge_check.json`` (``check_merge`` on ``MERGE_CHECK_SHAPE`` probe tokens, ``LoRAMerge.weight_retained`` and
+    the rounding seed). Collective over the initialised
     distributed context, on GPUs.
 
     Returns:
@@ -593,7 +596,7 @@ def merge_peft_checkpoint(
     Raises:
         RuntimeError: from ``load_peft_model`` or ``check_merge``, before anything is saved.
     """
-    from megatron.bridge.peft.lora import merge_and_unwrap_adapters
+    from megatron.bridge.peft.lora import LoRAMerge, merge_and_unwrap_adapters
     from megatron.bridge.training.utils.checkpoint_utils import (
         get_checkpoint_name,
         get_checkpoint_run_config_filename,
@@ -607,11 +610,16 @@ def merge_peft_checkpoint(
             if hasattr(module, "disable_adapter_layers"):
                 module.disable_adapter_layers()
     base = _probe_logits(model)
-    model = merge_and_unwrap_adapters(model)
+    merger = LoRAMerge(stochastic_rounding_seed=stochastic_rounding_seed)
+    model = merge_and_unwrap_adapters(model, merger)
+    weight_retained = merger.weight_retained()
     merged = _probe_logits(model)
     check = None
     if parallel_state.is_pipeline_last_stage():
-        check = check_merge(adapted, repeat, base, merged)
+        check = check_merge(adapted, repeat, base, merged) | {
+            "weight_retained": weight_retained,
+            "stochastic_rounding_seed": stochastic_rounding_seed,
+        }
         logger.info("merge check on %s probe tokens: %s", MERGE_CHECK_SHAPE, check)
     # Every rank waits for the last stage's verdict, which raises there on a bad merge.
     torch.distributed.barrier()

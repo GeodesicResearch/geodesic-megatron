@@ -37,6 +37,11 @@
 #                       its base before export: where the merged torch_dist
 #                       checkpoint goes (default <megatron-path>_merged); the HF
 #                       export lands in its iter_N/hf.
+#   --stochastic-merge-seed N
+#                       For a PEFT checkpoint: round the merged bf16 weights
+#                       stochastically with seed N instead of to nearest, which
+#                       drops updates below half a bf16 step (merge_check.json's
+#                       "retained" shows the share of the adapters' effect kept).
 #   --keep-remote-code  Keep the NemotronH remote-code (auto_map + custom
 #                       modeling files) in the export instead of stripping it.
 #                       Needed for consumers without native NemotronH support
