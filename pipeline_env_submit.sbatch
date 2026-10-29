@@ -80,12 +80,12 @@ case "$MODE" in
             echo "ERROR: smoke mode needs at least 2 nodes (got $NNODES). Resubmit with --nodes=2." >&2
             exit 1
         fi
-        # MASTER_ADDR is resolved HOST-side: scontrol does not exist inside the
-        # container (only /projects, /lus, the repo, libfabric, /usr/lib64 and the
-        # Slingshot build are bound — not host /usr/bin), so an in-container
+        # The rendezvous is resolved HOST-side (set_rendezvous): scontrol does not exist
+        # inside the container (only /projects, /lus, the repo, libfabric, /usr/lib64 and
+        # the Slingshot build are bound — not host /usr/bin), so an in-container
         # `$(scontrol ...)` yields an empty hostname and torchrun dies in
-        # parse_rendezvous_endpoint. Same reason the other launchers resolve it here.
-        SMOKE_MASTER="$(scontrol show hostname "$SLURM_JOB_NODELIST" | head -1)"
+        # parse_rendezvous_endpoint. The default port is 29401.
+        set_rendezvous "$SLURM_JOB_NODELIST" 29401
         # Slingshot selection vars. pipeline_env_activate.sh sets NCCL_NET_PLUGIN and
         # the LD_LIBRARY_PATH order but NOT these three. Without them NCCL can bootstrap
         # on the management ethernet (which cannot reach other nodes) or libfabric can
@@ -96,10 +96,7 @@ case "$MODE" in
         # nccl_allreduce_smoke.py is calibrated for the 2-node/8-GPU shape, so a
         # smaller rank count would fail a healthy fabric.
         srun --nodes="$NNODES" --ntasks-per-node=1 --export=ALL "$REPO_DIR/pipeline_env_exec.sh" \
-            "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; \
-             torchrun --nnodes=$NNODES --nproc_per_node=4 --node_rank=\$SLURM_NODEID \
-                 --master_addr=$SMOKE_MASTER --master_port=${MASTER_PORT_OVERRIDE:-29401} \
-                 scripts/container/nccl_allreduce_smoke.py" || rc=$?
+            "$(torchrun_payload 4 "$NNODES" scripts/container/nccl_allreduce_smoke.py)" || rc=$?
         ;;
     *)
         echo "ERROR: Mode must be 'setup', 'validate', or 'smoke', got: $MODE" >&2

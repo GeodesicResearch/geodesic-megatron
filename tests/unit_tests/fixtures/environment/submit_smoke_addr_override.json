@@ -19,10 +19,10 @@
     },
     {
       "argv": [
-        "--nnodes=2",
         "--nproc_per_node=4",
+        "--nnodes=2",
         "--node_rank=0",
-        "--master_addr=nid000001",
+        "--master_addr=10.0.0.9",
         "--master_port=29401",
         "scripts/container/nccl_allreduce_smoke.py"
       ],

@@ -102,6 +102,12 @@ def test_set_rendezvous_takes_the_first_host_and_the_job_port(pipeline_launch_sh
     assert (result.returncode, result.stdout) == (0, f"{expected}\n")
 
 
+@pytest.mark.parametrize("env, expected", [({}, "29401"), ({"MASTER_PORT_OVERRIDE": "31111"}, "31111")])
+def test_set_rendezvous_takes_a_default_port_the_override_still_beats(pipeline_launch_shell, env, expected):
+    result = _bash(pipeline_launch_shell, 'set_rendezvous nid000010 29401; echo "$MASTER_PORT"', env)
+    assert (result.returncode, result.stdout) == (0, f"{expected}\n")
+
+
 def test_node_local_tmp_is_job_scoped_and_holds_the_lock_and_triton_dirs(pipeline_launch_shell):
     result = _bash(
         pipeline_launch_shell,

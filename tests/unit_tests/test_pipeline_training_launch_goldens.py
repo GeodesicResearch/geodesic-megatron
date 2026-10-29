@@ -237,3 +237,10 @@ def test_exec_shim_scrub(tmp_path):
 def test_env_submit(pipeline_launch_shell, case, args, env):
     run = pipeline_launch_shell.run("pipeline_env_submit.sbatch", *args, env=env)
     assert_golden_json(FIXTURES / "environment" / f"{case}.json", pipeline_launch_shell.normalise(run))
+
+
+def test_smoke_rendezvous_honours_the_address_override_as_every_launcher_does(pipeline_launch_shell):
+    env = {"SLURM_JOB_NUM_NODES": "2", "SLURM_JOB_NODELIST": "nid[000001-000002]", "MASTER_ADDR_OVERRIDE": "10.0.0.9"}
+    run = pipeline_launch_shell.run("pipeline_env_submit.sbatch", "smoke", env=env)
+    [torchrun] = [call for call in run["calls"] if call["cmd"] == "torchrun"]
+    assert "--master_addr=10.0.0.9" in torchrun["argv"] and "--master_port=29401" in torchrun["argv"]

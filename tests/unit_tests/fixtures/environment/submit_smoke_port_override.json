@@ -19,8 +19,8 @@
     },
     {
       "argv": [
-        "--nnodes=2",
         "--nproc_per_node=4",
+        "--nnodes=2",
         "--node_rank=0",
         "--master_addr=nid9",
         "--master_port=31000",

@@ -15,12 +15,13 @@ first_host() {
     scontrol show hostname "$1" | head -1
 }
 
-# set_rendezvous NODELIST: MASTER_ADDR is MASTER_ADDR_OVERRIDE or NODELIST's first
-# host, which must be a node that runs ranks; MASTER_PORT is MASTER_PORT_OVERRIDE
-# or 29500 + SLURM_JOB_ID % 1000. Sets both in the caller's shell, unexported.
+# set_rendezvous NODELIST [DEFAULT_PORT]: MASTER_ADDR is MASTER_ADDR_OVERRIDE or
+# NODELIST's first host, which must be a node that runs ranks; MASTER_PORT is
+# MASTER_PORT_OVERRIDE, else DEFAULT_PORT, else 29500 + SLURM_JOB_ID % 1000.
+# Sets both in the caller's shell, unexported.
 set_rendezvous() {
     MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(first_host "$1")}"
-    MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
+    MASTER_PORT="${MASTER_PORT_OVERRIDE:-${2:-$((29500 + SLURM_JOB_ID % 1000))}}"
 }
 
 # node_local_tmp PREFIX: exports TMPDIR=/tmp/PREFIX_<job id> and creates it, with
