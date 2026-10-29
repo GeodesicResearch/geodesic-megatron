@@ -26,8 +26,8 @@
 # rest, and still from the arm's own table, so the jobs keep the arm's names and the counts
 # the verifier checks against. A subset the stage does not contain is an error.
 #
-# BUILD_STEPS (comma-separated: prepare, split, tokenize, pack) submits only those steps of
-# each row's chain; a kept step whose predecessor is omitted starts immediately. `prepare`
+# BUILD_STEPS (comma-separated: prepare, split, tokenize, pack) submits only those steps
+# of each row's chain; a kept step whose predecessor is omitted starts immediately. `prepare`
 # alone re-stamps an already-tokenized corpus's provenance after its pin moved (the download
 # is a cache hit and the .bin/.idx are untouched); `tokenize` alone re-tokenizes a prepared
 # JSONL. A step run without its predecessor's output fails in its own job, loudly.
@@ -40,9 +40,12 @@
 # BUILD_STEPS alongside BUILD_SHARDS (BUILD_STEPS=split,pack BUILD_SHARDS=1, say) is refused
 # rather than silently left out.
 #
-# Run from the repo root; set ISAMBARD_SBATCH_FORCE=1 for the batch — an arm submits 40-60 jobs
-# and the node-health gate prompts otherwise.
+# Run from the repo root. Every job is one node, so every one is submitted with
+# ISAMBARD_SBATCH_FORCE=1, as the node-limit rule (README.md, "The node limit for new submissions")
+# submits one-node jobs: isambard_sbatch then skips its account node-cap check, which an arm's 40-60
+# jobs would otherwise trip, and still excludes the bad nodes. A dry run states it.
 set -euo pipefail
+export ISAMBARD_SBATCH_FORCE=1
 
 TABLE="${1:?usage: build_corpora.sh <corpora-table> <stage|all> [subset ...]}"
 STAGE="${2:?usage: build_corpora.sh <corpora-table> <stage|all> [subset ...]}"
@@ -51,6 +54,7 @@ SUBSETS=("$@")
 DRY_RUN="${DRY_RUN:-0}"
 BUILD_STEPS="${BUILD_STEPS:-}"
 BUILD_SHARDS="${BUILD_SHARDS:-}"
+[ "$DRY_RUN" != "1" ] || echo "  every job would be submitted with ISAMBARD_SBATCH_FORCE=$ISAMBARD_SBATCH_FORCE" >&2
 
 CAMPAIGN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRIPE_COUNT="${SHARD_STRIPE_COUNT:-8}"
@@ -152,7 +156,7 @@ while IFS=$'\x1f' read -r -a field; do
             if [ "$parent" = "DRYRUN" ]; then dep=(--hold); else dep=("--dependency=afterok:$parent"); fi
         fi
 
-        jobid=$(submit "$desc" "${dep[@]}" --time="${hours}:00:00" --job-name="$name" \
+        jobid=$(submit "$desc" ${dep[@]+"${dep[@]}"} --time="${hours}:00:00" --job-name="$name" \
             "${sbatch_args[@]}" "${payload[@]}")
         JOB_ID[$key]="$jobid"
         echo "  $desc -> $jobid"

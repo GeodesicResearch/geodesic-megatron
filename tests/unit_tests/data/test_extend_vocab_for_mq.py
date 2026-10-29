@@ -3,10 +3,13 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""Unit tests for the shard-writing guarantees of scripts/data/extend_vocab_for_mq.py.
+"""Unit tests for scripts/data/extend_vocab_for_mq.py.
 
 The script rewrites multi-GB embedding shards, so a partial write must never be
-published: these tests pin the size-vs-header check and the atomic replace.
+published: these tests pin the size-vs-header check and the atomic replace. They
+also pin which tokenizer directories the script accepts: it refuses one whose
+tokenizer_config.json carries loss_mask_token_ids before writing anything, and
+otherwise ships its files with the extended checkpoint.
 
 Run:
     uv run pytest tests/unit_tests/data/test_extend_vocab_for_mq.py -v
@@ -15,10 +18,15 @@ Run:
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
+import safetensors.torch
 import torch
+
+from megatron.bridge.training.token_masking.resolution import DECLARATION_FIELD
+from tests.unit_tests.token_masking_fixtures import MARKER_ID, build_tiny_hf_tokenizer, write_declaration
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -59,8 +67,6 @@ class TestSafetensorsExpectedSize:
 
 class TestSaveShardAtomically:
     def test_writes_readable_tensors_and_removes_the_temp_file(self, ev_module, tmp_path, tensors):
-        import safetensors.torch
-
         dest = tmp_path / "shard.safetensors"
         ev_module._save_shard_atomically(tensors, dest)
 
@@ -84,9 +90,9 @@ class TestSaveShardAtomically:
 
 
 class TestRequiredTokenizerFiles:
-    def test_tokenizer_config_is_required(self, ev_module):
-        # tokenizer_config.json carries loss_mask_token_ids; shipping a checkpoint
-        # without it would silently disable MQ masking.
+    def test_tokenizer_json_and_config_are_required(self, ev_module):
+        # tokenizer.json registers the marker and tokenizer_config.json must come from the same tokenizer; a
+        # checkpoint missing either would ship its parent's tokenizer, which BPE-splits the marker.
         assert "tokenizer_config.json" in ev_module.REQUIRED_TOKENIZER_FILES
         assert "tokenizer.json" in ev_module.REQUIRED_TOKENIZER_FILES
 
@@ -94,3 +100,81 @@ class TestRequiredTokenizerFiles:
         assert set(ev_module.TOKENIZER_FILE_NAMES) == set(ev_module.REQUIRED_TOKENIZER_FILES) | set(
             ev_module.OPTIONAL_TOKENIZER_FILES
         )
+
+
+class TestCheckMqTokenizerDir:
+    def test_accepts_a_tokenizer_without_the_declaration(self, ev_module, tmp_path):
+        ev_module.check_mq_tokenizer_dir(build_tiny_hf_tokenizer(tmp_path / "tokenizer"))
+
+    @pytest.mark.parametrize("declared", [[MARKER_ID], [], None], ids=["ids", "empty", "null"])
+    def test_refuses_a_tokenizer_carrying_the_declaration(self, ev_module, tmp_path, declared):
+        directory = build_tiny_hf_tokenizer(tmp_path / "tokenizer")
+        write_declaration(directory, declared)
+        with pytest.raises(ValueError, match=f"carries {DECLARATION_FIELD}"):
+            ev_module.check_mq_tokenizer_dir(directory)
+
+    def test_refuses_a_missing_directory(self, ev_module, tmp_path):
+        with pytest.raises(FileNotFoundError, match="MQ tokenizer dir not found"):
+            ev_module.check_mq_tokenizer_dir(tmp_path / "absent")
+
+    def test_refuses_a_directory_missing_a_required_file(self, ev_module, tmp_path):
+        directory = build_tiny_hf_tokenizer(tmp_path / "tokenizer")
+        (directory / "tokenizer.json").unlink()
+        with pytest.raises(FileNotFoundError, match=r"missing required file\(s\): \['tokenizer.json'\]"):
+            ev_module.check_mq_tokenizer_dir(directory)
+
+
+HIDDEN = 4
+
+
+def _write_tiny_checkpoint(directory: Path, vocab: int) -> None:
+    """An HF checkpoint dir with untied embedding and head of ``vocab`` rows, as the script reads one."""
+    directory.mkdir(parents=True)
+    shard = "model-00001-of-00001.safetensors"
+    tensors = {
+        "backbone.embeddings.weight": torch.randn(vocab, HIDDEN).to(torch.bfloat16),
+        "lm_head.weight": torch.randn(vocab, HIDDEN).to(torch.bfloat16),
+    }
+    safetensors.torch.save_file(tensors, directory / shard)
+    index = {"metadata": {}, "weight_map": {name: shard for name in tensors}}
+    (directory / "model.safetensors.index.json").write_text(json.dumps(index))
+    (directory / "config.json").write_text(json.dumps({"vocab_size": vocab}))
+
+
+class TestMain:
+    def test_refuses_a_declaring_tokenizer_before_writing_anything(self, ev_module, tmp_path):
+        tokenizer = build_tiny_hf_tokenizer(tmp_path / "tokenizer", declared_token_ids=[MARKER_ID])
+        output = tmp_path / "out"
+        with pytest.raises(ValueError, match=f"carries {DECLARATION_FIELD}"):
+            ev_module.main(
+                [
+                    "--input-dir",
+                    str(tmp_path / "in"),
+                    "--output-dir",
+                    str(output),
+                    "--mq-tokenizer-dir",
+                    str(tokenizer),
+                ]
+            )
+        assert not output.exists()
+
+    def test_extends_the_vocab_and_ships_the_tokenizer(self, ev_module, tmp_path):
+        source = tmp_path / "in"
+        _write_tiny_checkpoint(source, ev_module.ORIG_VOCAB)
+        tokenizer = build_tiny_hf_tokenizer(tmp_path / "tokenizer")
+        output = tmp_path / "out"
+
+        assert (
+            ev_module.main(
+                ["--input-dir", str(source), "--output-dir", str(output), "--mq-tokenizer-dir", str(tokenizer)]
+            )
+            == 0
+        )
+
+        extended = safetensors.torch.load_file(output / "model-00001-of-00001.safetensors")
+        assert extended["backbone.embeddings.weight"].shape == (ev_module.TARGET_VOCAB, HIDDEN)
+        assert extended["lm_head.weight"].shape == (ev_module.TARGET_VOCAB, HIDDEN)
+        assert json.loads((output / "config.json").read_text())["vocab_size"] == ev_module.TARGET_VOCAB
+        for name in ev_module.REQUIRED_TOKENIZER_FILES:
+            assert (output / name).read_bytes() == (tokenizer / name).read_bytes()
+        assert DECLARATION_FIELD not in json.loads((output / "tokenizer_config.json").read_text())

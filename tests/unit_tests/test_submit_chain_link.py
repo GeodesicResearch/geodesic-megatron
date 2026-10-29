@@ -21,7 +21,6 @@ and the real chain spec. Only SLURM itself (squeue, isambard_sbatch) is stood in
 
 from __future__ import annotations
 
-import os
 import stat
 import subprocess
 from pathlib import Path
@@ -130,18 +129,6 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True).stdout
 
 
-@pytest.fixture
-def outside_any_git_hook(monkeypatch):
-    """Drop the GIT_* variables git exports to the hooks it runs.
-
-    The pre-commit hook runs this suite, and git hands it GIT_INDEX_FILE naming the outer
-    repository's index, which every git call below would otherwise read instead of the test's own.
-    """
-    for name in [name for name in os.environ if name.startswith("GIT_")]:
-        monkeypatch.delenv(name)
-
-
-@pytest.mark.usefixtures("outside_any_git_hook")
 def test_a_repository_with_an_uncommitted_change_is_refused_and_a_clean_one_names_its_head(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

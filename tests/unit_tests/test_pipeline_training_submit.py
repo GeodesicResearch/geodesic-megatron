@@ -60,14 +60,14 @@ def _run_submit(tmp_path, extra_args):
 def test_launcher_flags_forward_raw(tmp_path):
     """--disable-ft must reach the launcher as a top-level arg, not behind --."""
     args = _run_submit(tmp_path, ["--disable-ft"])
-    assert args == ["cfg.yaml", "--model", "super", "--mode", "sft", "--disable-ft"]
+    assert args == [str(tmp_path / "stub_repo" / "cfg.yaml"), "--model", "super", "--mode", "sft", "--disable-ft"]
 
 
 def test_hydra_overrides_still_forward(tmp_path):
     """Non-flag extras (Hydra overrides) pass through unchanged alongside flags."""
     args = _run_submit(tmp_path, ["--disable-ft", "train.train_iters=32", "checkpoint.save=null"])
     assert args == [
-        "cfg.yaml",
+        str(tmp_path / "stub_repo" / "cfg.yaml"),
         "--model",
         "super",
         "--mode",

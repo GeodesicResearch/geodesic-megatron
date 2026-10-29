@@ -82,6 +82,20 @@ def test_a_band_width_other_than_the_pre_registered_one_is_not_evaluated(lg, tmp
     assert "gate L: NOT EVALUATED" in out and "not the pre-registered 0.020000" in out
 
 
+@pytest.mark.parametrize(
+    "spec_text",
+    [None, "", "- a\n", "references: [\n", "references: {}\n"],
+    ids=["absent", "empty", "list", "malformed", "missing-key"],
+)
+def test_a_spec_that_cannot_be_used_ends_not_evaluated_rather_than_failed(lg, tmp_path, capsys, spec_text):
+    """Exit status 1 is a FAIL verdict. A spec that is absent, unreadable or refused is a gate that did not run."""
+    spec = tmp_path / "loss_gate.yaml"
+    if spec_text is not None:
+        spec.write_text(spec_text)
+    assert lg.main(["--spec", str(spec), "--candidate", str(tmp_path / "train.out")]) == 2
+    assert str(spec) in capsys.readouterr().err
+
+
 def test_a_candidate_that_is_a_reference_is_not_evaluated(lg, tmp_path, refs):
     """A run always lies inside a band it helped draw."""
     spec = write_spec(tmp_path, refs, {"L": gate(refs, 0.01)})
