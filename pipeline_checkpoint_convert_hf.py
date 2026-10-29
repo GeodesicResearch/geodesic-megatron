@@ -519,6 +519,164 @@ def read_embedding_row_count(hf_path: Path) -> int | None:
     return header[emb_key]["shape"][0]
 
 
+#: The inference tokenizer and generation files of a release, which an export ships from its --hf-model release
+#: when the training tokenizer's chat template renders as the release's (``adopt_release_inference_files``).
+RELEASE_INFERENCE_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "chat_template.jinja",
+    "generation_config.json",
+)
+
+#: Conversations on which two chat templates must render byte-identically to count as the same inference format:
+#: system and multi-turn, assistant reasoning both as ``reasoning_content`` and inline, and a tool call.
+TEMPLATE_PROBE_CONVERSATIONS = (
+    [{"role": "user", "content": "What is 2 + 2?"}],
+    [
+        {"role": "system", "content": "You are a careful assistant."},
+        {"role": "user", "content": "Name a prime."},
+        {"role": "assistant", "content": "<think>\n2 is prime.\n</think>\n\nTwo."},
+        {"role": "user", "content": "Another?"},
+    ],
+    [
+        {"role": "user", "content": "Name a prime."},
+        {"role": "assistant", "reasoning_content": "3 is prime.", "content": "Three."},
+    ],
+    [
+        {"role": "user", "content": "Weather in Paris?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "weather", "arguments": {"city": "Paris"}}}],
+        },
+        {"role": "tool", "content": "Sunny, 21C."},
+    ],
+)
+
+TEMPLATE_PROBE_TOOLS = (
+    {
+        "type": "function",
+        "function": {
+            "name": "weather",
+            "description": "Current weather in a city.",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+        },
+    },
+)
+
+
+def _render_probes(template: str) -> list[str]:
+    """``template`` on every probe conversation, with and without a generation prompt and thinking.
+
+    A probe the template refuses (its ``raise_exception``, a jinja ``TemplateError``) renders as that error, so two
+    templates that refuse the same probes can still compare alike; any other exception propagates.
+
+    Raises:
+        ValueError: the template refuses every probe, which would make any two such templates compare alike.
+    """
+    from jinja2.exceptions import TemplateError
+    from transformers.utils.chat_template_utils import render_jinja_template
+
+    renders, refused = [], 0
+    for conversation in TEMPLATE_PROBE_CONVERSATIONS:
+        tools = list(TEMPLATE_PROBE_TOOLS) if any("tool_calls" in m for m in conversation) else None
+        for add_generation_prompt in (False, True):
+            for enable_thinking in (False, True):
+                try:
+                    rendered = render_jinja_template(
+                        conversations=[conversation],
+                        tools=tools,
+                        chat_template=template,
+                        add_generation_prompt=add_generation_prompt,
+                        enable_thinking=enable_thinking,
+                    )[0][0]
+                except TemplateError as error:
+                    rendered = f"<{type(error).__name__}: {error}>"
+                    refused += 1
+                renders.append(rendered)
+    if refused == len(renders):
+        raise ValueError(f"the chat template refuses all {refused} probe conversations: {renders[0]}")
+    return renders
+
+
+def templates_render_alike(template: str, other: str) -> bool:
+    """Whether two chat templates render every ``TEMPLATE_PROBE_CONVERSATIONS`` case byte-identically.
+
+    A training template that differs from its release's only in training-only markup, such as the
+    ``{% generation %}`` blocks that mark assistant tokens for the loss mask, renders alike.
+    """
+    return _render_probes(template) == _render_probes(other)
+
+
+def adopt_release_inference_files(hf_path: Path, hf_model_id: str, training_template: str) -> bool:
+    """Ship the --hf-model release's inference tokenizer and generation files when the model trained on its format.
+
+    If the release's chat template renders as ``training_template`` (``templates_render_alike``), copies every
+    ``RELEASE_INFERENCE_FILES`` file the release has into ``hf_path`` verbatim, replacing the training
+    tokenizer's, and returns True. Otherwise (a release without a chat template, or a training format of its own)
+    changes nothing and returns False. ``hf_model_id`` is a local release directory or a Hub id.
+
+    Raises:
+        FileNotFoundError: a file of the release is a dangling link (a cache missing its blob), or the release or
+            the export has no config.json.
+    """
+    if Path(hf_model_id).is_dir():
+        release_dir = Path(hf_model_id)
+    else:
+        from huggingface_hub import snapshot_download
+
+        release_dir = Path(snapshot_download(hf_model_id, allow_patterns=[*RELEASE_INFERENCE_FILES, "config.json"]))
+    for name in (*RELEASE_INFERENCE_FILES, "config.json"):
+        path = release_dir / name
+        if os.path.lexists(path) and not path.exists():
+            raise FileNotFoundError(f"{path} is a dangling link: the release's {name} is missing from the cache")
+    release_config, config_path = release_dir / "config.json", hf_path / "config.json"
+    for path in (release_config, config_path):
+        if not path.exists():
+            raise FileNotFoundError(f"{path} does not exist: the token ids of config.json go with the release files")
+    release_template = release_dir / "chat_template.jinja"
+    if not release_template.exists():
+        print(f"{hf_model_id} ships no chat_template.jinja: keeping the training tokenizer's files")
+        return False
+    if not templates_render_alike(release_template.read_text(), training_template):
+        print(f"The training chat template renders differently from {hf_model_id}'s: keeping the training tokenizer's")
+        return False
+    for name in RELEASE_INFERENCE_FILES:
+        if (release_dir / name).exists():
+            shutil.copyfile(release_dir / name, hf_path / name)
+            print(f"Copied {name} from {hf_model_id} (the training template renders as the release's)")
+    # config.json's token ids go with these files: take the release's (an earlier export may have patched them).
+    release_ids = json.loads(release_config.read_text())
+    config = json.loads(config_path.read_text())
+    token_ids = {k: release_ids[k] for k in ("bos_token_id", "eos_token_id", "pad_token_id") if k in release_ids}
+    if any(config.get(k) != v for k, v in token_ids.items()):
+        config.update(token_ids)
+        config_path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n")
+        print(f"Set config.json token ids to {hf_model_id}'s: {token_ids}")
+    return True
+
+
+def _pin_tokenizer_class(tc: dict) -> bool:
+    """Make a tokenizer_config.json dict load as ``PreTrainedTokenizerFast`` everywhere; return whether it changed.
+
+    Strips the cosmetic fields that older transformers (eval venv 4.57.x) read as a hint to load TokenizersBackend
+    (a transformers 5.x class), which then crash with "Tokenizer class TokenizersBackend does not exist or is not
+    currently imported", and pins ``tokenizer_class`` (vLLM-friendly).
+    """
+    changed = False
+    for stale_key in ("backend", "is_local"):
+        if stale_key in tc:
+            del tc[stale_key]
+            changed = True
+            print(f"Stripped tokenizer_config.{stale_key}")
+    if tc.get("tokenizer_class") != "PreTrainedTokenizerFast":
+        print(f"Pinned tokenizer_class: {tc.get('tokenizer_class')} -> PreTrainedTokenizerFast")
+        tc["tokenizer_class"] = "PreTrainedTokenizerFast"
+        changed = True
+    return changed
+
+
 def fixup_hf_output(
     hf_path: Path,
     hf_model_id: str,
@@ -529,14 +687,19 @@ def fixup_hf_output(
 ) -> None:
     """Fix known issues in the converted HF output for eval/inference compatibility.
 
-    1. Fixes tokenizer_config.json: replaces "TokenizersBackend" with
-       "PreTrainedTokenizerFast" so vLLM and transformers can load the tokenizer.
+    1. Fixes tokenizer_config.json (``_pin_tokenizer_class``): pins
+       tokenizer_class to "PreTrainedTokenizerFast" and strips backend/is_local
+       so vLLM and transformers can load the tokenizer.
     2. Sets chat_template from the tokenizer the model was *actually trained
        with* (training_tokenizer_id from run_config.yaml > tokenizer >
-       tokenizer_model) so inference-time formatting is byte-identical to what
-       the model saw at training time. Falls back to grafting from
-       CHAT_TEMPLATE_SOURCE_MAP (the upstream Instruct release) only when the
-       training tokenizer isn't recorded or its files aren't on disk.
+       tokenizer_model) so inference-time formatting matches what the model saw
+       at training time. Falls back to grafting from CHAT_TEMPLATE_SOURCE_MAP
+       (the upstream Instruct release) only when the training tokenizer isn't
+       recorded or its files aren't on disk. When the training template renders
+       as the release's (``adopt_release_inference_files``), the release's
+       RELEASE_INFERENCE_FILES (downloaded when ``hf_model_id`` is a Hub id)
+       replace the training tokenizer's, and config.json takes the release's
+       token ids; the fix-ups below still apply to the adopted files.
     3. For non-reasoning models, replaces chat_template.jinja with a simple
        ChatML template (no open <think> blocks). In transformers 5.x,
        chat_template.jinja takes precedence over tokenizer_config.json.
@@ -607,31 +770,12 @@ def fixup_hf_output(
 
     # Fix tokenizer_class and add chat_template to tokenizer_config.json
     tokenizer_config = hf_path / "tokenizer_config.json"
+    training_tpl = None
     if tokenizer_config.exists():
         with open(tokenizer_config) as f:
             tc = json.load(f)
 
-        changed = False
-
-        if tc.get("tokenizer_class") == "TokenizersBackend":
-            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            changed = True
-            print("Fixed tokenizer_class: TokenizersBackend -> PreTrainedTokenizerFast")
-
-        # Strip cosmetic fields that older transformers (eval venv 4.57.x)
-        # interpret as a hint to load TokenizersBackend (a transformers 5.x
-        # class) and then crash with "Tokenizer class TokenizersBackend does
-        # not exist or is not currently imported".
-        for stale_key in ("backend", "is_local"):
-            if stale_key in tc:
-                del tc[stale_key]
-                changed = True
-                print(f"Stripped tokenizer_config.{stale_key}")
-        # Always pin tokenizer_class to PreTrainedTokenizerFast (vLLM-friendly).
-        if tc.get("tokenizer_class") != "PreTrainedTokenizerFast":
-            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            changed = True
-            print("Pinned tokenizer_class: PreTrainedTokenizerFast")
+        changed = _pin_tokenizer_class(tc)
 
         # Set the chat_template. Priority order:
         #   1. The tokenizer the model was actually trained with
@@ -647,13 +791,12 @@ def fixup_hf_output(
         # (tokenizer.json, chat_template.jinja, special_tokens_map.json) byte-
         # identical into the HF dir, then rebuild tokenizer_config.json by
         # merging the converted dir's structural fields with the training
-        # tokenizer's tokens + chat_template. This guarantees the HF dir's
-        # tokenizer is byte-identical to what was used at training and
-        # avoids the legacy bug where the upstream Nemotron template (with
+        # tokenizer's tokens + chat_template (adopt_release_inference_files
+        # below replaces them with the release's when the training template
+        # renders as the release's). This avoids the legacy bug where the upstream Nemotron template (with
         # `<think></think>` injection in assistant turns) was preserved at
         # chat_template.jinja and synced into tokenizer_config.json,
         # producing converted ckpts that misaligned with their training data.
-        training_tpl = None
         if training_tokenizer_id:
             training_tpl = _try_resolve_template_from_hub_id(training_tokenizer_id)
             if training_tpl is None:
@@ -779,6 +922,15 @@ def fixup_hf_output(
             chat_template_jinja_path.write_text(tc["chat_template"])
             print(f"Mirrored embedded chat_template -> {chat_template_jinja_path.name}")
 
+    adopted_release_files = training_tpl is not None and adopt_release_inference_files(
+        hf_path, hf_model_id, training_tpl
+    )
+    if adopted_release_files and tokenizer_config.exists():
+        adopted_tc = json.loads(tokenizer_config.read_text())
+        if _pin_tokenizer_class(adopted_tc):
+            with open(tokenizer_config, "w") as f:
+                json.dump(adopted_tc, f, indent=2, ensure_ascii=False)
+
     # Keep chat_template.jinja as shipped by the upstream Nemotron tokenizer.
     # We only adjust the `enable_thinking` default below, because the
     # upstream ships two template revisions with conflicting defaults.
@@ -852,11 +1004,12 @@ def fixup_hf_output(
         # above) while the embedded copy is still the freshly-grafted (un-
         # patched) version. transformers >= 5.x prefers the .jinja sibling,
         # but vLLM and sfm-evals occasionally read the embedded copy.
+        # A release's tokenizer_config.json without an embedded copy stays as released.
         if tokenizer_config.exists() and jinja_path.exists():
             jinja_text = jinja_path.read_text()
             with open(tokenizer_config) as f:
                 tc = json.load(f)
-            if tc.get("chat_template") != jinja_text:
+            if tc.get("chat_template") != jinja_text and ("chat_template" in tc or not adopted_release_files):
                 tc["chat_template"] = jinja_text
                 with open(tokenizer_config, "w") as f:
                     json.dump(tc, f, indent=2, ensure_ascii=False)
@@ -875,8 +1028,10 @@ def fixup_hf_output(
         (hf_path / "tokenizer_config.json").exists()
         and "chat_template" in json.loads((hf_path / "tokenizer_config.json").read_text())
     )
+    # Generation reads generation_config.json, so config.json keeps the release's value when that file exists.
     if chat_template_active:
-        for cfg_name in ("config.json", "generation_config.json"):
+        eos_configs = ["generation_config.json"] if (hf_path / "generation_config.json").exists() else ["config.json"]
+        for cfg_name in eos_configs:
             cfg_path = hf_path / cfg_name
             if not cfg_path.exists():
                 continue

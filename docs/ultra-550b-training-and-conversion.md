@@ -174,7 +174,10 @@ isambard_sbatch --nodes=12 pipeline_checkpoint_submit.sbatch export \
   training parallelism (PP=36). ~25 min on 12 nodes.
 - The exporter auto-applies the serving fixups: `tokenizer_class` →
   `PreTrainedTokenizerFast`, strips `tokenizer_config.backend/is_local`, installs the
-  training tokenizer's `chat_template`, patches `eos_token_id` → `[2, 11]`.
+  training tokenizer's `chat_template`, patches `eos_token_id` → `[2, 11]`. If the
+  training template renders as the `--hf-model` release's, the release's tokenizer and
+  generation files and token ids replace the training tokenizer's (with the same
+  `tokenizer_class` pin).
 - Output lands at `<experiment>/iter_<N>/hf/` (~1 TB). Don't `--push-to-hub` unless
   explicitly releasing.
 

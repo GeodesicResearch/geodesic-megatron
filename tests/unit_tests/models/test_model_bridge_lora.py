@@ -1046,3 +1046,27 @@ def test_column_parallel_mapping_skips_ep_gather_for_adapters(monkeypatch):
 
     result = mapping.megatron_to_hf(torch.ones(2, 2), None)
     torch.testing.assert_close(result["hf_param"], torch.ones(2, 2))
+
+
+def test_split_qkv_linear_out_splits_lora_b_rows_like_the_base_weight():
+    """A rank-32 LoRA B of a fused QKV, at Super's attention sizes, splits into the q/k/v rows of B @ A.
+
+    The fused weight's last dimension (hidden 4096) and the LoRA rank (32) differ, so the weight path's FP8
+    scale-domain inference must not apply to B.
+    """
+    from megatron.core.transformer import TransformerConfig
+
+    from megatron.bridge.models.conversion.param_mapping import split_qkv_weights
+
+    config = TransformerConfig(
+        num_layers=1, hidden_size=4096, num_attention_heads=32, num_query_groups=2, kv_channels=128
+    )
+    rows, rank = (32 + 2 * 2) * 128, 32
+    torch.manual_seed(0)
+    lora_b, lora_a = torch.randn(rows, rank), torch.randn(rank, config.hidden_size)
+    split = DummyBridge()._split_qkv_linear_out_weight(SimpleNamespace(config=config), lora_b)
+    q_full, k_full, v_full = split_qkv_weights(config, lora_b @ lora_a)
+    assert split["q_proj"].shape == (32 * 128, rank) and split["k_proj"].shape == (2 * 128, rank)
+    torch.testing.assert_close(split["q_proj"] @ lora_a, q_full)
+    torch.testing.assert_close(split["k_proj"] @ lora_a, k_full)
+    torch.testing.assert_close(split["v_proj"] @ lora_a, v_full)
