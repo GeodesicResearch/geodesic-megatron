@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 from scripts.training.config_compose import load_composed_yaml
 
+from tests.unit_tests.repo_scripts import run_training_main
+
 
 MODELS = ("nano", "super", "ultra")
 MODES = ("sft", "cpt", "pretrain")
@@ -61,38 +63,15 @@ class TestRecipeMap:
 
 
 class TestMainWiring:
-    """Drive the real main() end-to-end up to the training-entry call.
-
-    The training entry points (pretrain/finetune) are replaced with recorders: past that
-    line the code launches distributed training — a SLURM/GPU/rendezvous boundary a unit
-    test cannot cross. Everything before it (recipe construction, YAML merge, dataset
-    rewiring, mode dispatch) runs for real, on the Nano recipes (pure dataclass
-    construction — Super/Ultra would fetch the HF config).
+    """Drive the real main() end-to-end up to the training-entry call (``run_training_main``), on the Nano
+    recipes (pure dataclass construction — Super/Ultra would fetch the HF config).
     """
 
     def _run_main(self, run_module, monkeypatch, tmp_path, mode, yaml_text):
         config = tmp_path / "override.yaml"
         config.write_text(yaml_text)
-        calls = {}
-        monkeypatch.setattr(run_module, "pretrain", lambda **kw: calls.setdefault("pretrain", kw))
-        monkeypatch.setattr(run_module, "finetune", lambda **kw: calls.setdefault("finetune", kw))
-        monkeypatch.syspath_prepend(str(Path(run_module.__file__).parent))
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "pipeline_training_run.py",
-                "--model",
-                "nano",
-                "--mode",
-                mode,
-                "--config-file",
-                str(config),
-                "--disable-ft",
-            ],
-        )
-        run_module.main()
-        return calls
+        argv = ["--model", "nano", "--mode", mode, "--config-file", str(config), "--disable-ft"]
+        return run_training_main(run_module, monkeypatch, argv)
 
     _DATA_PATH_YAML = (
         "tokenizer:\n"

@@ -280,6 +280,12 @@ def run_module():
     return load_script("pipeline_training_run")
 
 
+@pytest.fixture(scope="module")
+def prepare_module():
+    """The repo-root pipeline_data_prepare.py, loaded by path (repo_scripts.load_script)."""
+    return load_script("pipeline_data_prepare")
+
+
 def pytest_sessionfinish(session, exitstatus):
     if exitstatus == 5:
         session.exitstatus = 0

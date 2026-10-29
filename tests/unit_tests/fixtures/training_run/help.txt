@@ -1,0 +1,18 @@
+usage: pipeline_training_run.py [-h] --model {nano,super,ultra} --mode {sft,cpt,pretrain} [--config-file CONFIG_FILE]
+                                [--peft PEFT] [--enable-ft] [--disable-ft] [--disable-straggler] [--enable-pao]
+
+Unified Nemotron 3 training: SFT, CPT, and from-scratch pretraining for Nano, Super, and Ultra
+
+options:
+  -h, --help            show this help message and exit
+  --model {nano,super,ultra}
+                        Model variant
+  --mode {sft,cpt,pretrain}
+                        Training mode
+  --config-file CONFIG_FILE
+                        Path to the YAML OmegaConf override file.
+  --peft PEFT           Type of PEFT to use (SFT mode only)
+  --enable-ft           Enable fault tolerance (requires ft_launcher) and NVRx straggler detection (default: True)
+  --disable-ft          Disable fault tolerance and straggler detection
+  --disable-straggler   Disable NVRx straggler detection only, keeping fault tolerance (ft_launcher restarts) enabled
+  --enable-pao          Enable Precision-Aware Optimizer (BF16 momentum/variance, halves optimizer memory)

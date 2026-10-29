@@ -1,0 +1,11 @@
+{
+  "dataset_kwargs": {
+    "answer_only_loss": true,
+    "chat": true,
+    "pad_to_max_length": false,
+    "use_hf_tokenizer_chat_template": true
+  },
+  "packing_algorithm": "first_fit_shuffle",
+  "seed": 1234,
+  "seq_length": 2048
+}

@@ -1,0 +1,66 @@
+{
+  "args": [
+    "tokenize",
+    "<TMP>/root with space",
+    "geodesic-research/nemotron-base-tokenizer"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "3rdparty/Megatron-LM/tools/preprocess_data.py",
+        "--input",
+        "<TMP>/root with space/training.jsonl",
+        "--output-prefix",
+        "<TMP>/root with space/tokenized",
+        "--tokenizer-type",
+        "HuggingFaceTokenizer",
+        "--tokenizer-model",
+        "geodesic-research/nemotron-base-tokenizer",
+        "--json-keys",
+        "input",
+        "--append-eod",
+        "--workers",
+        "32",
+        "--partitions",
+        "1",
+        "--log-interval",
+        "5000"
+      ],
+      "cmd": "python",
+      "env": {
+        "TMPDIR": "/projects/a5k/public/tmp"
+      }
+    },
+    {
+      "argv": [
+        "scripts/data/count_idx_tokens.py",
+        "<TMP>/root with space/tokenized_input_document.idx",
+        "--provenance-out",
+        "<TMP>/root with space/tokenized_input_document.provenance.json",
+        "--note",
+        "dataset_root=<TMP>/root with space",
+        "--note",
+        "input_jsonl=<TMP>/root with space/training.jsonl",
+        "--note",
+        "tokenizer=geodesic-research/nemotron-base-tokenizer",
+        "--note",
+        "json_key=input",
+        "--note",
+        "append_eod=true",
+        "--note",
+        "workers=32",
+        "--note",
+        "partitions=1",
+        "--note",
+        "slurm_job_id=<JOB>"
+      ],
+      "cmd": "python",
+      "env": {
+        "TMPDIR": "/projects/a5k/public/tmp"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": "===== Pretraining-Format Tokenization (JSONL -> .bin/.idx) =====\nJob ID:       <JOB>\nNode:         <HOST>\nInput:        <TMP>/root with space/training.jsonl\nTokenizer:    geodesic-research/nemotron-base-tokenizer\nArtifact:     <TMP>/root with space/tokenized_input_document.{bin,idx}\nWorkers:      32\nPartitions:   1  (one writer process each)\nEnv:          <TMP>/container/nemo.sif\n================================================================\n===== Exact token count (from the .idx) =====\n===== Tokenization Complete =====\n"
+}
