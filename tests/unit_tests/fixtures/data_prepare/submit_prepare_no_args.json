@@ -15,5 +15,5 @@
   ],
   "returncode": 0,
   "stderr": "",
-  "stdout": "===== SFT Dataset Preparation (download + tokenize + pack) =====\nJob ID:   <JOB>\nNode:     <HOST>\nRepo dir: <REPO>\nEnv:      <TMP>/container/nemo.sif\nArgs:     \n================================================================\n===== Preparation Complete =====\n"
+  "stdout": "===== SFT Dataset Preparation (download + tokenize + pack) =====\nJob ID:   <JOB>\nNode:     nid000001\nRepo dir: <REPO>\nEnv:      <TMP>/container/nemo.sif\nArgs:     \n================================================================\n===== Preparation Complete =====\n"
 }

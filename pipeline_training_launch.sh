@@ -38,7 +38,7 @@
 #   FI_LOG_LEVEL=warn           libfabric warnings (e.g. CXI MR-cache rejections) into the log.
 #   ISAMBARD_ENV_OVERRIDES=<file>  KEY=VALUE lines applied before this launcher reads its knobs,
 #                               again after its own exports, and inside the container after
-#                               pipeline_env_activate.sh (see "Per-launch environment overrides").
+#                               pipeline_env_activate.sh (see pipeline/sh/env_overrides.sh).
 #   (a stopped run)             scripts/training/dump_hung_ranks.sh <jobid> BEFORE cancelling
 #                               it: every rank's Python + native stacks, and its NCCL flight
 #                               recorder where a watchdog exists (not under the shipped
@@ -145,135 +145,25 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-# ==============================================================================
-# Per-launch environment overrides (ISAMBARD_ENV_OVERRIDES)
-#
-# ISAMBARD_ENV_OVERRIDES=<file> sets environment variables for one launch without editing
-# this file or pipeline_env_activate.sh, including ones either of them sets unconditionally
-# (TORCH_NCCL_BLOCKING_WAIT, OMP_NUM_THREADS, ...). The file holds KEY=VALUE lines. Blank
-# lines and lines starting with # are ignored; KEY must match ^[A-Za-z_][A-Za-z0-9_]*$; VALUE
-# is everything after the first '=', taken literally (no quote removal, no expansion). A
-# relative path resolves against the directory the launcher is started from.
-#
-# The file is read here, before the launcher does anything else, and the launch ends here if
-# the variable is set but names no file, or if any line is malformed (a carriage return
-# counts: it would end up inside the value), repeats a KEY, names what looks like a credential
-# (every value is printed into the job log), or names one of the launcher's own shell
-# variables (apply_env_overrides lists them): those would change the launch itself -- its
-# model, node count, checkout, container, payload -- rather than the environment it runs in.
-#
-# Each override is applied at three points, because three layers set the environment:
-#   - here, before the launcher reads any of its knobs, so the knobs take the override
-#     (ISAMBARD_NCCL_DEBUG, TRAIN_PERSISTENT_TRITON_CACHE, TRAIN_FI_CXI_*_OVERRIDE,
-#     MASTER_*_OVERRIDE, GEODESIC_CONTAINER_*, ISAMBARD_RUN_ID, ...);
-#   - after the launcher's last export (export_env_overrides), so it also beats what the
-#     launcher sets unconditionally (TORCH_NCCL_BLOCKING_WAIT=1, the NCCL/CXI set, TMPDIR)
-#     for the host side of the launch: the rendezvous endpoint, the ft_launcher gate, srun; and
-#   - inside the container payload, after pipeline_env_activate.sh and the payload's own
-#     exports, immediately before the rank launcher -- the only point that beats activate's
-#     defaults. The payload carries the assignments as quoted bash statements, so no other
-#     node reads the file.
-# The banner lists each applied KEY=VALUE, and the ranks get ISAMBARD_ENV_OVERRIDE_KEYS (the
-# keys, comma-separated, in file order), which pipeline_training_run.py uses to log the value
-# each node's processes actually see. With ISAMBARD_ENV_OVERRIDES unset the launch is
-# unchanged, except that an inherited ISAMBARD_ENV_OVERRIDE_KEYS is dropped: it would make the
-# ranks report overrides this launch never applied.
-# ==============================================================================
-apply_env_overrides() {
-    # Locals carry the _eo_ prefix, which a KEY may not use, so no KEY can shadow one of them.
-    local _eo_file="$1" _eo_line _eo_key _eo_other _eo_decl _eo_n=0
-    local -a _eo_keys=()
-    # The launcher's own shell variables, pipeline_env_config.env's CONTAINER_* (which it derives
-    # from the GEODESIC_CONTAINER_* inputs, on the host and again on every node), the variables
-    # that choose the checkout, waive its check or carry the code-identity or launch-width check's record, and this
-    # hook's own. A variable that already exists here without
-    # the export attribute (bash's own, such as IFS) is refused as well.
-    # tests/unit_tests/test_launcher_env_overrides.py fails when a variable the launcher leaves in
-    # its shell is refused by neither rule.
-    local -a _eo_reserved=(
-        CONFIG_FILE MODEL MODE USE_FT USE_STRAGGLER ENABLE_PAO PEFT OVERRIDE_NODES OVERRIDE_NODELIST
-        EXTRA_ARGS USAGE REPO_DIR ENV_CACHE_SUFFIX _FD1_TARGET RUN_ID_LINK_DIR NNODES NODELIST
-        TOTAL_GPUS TRAIN_SCRIPT SCRIPT_ARGS SRUN_ARGS RUNNER ACTIVATE_CMD
-        GEODESIC_REPO_DIR TRAIN_REPO_DIR ALLOW_CROSS_CHECKOUT_CONFIG ISAMBARD_CODE_IDENTITY ISAMBARD_LAUNCH_WIDTH
-        ISAMBARD_ENV_OVERRIDES ISAMBARD_ENV_OVERRIDE_KEYS ENV_OVERRIDE_ENTRIES ENV_OVERRIDES_PAYLOAD
-    )
-    if [ ! -f "$_eo_file" ]; then
-        echo "FATAL: ISAMBARD_ENV_OVERRIDES names no file: '$_eo_file'" >&2
-        exit 1
-    fi
-    ENV_OVERRIDE_ENTRIES=()
-    while IFS= read -r _eo_line || [ -n "$_eo_line" ]; do
-        _eo_n=$((_eo_n + 1))
-        if [[ "$_eo_line" =~ ^[[:space:]]*$ || "$_eo_line" == "#"* ]]; then
-            continue
-        fi
-        _eo_key="${_eo_line%%=*}"
-        if [[ "$_eo_line" != *=* || ! "$_eo_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ || "$_eo_line" == *$'\r'* ]]; then
-            echo "FATAL: $_eo_file:$_eo_n: not KEY=VALUE (KEY matching ^[A-Za-z_][A-Za-z0-9_]*\$, no carriage return): $_eo_line" >&2
-            exit 1
-        fi
-        if [[ "${_eo_key^^}" =~ (^|_)(TOKEN|SECRET|PASSWORD|API_KEY)(_|$) ]]; then
-            echo "FATAL: $_eo_file:$_eo_n: $_eo_key looks like a credential; overrides are printed into the job log" >&2
-            exit 1
-        fi
-        for _eo_other in "${_eo_reserved[@]}"; do
-            if [ "$_eo_other" = "$_eo_key" ]; then
-                echo "FATAL: $_eo_file:$_eo_n: $_eo_key is set by the launcher itself, not an environment override" >&2
-                exit 1
-            fi
-        done
-        if [[ "$_eo_key" == CONTAINER_* ]]; then
-            echo "FATAL: $_eo_file:$_eo_n: $_eo_key is derived by pipeline_env_config.env; override its GEODESIC_CONTAINER_* input" >&2
-            exit 1
-        fi
-        if [[ "$_eo_key" == _eo_* ]]; then
-            echo "FATAL: $_eo_file:$_eo_n: $_eo_key uses the _eo_ prefix, which the override hook keeps for itself" >&2
-            exit 1
-        fi
-        if _eo_decl="$(declare -p "$_eo_key" 2>/dev/null)"; then
-            _eo_decl="${_eo_decl#declare -}"
-            if [[ "${_eo_decl%% *}" != *x* ]]; then
-                echo "FATAL: $_eo_file:$_eo_n: $_eo_key is a shell variable of the launcher, not an environment variable" >&2
-                exit 1
-            fi
-        fi
-        for _eo_other in "${_eo_keys[@]}"; do
-            if [ "$_eo_other" = "$_eo_key" ]; then
-                echo "FATAL: $_eo_file:$_eo_n: $_eo_key is set more than once" >&2
-                exit 1
-            fi
-        done
-        _eo_keys+=("$_eo_key")
-        ENV_OVERRIDE_ENTRIES+=("$_eo_line")
-    done < "$_eo_file"
+# Overridable (default = main checkout) so a git worktree can be trained pre-merge. Resolved here, before the
+# overrides file is read, because the shell libraries live in the checkout; the launcher changes into it below.
+REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
+# A REPO_DIR without the libraries cannot be reported by them, so this line, the same in every launcher, does it.
+[ -f "$REPO_DIR/pipeline/sh/common.sh" ] || { echo "FATAL: $REPO_DIR has no pipeline/sh/common.sh, so REPO_DIR is not this repo's checkout. Inside a tunnel or salloc SLURM_SUBMIT_DIR (${SLURM_SUBMIT_DIR:-unset}) is the tunnel's own submit dir, and a copied script runs from the copy's dir. Export GEODESIC_REPO_DIR=/path/to/repo." >&2; exit 1; }
+source "$REPO_DIR/pipeline/sh/common.sh"
+source "$REPO_DIR/pipeline/sh/slurm.sh"
+source "$REPO_DIR/pipeline/sh/fabric.sh"
+source "$REPO_DIR/pipeline/sh/env_overrides.sh"
+source "$REPO_DIR/pipeline/sh/run_identity.sh"
 
-    for _eo_line in "${ENV_OVERRIDE_ENTRIES[@]}"; do
-        export "$_eo_line"
-    done
-    ISAMBARD_ENV_OVERRIDE_KEYS="$(IFS=,; echo "${_eo_keys[*]}")"
-    export ISAMBARD_ENV_OVERRIDE_KEYS
-}
-
-# Re-applies the overrides read by apply_env_overrides after the launcher's own exports, and
-# renders them as the bash statements the container payload runs after activation.
-export_env_overrides() {
-    local _eo_line
-    ENV_OVERRIDES_PAYLOAD=""
-    for _eo_line in "${ENV_OVERRIDE_ENTRIES[@]}"; do
-        export "$_eo_line"
-        ENV_OVERRIDES_PAYLOAD+="export ${_eo_line%%=*}=$(printf '%q' "${_eo_line#*=}")"$'\n'
-    done
-    ENV_OVERRIDES_PAYLOAD+="export ISAMBARD_ENV_OVERRIDE_KEYS=$(printf '%q' "$ISAMBARD_ENV_OVERRIDE_KEYS")"
-}
-
+# Per-launch environment overrides (pipeline/sh/env_overrides.sh), first application: before the
+# launcher reads any of its knobs.
 if [ -n "${ISAMBARD_ENV_OVERRIDES+x}" ]; then
     apply_env_overrides "$ISAMBARD_ENV_OVERRIDES"
 else
     unset ISAMBARD_ENV_OVERRIDE_KEYS
 fi
 
-# Overridable (default = main checkout) so a git worktree can be trained pre-merge.
-REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
 # A config from a different checkout than REPO_DIR's was written for other code; refused unless
 # ALLOW_CROSS_CHECKOUT_CONFIG=1 (see the script). This launcher's own copy runs, whatever REPO_DIR holds.
@@ -289,14 +179,7 @@ bash "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts/training/checkout_gua
 # venv to activate here. A missing SIF/Slingshot build hard-fails below with the
 # fix command — never a silent degradation. See docs/environment.md.
 # ==============================================================================
-if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
-    echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
-    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
-    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
-    exit 1
-fi
-source "$REPO_DIR/pipeline_env_config.env"
-env_config_require
+source_env_config
 
 # A config that pins the code it trains with (a code_identity: block) is refused unless REPO_DIR is that code.
 # scripts/training/code_identity.py checks it once, on this node, before any rank starts, inside the container (whose
@@ -341,282 +224,9 @@ if [ -n "${TRAIN_NCCL_NET_PLUGIN:-}" ]; then
 fi
 
 # ==============================================================================
-# NCCL transport and network plugin
-#
-# Isambard uses HPE Slingshot-11 (CXI fabric) for inter-node communication.
-# NCCL talks to Slingshot via the AWS OFI NCCL plugin (aws-ofi-nccl), which
-# bridges NCCL's network API to libfabric's CXI provider.
-#
-# Docs:
-#   NCCL env vars:    https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html
-#   fi_cxi man page:  https://ofiwg.github.io/libfabric/v2.1.0/man/fi_cxi.7.html
-#   HPE libfabric:    https://support.hpe.com/hpesc/public/docDisplay?docId=dp00005991en_us
+# NCCL, CXI and torch-distributed settings (fabric_training, pipeline/sh/fabric.sh)
 # ==============================================================================
-
-# --- NCCL network plugin selection ---
-
-# Use the AWS OFI NCCL plugin for libfabric-based transport (required for Slingshot).
-# Without this, NCCL falls back to TCP sockets which are orders of magnitude slower.
-export NCCL_NET="AWS Libfabric"
-
-# Select the CXI provider within libfabric. CXI is HPE's native provider for the
-# Cassini NIC (Slingshot-11). Other providers (verbs, tcp, etc.) won't work here.
-export FI_PROVIDER=cxi
-
-# Bind NCCL's socket-based control plane to the Slingshot HSN interface (hsn0/hsn1).
-# Without this, NCCL may try to use the management ethernet which can't reach other nodes.
-export NCCL_SOCKET_IFNAME=hsn
-
-# --- NCCL collective algorithm and protocol tuning ---
-
-# Disable CollNet (collective offload to smart switches). Slingshot doesn't have
-# in-network reduction hardware, so CollNet has no effect and can cause init delays.
-export NCCL_COLLNET_ENABLE=0
-
-# Allow NCCL rings/trees to use different NICs on different nodes. With value=1, NCCL
-# can route traffic across both HSN NICs even if peer nodes aren't on the same rail,
-# which improves bandwidth utilization on Slingshot's dragonfly topology.
-export NCCL_CROSS_NIC=1
-
-# Enable GPU Direct RDMA (GDR) when GPU and NIC share the same NUMA node (PHB = same
-# PCIe Host Bridge). GDR lets the NIC DMA directly to/from GPU memory, bypassing CPU
-# staging buffers. PHB is the right level for GH200 where GPU and NIC are on the same
-# PCIe root complex. Higher levels (SYS) would enable GDR across NUMA, but GH200 is
-# single-socket so PHB covers all local GPU-NIC paths.
-export NCCL_NET_GDR_LEVEL=PHB
-
-# Disable the LL128 (Low Latency 128-byte) protocol. LL128 uses GPU shared memory for
-# sub-microsecond latency on small messages, but performs worse than Simple protocol on
-# Slingshot for the large collective payloads typical in LLM training. The ^prefix means
-# "exclude this protocol", so NCCL will use LL (small msgs) and Simple (large msgs).
-export NCCL_PROTO=^LL128
-
-# Force Ring algorithm for all collectives. Ring provides best peak bandwidth utilization
-# by arranging GPUs in a logical circle where each sends/receives to/from one neighbor.
-# Tree algorithm has lower latency for small messages but worse bandwidth. On Slingshot,
-# Ring is 16% faster for DP reduce-scatter (the bottleneck collective in distributed
-# optimizer training). Comma-separated list; other options: Tree, CollnetDirect, CollnetChain.
-export NCCL_ALGO=Ring
-
-# Minimum number of NCCL channels (parallel data paths). Each channel maps to a CUDA
-# CTA (thread block) that drives data movement. Default is 1 for small-scale jobs.
-# Setting to 4 ensures enough parallelism to saturate Slingshot bandwidth even for
-# smaller collectives. More channels = more CUDA SMs used by NCCL, but 4 is modest.
-export NCCL_MIN_NCHANNELS=4
-
-# Number of network channels per remote GPU peer. Default is 2. Each channel gets its
-# own QP (queue pair) / CXI connection, providing path diversity. Setting to 4 fixes a
-# 24% throughput regression on GH200 documented in Isambard release notes. The extra
-# channels let NCCL interleave more in-flight transfers across the NIC's tx/rx queues.
-export NCCL_NCHANNELS_PER_NET_PEER=4
-
-# Disable NVLink SHARP (NVSwitch-based collective offload). NVLS is available on
-# DGX H100/B200 systems with 3rd-gen NVSwitch, which Isambard GH200 nodes don't have.
-# Enabling it would cause NCCL to fail looking for NVSwitch hardware that doesn't exist.
-# Must also be 0 for nvidia-resiliency-ext in-process restart compatibility.
-export NCCL_NVLS_ENABLE=0
-
-# --- GPU Direct RDMA (GDRCopy) ---
-
-# Enable GDRCopy in NCCL: allows low-latency GPU memory access via a CPU-mapped path
-# (kernel module gdrdrv). Used for small control messages and signaling in collectives.
-# Complements GPU Direct RDMA (NET_GDR_LEVEL) which handles bulk data. GDRCopy is
-# particularly helpful for reducing latency of NCCL's internal synchronization.
-export NCCL_GDRCOPY_ENABLE=1
-
-# Enable GDRCopy in the libfabric CXI provider. This is the libfabric-side counterpart
-# of NCCL_GDRCOPY_ENABLE -- it tells the CXI provider to use GDRCopy for GPU memory
-# registrations and small transfers, enabling true GPU RDMA without CPU bounce buffers.
-export FI_HMEM_CUDA_USE_GDRCOPY=1
-
-# --- CXI provider: completion queue and transmit ---
-
-# Maximum entries in the CXI completion queue. Default is 1024, which is too small for
-# NCCL's many parallel channels. When the CQ overflows, the NIC drops completions and
-# NCCL hangs waiting for acks that never arrive ("Cassini Event Queue overflow detected").
-# 131072 entries provides headroom for 128-GPU jobs with 4 channels per peer.
-export FI_CXI_DEFAULT_CQ_SIZE=131072
-
-# Maximum outstanding transmit requests per endpoint. Controls how many rendezvous sends
-# can be in-flight simultaneously. Default was 16384 in our original configs, but that
-# exhausted CXI hardware resources (limited tx credits on the Cassini NIC), causing sends
-# to stall. 1024 is sufficient for NCCL's channel count and avoids resource exhaustion.
-export FI_CXI_DEFAULT_TX_SIZE=1024
-
-# --- CXI provider: memory registration ---
-
-# Use the Linux userfaultfd mechanism to monitor memory region invalidation. When CUDA
-# or the OS remaps virtual memory, libfabric's MR cache must invalidate stale registrations.
-# userfaultfd is a kernel-level notification (vs. memhooks which intercept malloc/free at
-# the linker level). More reliable with CUDA's VMM allocator and avoids false invalidations
-# from glibc memory operations that memhooks would trigger.
-export FI_MR_CACHE_MONITOR=userfaultfd
-
-# MR-cache capacity. The provider default (~4096 entries) is too small for a 512-rank
-# distributed-checkpoint save: the save's staging churn fills the cache, and once full it
-# stops caching NEW registrations — after which every NCCL chunk transfer pays slow-path
-# registration and ALL collectives run ~25x slower for the remainder of the process
-# (measured 2026-08-14: ~6.5 s/iter -> uniform ~165 s/iter on the 512-GPU Nano pretrain
-# posture, permanent until restart; fresh process fast; DP=128 saves unaffected). With
-# max_count 65536 / unlimited size the same save is harmless (post-save 6.6 s/iter).
-# The A/B pair proving this: probe_r1f (default cache, collapse) vs probe_r1g (this
-# setting, no collapse), same allocation, same config.
-export FI_MR_CACHE_MAX_COUNT=${FI_MR_CACHE_MAX_COUNT:-65536}
-export FI_MR_CACHE_MAX_SIZE=${FI_MR_CACHE_MAX_SIZE:--1}
-
-# Disable CXI host memory registration for data buffers. When enabled (default), the CXI
-# provider registers host memory with the NIC for RDMA. Disabling it avoids contention on
-# the NIC's memory registration table when many ranks on the same node register overlapping
-# host memory regions, which can cause registration failures or slowdowns.
-export FI_CXI_DISABLE_HOST_REGISTER=1
-
-# --- CXI provider: message matching and rendezvous ---
-
-# Use software-based message matching instead of NIC hardware matching. The Cassini NIC
-# has limited hardware match entries; when exhausted, it falls back to software anyway but
-# with a costly mode-switch. "soft" mode uses software from the start, which is more
-# predictable and avoids the stall that happens when hardware entries run out mid-collective.
-export FI_CXI_RX_MATCH_MODE="${TRAIN_FI_CXI_RX_MATCH_MODE_OVERRIDE:-soft}"
-
-# Force all messages to use the rendezvous protocol (no eager sends). These three vars
-# together set the eager-to-rendezvous crossover point to 0 bytes:
-#   RDZV_GET_MIN=0:    minimum Get payload in rendezvous is 0 (no floor)
-#   RDZV_THRESHOLD=0:  no bytes sent eagerly before switching to rendezvous
-#   RDZV_EAGER_SIZE=0: no eager data piggybacked on the rendezvous request
-# Eager protocol pre-posts receive buffers and copies data on arrival; rendezvous does a
-# zero-copy RDMA Get from the sender's buffer. For NCCL's large payloads, rendezvous is
-# always faster and avoids exhausting the CXI eager buffer pool (overflow_buf).
-export FI_CXI_RDZV_GET_MIN="${TRAIN_FI_CXI_RDZV_OVERRIDE:-0}"
-export FI_CXI_RDZV_THRESHOLD="${TRAIN_FI_CXI_RDZV_THRESHOLD_OVERRIDE:-0}"
-export FI_CXI_RDZV_EAGER_SIZE=0
-# TRAIN_FI_CXI_RDZV_THRESHOLD_OVERRIDE / TRAIN_FI_CXI_RX_MATCH_MODE_OVERRIDE let a
-# diagnostic run relax these hang-avoidance settings to test whether the rendezvous /
-# soft-matching message pattern (not raw fabric bandwidth) is the multi-group slowdown.
-
-# Use the alternative rendezvous read protocol. The default rendezvous uses a Put-based
-# protocol where the sender pushes data to the receiver. "alt_read" uses a Get-based
-# protocol where the receiver pulls data from the sender. The alt_read path is less prone
-# to CXI deadlocks when many endpoints rendezvous simultaneously (common in NCCL all-to-all)
-# and improves collective performance on Slingshot.
-export FI_CXI_RDZV_PROTO=alt_read
-
-# Disable Immediate Data Completion (IDC) for non-inject messages. IDC is a Cassini
-# optimization that inlines small message completions into the CQ entry. For NCCL's
-# message patterns (many parallel channels, large payloads), IDC adds overhead to the
-# completion path without benefit. Disabling it reduces CQ pressure.
-export FI_CXI_DISABLE_NON_INJECT_MSG_IDC=1
-
-# --- PyTorch NCCL process group settings ---
-
-# Enable async error handling in NCCL process group. When a collective hangs (e.g., due
-# to a Slingshot network issue), a background watchdog thread detects the timeout and
-# aborts the process instead of blocking forever. Required for fault tolerance -- without
-# this, a single hung rank blocks the entire job indefinitely. The NCCL_* form is the
-# legacy name; TORCH_NCCL_* is the current PyTorch form. Both are set for compatibility.
-export NCCL_ASYNC_ERROR_HANDLING=1
-export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-
-# Make NCCL wait() calls blocking (synchronous): the calling thread polls the collective to
-# completion or timeout and throws on timeout. What this costs, in torch's own words at
-# process-group creation ("TORCH_NCCL_BLOCKING_WAIT is enabled, NO watchdog thread is
-# created"): there is no watchdog thread, so no asynchronous timeout detection, no heartbeat
-# monitor, and no flight-recorder dump on timeout or on demand (the trace-location block
-# below). The only timeout is the calling thread's wait() at the YAML's
-# dist.distributed_timeout_minutes, which Megatron passes to init_process_group; the
-# TORCH_NCCL_TIMEOUT below covers groups created without one. A run that stops iterating
-# therefore leaves no evidence by itself -- scripts/training/dump_hung_ranks.sh <jobid> takes
-# it from outside. Turning blocking wait off restores the watchdog and everything it owns; for
-# one launch, that is TORCH_NCCL_BLOCKING_WAIT=0 in an ISAMBARD_ENV_OVERRIDES file (below).
-export TORCH_NCCL_BLOCKING_WAIT=1
-
-# Avoid using record_stream() on NCCL output tensors. record_stream() extends a tensor's
-# lifetime until the NCCL stream finishes, which prevents PyTorch's caching allocator from
-# reusing that memory. This causes GPU memory fragmentation and over-allocation, especially
-# in large-scale distributed training. Disabling it lets the allocator reclaim memory
-# earlier via event-based synchronization instead.
-export TORCH_NCCL_AVOID_RECORD_STREAMS=1
-
-# Disable MPI GPU-aware transport. Isambard's MPICH has GPU support compiled in, but we
-# use NCCL (not MPI) for GPU collectives. If both NCCL and MPI try to manage GPU contexts
-# simultaneously, they can deadlock on CUDA context initialization. Setting this to 0
-# ensures MPI only handles CPU data (hostfile, process launch) and stays out of NCCL's way.
-export MPICH_GPU_SUPPORT_ENABLED=0
-
-# ==============================================================================
-# NCCL timeout and fault tolerance
-#
-# These settings work with ft_launcher (nvidia-resiliency-ext) to detect and
-# recover from Slingshot NCCL hangs. The layered approach:
-#   1. ft_launcher worker restart (step timeout 7200s) -- the per-node agent
-#      restarts failed workers from the latest checkpoint
-#   2. NCCL watchdog (TORCH_NCCL_TIMEOUT=7200s) -- aborts genuinely wedged
-#      collectives
-#   3. srun --kill-on-bad-exit=1 -- a rank that dies unrecoverably ends the
-#      whole step instead of stranding the survivors in a never-completing
-#      collective; a --dependency=singleton chain then resumes from the
-#      latest checkpoint
-# ==============================================================================
-
-# NCCL watchdog timeout in seconds. If any collective takes longer than this, the
-# watchdog thread aborts the process. The FIRST iteration establishes all collective
-# patterns via lazy NCCL communicator init over Slingshot, which scales with pipeline
-# depth and rank count: ~15-20 min at PP=8, but MEASURED ~52 min for Ultra at PP=36 /
-# 288 ranks (steady-state then drops to ~30 s/iter). 1800s (30 min) was too short for
-# deep pipelines and caused a false "hang" on iter 1 — set to 7200s (2 h), ABOVE the
-# configs' distributed_timeout_minutes=90 (5400 s) so Megatron's explicit process-group
-# timeout (clean error) always fires before this last-resort watchdog. After the
-# first iter the ft_launcher auto-learned step timeout (~tens of s) catches real hangs
-# fast, so this larger watchdog is only a first-iter backstop. Overridable.
-export TORCH_NCCL_TIMEOUT=${TORCH_NCCL_TIMEOUT:-7200}
-
-# Suppress verbose C++ logging from PyTorch internals. "error" level hides INFO/WARN
-# messages from torch::distributed and autograd that would otherwise flood logs on
-# 128+ ranks. NCCL's own logging is controlled separately by NCCL_DEBUG.
-export TORCH_CPP_LOG_LEVEL=error
-
-# Don't rethrow CUDA errors from the NCCL watchdog. Default is true (rethrow), which
-# kills the process on any CUDA error detected during a collective. Setting to 0 allows
-# nvidia-resiliency-ext's in-process restart to catch the error and reinitialize NCCL
-# instead of crashing. Required for in-process restart to work.
-export TORCH_NCCL_RETHROW_CUDA_ERRORS=0
-
-# PyTorch NCCL Flight Recorder. Keeps an in-memory ring buffer of the last N collective
-# ops per rank (op name, sizes, comm, enqueue/start/complete state). Near-zero overhead.
-# On a watchdog timeout (TORCH_NCCL_DUMP_ON_TIMEOUT=1) every rank dumps its buffer to
-# ${TORCH_NCCL_DEBUG_INFO_TEMP_FILE}<rank> (the trace-location block later in this file puts
-# that beside the raw log) -- it shows which collective each rank was stuck on and which
-# ranks never arrived. The dump is the WATCHDOG's, and TORCH_NCCL_BLOCKING_WAIT=1 above
-# means there is no watchdog: in the shipped posture the buffer is filled and never written.
-# Override the buffer size to 0 to disable. All overridable.
-export TORCH_NCCL_TRACE_BUFFER_SIZE=${TORCH_NCCL_TRACE_BUFFER_SIZE:-2000}
-export TORCH_NCCL_DUMP_ON_TIMEOUT=${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}
-export TORCH_NCCL_TRACE_CPP_STACK=${TORCH_NCCL_TRACE_CPP_STACK:-0}
-
-# NCCL debug logging level. WARN prints connection setup failures, transport selection,
-# and error conditions without the massive per-message output of INFO. INFO can cause OOM
-# on 128-GPU jobs by writing GBs of log data -- when set to INFO, also set NCCL_DEBUG_FILE
-# to a per-rank path (supports %h host / %p pid) so it does NOT flood the shared stdout.
-# Overridable: a debug run sets NCCL_DEBUG=INFO + NCCL_DEBUG_FILE for granular capture.
-export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
-
-# Restrict NCCL debug output to INIT (connection setup, topology detection, transport
-# selection) and NET (network plugin operations, libfabric calls). This filters out
-# noisy subsystems like COLL (per-collective traces) and GRAPH (channel/ring construction)
-# that are only useful for deep debugging. Overridable for granular debug runs.
-export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET}
-
-# A submit-time NCCL_DEBUG does not reliably survive to this point: the brics
-# aws-ofi-nccl module setenvs NCCL_DEBUG=VERSION and `module purge` churns
-# module-owned NCCL_* values, so the "overridable" promise above held only by
-# accident. ISAMBARD_NCCL_DEBUG is applied last and therefore actually wins.
-# At INFO on 512 ranks, direct output to per-rank files (ISAMBARD_NCCL_DEBUG_FILE,
-# %h host / %p pid placeholders) or every rank floods the shared stdout.
-if [ -n "${ISAMBARD_NCCL_DEBUG:-}" ]; then
-    export NCCL_DEBUG="$ISAMBARD_NCCL_DEBUG"
-    if [ -n "${ISAMBARD_NCCL_DEBUG_FILE:-}" ]; then
-        export NCCL_DEBUG_FILE="$ISAMBARD_NCCL_DEBUG_FILE"
-    fi
-fi
+fabric_training
 
 # ==============================================================================
 # Job-specific paths and caches
@@ -692,87 +302,11 @@ export ISAMBARD_FP32_SSM_STATE="${ISAMBARD_FP32_SSM_STATE:-checkpoint}"
 export ISAMBARD_COMM_WARMUP="${ISAMBARD_COMM_WARMUP:-0}"
 
 # ==============================================================================
-# Run identity (INFR-68)
+# Run identity (pipeline/sh/run_identity.sh)
 # ==============================================================================
-# One unique ID joins everything a training run leaves behind: the raw SLURM
-# job log, the torch-profiler artifacts, and the W&B run (stamped as summary
-# metrics by scripts/telemetry/run_identity.py). Minted once per launch;
-# respects a pre-set value so a re-launch within one allocation can share it.
-# Exported, so it reaches every rank inside the container (see the env guarantee
-# at the srun call below).
-export ISAMBARD_RUN_ID="${ISAMBARD_RUN_ID:-$(date +%Y%m%dT%H%M%S)-j${SLURM_JOB_ID}}"
-
-# Absolute path of this job's raw log. Resolution order:
-#   1. explicit ISAMBARD_RAW_LOG_PATH in the environment (always wins);
-#   2. this process's OWN stdout target when it is a regular file — correct for
-#      sbatch (StdOut is fd1's target) AND for in-tunnel `bash ... > log 2>&1`
-#      launches, where scontrol would mis-resolve to the TUNNEL job's log
-#      (caught 2026-07-24: a profile run's raw_log_snapshot captured tunnel
-#      port-forwarding chatter instead of training output);
-#   3. scontrol's StdOut field — but ONLY when stdout is not a terminal. An
-#      interactive launch (tty) inside someone else's batch allocation (e.g. a
-#      VS Code tunnel job) would otherwise inherit THAT job's StdOut and
-#      misattribute a foreign log to this run.
-# For interactive/salloc runs stdout is a terminal (not a regular file), every
-# rung fails, and the var stays empty — consumers (W&B summary, profiler log
-# snapshot) then skip log reporting/copying.
-# The `|| true`s matter: this script runs `set -euo pipefail`, and a no-match
-# grep (salloc case) would otherwise abort the launch.
-if [ -z "${ISAMBARD_RAW_LOG_PATH:-}" ]; then
-    _FD1_TARGET="$(readlink -f /proc/$$/fd/1 2>/dev/null || true)"
-    if [ -n "$_FD1_TARGET" ] && [ -f "$_FD1_TARGET" ]; then
-        ISAMBARD_RAW_LOG_PATH="$_FD1_TARGET"
-    elif [ ! -t 1 ]; then
-        ISAMBARD_RAW_LOG_PATH="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | grep -oE 'StdOut=[^ ]+' | head -n 1 | cut -d= -f2- || true)"
-    else
-        ISAMBARD_RAW_LOG_PATH=""
-    fi
-fi
-if [ ! -f "$ISAMBARD_RAW_LOG_PATH" ]; then
-    ISAMBARD_RAW_LOG_PATH=""
-fi
-export ISAMBARD_RAW_LOG_PATH
-
-# Findable-by-run-ID companion symlink next to the raw log, so a log can be
-# located from a run ID alone: <log-dir>/by-run-id/<run-id>.out -> train-<job>.out
-# Non-fatal: identity bookkeeping must never kill a training launch.
-if [ -n "$ISAMBARD_RAW_LOG_PATH" ]; then
-    RUN_ID_LINK_DIR="$(dirname "$ISAMBARD_RAW_LOG_PATH")/by-run-id"
-    if ! mkdir -p "$RUN_ID_LINK_DIR" 2>/dev/null ||
-        ! ln -sfn "$ISAMBARD_RAW_LOG_PATH" "$RUN_ID_LINK_DIR/${ISAMBARD_RUN_ID}.out" 2>/dev/null; then
-        echo "WARNING: by-run-id log symlink not created (non-fatal)" >&2
-    fi
-fi
-
-# Where a rank's NCCL flight-recorder dump lands, and the FIFO through which one is asked for.
-# The recorder (TORCH_NCCL_TRACE_BUFFER_SIZE above) is written by torch's watchdog thread: on a
-# collective timeout (TORCH_NCCL_DUMP_ON_TIMEOUT=1), or as soon as anything is written to the
-# FIFO the watchdog's monitor opens at ${TORCH_NCCL_DEBUG_INFO_PIPE_FILE}<rank>.pipe. Under
-# TORCH_NCCL_BLOCKING_WAIT=1 (above) torch creates NO watchdog thread, so neither happens and
-# the FIFO never appears; these paths are set so that the dump lands somewhere readable the
-# moment blocking wait is turned off -- torch's own default is node-local /tmp, gone with the
-# allocation. Evidence that needs no watchdog: scripts/training/dump_hung_ranks.sh <jobid>.
-#   - Dump: <log-dir>/nccl_trace/<jobid>/rank_<rank>, beside the raw log like by-run-id/.
-#   - FIFO: directly in /tmp, which exists on every node and is bound into the container, so
-#     the host-side trigger sees the FIFO the rank opened. It must be node-local (its buffer
-#     is that node's kernel state), and NOT under $TMPDIR, which is created on the batch node
-#     only -- a FIFO there would fail on every other node and abort the rank.
-# Both overridable. An interactive launch has no raw log; the dump then keeps torch's default.
-configure_nccl_trace_location() {
-    if [ -z "${ISAMBARD_RAW_LOG_PATH:-}" ]; then
-        echo "NOTE: no raw log path; NCCL flight-recorder dumps keep torch's node-local /tmp default" >&2
-    elif [ -z "${TORCH_NCCL_DEBUG_INFO_TEMP_FILE:-}" ]; then
-        local trace_dir
-        trace_dir="$(dirname "$ISAMBARD_RAW_LOG_PATH")/nccl_trace/${SLURM_JOB_ID}"
-        # Diagnostics bookkeeping must never kill a training launch, as for by-run-id/ above.
-        if mkdir -p "$trace_dir" 2>/dev/null; then
-            export TORCH_NCCL_DEBUG_INFO_TEMP_FILE="${trace_dir}/rank_"
-        else
-            echo "WARNING: could not create $trace_dir; NCCL flight-recorder dumps keep torch's node-local /tmp default" >&2
-        fi
-    fi
-    export TORCH_NCCL_DEBUG_INFO_PIPE_FILE="${TORCH_NCCL_DEBUG_INFO_PIPE_FILE:-/tmp/nccl_dump_${SLURM_JOB_ID}_}"
-}
+set_run_id
+set_raw_log_path
+link_run_id_log
 configure_nccl_trace_location
 
 # A config that fixes the width it trains at (a launch_width: block) trains at exactly that width or not at all
@@ -827,37 +361,14 @@ apply_launch_width "$CONFIG_FILE" "$REPO_DIR" || exit 1
 # ==============================================================================
 NNODES="${OVERRIDE_NODES:-$SLURM_NNODES}"
 NODELIST="${OVERRIDE_NODELIST:-$SLURM_NODELIST}"
-export MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$NODELIST" | head -n 1)}"
-export MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
+set_rendezvous "$NODELIST"
+export MASTER_ADDR MASTER_PORT
 TOTAL_GPUS=$((NNODES * 4))
 
-# Dragonfly placement of this run's nodes, exported for the W&B run summary
-# (scripts/telemetry/run_identity.py reads ISAMBARD_SWITCH_SPREAD). Computed here rather
-# than in the payload because the payload runs inside the container, which inherits the
-# SLURM environment variables but not the SLURM binaries -- scontrol is absent there.
-# Worth recording on every run: the same Nano pretrain config measured 137.8 TFLOP/s/GPU
-# across 2 switch groups and 114.7 across 8, so a throughput number is only comparable to
-# another taken at the same spread.
-# Non-fatal, like the rest of the identity bookkeeping: a failure here must never stop a run.
-derive_switch_spread() {
-    # Emits "<switch>:<nodes>,..." largest first, or nothing. Every statement must end
-    # truthy: the caller runs under `set -euo pipefail`, so a while-loop whose final
-    # iteration ends on a false test makes the whole pipeline nonzero even though the
-    # tail of it succeeded, and that would abort the launch rather than skip the metric.
-    local mine sw nodes n
-    mine=$(scontrol show hostnames "$1" | sort -u)
-    [ -n "$mine" ] || return 0
-    scontrol show topology | while read -r line; do
-        case "$line" in *Level=0*) ;; *) continue ;; esac
-        sw=${line#*SwitchName=}; sw=${sw%% *}
-        nodes=${line#*Nodes=}; nodes=${nodes%% *}
-        if [ -n "$sw" ] && [ -n "$nodes" ]; then
-            n=$(scontrol show hostnames "$nodes" | sort -u |
-                comm -12 - <(printf '%s\n' "$mine") | wc -l)
-            if [ "$n" -gt 0 ]; then printf '%s:%s\n' "$sw" "$n"; fi
-        fi
-    done | sort -t: -k2 -rn | paste -sd, -
-}
+# Dragonfly placement of this run's nodes (derive_switch_spread, pipeline/sh/slurm.sh), exported for the W&B run
+# summary (scripts/telemetry/run_identity.py reads ISAMBARD_SWITCH_SPREAD). Computed here rather than in the payload
+# because the payload runs inside the container, which inherits the SLURM environment variables but not the SLURM
+# binaries -- scontrol is absent there. Non-fatal, like the rest of the identity bookkeeping.
 if [ -z "${ISAMBARD_SWITCH_SPREAD:-}" ]; then
     ISAMBARD_SWITCH_SPREAD="$(derive_switch_spread "$NODELIST" || true)"
 fi
@@ -877,8 +388,7 @@ if [ "$USE_FT" = true ]; then
 fi
 
 # Per-launch environment overrides, second application: after the launcher's last export, so
-# that the overrides also beat its unconditional exports (see "Per-launch environment
-# overrides" at the top, which applied them first).
+# that the overrides also beat its unconditional exports (pipeline/sh/env_overrides.sh).
 ENV_OVERRIDES_PAYLOAD=""
 if [ -n "${ISAMBARD_ENV_OVERRIDES+x}" ]; then
     export_env_overrides
@@ -894,23 +404,22 @@ if [ ! -f "$TRAIN_SCRIPT" ]; then
     exit 1
 fi
 
-# Build training script args
-SCRIPT_ARGS="--config-file $CONFIG_FILE --model $MODEL --mode $MODE"
+# Build training script args, one array element per argument; the payload pastes them in quoted (quote_args), so a
+# value with a space or a shell character reaches the ranks as one word.
+SCRIPT_ARGS=(--config-file "$CONFIG_FILE" --model "$MODEL" --mode "$MODE")
 if [ -n "$PEFT" ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS --peft $PEFT"
+    SCRIPT_ARGS+=(--peft "$PEFT")
 fi
 if [ "$ENABLE_PAO" = true ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS --enable-pao"
+    SCRIPT_ARGS+=(--enable-pao)
 fi
 if [ "$USE_FT" = false ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS --disable-ft"
+    SCRIPT_ARGS+=(--disable-ft)
 fi
 if [ "$USE_STRAGGLER" = false ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS --disable-straggler"
+    SCRIPT_ARGS+=(--disable-straggler)
 fi
-if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS ${EXTRA_ARGS[*]}"
-fi
+SCRIPT_ARGS+=("${EXTRA_ARGS[@]}")
 
 # ==============================================================================
 # Print summary
@@ -981,12 +490,13 @@ ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
 # ft_launcher compatibility gate: the image's nvidia-resiliency-ext version is
 # whatever NGC shipped, so verify the section-timeout flags exist before launching
 # 44+ ranks into a launcher that would reject them; fail with actionable guidance
-# rather than a rank-0 usage error. (D6 in docs/environment.md.)
+# rather than a rank-0 usage error. (D6 in docs/environment.md.) The check is
+# pipeline/environment/ft_launcher.py's, run in the container.
 if [ "$USE_FT" = true ]; then
-    if ! "$REPO_DIR/pipeline_env_exec.sh" "ft_launcher --help" 2>&1 | \
-            grep -q -- "--ft-rank-section-timeouts"; then
-        echo "FATAL: the container image's ft_launcher (nvidia-resiliency-ext) does not" >&2
-        echo "  support --ft-rank-section-timeouts. Rerun with --disable-ft, or qualify a" >&2
+    # The check names what is missing on stderr, which passes through.
+    if ! "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python -m pipeline.environment.ft_launcher")" >/dev/null; then
+        echo "FATAL: the container image's ft_launcher (nvidia-resiliency-ext) does not support the" >&2
+        echo "  section-timeout flags this launcher passes (see above). Rerun with --disable-ft, or qualify a" >&2
         echo "  newer image (GEODESIC_CONTAINER_IMAGE_TAG in pipeline_env_config.env)." >&2
         exit 1
     fi
@@ -1032,8 +542,7 @@ if [ "$USE_FT" = true ]; then
             --ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600 \
             --ft-rank-out-of-section-timeout=7200 \
             --ft-log-level=INFO \
-            $TRAIN_SCRIPT \
-            $SCRIPT_ARGS
+            $TRAIN_SCRIPT$(quote_args "${SCRIPT_ARGS[@]}")
     "
 else
     # Plain torchrun (no fault tolerance)
@@ -1049,8 +558,7 @@ else
             --node_rank=\$SLURM_NODEID \
             --master_addr=$(printf '%q' "$MASTER_ADDR") \
             --master_port=$(printf '%q' "$MASTER_PORT") \
-            $TRAIN_SCRIPT \
-            $SCRIPT_ARGS
+            $TRAIN_SCRIPT$(quote_args "${SCRIPT_ARGS[@]}")
     "
 fi
 

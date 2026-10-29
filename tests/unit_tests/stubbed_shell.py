@@ -137,6 +137,10 @@ exec bash -c "${!#}"
 # Lmod is a host shell function, absent in the container; the scripts only purge.
 exit 0
 """,
+    "hostname": """\
+# The test host's name differs between runs; the fake job's only node is nid000001.
+echo nid000001
+""",
     "date": """\
 # Wall-clock time would make every banner differ between runs.
 echo "<DATE>"
@@ -157,15 +161,25 @@ record torchrun "$@"
 exit "${STUB_TORCHRUN_RC:-0}"
 """,
     "ft_launcher": """\
-# Ranks need GPUs and a rendezvous: record the launch. --help answers the launcher's flag-support check.
-if [ "${1:-}" = --help ]; then echo "--ft-rank-section-timeouts"; exit 0; fi
+# Ranks need GPUs and a rendezvous: record the launch. --help prints $STUB_FT_LAUNCHER_HELP when it is set (an
+# empty value is a launcher with neither flag), and otherwise the two section-timeout flags the launcher passes,
+# then exits with $STUB_FT_LAUNCHER_HELP_RC (default 0).
+if [ "${1:-}" = --help ]; then
+    printf '%s\n' "${STUB_FT_LAUNCHER_HELP-  --ft-rank-section-timeouts ...
+  --ft-rank-out-of-section-timeout ...}"
+    exit "${STUB_FT_LAUNCHER_HELP_RC:-0}"
+fi
 record ft_launcher "$@"
 """,
     "python": """\
-# A script's launch needs GPUs or the network: record it. Helper code (`python -c`, `python -m pipeline.*`, and
+# A script's launch needs GPUs or the network: record it. Helper code (`python -c`, `python -m pipeline.*`, the
+# training launcher's checks `python -m scripts.training.code_identity` and `scripts.training.launch_width`, and
 # scripts/data/prepare_revisions.py, which resolves a tokenizer reference) runs for real, with the Hub replaced by
 # the recording fake.
-if [ "${1:-}" = -c ] || { [ "${1:-}" = -m ] && [[ "${2:-}" == pipeline.* ]]; } || [ "${1:-}" = scripts/data/prepare_revisions.py ]; then
+if [ "${1:-}" = -c ] \
+    || { [ "${1:-}" = -m ] && [[ "${2:-}" == pipeline.* || "${2:-}" == scripts.training.code_identity \
+        || "${2:-}" == scripts.training.launch_width ]]; } \
+    || [ "${1:-}" = scripts/data/prepare_revisions.py ]; then
     PYTHONPATH="$STUB_DIR/fake_modules${PYTHONPATH:+:$PYTHONPATH}" exec "$STUB_PYTHON" "$@"
 fi
 record python "$@"
@@ -267,7 +281,7 @@ class PipelineShell:
         return stubbed_shell_env(self.stub_dir, {**self._base, **(extra or {})})
 
     def run(self, script: str, *args: str, env: Mapping[str, str] | None = None, timeout: float = 300) -> dict:
-        """Run ``bash <repo root>/<script> args`` in ``env()`` and return what happened.
+        """Run ``bash <script> args`` in ``env()`` and return what happened; a relative ``script`` is under the repo root.
 
         Returns:
             ``args``, ``returncode``, ``stdout``, ``stderr``, and ``calls``: the records of this run's recorded stub

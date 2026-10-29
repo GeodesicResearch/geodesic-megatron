@@ -239,3 +239,21 @@ def test_a_pipeline_module_runs_for_real_and_is_not_recorded(shell, tmp_path):
     )
     assert (result.returncode, result.stdout) == (0, "5 -\n"), result.stderr
     assert not shell.calls_file.exists()
+
+
+@pytest.mark.parametrize(
+    "help_text, flags",
+    [
+        (None, ["--ft-rank-section-timeouts", "--ft-rank-out-of-section-timeout"]),
+        ("  --ft-rank-section-timeouts ...", ["--ft-rank-section-timeouts"]),
+        ("", []),
+    ],
+)
+def test_the_ft_launcher_stub_answers_help_with_the_text_a_test_sets(shell, help_text, flags):
+    """Unset, --help lists both section-timeout flags, as the image's ft_launcher does; a test sets the text to
+    stand in for an ft_launcher that lacks one or both."""
+    env = shell.env({} if help_text is None else {"STUB_FT_LAUNCHER_HELP": help_text})
+    result = subprocess.run(["ft_launcher", "--help"], capture_output=True, text=True, env=env, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert [word for word in result.stdout.split() if word.startswith("--")] == flags
+    assert not shell.calls_file.exists()

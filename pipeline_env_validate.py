@@ -342,13 +342,14 @@ def check_hf_datasets_cache():
 @stage("ft_launcher supports section timeouts")
 def check_ft_launcher_flags():
     """Assert ft_launcher supports the section-timeout flags the launcher passes."""
-    out = subprocess.run(["ft_launcher", "--help"], capture_output=True, text=True, timeout=120)
-    help_text = out.stdout + out.stderr
-    for flag in ("--ft-rank-section-timeouts", "--ft-rank-out-of-section-timeout"):
-        assert flag in help_text, (
-            f"ft_launcher lacks {flag} (image nvidia-resiliency-ext too old) — "
-            "run training with --disable-ft or qualify a newer image"
-        )
+    from pipeline.environment.ft_launcher import ft_launcher_help, missing_flags
+
+    help_run = ft_launcher_help()
+    missing = missing_flags(help_run.stdout + help_run.stderr)
+    assert not missing, (
+        f"ft_launcher lacks {missing[0]} (image nvidia-resiliency-ext too old) — "
+        "run training with --disable-ft or qualify a newer image"
+    )
 
 
 @stage("dataset helpers build/import (JIT toolchain)")

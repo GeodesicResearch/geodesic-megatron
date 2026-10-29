@@ -26,5 +26,5 @@
   ],
   "returncode": 0,
   "stderr": "",
-  "stdout": "===== Offline SFT Dataset Packing =====\nJob ID:         <JOB>\nNode:           <HOST>\nDataset root:   <TMP>/root\nTokenizer:      geodesic-research/nemotron-think-tokenizer\nSeq length:     16384\nPad seq to mul: 8\nEnv:            <TMP>/container/nemo.sif\n========================================\n===== Packing Complete =====\n"
+  "stdout": "===== Offline SFT Dataset Packing =====\nJob ID:         <JOB>\nNode:           nid000001\nDataset root:   <TMP>/root\nTokenizer:      geodesic-research/nemotron-think-tokenizer\nSeq length:     16384\nPad seq to mul: 8\nEnv:            <TMP>/container/nemo.sif\n========================================\n===== Packing Complete =====\n"
 }

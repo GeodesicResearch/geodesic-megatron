@@ -147,7 +147,7 @@ version report prints the live set per image:
 | mamba-ssm / causal-conv1d | 2.3.0 / 1.6.0 | prebuilt in the image — the Nemotron-H hybrid needs both |
 | nv-grouped-gemm | 1.1.4.post8 | MoE grouped GEMM |
 | apex | 0.1 | why `model.gradient_accumulation_fusion: True` works and is the faster path (measured ~1.1 s/iter on the 120B quickstart) |
-| nvidia-resiliency-ext | 0.4.1 | `ft_launcher`; gated at launch, see D6 |
+| nvidia-resiliency-ext | 0.6.0 | `ft_launcher`; gated at launch, see D6 |
 | transformers / datasets / numpy | 5.3.0 / 3.1.0 / 1.26.4 | |
 | peft | 0.13.2 → **0.18.1** via the overlay | see D3b |
 
@@ -250,7 +250,7 @@ a carriage return), repeats a key, or sets a key the hook refuses:
   checks' records (`ISAMBARD_CODE_IDENTITY`, `scripts/training/code_identity.py`; `ISAMBARD_LAUNCH_WIDTH`,
   `scripts/training/launch_width.py`), and the hook's own. An override
   of one of these would change the launch rather than its environment; the list is
-  `apply_env_overrides` in the launcher, and a unit test fails when a variable the launcher
+  `apply_env_overrides` in `pipeline/sh/env_overrides.sh`, and a unit test fails when a variable the launcher
   keeps is missing from it;
 - `CONTAINER_*`, which `pipeline_env_config.env` derives from the `GEODESIC_CONTAINER_*`
   inputs on the host and again on every node: override the input instead;
@@ -386,11 +386,11 @@ be poisoned by. The full ordering (mirroring the BriCS recipe): host libfabric �
 
 ### D6 — ft_launcher version gate
 
-The image's `nvidia-resiliency-ext` is whatever NGC shipped (0.4.1 on the current tag).
-Before an FT launch, `pipeline_training_launch.sh` greps `ft_launcher --help` *inside the
-container* for `--ft-rank-section-timeouts`; if absent it exits with "rerun with
-`--disable-ft`, or qualify a newer image" instead of letting 44+ ranks die on a usage error.
-The validator checks the same two flags. Related image-version friction already handled: the
+The image's `nvidia-resiliency-ext` is whatever NGC shipped (0.6.0 on the current tag).
+Before an FT launch, `pipeline_training_launch.sh` runs `python -m pipeline.environment.ft_launcher`
+*inside the container*, which checks `ft_launcher --help` for both section-timeout flags the
+launcher passes; if that fails it exits with "rerun with `--disable-ft`, or qualify a newer
+image" instead of letting 44+ ranks die on a usage error. The validator checks the same flags. Related image-version friction already handled: the
 image's `ft_launcher` parses heartbeat timeouts as FLOATS and rejects the literal `none` the
 launcher used to pass. They are therefore passed as explicit large values
 (`--ft-initial-rank-heartbeat-timeout=7200 --ft-rank-heartbeat-timeout=7200`), NOT omitted:

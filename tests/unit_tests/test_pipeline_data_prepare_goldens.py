@@ -23,7 +23,6 @@ which records the launches it reaches inside the container.
 
 import json
 import shutil
-import socket
 import sys
 
 import pytest
@@ -245,5 +244,4 @@ def test_submit_wrapper_launch(pipeline_launch_shell, tmp_path, case):
     args = [arg.replace("<TMP>", str(tmp_path)) for arg in SUBMIT_CASES[case]]
     shell = pipeline_launch_shell
     run = shell.normalise(shell.run("pipeline_data_submit.sbatch", *args))
-    run = json.loads(json.dumps(run).replace(socket.gethostname(), "<HOST>"))
     assert_golden_json(GOLDENS / f"{case}.json", run)

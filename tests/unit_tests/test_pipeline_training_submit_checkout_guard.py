@@ -249,6 +249,9 @@ class TestLauncher:
     """The real launcher checks right after resolving REPO_DIR, before anything else needs the cluster."""
 
     def _launch(self, config: Path, repo_dir: Path) -> subprocess.CompletedProcess:
+        # The launcher sources its shell libraries from REPO_DIR before the check, so the fake checkout links the
+        # real ones.
+        (repo_dir / "pipeline").symlink_to(REPO_ROOT / "pipeline")
         env = {"PATH": os.environ["PATH"], "HOME": str(repo_dir.parent), "SLURM_JOB_ID": "1"}
         return subprocess.run(
             ["bash", str(LAUNCHER), str(config), "--model", "nano", "--mode", "pretrain"],

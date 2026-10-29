@@ -1,0 +1,42 @@
+{
+  "args": [
+    "smoke"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "--nodes=2",
+        "--ntasks-per-node=1",
+        "--export=ALL",
+        "<REPO>/pipeline_env_exec.sh"
+      ],
+      "cmd": "srun",
+      "env": {
+        "FI_PROVIDER": "cxi",
+        "NCCL_NET": "AWS Libfabric",
+        "NCCL_SOCKET_IFNAME": "hsn"
+      }
+    },
+    {
+      "argv": [
+        "--nproc_per_node=4",
+        "--nnodes=2",
+        "--node_rank=0",
+        "--master_addr=10.0.0.9",
+        "--master_port=29401",
+        "scripts/container/nccl_allreduce_smoke.py"
+      ],
+      "cmd": "torchrun",
+      "env": {
+        "FI_PROVIDER": "cxi",
+        "NCCL_NET": "AWS Libfabric",
+        "NCCL_SOCKET_IFNAME": "hsn",
+        "SLURM_NODEID": "0",
+        "TMPDIR": "/projects/a5k/public/tmp"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": "============================================================\nEnvironment smoke\n  Node:       nid000001\n  Job ID:     <JOB>\n  Start time: <DATE>\n============================================================\n============================================================\nDone at <DATE> (exit 0)\n============================================================\n"
+}

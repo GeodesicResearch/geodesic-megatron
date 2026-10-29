@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for pipeline_env_config.env: the bind list the container shim mounts."""
+"""Unit tests for pipeline_env_config.env: the bind list the container shim mounts, and the host-toolchain scrub."""
 
 import os
 import subprocess
@@ -54,3 +54,36 @@ def test_without_a_tmpdir_the_bind_list_is_the_fixed_set():
 def test_a_tmpdir_that_does_not_exist_adds_no_bind(tmp_path):
     # apptainer refuses a bind whose source is missing, which would end every container command of the job.
     assert _binds(str(tmp_path / "missing")) == _binds(None)
+
+
+SCRUBBED = (
+    "LD_PRELOAD",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    "NCCL_LIBRARY",
+    "CC",
+    "CXX",
+    "CUDAHOSTCXX",
+    "CUDA_HOME",
+    "CPLUS_INCLUDE_PATH",
+    "C_INCLUDE_PATH",
+    "CUDNN_PATH",
+)
+
+
+def test_env_scrub_host_toolchain_unsets_the_host_toolchain_and_empties_the_library_path():
+    """What both the exec shim and the Slingshot build scrub, and nothing else."""
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "USER": "probe", "REPO_DIR": "/repo"}
+    env.update({key: f"/host/{key.lower()}" for key in SCRUBBED})
+    env.update({"LD_LIBRARY_PATH": "/opt/cray/lib64", "KEEP_ME": "1"})
+    result = subprocess.run(
+        ["bash", "-c", f'source "{CONFIG}" && env_scrub_host_toolchain && env -0'],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    after = dict(item.split("=", 1) for item in result.stdout.split("\0") if item)
+    assert not set(SCRUBBED) & set(after)
+    assert after["LD_LIBRARY_PATH"] == ""
+    assert after["KEEP_ME"] == "1"

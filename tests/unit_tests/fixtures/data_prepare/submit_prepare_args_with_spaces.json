@@ -27,5 +27,5 @@
   ],
   "returncode": 0,
   "stderr": "",
-  "stdout": "===== SFT Dataset Preparation (download + tokenize + pack) =====\nJob ID:   <JOB>\nNode:     <HOST>\nRepo dir: <REPO>\nEnv:      <TMP>/container/nemo.sif\nArgs:     --dataset org/data set --output-dir <TMP>/out dir --seq-length 4096\n================================================================\n===== Preparation Complete =====\n"
+  "stdout": "===== SFT Dataset Preparation (download + tokenize + pack) =====\nJob ID:   <JOB>\nNode:     nid000001\nRepo dir: <REPO>\nEnv:      <TMP>/container/nemo.sif\nArgs:     --dataset org/data set --output-dir <TMP>/out dir --seq-length 4096\n================================================================\n===== Preparation Complete =====\n"
 }
