@@ -28,7 +28,7 @@ import struct
 from pathlib import Path
 
 from pipeline.export.fixups.remote_code import apply_remote_code_policy
-from pipeline.hf_cache import cached_snapshots
+from pipeline.hf_cache import cached_file
 from pipeline.nemotron import BLOCK_TYPE_CHARS, IM_END_TOKEN_ID
 
 
@@ -111,7 +111,7 @@ def fix_eos_token_ids(hf_path: Path) -> None:
 
 def fix_hybrid_override_pattern(config: dict, hf_model_id: str) -> bool:
     """Write MoE layers as "E" in ``config``'s hybrid_override_pattern, or copy a missing pattern from the cached
-    release ``hf_model_id`` (largest-hash snapshot first). Mutates ``config``; returns whether it changed."""
+    release ``hf_model_id`` (its refs/main snapshot). Mutates ``config``; returns whether it changed."""
     # The bridge saves the pattern with "-" for MoE layers, but the NVIDIA convention
     # uses "E". vLLM checks `"E" in config.hybrid_override_pattern` to detect MoE.
     # Also copy the pattern from the source HF model if not in config.json, since the
@@ -123,15 +123,14 @@ def fix_hybrid_override_pattern(config: dict, hf_model_id: str) -> bool:
         return True
     if not pattern:
         # Copy from source model config in HF cache
-        for snapshot_dir in cached_snapshots(hf_model_id) or []:
-            source_cfg_path = snapshot_dir / "config.json"
-            if source_cfg_path.exists():
-                with open(source_cfg_path) as f:
-                    source_cfg = json.load(f)
-                if "hybrid_override_pattern" in source_cfg:
-                    config["hybrid_override_pattern"] = source_cfg["hybrid_override_pattern"]
-                    print(f"Added hybrid_override_pattern from {hf_model_id}")
-                    return True
+        source_cfg_path = cached_file(hf_model_id, "config.json")
+        if source_cfg_path is not None:
+            with open(source_cfg_path) as f:
+                source_cfg = json.load(f)
+            if "hybrid_override_pattern" in source_cfg:
+                config["hybrid_override_pattern"] = source_cfg["hybrid_override_pattern"]
+                print(f"Added hybrid_override_pattern from {hf_model_id}")
+                return True
     return False
 
 

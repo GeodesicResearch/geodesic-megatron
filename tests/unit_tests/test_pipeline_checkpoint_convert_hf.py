@@ -391,9 +391,12 @@ _TRAINING_TOKENIZER_ID = "org/training-tokenizer"
 
 
 def _training_tokenizer_cache(hf_home: Path, template: str) -> Path:
-    """A training tokenizer's snapshot in an HF cache under ``hf_home``."""
-    snapshot = hf_home / "hub" / f"models--{_TRAINING_TOKENIZER_ID.replace('/', '--')}" / "snapshots" / "abc123"
+    """A training tokenizer's snapshot in an HF cache under ``hf_home``, the one its ``refs/main`` names."""
+    repo = hf_home / "hub" / f"models--{_TRAINING_TOKENIZER_ID.replace('/', '--')}"
+    snapshot = repo / "snapshots" / "abc123"
     snapshot.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("abc123")
     (snapshot / "chat_template.jinja").write_text(template)
     (snapshot / "tokenizer.json").write_text('{"training": "tokenizer"}')
     (snapshot / "tokenizer_config.json").write_text('{"eos_token": "<|im_end|>"}')
