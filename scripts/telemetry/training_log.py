@@ -40,7 +40,7 @@ GIGABYTES_SUFFIX = "-gigabytes"
 # The tag is restated rather than imported, because this module must import without torch.
 _PEAK_MEMORY_RE = re.compile(r"\[peak-memory\] (?P<fields>.*)$")
 
-# pipeline_training_run.py's log_env_overrides, once per node: "[env-overrides] rank=<R> host=<host> KEY=<value> ...".
+# pipeline/training/env_overrides.py's log_env_overrides, once per node: "[env-overrides] rank=<R> host=<host> KEY=<value> ...".
 _ENV_OVERRIDES_RE = re.compile(r"\[env-overrides\] rank=\S+ host=\S+ (?P<values>.*)$")
 
 # wandb prints the run URL at init ("View run at <url>") and at finish ("View run <name> at: <url>"),

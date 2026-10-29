@@ -26,12 +26,7 @@ import weakref
 import pytest
 import torch
 
-from tests.unit_tests.repo_scripts import load_script
-
-
-@pytest.fixture(scope="module")
-def patches():
-    return load_script("pipeline_training_patches")
+from pipeline.training.patches import mamba_scan
 
 
 class FakeScan:
@@ -100,9 +95,9 @@ def _run(build_wrapper) -> dict:
 
 
 @pytest.fixture(scope="module")
-def runs(patches):
-    fp32 = patches._make_fp32_scan_wrapper
-    offload = patches._make_save_offload_wrapper
+def runs():
+    fp32 = mamba_scan._make_fp32_scan_wrapper
+    offload = mamba_scan._make_save_offload_wrapper
     return {
         "plain": _run(lambda op: op),
         "fp32_direct": _run(lambda op: fp32(op, checkpointed=False)),
@@ -165,22 +160,22 @@ def test_gradients_reach_every_participating_tensor_and_agree_across_modes(runs)
 @pytest.mark.parametrize(
     "build",
     [
-        pytest.param(lambda p, op: p._make_fp32_scan_wrapper(op, checkpointed=True), id="fp32_checkpoint"),
-        pytest.param(lambda p, op: p._make_save_offload_wrapper(op), id="offload"),
+        pytest.param(lambda op: mamba_scan._make_fp32_scan_wrapper(op, checkpointed=True), id="fp32_checkpoint"),
+        pytest.param(lambda op: mamba_scan._make_save_offload_wrapper(op), id="offload"),
     ],
 )
-def test_no_grad_calls_the_scan_once_and_builds_no_graph(patches, build):
+def test_no_grad_calls_the_scan_once_and_builds_no_graph(build):
     scan = FakeScan()
     with torch.no_grad():
-        y, _ = build(patches, scan)(torch.randn(4, 8, dtype=torch.bfloat16), torch.tensor(1.5))
+        y, _ = build(scan)(torch.randn(4, 8, dtype=torch.bfloat16), torch.tensor(1.5))
     assert (y.dtype, scan.calls, y.grad_fn) == (torch.bfloat16, 1, None)
 
 
-def test_wrapper_markers_name_the_mode_and_the_wrapped_op(patches):
+def test_wrapper_markers_name_the_mode_and_the_wrapped_op():
     scan = FakeScan()
-    direct = patches._make_fp32_scan_wrapper(scan, checkpointed=False)
-    checkpointed = patches._make_fp32_scan_wrapper(scan, checkpointed=True)
-    offloaded = patches._make_save_offload_wrapper(direct)
+    direct = mamba_scan._make_fp32_scan_wrapper(scan, checkpointed=False)
+    checkpointed = mamba_scan._make_fp32_scan_wrapper(scan, checkpointed=True)
+    offloaded = mamba_scan._make_save_offload_wrapper(direct)
     assert (direct.__name__, direct._fp32_ssm_state_mode, direct._wrapped) == (
         "mamba_split_conv1d_scan_combined_fp32_state",
         "direct",
@@ -203,20 +198,20 @@ def mamba_mixer(monkeypatch):
     return mamba_mixer
 
 
-def test_installers_are_idempotent_and_stack_offload_outermost(patches, mamba_mixer):
+def test_installers_are_idempotent_and_stack_offload_outermost(mamba_mixer):
     original = mamba_mixer.mamba_split_conv1d_scan_combined
-    assert patches.patch_mamba_training_scan_fp32_state(checkpointed=False) is True
-    assert patches.patch_mamba_training_scan_fp32_state(checkpointed=False) is False
-    assert patches.patch_mamba_training_scan_fp32_state(checkpointed=True) is False
-    assert patches.patch_mamba_training_scan_save_offload() is True
-    assert patches.patch_mamba_training_scan_save_offload() is False
+    assert mamba_scan.patch_mamba_training_scan_fp32_state(checkpointed=False) is True
+    assert mamba_scan.patch_mamba_training_scan_fp32_state(checkpointed=False) is False
+    assert mamba_scan.patch_mamba_training_scan_fp32_state(checkpointed=True) is False
+    assert mamba_scan.patch_mamba_training_scan_save_offload() is True
+    assert mamba_scan.patch_mamba_training_scan_save_offload() is False
     installed = mamba_mixer.mamba_split_conv1d_scan_combined
     assert installed._mamba_save_offload_patched and installed._fp32_ssm_state_mode == "direct"
     assert installed._wrapped._wrapped is original
 
 
-def test_offload_is_refused_under_the_checkpointed_fp32_mode(patches, mamba_mixer):
-    assert patches.patch_mamba_training_scan_fp32_state(checkpointed=True) is True
+def test_offload_is_refused_under_the_checkpointed_fp32_mode(mamba_mixer):
+    assert mamba_scan.patch_mamba_training_scan_fp32_state(checkpointed=True) is True
     checkpointed = mamba_mixer.mamba_split_conv1d_scan_combined
-    assert patches.patch_mamba_training_scan_save_offload() is False
+    assert mamba_scan.patch_mamba_training_scan_save_offload() is False
     assert mamba_mixer.mamba_split_conv1d_scan_combined is checkpointed

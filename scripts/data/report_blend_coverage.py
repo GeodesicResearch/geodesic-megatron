@@ -16,7 +16,7 @@
 """Report how much of each corpus a training run's ``.bin/.idx`` blend reads.
 
 The run's training dataset is built on CPU the way its launch builds it: the config is resolved by the
-launcher's own merge (``pipeline_training_run.resolve_training_config``), its ``dataset`` section becomes
+launcher's own merge (``pipeline.training.recipes.resolve_training_config``), its ``dataset`` section becomes
 a dataset config through the launcher's own construction (``bin_idx_dataset_config``), the loader's
 training-data window (``get_train_data_window``) sizes it, and the loader's builder builds it. No
 process group, GPU or checkpoint is needed, and the index caches it writes are the ones the launch
@@ -62,7 +62,8 @@ from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
-import pipeline_training_run  # noqa: E402
+from pipeline.training.datasets import bin_idx_dataset_config  # noqa: E402
+from pipeline.training.recipes import RECIPE_MAP, resolve_training_config  # noqa: E402
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -127,10 +128,10 @@ def resolve_run_config(config_file: str, model: str, mode: str):
     """The config a launch of ``config_file`` trains with, its ``.bin/.idx`` dataset config finalized."""
     if mode not in BIN_IDX_MODES:
         raise ValueError(f"mode {mode!r} does not read a .bin/.idx blend; use one of {BIN_IDX_MODES}")
-    cfg, merged = pipeline_training_run.resolve_training_config(model, mode, None, config_file, [])
+    cfg, merged = resolve_training_config(model, mode, None, config_file, [])
     if cfg.train.rampup_batch_size is not None:
         raise ValueError("a batch-size ramp makes the samples consumed before the resumed step unknowable here")
-    cfg.dataset = pipeline_training_run.bin_idx_dataset_config(merged.get("dataset", {}), mode)
+    cfg.dataset = bin_idx_dataset_config(merged.get("dataset", {}), mode)
     cfg.dataset.tokenizer = build_tokenizer(cfg.tokenizer)
     cfg.dataset.finalize()
     return cfg
@@ -189,9 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     """Build the run's training dataset, write the per-corpus report, and log it."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("config", help="the run's override YAML, exactly as the launch passes it")
-    parser.add_argument(
-        "--model", required=True, choices=sorted({model for model, _ in pipeline_training_run.RECIPE_MAP})
-    )
+    parser.add_argument("--model", required=True, choices=sorted({model for model, _ in RECIPE_MAP}))
     parser.add_argument("--mode", required=True, choices=BIN_IDX_MODES)
     parser.add_argument("--report-out", type=Path, required=True, help="where the JSON report is written")
     args = parser.parse_args(argv)

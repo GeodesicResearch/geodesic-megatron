@@ -40,6 +40,7 @@ from scripts.nemotronh_flops_estimator import RunSpec
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml
 from scripts.training.launcher_source import env_override_entries
 
+from pipeline.training import recipes
 from tests.unit_tests.campaign_config import (
     FAST_MIDTRAIN_LAUNCHER_SETTINGS,
     FAST_MIDTRAIN_LEVERS,
@@ -232,10 +233,10 @@ SFT_QUICKSTART = Quickstart(
 QUICKSTARTS = [PRETRAIN_QUICKSTART, MIDTRAIN_QUICKSTART, SFT_QUICKSTART]
 
 
-def merged(path: Path, stage: BenchmarkStage, run_module):
+def merged(path: Path, stage: BenchmarkStage):
     """The config the launcher trains for the YAML at ``path``: merged onto the recipe pipeline_training_run.py
     dispatches for the stage's mode, without PEFT."""
-    return merge_onto_recipe(path, partial(run_module.RECIPE_MAP[("nano", stage.mode)], None))
+    return merge_onto_recipe(path, partial(recipes.RECIPE_MAP[("nano", stage.mode)], None))
 
 
 @pytest.fixture(scope="module", params=STAGES, ids=[stage.name for stage in STAGES])
@@ -244,13 +245,13 @@ def stage(request) -> BenchmarkStage:
 
 
 @pytest.fixture(scope="module")
-def benchmark(stage, run_module):
-    return merged(stage.benchmark, stage, run_module)
+def benchmark(stage):
+    return merged(stage.benchmark, stage)
 
 
 @pytest.fixture(scope="module")
-def production(stage, run_module):
-    return merged(stage.production, stage, run_module)
+def production(stage):
+    return merged(stage.production, stage)
 
 
 def microbatches_per_replica(cfg, global_batch_size: int, gpus: int) -> int:
@@ -377,8 +378,8 @@ def quickstart_case(request) -> Quickstart:
 
 
 @pytest.fixture(scope="module")
-def quickstart(quickstart_case, run_module):
-    return merged(quickstart_case.path, quickstart_case.stage, run_module)
+def quickstart(quickstart_case):
+    return merged(quickstart_case.path, quickstart_case.stage)
 
 
 class TestTheQuickstartIsTheBenchmarkPlusItsLevers:

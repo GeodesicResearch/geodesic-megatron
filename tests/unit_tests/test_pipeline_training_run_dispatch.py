@@ -1,8 +1,7 @@
-"""Unit tests for pipeline_training_run.py's model/mode dispatch (RECIPE_MAP + CLI parsing).
+"""Unit tests for the model/mode dispatch (pipeline.training.recipes.RECIPE_MAP) and pipeline_training_run.py's CLI.
 
-The script lives at the repo root and is loaded by path (the same pattern as
-test_pipeline_data_prepare.py), so these tests exercise the real dispatch table rather
-than a re-declaration of it.
+The script lives at the repo root and is loaded by path (the ``run_module`` fixture), and the dispatch
+table is imported from its module, so these tests exercise the real one rather than a re-declaration of it.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from pathlib import Path
 import pytest
 from scripts.training.config_compose import load_composed_yaml
 
+from pipeline.training import env_overrides, recipes
 from tests.unit_tests.repo_scripts import run_training_main
 
 
@@ -29,11 +29,11 @@ BASELINE_PRETRAIN = (
 
 
 class TestRecipeMap:
-    def test_covers_every_model_mode_pair(self, run_module):
-        assert set(run_module.RECIPE_MAP.keys()) == {(model, mode) for model in MODELS for mode in MODES}
+    def test_covers_every_model_mode_pair(self):
+        assert set(recipes.RECIPE_MAP.keys()) == {(model, mode) for model in MODELS for mode in MODES}
 
     @pytest.mark.parametrize("model", MODELS)
-    def test_pretrain_entries_reference_the_pretrain_recipes(self, run_module, model):
+    def test_pretrain_entries_reference_the_pretrain_recipes(self, model):
         """Each pretrain entry must call its model's *_pretrain_config, not an SFT recipe.
 
         Checked via the lambda's referenced names rather than by invoking it: the Super and
@@ -41,21 +41,21 @@ class TestRecipeMap:
         which reads the HF config from the Hub/cache — a network boundary a unit test must
         not depend on. The Nano recipe is invoked for real below.
         """
-        names = run_module.RECIPE_MAP[(model, "pretrain")].__code__.co_names
+        names = recipes.RECIPE_MAP[(model, "pretrain")].__code__.co_names
         assert f"nemotron_3_{model}_pretrain_config" in names
 
     @pytest.mark.parametrize("model", MODELS)
-    def test_cpt_entries_still_reference_the_sft_recipes(self, run_module, model):
+    def test_cpt_entries_still_reference_the_sft_recipes(self, model):
         """CPT deliberately reuses the SFT recipes (warm-start hyperparameters + finetune())."""
-        names = run_module.RECIPE_MAP[(model, "cpt")].__code__.co_names
+        names = recipes.RECIPE_MAP[(model, "cpt")].__code__.co_names
         assert f"nemotron_3_{model}_sft_config" in names
         assert f"nemotron_3_{model}_pretrain_config" not in names
 
-    def test_nano_pretrain_recipe_builds_from_scratch_config(self, run_module):
+    def test_nano_pretrain_recipe_builds_from_scratch_config(self):
         """The Nano entry constructs the real pretrain recipe: NVIDIA's pretraining workload
         (GBS 3072, seq 8192) and no checkpoint to load — the from-scratch semantics the
         pretrain mode exists for."""
-        cfg = run_module.RECIPE_MAP[("nano", "pretrain")](None)
+        cfg = recipes.RECIPE_MAP[("nano", "pretrain")](None)
         assert cfg.train.global_batch_size == 3072
         assert cfg.model.seq_length == 8192
         assert cfg.dataset.sequence_length == 8192
@@ -125,7 +125,7 @@ class TestMainWiring:
         monkeypatch.setenv("TORCH_NCCL_BLOCKING_WAIT", "0")
         monkeypatch.setenv("LOCAL_RANK", "0")
         monkeypatch.setenv("RANK", "0")
-        with caplog.at_level(logging.INFO, logger=run_module.logger.name):
+        with caplog.at_level(logging.INFO, logger=env_overrides.logger.name):
             self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._DATA_PATH_YAML)
         echoes = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[env-overrides]")]
         assert len(echoes) == 1 and echoes[0].endswith(" TORCH_NCCL_BLOCKING_WAIT=0")

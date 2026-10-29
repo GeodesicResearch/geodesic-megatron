@@ -34,6 +34,7 @@ import yaml
 from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+from pipeline.training.datasets import bin_idx_dataset_config
 from tests.unit_tests.corpora_fixtures import importable, write_tokenized_documents
 
 
@@ -66,7 +67,7 @@ def _corpus(root: Path, first_value: int, lengths: list[int]) -> str:
 
 
 def _dataset_config(tool, data_path: list[str], cache: Path):
-    config = tool.pipeline_training_run.bin_idx_dataset_config(
+    config = bin_idx_dataset_config(
         {"data_path": data_path, "seq_length": SEQ_LENGTH, "split": "1,0,0", "path_to_cache": str(cache)},
         "pretrain",
     )

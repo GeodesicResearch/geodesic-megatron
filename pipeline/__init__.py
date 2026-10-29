@@ -28,5 +28,6 @@ Catalogue:
     export: Megatron checkpoint -> HuggingFace export (pipeline_checkpoint_convert_hf.py).
     coherence: the generation backends of pipeline_coherence_test.py.
     data: the stages of pipeline_data_prepare.py.
+    training: the pieces of pipeline_training_run.py, the training entry point every rank runs.
     sh: the shell libraries the launchers source; each file catalogues its functions.
 """
