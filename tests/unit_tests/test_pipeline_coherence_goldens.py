@@ -234,10 +234,18 @@ def test_coherence_megatron_load_trace(coherence, monkeypatch, tmp_path, trust):
 
 def test_a_run_dir_loads_its_newest_completed_save_not_one_still_being_written(tmp_path):
     """iter_0000200 is above the tracker (100), so it is still being written; the backend loads iter_0000100."""
-    from pipeline.checkpoints import newest_completed_iteration as checkpoint_to_load
+    from pipeline.checkpoints import newest_completed_iteration
 
     run_dir = make_checkpoint_dir(tmp_path / "run", [100, 200], tracker=100)
-    assert checkpoint_to_load(str(run_dir)) == str(run_dir / "iter_0000100")
-    assert checkpoint_to_load(str(run_dir / "iter_0000200")) == str(run_dir / "iter_0000200")
+    assert newest_completed_iteration(str(run_dir)) == str(run_dir / "iter_0000100")
+    assert newest_completed_iteration(str(run_dir / "iter_0000200")) == str(run_dir / "iter_0000200")
     with pytest.raises(SystemExit, match="no completed save"):
-        checkpoint_to_load(str(make_checkpoint_dir(tmp_path / "fresh", [10], tracker=None)))
+        newest_completed_iteration(str(make_checkpoint_dir(tmp_path / "fresh", [10], tracker=None)))
+
+
+@pytest.mark.parametrize("flag", [["--backend", "megatron"], ["--backend=megatron"]])
+def test_both_spellings_of_the_megatron_backend_take_the_multi_node_path(pipeline_launch_shell, flag):
+    env = {"SLURM_NNODES": "2", "SLURM_NODELIST": "nid[000010-000011]"}
+    run = pipeline_launch_shell.run("pipeline_coherence_submit.sbatch", "/ckpt", *flag, "--hf-model", "x/y", env=env)
+    assert run["returncode"] == 0, run["stderr"]
+    assert [c["cmd"] for c in run["calls"]] == ["srun", "torchrun"]

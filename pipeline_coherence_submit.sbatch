@@ -62,6 +62,7 @@ BACKEND=hf
 prev=""
 for a in "$@"; do
     [ "$prev" = "--backend" ] && BACKEND="$a"
+    case "$a" in --backend=*) BACKEND="${a#--backend=}" ;; esac
     prev="$a"
 done
 
