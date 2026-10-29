@@ -246,6 +246,7 @@ class TestMergeCheck:
         base = torch.randn(2, 4, 8)
         adapted = base + 1.0
         check = convert_module.check_merge(adapted, base, base + 0.95)
+        assert check["failure"] is None
         assert check["retained"] == pytest.approx(0.95)
         assert check["merged_vs_base"]["mean_abs_diff"] == pytest.approx(0.95)
         assert check["base"]["mean_abs_diff"] == pytest.approx(1.0)
@@ -255,23 +256,23 @@ class TestMergeCheck:
         import torch
 
         base = torch.randn(2, 4, 8)
-        with pytest.raises(RuntimeError, match="retains less than 0.9"):
-            convert_module.check_merge(base + 1.0, base, base + 0.75)
+        check = convert_module.check_merge(base + 1.0, base, base + 0.75)
+        assert check["failure"].startswith("the merged model retains 0.750, less than 0.9,")
 
     def test_adapters_that_change_nothing_fail(self, convert_module):
         """An empty adapter load leaves adapted == base == merged, which must not read as a perfect merge."""
         import torch
 
         adapted = torch.randn(2, 4, 8)
-        with pytest.raises(RuntimeError, match="change no logit"):
-            convert_module.check_merge(adapted, adapted.clone(), adapted.clone())
+        check = convert_module.check_merge(adapted, adapted.clone(), adapted.clone())
+        assert check["failure"] == "the adapters change no logit, so there is nothing to merge"
 
     def test_a_merge_as_far_as_the_base_fails(self, convert_module):
         import torch
 
         adapted = torch.randn(2, 4, 8)
-        with pytest.raises(RuntimeError, match="as far from the adapted one"):
-            convert_module.check_merge(adapted, adapted + 1.0, adapted - 1.0)
+        check = convert_module.check_merge(adapted, adapted + 1.0, adapted - 1.0)
+        assert check["failure"] == "the merged model is as far from the adapted one as the base is"
 
 
 def test_a_peft_checkpoint_outside_a_parallel_torchrun_is_refused(convert_module, tmp_path, monkeypatch):

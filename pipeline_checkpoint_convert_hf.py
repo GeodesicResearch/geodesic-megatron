@@ -216,8 +216,8 @@ def is_peft_checkpoint(iter_path: Path) -> bool:
 
 #: (sequences, tokens) of the seeded random token ids the merge check of a PEFT export runs on.
 MERGE_CHECK_SHAPE = (2, 256)
-#: The share of the adapters' logit effect a merge must reproduce. Rounding the merged weights to bf16 loses about a
-#: percent of a small update; a missed or misplaced update loses far more.
+#: The share of the adapters' logit effect a merge must reproduce. Storing W + update in bf16 rounds away the parts of
+#: an update below half a bf16 step of W: about a percent of a trained adapter, more of a barely trained one.
 MERGE_CHECK_MIN_RETAINED = 0.9
 
 
@@ -272,17 +272,13 @@ def logit_agreement(reference: torch.Tensor, candidate: torch.Tensor) -> dict[st
 
 
 def check_merge(adapted: torch.Tensor, base: torch.Tensor, merged: torch.Tensor) -> dict:
-    """How closely merged-model logits match adapted-model logits, against the adapters' effect, or raise.
+    """How closely merged-model logits match adapted-model logits, against the adapters' effect, and the verdict.
 
     Returns ``logit_agreement`` of adapted against ``merged`` and ``base`` and of merged against base
-    (``merged_vs_base``), keyed by those names, and ``retained``: the share of the adapters' logit change
-    (adapted - base) that the merged model reproduces, the projection of (merged - base) on it. Rounding the merged
-    weights to their storage precision loses updates far smaller than a weight's own magnitude, which ``retained``
-    below 1 shows.
-
-    Raises:
-        RuntimeError: the adapters change nothing, the merged model differs from the adapted one by as much as the
-            adapters' effect, or it retains less than ``MERGE_CHECK_MIN_RETAINED`` of that effect.
+    (``merged_vs_base``), keyed by those names; ``retained``: the share of the adapters' logit change
+    (adapted - base) that the merged model reproduces, the projection of (merged - base) on it; and ``failure``: None,
+    or why the merge fails. It fails if the adapters change nothing, if the merged model differs from the adapted one
+    by as much as the adapters' effect, or if it retains less than ``MERGE_CHECK_MIN_RETAINED`` of that effect.
     """
     effect = adapted - base
     check = {
@@ -290,14 +286,18 @@ def check_merge(adapted: torch.Tensor, base: torch.Tensor, merged: torch.Tensor)
         "base": logit_agreement(adapted, base),
         "merged_vs_base": logit_agreement(merged, base),
         "retained": ((merged - base) * effect).sum().item() / max((effect * effect).sum().item(), 1e-30),
+        "failure": None,
     }
     if check["base"]["max_abs_diff"] == 0:
-        raise RuntimeError(f"the adapters change no logit, so there is nothing to merge: {check}")
-    if check["merged"]["mean_abs_diff"] >= check["base"]["mean_abs_diff"]:
-        raise RuntimeError(f"the merged model is as far from the adapted one as the base is: {check}")
-    if check["retained"] < MERGE_CHECK_MIN_RETAINED:
-        raise RuntimeError(
-            f"the merged model retains less than {MERGE_CHECK_MIN_RETAINED} of the adapters' effect: {check}"
+        check["failure"] = "the adapters change no logit, so there is nothing to merge"
+    elif check["merged"]["mean_abs_diff"] >= check["base"]["mean_abs_diff"]:
+        check["failure"] = "the merged model is as far from the adapted one as the base is"
+    elif check["retained"] < MERGE_CHECK_MIN_RETAINED:
+        check["failure"] = (
+            f"the merged model retains {check['retained']:.3f}, less than {MERGE_CHECK_MIN_RETAINED}, of the adapters' "
+            "effect. Storing W + update in bf16 rounds away the parts of an update below half a bf16 step of W, which "
+            "costs a barely trained adapter this much. A missed or misplaced update costs more. Serve such an adapter "
+            "on its base instead of merged."
         )
     return check
 
@@ -309,13 +309,13 @@ def export_merged_peft(bridge, model: list, hf_path: Path, strict: bool, show_pr
     place with ``LoRAMerge`` and compares its probe logits with the adapted and base models' (``check_merge``),
     written to ``<hf_path>/merge_check.json``. Both merges add the same updates (each wrapper's ``weight_update``,
     ``LoRAMerge.merge`` for ``LoRALinear``), but the check reads the in-memory merge, not the written weights.
-    Collective over the model's ranks.
+    Collective over the model's ranks. The check of the rank that writes merge_check.json decides for every rank.
 
     Returns:
         The check on the last pipeline stage, None elsewhere.
 
     Raises:
-        RuntimeError: from ``check_merge``, on the last pipeline stage, after the HF export is written.
+        RuntimeError: on every rank, after the HF export and merge_check.json are written, if the check fails.
     """
     from megatron.core import parallel_state
 
@@ -331,6 +331,7 @@ def export_merged_peft(bridge, model: list, hf_path: Path, strict: bool, show_pr
     merger.disable_adapter_layers(model)
     merged = probe_logits(model)
     check = None
+    failed = torch.zeros(1, device="cuda")
     if parallel_state.is_pipeline_last_stage():
         check = check_merge(adapted, base, merged)
         if (
@@ -340,7 +341,12 @@ def export_merged_peft(bridge, model: list, hf_path: Path, strict: bool, show_pr
         ):
             (hf_path / "merge_check.json").write_text(json.dumps(check, indent=2) + "\n")
             print(f"Merge check on {MERGE_CHECK_SHAPE} probe tokens: {check}")
-    torch.distributed.barrier()
+            failed.fill_(check["failure"] is not None)
+    # Every rank learns the verdict and raises: a rank left waiting in a collective would hold its node until the
+    # job's time limit, because only the failed ranks' own torchrun agents end.
+    torch.distributed.all_reduce(failed, op=torch.distributed.ReduceOp.MAX)
+    if failed.item():
+        raise RuntimeError(f"the merge check failed (written to {hf_path / 'merge_check.json'}): {check}")
     return check
 
 

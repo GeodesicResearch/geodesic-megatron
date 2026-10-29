@@ -461,7 +461,8 @@ bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
 - **PEFT checkpoints export merged**: an adapter-only checkpoint (its `run_config.yaml` names `peft`) is loaded with the
   base its run trained on (`checkpoint.pretrained_checkpoint`) and exported with every adapter merged into its weights.
   `hf/merge_check.json` compares the adapted and base models with the model merged in memory by `LoRAMerge`, on fixed
-  probe tokens, and the export fails if that merge keeps under 90% of the adapters' logit effect. Super with Expert LoRA
+  probe tokens, and the export fails on every rank if that merge keeps under 90% of the adapters' logit effect. bf16
+  storage loses more than that of a barely trained adapter, so serve one on its base. Super with Expert LoRA
   (routed experts on `GroupedExperts`) takes 2 nodes at `--pp 2 --ep 4`, or 4 at `--pp 4 --ep 4` for more memory headroom.
 
 ### Already-converted checkpoints
