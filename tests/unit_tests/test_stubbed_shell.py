@@ -238,6 +238,7 @@ def test_a_pipeline_module_runs_for_real_and_is_not_recorded(shell, tmp_path):
         timeout=120,
     )
     assert (result.returncode, result.stdout) == (0, "5 -\n"), result.stderr
+    assert not shell.calls_file.exists()
 
 
 @pytest.mark.parametrize(

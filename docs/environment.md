@@ -250,7 +250,7 @@ a carriage return), repeats a key, or sets a key the hook refuses:
   checks' records (`ISAMBARD_CODE_IDENTITY`, `scripts/training/code_identity.py`; `ISAMBARD_LAUNCH_WIDTH`,
   `scripts/training/launch_width.py`), and the hook's own. An override
   of one of these would change the launch rather than its environment; the list is
-  `apply_env_overrides` in the launcher, and a unit test fails when a variable the launcher
+  `apply_env_overrides` in `pipeline/sh/env_overrides.sh`, and a unit test fails when a variable the launcher
   keeps is missing from it;
 - `CONTAINER_*`, which `pipeline_env_config.env` derives from the `GEODESIC_CONTAINER_*`
   inputs on the host and again on every node: override the input instead;
