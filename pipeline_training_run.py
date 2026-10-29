@@ -37,14 +37,19 @@ Pretrain mode:
 import argparse
 import logging
 import os
-import shlex
-import socket
 import sys
 from typing import Tuple
 
 import torch
 from omegaconf import OmegaConf
+from scripts.training.code_identity import (
+    CODE_IDENTITY_KEY,
+    parse_code_identity,
+    require_checked_code_identity,
+)
 from scripts.training.config_compose import load_composed_yaml
+from scripts.training.launch_blocks import pop_launch_blocks
+from scripts.training.launch_width import LAUNCH_WIDTH_KEY, parse_launch_width, require_launched_width
 
 from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
@@ -71,10 +76,13 @@ from megatron.bridge.training.config import (
 from megatron.bridge.training.finetune import finetune
 from megatron.bridge.training.gpt_step import forward_step
 from megatron.bridge.training.pretrain import pretrain
+from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+from megatron.bridge.training.utils.log_utils import log_node_banner
 from megatron.bridge.training.utils.omegaconf_utils import (
     apply_overrides,
     create_omegaconf_dict_config,
     parse_hydra_overrides,
+    require_known_override_keys,
 )
 
 
@@ -277,10 +285,13 @@ def log_env_overrides() -> None:
             f"{ENV_OVERRIDE_KEYS_VAR} is set but {rank_vars} are not: the override echo runs under the "
             "launcher's torchrun/ft_launcher, which sets both"
         )
-    if os.environ["LOCAL_RANK"] != "0":
-        return
-    values = " ".join(f"{key}={shlex.quote(os.environ[key])}" for key in keys)
-    logger.info("[env-overrides] rank=%s host=%s %s", os.environ["RANK"], socket.gethostname(), values)
+    log_node_banner(
+        logger,
+        "env-overrides",
+        [(key, os.environ[key]) for key in keys],
+        rank=int(os.environ["RANK"]),
+        local_rank=int(os.environ["LOCAL_RANK"]),
+    )
 
 
 # =============================================================================
@@ -302,7 +313,10 @@ def resolve_training_config(
 
     Returns:
         The ConfigContainer with every override applied, and the merged overrides as a plain dict,
-        which the mode-specific setup reads sections from.
+        which the mode-specific setup reads sections from. A ``code_identity:`` block names the code the
+        config must train with and a ``launch_width:`` block the width it must train at, not settings of the
+        run: each is kept out of the merge, so no override can change it, and returned in the dict under its
+        own key (``scripts/training/code_identity.py``, ``scripts/training/launch_width.py``).
     """
     cfg: ConfigContainer = RECIPE_MAP[(model, mode)](peft)
 
@@ -310,25 +324,56 @@ def resolve_training_config(
     merged_omega_conf, excluded_fields = create_omegaconf_dict_config(cfg)
 
     # Load and merge YAML overrides
+    launch_blocks = {}
     if config_file:
         logger.debug(f"Loading YAML overrides from: {config_file}")
         if not os.path.exists(config_file):
             logger.error(f"Override YAML file not found: {config_file}")
             sys.exit(1)
-        yaml_overrides_omega = OmegaConf.create(load_composed_yaml(config_file))
-        merged_omega_conf = OmegaConf.merge(merged_omega_conf, yaml_overrides_omega)
+        yaml_overrides = load_composed_yaml(config_file)
+        launch_blocks = pop_launch_blocks(yaml_overrides)
+        merged_omega_conf = OmegaConf.merge(merged_omega_conf, OmegaConf.create(yaml_overrides))
         logger.debug("YAML overrides merged successfully.")
 
-    # Apply command-line overrides using Hydra-style parsing
+    # Apply command-line overrides using Hydra-style parsing, after naming any removed or misspelled key the way
+    # the YAML path does (Hydra's struct mode would refuse one with an error that names no replacement).
     if cli_overrides:
         logger.debug(f"Applying Hydra-style command-line overrides: {cli_overrides}")
+        require_known_override_keys(cfg, cli_overrides)
         merged_omega_conf = parse_hydra_overrides(merged_omega_conf, cli_overrides)
         logger.debug("Hydra-style command-line overrides applied successfully.")
 
     # Apply the final merged OmegaConf configuration back to the original ConfigContainer
     final_overrides_as_dict = OmegaConf.to_container(merged_omega_conf, resolve=True)
     apply_overrides(cfg, final_overrides_as_dict, excluded_fields)
+    final_overrides_as_dict.update(launch_blocks)
     return cfg, final_overrides_as_dict
+
+
+def checked_code_identity(merged: dict, config_file: str | None) -> dict | None:
+    """The launcher's passing record of the code check, for a config whose ``code_identity:`` block names its code;
+    None for a config that names none. Raises ``CodeIdentityError`` for a pinning config the launcher did not check,
+    or checked against another block or without passing (``scripts/training/code_identity.py``)."""
+    block = merged.get(CODE_IDENTITY_KEY)
+    if block is None:
+        return None
+    identity = parse_code_identity(block, f"{config_file}: {CODE_IDENTITY_KEY}")
+    return require_checked_code_identity(identity, config_file, dict(os.environ))
+
+
+def checked_launch_width(merged: dict, config_file: str | None, cfg: ConfigContainer) -> dict | None:
+    """The launcher's record of the launch, for a config whose ``launch_width:`` block fixes the width it trains at,
+    once the run's own world and data-parallel sizes are the block's; None for a config that fixes none. Raises
+    ``LaunchWidthError`` otherwise (``scripts/training/launch_width.py``)."""
+    block = merged.get(LAUNCH_WIDTH_KEY)
+    if block is None:
+        return None
+    width = parse_launch_width(block, f"{config_file}: {LAUNCH_WIDTH_KEY}")
+    return require_launched_width(width, config_file, dict(os.environ), cfg.get_data_parallel_size)
+
+
+# The modes whose training data is a .bin/.idx blend (``bin_idx_dataset_config``).
+BIN_IDX_MODES = ("cpt", "pretrain")
 
 
 def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
@@ -378,6 +423,25 @@ def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
         dataloader_type="cyclic",
         path_to_cache=path_to_cache,
     )
+
+
+def resolve_bin_idx_run_config(config_file: str, model: str, mode: str) -> ConfigContainer:
+    """The config a launch of ``config_file`` in a ``.bin/.idx`` mode trains with, resolved on the CPU.
+
+    The recipe, the override YAML (``base_config:`` chain included) and the mode's dataset config, as ``main`` builds
+    them, with the tokenizer attached to the dataset config and the config finalized, as setup does before it builds
+    the data, so whatever reads the run's data from it reads the samples the run reads.
+
+    Raises:
+        ValueError: for a mode whose training data is not a ``.bin/.idx`` blend.
+    """
+    if mode not in BIN_IDX_MODES:
+        raise ValueError(f"mode {mode!r} does not read a .bin/.idx blend; use one of {BIN_IDX_MODES}")
+    cfg, merged = resolve_training_config(model, mode, None, config_file, [])
+    cfg.dataset = bin_idx_dataset_config(merged.get("dataset", {}), mode)
+    cfg.dataset.tokenizer = build_tokenizer(cfg.tokenizer)
+    cfg.dataset.finalize()
+    return cfg
 
 
 def main() -> None:
@@ -442,6 +506,14 @@ def main() -> None:
 
     peft = args.peft if args.peft and args.peft.lower() != "none" else None
     cfg, merged = resolve_training_config(args.model, args.mode, peft, args.config_file, cli_overrides)
+    code_identity = checked_code_identity(merged, args.config_file)
+    launch_width = checked_launch_width(merged, args.config_file, cfg)
+    if launch_width is not None and int(os.environ.get("RANK", "0")) == 0:
+        logger.info(
+            f"[launch-width] world_size={launch_width['world_size']} "
+            f"data_parallel_size={launch_width['data_parallel_size']} nodes={launch_width['nodes']} "
+            f"gpus_per_node={launch_width['gpus_per_node']} nodelist={launch_width['nodelist']}"
+        )
 
     if not cfg.tokenizer.tokenizer_model:
         raise ValueError(
@@ -503,7 +575,7 @@ def main() -> None:
                 )
                 cfg.dataset.rewrite = False
 
-    elif args.mode in ("cpt", "pretrain"):
+    elif args.mode in BIN_IDX_MODES:
         cfg.dataset = bin_idx_dataset_config(merged.get("dataset", {}) if args.config_file else {}, args.mode)
         logger.info(f"{args.mode} mode: native .bin/.idx data, data_path={cfg.dataset.data_path}")
 
@@ -544,7 +616,7 @@ def main() -> None:
     run_id = get_run_id()
     raw_log_path = get_raw_log_path()
     logger.info(f"Run identity: run_id={run_id} raw_log={raw_log_path or '(none)'}")
-    identity_cb = RunIdentityCallback(run_id=run_id, raw_log_path=raw_log_path)
+    identity_cb = RunIdentityCallback(run_id=run_id, raw_log_path=raw_log_path, code_identity=code_identity)
 
     # Optional torch-profiler trace collection (ISAMBARD_TORCH_PROFILE, default
     # off): full optimizer steps with with_stack + record_shapes, exported with

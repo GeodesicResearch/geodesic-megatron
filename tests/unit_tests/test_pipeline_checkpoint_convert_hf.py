@@ -6,28 +6,10 @@ GPU-free: only exercises the filesystem-level config.json / modeling-file handli
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
-
-
-# pipeline_checkpoint_convert_hf.py lives at the repo root, not under src/. Load it
-# directly so tests don't depend on the script being on sys.path. Only torch + yaml
-# are imported at module scope (megatron.bridge imports are lazy inside functions),
-# and main() does not run because __name__ is the spec name, not "__main__".
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_CONVERT_PATH = _REPO_ROOT / "pipeline_checkpoint_convert_hf.py"
-
-
-@pytest.fixture(scope="module")
-def convert_module():
-    spec = importlib.util.spec_from_file_location("pipeline_checkpoint_convert_hf", _CONVERT_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline_checkpoint_convert_hf"] = module
-    spec.loader.exec_module(module)
-    return module
+from scripts.checkpoint.decoding_defaults import REASONING_GENERATION_DEFAULTS
 
 
 def _make_modeling_source(src_dir: Path, convert_module) -> Path:
@@ -193,3 +175,107 @@ class TestReadEmbeddingRowCount:
     def test_returns_none_when_no_embedding_tensor(self, convert_module, tmp_path):
         _write_safetensors(tmp_path / "model.safetensors", {"lm_head.weight": (4, 8)})
         assert convert_module.read_embedding_row_count(tmp_path) is None
+
+
+# ── Decoding defaults ────────────────────────────────────────────────────────
+
+# An export's generation_config.json as the bridge copies the instruct release's: sampling at temperature 1.0, with
+# a top_k as well so that every sampling field is present.
+UPSTREAM_GENERATION_CONFIG = {
+    "_from_model_config": True,
+    "bos_token_id": 1,
+    "do_sample": True,
+    "eos_token_id": [2, 11],
+    "pad_token_id": 0,
+    "temperature": 1.0,
+    "top_k": 50,
+    "top_p": 1.0,
+    "transformers_version": "5.3.0",
+}
+NON_SAMPLING_FIELDS = {
+    "_from_model_config": True,
+    "bos_token_id": 1,
+    "eos_token_id": [2, 11],
+    "pad_token_id": 0,
+    "transformers_version": "5.3.0",
+}
+
+
+def _written(hf_path: Path, config: dict) -> Path:
+    import json
+
+    hf_path.mkdir(parents=True, exist_ok=True)
+    path = hf_path / "generation_config.json"
+    path.write_text(json.dumps(config, indent=2) + "\n")
+    return path
+
+
+class TestGenerationDefaults:
+    def test_a_non_reasoning_export_decodes_greedily(self, convert_module, tmp_path):
+        import json
+
+        path = _written(tmp_path, UPSTREAM_GENERATION_CONFIG)
+
+        convert_module.apply_generation_defaults(tmp_path, reasoning=False)
+
+        written = json.loads(path.read_text())
+        assert written == NON_SAMPLING_FIELDS
+        assert path.read_text() == json.dumps(NON_SAMPLING_FIELDS, indent=2, sort_keys=True) + "\n"
+
+    def test_a_reasoning_export_samples_at_temperature_0_6_and_top_p_0_95(self, convert_module, tmp_path):
+        import json
+
+        path = _written(tmp_path, UPSTREAM_GENERATION_CONFIG)
+
+        convert_module.apply_generation_defaults(tmp_path, reasoning=True)
+
+        # Upstream's top_k is dropped with its other sampling fields, so the export samples as stated and no more.
+        assert json.loads(path.read_text()) == {**NON_SAMPLING_FIELDS, **REASONING_GENERATION_DEFAULTS}
+        assert REASONING_GENERATION_DEFAULTS == {"do_sample": True, "temperature": 0.6, "top_p": 0.95}
+
+    def test_a_reasoning_export_without_sampling_fields_gains_them(self, convert_module, tmp_path):
+        import json
+
+        path = _written(tmp_path, {"bos_token_id": 1, "eos_token_id": [2, 11]})
+
+        convert_module.apply_generation_defaults(tmp_path, reasoning=True)
+
+        assert json.loads(path.read_text()) == {
+            "bos_token_id": 1,
+            "eos_token_id": [2, 11],
+            **REASONING_GENERATION_DEFAULTS,
+        }
+
+    @pytest.mark.parametrize("reasoning", [False, True])
+    def test_applying_twice_changes_nothing_further(self, convert_module, tmp_path, reasoning):
+        path = _written(tmp_path, UPSTREAM_GENERATION_CONFIG)
+        convert_module.apply_generation_defaults(tmp_path, reasoning=reasoning)
+        once = path.read_bytes()
+
+        convert_module.apply_generation_defaults(tmp_path, reasoning=reasoning)
+
+        assert path.read_bytes() == once
+
+    def test_a_non_reasoning_export_without_a_generation_config_is_left_without_one(self, convert_module, tmp_path):
+        convert_module.apply_generation_defaults(tmp_path, reasoning=False)
+
+        assert not (tmp_path / "generation_config.json").exists()
+
+    def test_a_reasoning_export_without_a_generation_config_is_refused(self, convert_module, tmp_path):
+        # Skipping it would ship a think model that decodes greedily.
+        with pytest.raises(FileNotFoundError, match="generation_config.json is missing"):
+            convert_module.apply_generation_defaults(tmp_path, reasoning=True)
+
+    @pytest.mark.parametrize("reasoning", [False, True])
+    def test_fixup_hf_output_sets_them_for_the_export_it_fixes(self, convert_module, tmp_path, reasoning):
+        import json
+
+        # The tokenizer files and config.json are absent, so only the steps that need no download run; this pins that
+        # the decoding defaults are among them whatever else is missing.
+        path = _written(tmp_path, UPSTREAM_GENERATION_CONFIG)
+
+        convert_module.fixup_hf_output(tmp_path, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", reasoning=reasoning)
+
+        written = json.loads(path.read_text())
+        expected = {**NON_SAMPLING_FIELDS, **(REASONING_GENERATION_DEFAULTS if reasoning else {})}
+        assert written == expected

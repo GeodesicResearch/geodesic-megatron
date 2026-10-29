@@ -30,7 +30,13 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   rest, and exits 1 when fewer than K are healthy. Count links rather than read `nvidia-smi topo -m`,
   which shows the configured topology even with links down; the HybridEP dispatcher aborts on a node
   with one dead link. The v2e2e probe (`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe.sbatch`)
-  runs it before its launches.
+  runs it before its launches, and `pipeline_training_launch.sh` before a launch whose config's `launch_width:`
+  block names `nvlink_links_per_gpu`.
+- `nvlink_sweep.sh <status dir>` - Writes that input: every node of the current SLURM allocation's
+  `nvidia-smi nvlink --status`, one task per node, as `<status dir>/<host>.txt`. A node whose `nvidia-smi` fails
+  leaves an empty file, which `nvlink_health.py` judges unhealthy, so its callers (`probe_job.sh` and the launcher)
+  report its exit status and let the selection decide. That holds only while the directory holds this sweep's records
+  alone, so it refuses a status directory that already exists.
 
 ## Launch environment
 
@@ -43,6 +49,22 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   (`python3 scripts/training/launch_environment.py && isambard_sbatch ...`); the v2e2e probes and
   `configs/control_pretraining/submit_chain_link.py` apply it themselves. It runs under the node's system
   Python 3.6 as well as the container's.
+
+- `checkout_guard.sh <config> <repo_dir>` - Refuses a config that lives in another git checkout than REPO_DIR, whose
+  code would train it (`ALLOW_CROSS_CHECKOUT_CONFIG=1` waives it); its header says what counts as a checkout and where
+  the launcher and the submit script run it.
+
+- `code_identity.py` - Refuses to train a config with any `src/` tree or listed file but those its `code_identity:`
+  block names (not the Megatron-LM submodule: a frozen copy takes it at the pinned commit's gitlink); its docstring has
+  the block and the check. An `ISAMBARD_ENV_OVERRIDES` file may not set the check's record, `ISAMBARD_CODE_IDENTITY`.
+
+- `launch_width.py` - Refuses to train a config at any width but its `launch_width:` block's; its docstring has the
+  block and the check. The NVLink sweep writes `<log-dir>/nvlink/<run-id>/status/`, with the selection's
+  `nodelist.txt` and `report.json` beside it (a launch whose directory exists is refused, and no node is registered as
+  bad), and an `ISAMBARD_ENV_OVERRIDES` file may not set the launch's record, `ISAMBARD_LAUNCH_WIDTH`.
+
+- `launch_blocks.py` - What `code_identity:` and `launch_width:` share: their keys, reading one through `base_config:`,
+  the launcher's record of its check, the command line, and staying out of the run's settings (its docstring).
 
 - `launcher_source.py` - Runs functions of `pipeline_training_launch.sh` as the launcher runs them, lifted by
   name (the launcher cannot be sourced whole): `env_override_entries(path)` returns the KEY=VALUE entries the
@@ -76,10 +98,32 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
 - `probe_job.sh` - The steps a production-width probe job is built from, sourced by its sbatch after it sets
   `REPO_DIR`, `OUT`, `NODES`, `GPUS`, `LINKS_PER_GPU`, `HF_MODEL`, `MODEL` and `MODE`: the start checks (the
   account's node cap, a frozen copy with a `REVISION` file, an absent scratch directory, no inherited launch
-  setting), the NVLink sweep and selection of `NODES` healthy nodes (registering the rest as bad), each launch
+  setting), the NVLink sweep (`nvlink_sweep.sh`) and selection of `NODES` healthy nodes (registering the rest as
+  bad), each launch
   under its own time limit, `score_run.py` scoring, a handoff's log evidence, the `loss_parity.py` band, and a
   `steps.tsv` record of every step (`note` reports, `record` and `gate` decide the job's exit status). The v2e2e
   probes (`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/`) are built from it.
+
+## Making a frozen copy
+
+`probe_job.sh` and `configs/control_pretraining/submit_corpus_job.py` run from a frozen copy of a commit, never from a
+working checkout. Every job reads its code from the copy, and bash reads a running script by byte offset, so an edit
+to a working checkout would change the code a queued or running job executes. The copy carries a `REVISION` file that
+names the commit, and these scripts refuse a directory without one. Make the copy from the root of a checkout in which
+the Megatron dataset helpers library is built:
+
+```bash
+SNAP=/projects/a5k/public/tmp/frozen_copies/code-$(git rev-parse --short=12 HEAD)
+mkdir -p "$SNAP/3rdparty/Megatron-LM"
+git archive HEAD | tar -x -C "$SNAP"
+git -C 3rdparty/Megatron-LM archive HEAD | tar -x -C "$SNAP/3rdparty/Megatron-LM"
+cp 3rdparty/Megatron-LM/megatron/core/datasets/helpers_cpp*.so "$SNAP/3rdparty/Megatron-LM/megatron/core/datasets/"
+git rev-parse HEAD > "$SNAP/REVISION"
+cd "$SNAP"
+```
+
+The submitting shell must carry no launch setting (`ISAMBARD_*`, `TRAIN_*`, `GEODESIC_CONTAINER_*`, other than the
+submission wrapper's own). The scripts refuse one, so each job's posture comes from its configs alone.
 
 ## Config composition
 
@@ -90,8 +134,10 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   is what `OmegaConf.merge` does. Scalars are read as `OmegaConf.load` reads them. A cycle, a
   missing base or a non-mapping file raises. `pipeline_training_run.py`, the FLOPs estimator and
   the config tests all read `--config-file` YAMLs through it. It needs only PyYAML, so host-side
-  tools can import it. `deep_merge(base, overlay)` is that merge on its own, and
-  `parse_yaml_mapping(text, source)` reads one document with the same scalar rules.
+  tools can import it. `deep_merge(base, overlay)` is that merge on its own,
+  `parse_yaml_mapping(text, source)` reads one document with the same scalar rules,
+  `load_composed(path, read)` composes with the caller's reader, and `composition_chain(path)` lists
+  the files a composition reads.
 
 ## Quick Start
 

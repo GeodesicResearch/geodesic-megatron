@@ -277,3 +277,37 @@ ForwardStepFunc = TwoArgForwardStep | ThreeArgStateForwardStep | ThreeArgForward
 
 # Type alias that includes both functions and functors
 ForwardStepCallable = ForwardStepFunc | ForwardStepFunctor
+
+
+# Forward steps mark themselves with this attribute when they apply token masking (see training/token_masking/):
+# setup refuses a run that masks token ids with a forward step that does not carry it.
+_APPLIES_TOKEN_MASKING = "applies_token_masking"
+
+
+def applies_token_masking(forward_step: ForwardStepFunc) -> ForwardStepFunc:
+    """Mark a forward step as applying token masking and reporting its statistics to the loss function."""
+    setattr(forward_step, _APPLIES_TOKEN_MASKING, True)
+    return forward_step
+
+
+def _unwrap_forward_step(forward_step: ForwardStepCallable) -> Any:
+    """The function or functor beneath any ``functools.partial`` wrappers."""
+    while isinstance(forward_step, partial):
+        forward_step = forward_step.func
+    return forward_step
+
+
+def forward_step_applies_token_masking(forward_step: ForwardStepCallable) -> bool:
+    """Whether a forward step (a function, a functor, or a partial of either) is marked ``applies_token_masking``."""
+    inner = _unwrap_forward_step(forward_step)
+    if getattr(inner, _APPLIES_TOKEN_MASKING, False):
+        return True
+    call = getattr(type(inner), "__call__", None)
+    return bool(getattr(call, _APPLIES_TOKEN_MASKING, False))
+
+
+def forward_step_name(forward_step: ForwardStepCallable) -> str:
+    """A readable ``module.qualname`` for a forward step function or functor."""
+    inner = _unwrap_forward_step(forward_step)
+    target = inner if hasattr(inner, "__qualname__") else type(inner)
+    return f"{target.__module__}.{target.__qualname__}"

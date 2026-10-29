@@ -159,23 +159,22 @@ starts near 1.03 and falls below 1.0 within the first hundred iterations; 0 NaN.
 ### Step 5 — Export checkpoint to HuggingFace format
 
 Nano converts on a single node (4 GPUs) with node-local EP — no Slingshot needed. Two details are specific to this
-model. It trains with the `torch_grouped` expert backend, whose checkpoint `run_config.yaml` names a model spec the
-exporter cannot import, so the export reads a clone of the checkpoint: links to its files plus a corrected
-`run_config.yaml` (`make_export_clone` in `scripts/hub/publish_models.py`; the source is never written to). And it is a
-reasoning (think) SFT, so it exports with `--reasoning`, which keeps the thinking chat template:
+model. First, it trains with the `torch_grouped` expert backend, whose checkpoint `run_config.yaml` names a model spec
+the exporter cannot import. The exporter repairs this itself: it loads the model from an export clone, made of links
+to the checkpoint's files plus a corrected `run_config.yaml` (`scripts/checkpoint/export_clone.py`). The clone is
+built under `/projects/a5k/public/tmp/export_clones_$USER` and removed once the export succeeds, so the checkpoint
+exports as it is and is never written to apart from its new `hf/`. Second, it is a reasoning (think) SFT, so it
+exports with `--reasoning`, which keeps the thinking chat template:
 
 ```bash
-python3 -c 'import sys; from pathlib import Path; from scripts.hub.publish_models import make_export_clone; make_export_clone(Path(sys.argv[1]), Path(sys.argv[2]))' \
-  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft/iter_0000200 \
-  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft_export/iter_0000200
 isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export \
-  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft_export \
+  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft \
   --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --reasoning \
   --iteration 200
 ```
 
 The converted model lands at
-`.../nemotron_nano_quickstart_sft_export/iter_0000200/hf/` — a standard HF checkpoint
+`.../nemotron_nano_quickstart_sft/iter_0000200/hf/` — a standard HF checkpoint
 (safetensors + config + tokenizer) loadable with `AutoModelForCausalLM`.
 
 ---
@@ -186,7 +185,7 @@ Nano fits on a single GPU for generation:
 
 ```bash
 isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch \
-  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft_export/iter_0000200/hf
+  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft/iter_0000200/hf
 ```
 
 This generates responses to 8 diverse prompts and logs a table (prompt, response,

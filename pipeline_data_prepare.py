@@ -26,19 +26,34 @@ Example usage:
     python pipeline_data_prepare.py \
         --dataset geodesic-research/Nemotron-Pretraining-Specialized \
         --count-only
+
+    # Pretraining corpus streamed from a pinned Hub revision straight to training.jsonl:
+    # no hub-cache copy of the parquet and no datasets Arrow cache (see --streaming)
+    python pipeline_data_prepare.py \
+        --dataset org/corpus --subset name --revision <40-character commit SHA> \
+        --streaming --skip-pack --skip-count --val-proportion 0
 """
 
 import argparse
 import json
+import multiprocessing
+import os
+import queue
+import re
+import shutil
 import subprocess
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import pandas as pd
+import fsspec
+import pyarrow.parquet as pq
 import yaml
-from datasets import Dataset, load_dataset
+from datasets import Features, Value, load_dataset, load_dataset_builder
+from scripts.data.hub_read_retry import reads_repeated_in_place, streamed_reads_retried
+from scripts.data.prepare_revisions import FULL_SHA, require_full_sha, subset_revision
 from transformers import AutoTokenizer  # noqa: I001
 
 
@@ -83,7 +98,10 @@ def parse_args():  # noqa: D103
         help=(
             "YAML file supplying the parameters that define what is prepared — dataset, subset, "
             "split, revision, tokenizer, sequence length. A corpus whose identity matters should be "
-            "described by one of these rather than by a shell command. Command-line flags override it."
+            "described by one of these rather than by a shell command. Command-line flags override it. "
+            "In place of one `revision`, the file may pin each subset at its own commit with "
+            "`revisions: {<subset>: <40-character SHA>}`; a subset it does not pin is refused "
+            "(scripts/data/prepare_revisions.py)."
         ),
     )
     parser.add_argument("--dataset", type=str, default=None, help="HuggingFace dataset name")
@@ -125,11 +143,34 @@ def parse_args():  # noqa: D103
 
     # Tokenizer arguments
     parser.add_argument("--tokenizer", type=str, default=DEFAULT_TOKENIZER, help="HF tokenizer for token counting")
+    parser.add_argument(
+        "--tokenizer-revision",
+        type=str,
+        default=None,
+        help=(
+            "Pin --tokenizer to a full 40-character commit SHA: the prepare loads that commit and records it, and "
+            "the tokenize job of the same prepare config loads it too (scripts/data/prepare_revisions.py). Omitted "
+            "means the tokenizer's default branch. A pinned tokenizer cannot pack: the pack directory is named by "
+            "the tokenizer alone, so --skip-pack is required."
+        ),
+    )
 
     # Pipeline control
     parser.add_argument("--skip-count", action="store_true", help="Skip token counting")
     parser.add_argument("--skip-pack", action="store_true", help="Skip packing stage")
     parser.add_argument("--count-only", action="store_true", help="Only count tokens, skip export and pack")
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help=(
+            "Stream the pinned Hub revision straight into training.jsonl instead of loading it: no "
+            "hub-cache copy of the data files and no datasets Arrow cache, so prepare writes the "
+            "corpus once (its JSONL) instead of three times. For pretraining-format "
+            "(.bin/.idx) corpora only. It needs --revision pinned to a full commit SHA, --skip-pack, "
+            "--skip-count, --val-proportion 0 and a plain split name, and it refuses --count-only, "
+            "--data-files, --join-columns and chat-format (messages) columns."
+        ),
+    )
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
 
     # Validation split
@@ -146,10 +187,48 @@ def parse_args():  # noqa: D103
     parser.add_argument(
         "--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)"
     )
+    parser.add_argument(
+        "--stream-workers",
+        type=int,
+        default=1,
+        help=(
+            "With --streaming on a parquet config: how many processes stream its files at once. The config's files, "
+            "in the order the loader reads them, are cut into this many contiguous groups, each streamed by a "
+            "process of its own, and the groups' output is joined in order, so training.jsonl holds the bytes one "
+            "stream would have written. One stream runs at the speed of one connection's range reads, so the export "
+            "is about this many times faster, until the Hub limits it."
+        ),
+    )
+    parser.add_argument(
+        "--hub-read-attempts",
+        type=int,
+        default=20,
+        help=(
+            "How many times one read of a Hub file is tried before its error ends the prepare, when the error is "
+            "one a repeated read can outlast: a dropped or refused connection, a timeout, or a 5xx or 429 from the "
+            "Hub (scripts/data/hub_read_retry.py). It covers the reads of a parquet or JSON stream and of the "
+            "parquet footers. 1 repeats nothing."
+        ),
+    )
+    parser.add_argument(
+        "--hub-read-first-wait-seconds",
+        type=float,
+        default=5.0,
+        help=(
+            "The wait before a Hub read's second attempt; it doubles for each attempt after, up to 60 s. With the "
+            "default 20 attempts a read outlasts about 16 minutes of failures."
+        ),
+    )
 
     config_path = parser.parse_known_args()[0].config
+    pins = {}
     if config_path:
         config = load_pipeline_config(config_path)
+        # A per-subset pin (`revisions`) has no flag: it is resolved below, once the subset, which
+        # the command line may name, is known. A `revision` beside it is taken out with it, so that
+        # the two are refused together rather than one silently set as the default.
+        if "revisions" in config:
+            pins = {key: config.pop(key) for key in ("revision", "revisions") if key in config}
         # Rejected rather than ignored: a typo in a corpus definition would otherwise
         # prepare the wrong data and say nothing.
         recognised = set(vars(parser.parse_args([])))
@@ -163,10 +242,90 @@ def parse_args():  # noqa: D103
     if not args.dataset:
         parser.error("--dataset is required, on the command line or in --config")
 
+    if pins:
+        try:
+            pinned = subset_revision(pins, args.subset, config_path)
+        except ValueError as error:
+            parser.error(str(error))
+        if args.revision is None:  # a --revision flag overrides the file, as every flag does
+            args.revision = pinned
+
+    if args.tokenizer_revision is not None:
+        try:
+            require_full_sha(args.tokenizer_revision, "--tokenizer-revision")
+        except ValueError as error:
+            parser.error(str(error))
+        if not args.skip_pack:
+            parser.error(
+                "--tokenizer-revision cannot pack: pack_sft_dataset.py names its directory by the tokenizer alone, "
+                "so two commits of one tokenizer would share it; set --skip-pack"
+            )
+
+    if args.streaming:
+        problems = streaming_refusals(args)
+        if problems:
+            parser.error("--streaming cannot honour this invocation:\n  - " + "\n  - ".join(problems))
+
     if args.download_workers is None:
         args.download_workers = args.num_proc
 
+    if args.hub_read_attempts < 1:
+        parser.error(f"--hub-read-attempts must be at least 1, not {args.hub_read_attempts}")
+
+    if args.stream_workers < 1:
+        parser.error(f"--stream-workers must be at least 1, not {args.stream_workers}")
+    if args.stream_workers > 1 and not args.streaming:
+        parser.error("--stream-workers divides a stream among processes: it needs --streaming")
+
     return args
+
+
+# The datasets library's own rule for a split name (``datasets.splits._split_re``): a plain name,
+# so neither slice syntax (``train[0:100]``, ``train[:10%]``) nor a ``+`` combination.
+_SPLIT_NAME = re.compile(r"\w+(\.\w+)*")
+
+
+def streaming_refusals(args):
+    """Why ``--streaming`` cannot honour these arguments: one message per refused option, empty when it can.
+
+    A streamed dataset is an ``IterableDataset``: it has no length, no random access and no
+    ``map`` over the whole of it before export, and nothing of it is on disk except the JSONL
+    being written. Every option whose stage needs one of those is refused here rather than
+    quietly skipped or served by a fallback that would materialise the data after all.
+    """
+    problems = []
+    # A full commit SHA: a branch or tag can move while a stream that takes hours is still reading it.
+    if not args.revision or not FULL_SHA.fullmatch(args.revision):
+        problems.append(
+            f"--revision must pin a full 40-character commit SHA, got {args.revision!r}: a stream reads "
+            "whatever the revision names while it runs, so no revision, a branch or a tag is not reproducible"
+        )
+    if not _SPLIT_NAME.fullmatch(args.split):
+        problems.append(
+            f"--split {args.split!r} is slice or combination syntax; a stream reads one whole named split, "
+            "so a sliced corpus (shard_mode slice) cannot stream: publish its slices as separate configs instead"
+        )
+    if args.data_files:
+        problems.append("--data-files loads local files through its own loader; --streaming reads a Hub revision")
+    if args.join_columns:
+        problems.append("--join-columns rewrites every row with Dataset.map before export, which a stream cannot run")
+    if args.count_only:
+        problems.append("--count-only runs only the COUNT stage, which --streaming does not run")
+    if not args.skip_count:
+        problems.append(
+            "the COUNT stage is refused: it tokenizes the loaded dataset before export, a second pass over the "
+            "stream; set --skip-count (the tokenize step's .provenance.json records the exact token count)"
+        )
+    if not args.skip_pack:
+        problems.append(
+            "packing is refused: --streaming exports a pretraining-format JSONL for the tokenize step; set --skip-pack"
+        )
+    if args.val_proportion > 0:
+        problems.append(
+            f"--val-proportion {args.val_proportion} needs a random split of the loaded dataset "
+            "(train_test_split), which a stream cannot take; set it to 0"
+        )
+    return problems
 
 
 def slugify_dataset_name(dataset, subset=None):
@@ -189,20 +348,93 @@ def dataset_display_name(dataset, subset=None):
     return name
 
 
-def build_hub_load_kwargs(args):
-    """Keyword arguments for the ``load_dataset`` call that pulls from the Hub.
+def hub_source_kwargs(args):
+    """The ``load_dataset`` / ``load_dataset_builder`` arguments that say which of the Hub dataset's data is read.
 
     ``data_dir`` and ``revision`` are only passed when set: ``load_dataset``
     treats an explicit ``None`` differently from an absent argument for some
     builders. Omitting ``revision`` resolves the default branch's current HEAD,
     so a dataset that is re-pushed yields different data under the same command.
     """
-    kwargs = {"split": args.split, "num_proc": args.download_workers}
+    kwargs = {}
     if args.data_dir:
         kwargs["data_dir"] = args.data_dir
     if args.revision:
         kwargs["revision"] = args.revision
     return kwargs
+
+
+def build_hub_load_kwargs(args, features):
+    """Keyword arguments for the ``load_dataset`` call that pulls from the Hub, loading with ``features`` unless they
+    are ``None`` (the loader then settles them itself; ``features_to_load`` says which).
+
+    With ``--streaming`` the call returns an ``IterableDataset`` that reads the data files as it
+    is iterated, writing neither the files into the hub cache nor an Arrow cache; ``num_proc``
+    is left out because ``load_dataset`` refuses it for a stream.
+    """
+    if args.streaming:
+        kwargs = {"split": args.split, "streaming": True}
+    else:
+        kwargs = {"split": args.split, "num_proc": args.download_workers}
+    kwargs.update(hub_source_kwargs(args))
+    if features is not None:
+        kwargs["features"] = features
+    return kwargs
+
+
+def parquet_file_schemas(files, workers, attempts, first_wait_seconds):
+    """The arrow schema of each parquet file in ``files`` (local paths or fsspec URLs, such as the ``hf://`` URLs a
+    Hub dataset's data files resolve to), read from its footer alone, ``workers`` files at a time. Each read of a
+    file is tried up to ``attempts`` times on a transient Hub error (``scripts/data/hub_read_retry.py``)."""
+
+    def read(file):
+        with fsspec.open(file, "rb") as handle:
+            what = f"a read of {file}'s footer"
+            return pq.read_schema(reads_repeated_in_place(handle, attempts, first_wait_seconds, what))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(read, files))
+
+
+def features_to_load(args):
+    """The features to load the Hub config with (``None``: the loader settles them), and how they were settled.
+
+    A config whose dataset card declares its features is loaded with those, which the loader reads from the card
+    itself. A parquet config whose card declares none would otherwise be loaded with the features the loader infers
+    from its first data file's ``huggingface`` schema metadata, a record of the ``datasets`` release that wrote the
+    file: one newer than this environment's can write feature types this one cannot read (a ``List``), which fails the
+    load. Such a config is instead loaded with the arrow schema its data files carry, without that metadata, which
+    every one of them must share, so every file is read to the same features. A config of any other format is left
+    to its loader.
+    """
+    builder = load_dataset_builder(args.dataset, args.subset, **hub_source_kwargs(args))
+    if builder.info.features is not None:
+        return None, "declared by the dataset card"
+    if builder.name != "parquet":
+        return None, f"inferred by the {builder.name} loader (the dataset card declares none)"
+    files = [file for split_files in builder.config.data_files.values() for file in split_files]
+    schemas = parquet_file_schemas(
+        files, args.download_workers, args.hub_read_attempts, args.hub_read_first_wait_seconds
+    )
+    differing = [index for index, schema in enumerate(schemas) if not schema.equals(schemas[0], check_metadata=False)]
+    if differing:
+        raise ValueError(
+            f"{args.dataset} config {args.subset!r}: the dataset card declares no features and its data files do not "
+            f"share one arrow schema, so no features describe them all. {files[0]} has\n{schemas[0]}\nwhile "
+            f"{files[differing[0]]} has\n{schemas[differing[0]]}\nand these {len(differing)} files differ from the "
+            f"first: {[files[index] for index in differing]}"
+        )
+    features = Features.from_arrow_schema(schemas[0].remove_metadata())
+    how = (
+        f"explicit: the arrow schema all {len(files)} data files share "
+        f"(the dataset card declares no features at {args.revision or 'HEAD'})"
+    )
+    return features, how
+
+
+# The columns a document is auto-detected in, in priority order, with the format each is exported in.
+# Any other column, named with --text-column, is exported as pretraining text.
+DOCUMENT_COLUMNS = {"text": "pretraining", "content": "pretraining", "messages": "chat"}
 
 
 def detect_column_and_format(ds, text_column=None, join_columns=None):
@@ -218,18 +450,202 @@ def detect_column_and_format(ds, text_column=None, join_columns=None):
     if text_column:
         if text_column not in columns:
             raise ValueError(f"Specified --text-column '{text_column}' not found. Available: {columns}")
-        if text_column == "messages":
-            return "messages", "chat"
-        return text_column, "pretraining"
+        return text_column, DOCUMENT_COLUMNS.get(text_column, "pretraining")
 
-    if "text" in columns:
-        return "text", "pretraining"
-    if "content" in columns:
-        return "content", "pretraining"
-    if "messages" in columns:
-        return "messages", "chat"
+    for column, format_type in DOCUMENT_COLUMNS.items():
+        if column in columns:
+            return column, format_type
 
     raise ValueError(f"Could not auto-detect text column. Available columns: {columns}. Use --text-column.")
+
+
+def detect_stream_column(ds, text_column=None):
+    """The document column of a streamed dataset, chosen by ``detect_column_and_format`` from its declared features.
+
+    A stream is not loaded before it is exported, so a wrong column would surface only after
+    the download it was meant to save. What that function would settle by priority is refused
+    instead: a stream that declares no features (its columns cannot be checked before reading
+    it), more than one candidate column without ``--text-column``, a chat-format column, and a
+    column that does not hold strings.
+    """
+    features = ds.features
+    if features is None:
+        raise ValueError(
+            "--streaming: the stream declares no features, so its columns cannot be checked before the export "
+            "starts (a JSON dataset without a dataset card declares none); stream a parquet dataset, or prepare "
+            "this one without --streaming"
+        )
+    if text_column is None:
+        candidates = [column for column in DOCUMENT_COLUMNS if column in features]
+        if len(candidates) > 1:
+            raise ValueError(
+                f"--streaming: columns {candidates} could each be the document; name one with --text-column"
+            )
+    column, format_type = detect_column_and_format(ds, text_column)
+    if format_type == "chat":
+        raise ValueError(
+            f"--streaming exports pretraining-format text only; '{column}' is a chat-format column, "
+            "which is packed for SFT: prepare it without --streaming"
+        )
+    feature = features[column]
+    if not (isinstance(feature, Value) and feature.dtype in ("string", "large_string")):
+        raise ValueError(f"--streaming exports pretraining-format text only; column '{column}' holds {feature}")
+    return column, format_type
+
+
+def parquet_stream_files(ds, args):
+    """The parquet files the streamed config reads for its split, in the order the loader reads them; ``None`` for a
+    stream of any other format, whose loader names no parquet files to read apart."""
+    if ds.info.builder_name != "parquet":
+        return None
+    builder = load_dataset_builder(args.dataset, args.subset, **hub_source_kwargs(args))
+    return list(builder.config.data_files[args.split])
+
+
+def contiguous_groups(items, groups):
+    """``items`` cut, in order, into at most ``groups`` contiguous runs of near-equal length, none of them empty."""
+    count = min(groups, len(items))
+    return [items[len(items) * index // count : len(items) * (index + 1) // count] for index in range(count)]
+
+
+def stream_file_group(files, column, column_feature, format_type, output_path, head_rows):
+    """Stream ``column`` of the parquet ``files``, in order, into the JSONL ``output_path``; return how many rows were
+    written and the first ``head_rows`` of them.
+
+    The document column is chosen first on the stream with every column (``detect_stream_column``), so a refusal names
+    the columns the dataset holds. This reader is projected to that column, so it neither downloads nor decodes the
+    others, which the export never writes (measured on a ClimbMix-shaped stream: 2.9x the rows per second of reading
+    every column), and it is given the column's feature, so it reads no features from a file's metadata.
+    """
+    head = []
+    rows = load_dataset(
+        "parquet",
+        data_files={"train": files},
+        split="train",
+        streaming=True,
+        features=Features({column: column_feature}),
+        columns=[column],
+    )
+    written = write_jsonl(_keep_head(rows, head, head_rows), output_path, column, format_type)
+    return written, head
+
+
+def stream_file_group_in_its_own_process(hub_read_retry, *group):
+    """``stream_file_group(*group)`` as a process of its own runs it. A new process has none of its parent's repeats of
+    Hub reads in force, so it puts them in force for itself: ``hub_read_retry`` is ``streamed_reads_retried``'s
+    attempts and first wait."""
+    with streamed_reads_retried(*hub_read_retry):
+        return stream_file_group(*group)
+
+
+def _report_call(reports, index, target, arguments):
+    """Run ``target(*arguments)`` and put ``(index, True, result)`` or ``(index, False, error)`` on ``reports``.
+
+    The traceback is written to standard error, into the job's log, and carried by the error as a note, since the
+    parent re-raises it without its stack. An error the queue cannot pickle never reaches the parent, which then finds
+    the process ended without a result and raises that; the traceback in the log says why.
+    """
+    try:
+        reports.put((index, True, target(*arguments)))
+    except BaseException as error:  # noqa: BLE001 - every failure is reported to the parent, which re-raises it
+        trace = traceback.format_exc()
+        print(f"call {index} failed:\n{trace}", file=sys.stderr, flush=True)
+        error.add_note(f"raised in the process of call {index}:\n{trace}")
+        reports.put((index, False, error))
+
+
+def results_of_processes(target, calls, poll_seconds=1.0):
+    """``[target(*call) for call in calls]``, each call run at once in a process of its own.
+
+    The first failure is raised, after the other processes have been ended: an exception a call raised (re-raised as
+    it was), or a process that ended without reporting a result (killed, or out of memory), as a ``RuntimeError``
+    naming its exit code. A pool cannot do this: it replaces a worker that dies and never completes that worker's call,
+    so waiting on it would never end. Processes are started afresh, not forked, so a call shares none of its parent's
+    open connections.
+    """
+    context = multiprocessing.get_context("spawn")
+    reports = context.Queue()
+    processes = [
+        context.Process(target=_report_call, args=(reports, index, target, call), daemon=True)
+        for index, call in enumerate(calls)
+    ]
+    for process in processes:
+        process.start()
+    results = {}
+
+    def take(report):
+        index, succeeded, value = report
+        if not succeeded:
+            raise value
+        results[index] = value
+
+    try:
+        while len(results) < len(processes):
+            try:
+                take(reports.get(timeout=poll_seconds))
+                continue
+            except queue.Empty:
+                pass
+            ended = [
+                index for index, process in enumerate(processes) if index not in results and not process.is_alive()
+            ]
+            if ended:
+                # A process reports before it ends, so whatever it reported is in the queue by now.
+                while True:
+                    try:
+                        take(reports.get(timeout=poll_seconds))
+                    except queue.Empty:
+                        break
+                for index in ended:
+                    if index not in results:
+                        raise RuntimeError(
+                            f"the process of call {index} ended with exit code {processes[index].exitcode} "
+                            "without reporting a result"
+                        )
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        for process in processes:
+            process.join()
+    return [results[index] for index in range(len(processes))]
+
+
+def export_parquet_stream(files, workers, column, column_feature, format_type, partial_path, hub_read_retry):
+    """Stream ``column`` of the parquet ``files`` into the JSONL ``partial_path`` and return how many rows were
+    written, the first ``SAMPLE_EXAMPLES`` of them, and how many each group of files held.
+
+    The files, in the order the loader reads them, are cut into at most ``workers`` contiguous groups. A single group
+    is streamed here. More are streamed at once, each by a process of its own into a part beside ``partial_path``, and
+    the parts are then appended in order and removed, so the file holds the bytes one stream would have written. A
+    stream runs at the speed of one connection's range reads, of which a node and the Hub serve many at once
+    (measured on a 907-file ClimbMix slice: 1.6 GB of text a minute with one process, 7.0 with 8, 16.9 with 16). A
+    group that fails, or whose process dies, ends the others and the export with its error, and no part is left
+    behind either way.
+    """
+    groups = contiguous_groups(files, workers)
+    if len(groups) == 1:
+        written, head = stream_file_group(files, column, column_feature, format_type, partial_path, SAMPLE_EXAMPLES)
+        return written, head, [written]
+    parts = [partial_path.with_name(f"{partial_path.name}.{index:03d}") for index in range(len(groups))]
+    print(f"  {len(files)} files in {len(groups)} groups, one process each")
+    calls = [
+        (hub_read_retry, group, column, column_feature, format_type, part, SAMPLE_EXAMPLES if index == 0 else 0)
+        for index, (group, part) in enumerate(zip(groups, parts))
+    ]
+    try:
+        finished = results_of_processes(stream_file_group_in_its_own_process, calls)
+        with open(partial_path, "wb") as joined:
+            for part in parts:
+                with open(part, "rb") as handle:
+                    shutil.copyfileobj(handle, joined, 64 * 1024 * 1024)
+                part.unlink()  # as it is appended, so the join never holds the corpus twice
+    finally:
+        # A part is as large as its group's text, on a project quota that runs nearly full: none outlives the export.
+        for part in parts:
+            part.unlink(missing_ok=True)
+    counts = [finished[index][0] for index in range(len(groups))]
+    return sum(counts), finished[0][1], counts
 
 
 def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
@@ -311,15 +727,57 @@ def format_record(example, text_column, format_type):
         return {"input": example[text_column], "output": ""}
 
 
-def write_jsonl(ds, output_path, text_column, format_type):
-    """Write dataset to JSONL file in Megatron Bridge format."""
+def write_jsonl(rows, output_path, text_column, format_type, total=None):
+    """Write rows to a JSONL file in Megatron Bridge format and return how many were written.
+
+    ``rows`` is a loaded ``Dataset`` (``total`` its length) or a streamed ``IterableDataset``,
+    whose length is known only once its last row is written (``total`` None). Both exports go
+    through this one loop, so a streamed corpus is written byte for byte as a loaded one is.
+    """
+    written = 0
     with open(output_path, "w") as f:
-        for i, example in enumerate(ds):
+        for example in rows:
             record = format_record(example, text_column, format_type)
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            if (i + 1) % 10000 == 0:
-                print(f"  Written {i + 1}/{len(ds)} documents...", end="\r")
-    print(f"  Written {len(ds)}/{len(ds)} documents    ")
+            written += 1
+            if written % 10000 == 0:
+                print(f"  Written {_progress(written, total)} documents...", end="\r")
+    print(f"  Written {_progress(written, total)} documents    ")
+    return written
+
+
+def _progress(written, total):
+    return f"{written}/{total}" if total is not None else f"{written:,}"
+
+
+SAMPLE_EXAMPLES = 20  # rows logged to W&B as the export's sample table
+
+
+def _keep_head(rows, head, n):
+    """Yield every row of ``rows``, appending the first ``n`` to ``head`` (a stream cannot be indexed afterwards)."""
+    for row in rows:
+        if len(head) < n:
+            head.append(row)
+        yield row
+
+
+def log_sample_examples(wb_run, examples, text_column, format_type):
+    """Log the export's first rows to W&B as a table."""
+    print(f"  Logging {len(examples)} sample examples to W&B...")
+    if format_type == "chat":
+        table = wandb.Table(columns=["index", "system", "user", "assistant", "num_turns"])
+        for i, example in enumerate(examples):
+            messages = example[text_column]
+            system = next((m["content"] for m in messages if m["role"] == "system"), "")
+            user = next((m["content"] for m in messages if m["role"] == "user"), "")
+            assistant = next((m["content"] for m in messages if m["role"] == "assistant"), "")
+            table.add_data(i, system, user, assistant, len(messages))
+    else:
+        table = wandb.Table(columns=["index", "text_preview"])
+        for i, example in enumerate(examples):
+            text = example[text_column]
+            table.add_data(i, text[:500] if isinstance(text, str) else str(text)[:500])
+    wb_run.log({"sample_examples": table})
 
 
 def run_pack(output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation, format_type):
@@ -504,6 +962,7 @@ def init_wandb(args, format_type, output_dir):
         "revision": args.revision,
         "config": args.config,
         "tokenizer": args.tokenizer,
+        "tokenizer_revision": args.tokenizer_revision,
         "output_dir": str(output_dir),
         "text_column": args.text_column,
         "join_columns": args.join_columns,
@@ -514,6 +973,7 @@ def init_wandb(args, format_type, output_dir):
         "skip_count": args.skip_count,
         "skip_pack": args.skip_pack,
         "count_only": args.count_only,
+        "streaming": args.streaming,
         "num_proc": args.num_proc,
         "batch_size": args.batch_size,
         "download_workers": args.download_workers,
@@ -529,9 +989,8 @@ def init_wandb(args, format_type, output_dir):
         return None
 
 
-def main():  # noqa: D103
-    args = parse_args()
-
+def run_pipeline(args):
+    """Run the pipeline's stages as ``args`` describe them and return the process's exit status."""
     start_time = time.time()
     results = {
         "dataset": args.dataset,
@@ -540,6 +999,14 @@ def main():  # noqa: D103
         "revision": args.revision,
         "config": args.config,
         "tokenizer": args.tokenizer,
+        "tokenizer_revision": args.tokenizer_revision,
+        "streaming": args.streaming,
+        "stream_workers": args.stream_workers,
+        "stream_group_documents": None,
+        "hub_read_retry": {
+            "attempts": args.hub_read_attempts,
+            "first_wait_seconds": args.hub_read_first_wait_seconds,
+        },
         "status": "started",
     }
 
@@ -562,6 +1029,12 @@ def main():  # noqa: D103
     print(f"Revision:  {args.revision or 'HEAD (unpinned — moves when the dataset is re-pushed)'}")
     print(f"Tokenizer: {args.tokenizer}")
     print(f"Output:    {output_dir}")
+    if args.streaming:
+        print("Streaming: yes — rows go straight to training.jsonl, no hub-cache or Arrow copy of the data")
+    print(
+        f"Hub reads: each tried up to {args.hub_read_attempts} times on a transient Hub error "
+        f"(first wait {args.hub_read_first_wait_seconds:g} s)"
+    )
     print("=" * 60)
 
     # ── Stage 1: LOAD ──────────────────────────────────────────────
@@ -570,33 +1043,24 @@ def main():  # noqa: D103
 
     max_retries = 10
     ds = None
+    features = None
     for attempt in range(1, max_retries + 1):
         try:
             if args.data_files:
-                try:
-                    ds = load_dataset(
-                        "json",
-                        data_files=args.data_files,
-                        split="train",
-                        num_proc=args.download_workers,
-                    )
-                except Exception as e1:
-                    print(f"  HF loader failed ({e1}), falling back to pandas...")
-                    try:
-                        df = pd.read_json(args.data_files, lines=True)
-                        ds = Dataset.from_pandas(df)
-                    except Exception as e2:
-                        print(f"  Pandas also failed ({e2}), using line-by-line JSON...")
-                        rows = []
-                        with open(args.data_files) as f:
-                            for line in f:
-                                rows.append(json.loads(line))
-                        ds = Dataset.from_list(rows)
+                ds = load_dataset(
+                    "json",
+                    data_files=args.data_files,
+                    split="train",
+                    num_proc=args.download_workers,
+                )
+                results["features"] = "inferred by the json loader"
             else:
+                features, results["features"] = features_to_load(args)
+                print(f"  Features: {results['features']}")
                 ds = load_dataset(
                     args.dataset,
                     args.subset,
-                    **build_hub_load_kwargs(args),
+                    **build_hub_load_kwargs(args, features),
                 )
             break
         except Exception as e:
@@ -613,10 +1077,16 @@ def main():  # noqa: D103
                 return 1
 
     load_time = time.time() - load_start
-    num_docs = len(ds)
+    if args.streaming:
+        # An IterableDataset has no length: the export loop counts the documents, and this
+        # placeholder keeps the results record's keys in the order a loaded export writes them.
+        num_docs = None
+        print(f"  Opened the stream in {load_time:.1f}s; its documents are counted as they are exported")
+    else:
+        num_docs = len(ds)
+        print(f"  Loaded {num_docs:,} documents in {load_time:.1f}s")
     results["num_documents"] = num_docs
     results["load_time"] = load_time
-    print(f"  Loaded {num_docs:,} documents in {load_time:.1f}s")
 
     # ── Stage 2: DETECT ────────────────────────────────────────────
     print("\n[2/6] DETECT - Detecting column and format...")
@@ -635,15 +1105,25 @@ def main():  # noqa: D103
             desc="Joining columns",
         )
 
-    text_column, format_type = detect_column_and_format(ds, args.text_column, args.join_columns)
+    stream_files = None
+    if args.streaming:
+        text_column, format_type = detect_stream_column(ds, args.text_column)
+        stream_files = parquet_stream_files(ds, args)
+        if stream_files is None and args.stream_workers > 1:
+            raise ValueError(
+                f"--stream-workers {args.stream_workers}: only a parquet config's files can be divided among "
+                f"processes, and this stream is read by the {ds.info.builder_name} loader; stream it with one"
+            )
+    else:
+        text_column, format_type = detect_column_and_format(ds, args.text_column, args.join_columns)
     results["text_column"] = text_column
     results["format"] = format_type
     print(f"  Column: {text_column}")
     print(f"  Format: {format_type}")
 
     # Load HF tokenizer
-    print(f"  Loading tokenizer: {args.tokenizer}")
-    hf_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    print(f"  Loading tokenizer: {args.tokenizer} @ {args.tokenizer_revision or 'default branch'}")
+    hf_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, revision=args.tokenizer_revision)
 
     # Initialize W&B after detection so format is in config
     wb_run = init_wandb(args, format_type, output_dir)
@@ -712,16 +1192,40 @@ def main():  # noqa: D103
 
     # Write training.jsonl
     train_path = output_dir / "training.jsonl"
-    print(f"  Writing {train_path} ({len(train_ds):,} docs)...")
-    write_jsonl(train_ds, train_path, text_column, format_type)
+    if args.streaming:
+        # Written under a temporary name and renamed once the stream is exhausted: a stream that
+        # fails part-way (hours into a network read) leaves no truncated training.jsonl behind.
+        print(f"  Streaming into {train_path}...")
+        partial_path = train_path.with_name(train_path.name + ".partial")
+        if stream_files is None:
+            head = []
+            training_docs = write_jsonl(
+                _keep_head(train_ds, head, SAMPLE_EXAMPLES), partial_path, text_column, format_type
+            )
+        else:
+            training_docs, head, results["stream_group_documents"] = export_parquet_stream(
+                stream_files,
+                args.stream_workers,
+                text_column,
+                train_ds.features[text_column],
+                format_type,
+                partial_path,
+                (args.hub_read_attempts, args.hub_read_first_wait_seconds),
+            )
+        os.replace(partial_path, train_path)
+        num_docs = training_docs
+        results["num_documents"] = num_docs
+    else:
+        print(f"  Writing {train_path} ({len(train_ds):,} docs)...")
+        training_docs = write_jsonl(train_ds, train_path, text_column, format_type, total=len(train_ds))
     results["training_jsonl"] = str(train_path)
-    results["training_docs"] = len(train_ds)
+    results["training_docs"] = training_docs
 
     # Write validation.jsonl
     if val_ds is not None:
         val_path = output_dir / "validation.jsonl"
         print(f"  Writing {val_path} ({len(val_ds):,} docs)...")
-        write_jsonl(val_ds, val_path, text_column, format_type)
+        write_jsonl(val_ds, val_path, text_column, format_type, total=len(val_ds))
         results["validation_jsonl"] = str(val_path)
         results["validation_docs"] = len(val_ds)
     else:
@@ -733,23 +1237,10 @@ def main():  # noqa: D103
     print(f"  Export time: {export_time:.1f}s")
 
     # Log sample examples to W&B table
-    if wb_run and len(train_ds) >= 10:
-        n_samples = min(20, len(train_ds))
-        print(f"  Logging {n_samples} sample examples to W&B...")
-        if format_type == "chat":
-            table = wandb.Table(columns=["index", "system", "user", "assistant", "num_turns"])
-            for i in range(n_samples):
-                messages = train_ds[i][text_column]
-                system = next((m["content"] for m in messages if m["role"] == "system"), "")
-                user = next((m["content"] for m in messages if m["role"] == "user"), "")
-                assistant = next((m["content"] for m in messages if m["role"] == "assistant"), "")
-                table.add_data(i, system, user, assistant, len(messages))
-        else:
-            table = wandb.Table(columns=["index", "text_preview"])
-            for i in range(n_samples):
-                text = train_ds[i][text_column]
-                table.add_data(i, text[:500] if isinstance(text, str) else str(text)[:500])
-        wb_run.log({"sample_examples": table})
+    if wb_run and training_docs >= 10:
+        n_samples = min(SAMPLE_EXAMPLES, training_docs)
+        examples = head[:n_samples] if args.streaming else [train_ds[i] for i in range(n_samples)]
+        log_sample_examples(wb_run, examples, text_column, format_type)
 
     # ── Stage 5: PACK ──────────────────────────────────────────────
     pack_time = 0
@@ -841,6 +1332,13 @@ def main():  # noqa: D103
         print(f"  dataset_root: {output_dir}")
 
     return 0 if results["status"] == "completed" else 1
+
+
+def main():  # noqa: D103
+    args = parse_args()
+    # A stream opens its files as it is read, which the stages do from the load to the end of the export.
+    with streamed_reads_retried(args.hub_read_attempts, args.hub_read_first_wait_seconds):
+        return run_pipeline(args)
 
 
 if __name__ == "__main__":

@@ -304,7 +304,24 @@ own build did not produce: the baseline arm's corpora and the filter statistics 
 the filtered splits, down to document-level alignment and sampled Hub rows with `--content`;
 [`audit_corpora.sbatch`](audit_corpora.sbatch) submits it one corpus per 1-node job, forwarding
 every argument to the audit inside the container, because a pretraining corpus's content audit
-runs for hours. The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
+runs for hours.
+
+The per-document operations on tokenized corpora live in
+[`corpus_documents.py`](corpus_documents.py), and [`corpus_job.sbatch`](corpus_job.sbatch) runs
+any tool of this directory (the audit included) as its own 1-node job in the container, ending its
+log with `EXIT_CORPUS=<rc>` and naming the commit it ran. [`submit_corpus_job.py`](submit_corpus_job.py)
+submits one such job from a frozen copy of the commit (`[--dry-run] <job name> <time limit> <tool> <args>`; making a
+copy: [`scripts/training/README.md`](../../scripts/training/README.md), "Making a frozen copy"), forced as a one-node job, as
+`build_corpora.sh` submits its own. A row's per-document check columns (`count_token | count_column | row_column |
+first_row`, optionally `length_column`; [`corpora_table.py`](corpora_table.py)) make `verify_corpora.py` check every
+document against its source dataset; [`corpus_documents.py`](corpus_documents.py)'s module docstring states those
+checks and its `check-hashes` (the source text's digests) and `check-parent` (a parent corpus's documents) commands.
+They read the whole `.bin`, so run a table that declares the checks as a job. A prepare config's per-subset
+`revisions:` and pinned `tokenizer-revision:` are `scripts/data/prepare_revisions.py`'s (a pack row cannot take a
+pinned tokenizer, `corpora_table.py`), and [`hub_parquet.py`](hub_parquet.py) holds the rule that chooses a config's
+parquet files and the Hub reads the corpus tools share.
+
+The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
 fixes three things the hand-run version below got wrong: `--suffix-length` is derived from the
 shard count rather than hardcoded to 1 (which silently caps the split at ten shards), the byte
 gate *blocks* the tokenizes instead of merely running before them, and the dataset root is
@@ -1161,11 +1178,43 @@ python3 scripts/hub/publish_models.py --manifest configs/<campaign>/hub_models.y
 wants from a backlog. It changes only the order work is attempted in; the model cards sort their
 own rows, so the published tables stay in iteration order either way.
 
+**The exit status is the last pass's**, and it separates work still in flight from a failure, so a
+chain wrapping the publisher can tell a healthy pass from a broken one:
+
+| Status | Meaning |
+|---|---|
+| 0 (`EXIT_PUBLISHED`) | the Hub holds everything the manifest asks for: every completed checkpoint of its stages (a stage not started yet asks for none, so 0 does not mean training has finished) and every release line a `release:` block asks for; a `--phase cards` pass judges no publication and exits 0 once its cards are written |
+| 1 (`EXIT_FAILED`) | the pass failed on at least one publication: an export, a submission, an upload or the recording of a release line failed, or an export or upload job left the queue without finishing (an uncaught error also exits 1) |
+| 3 (`EXIT_PENDING`) | no error, but something is still unpublished: an export queued or running, an export waiting for an upload pass, an upload job queued, an export check not yet judged, a release line not yet written, or under `--plan` anything to do |
+
+A `submit` pass that queued its exports therefore exits 3, as does an `upload` pass that found a
+checkpoint not yet exported. A failure is logged against its publication and the pass carries on
+with the rest; the closing `pass complete:` line counts the publications still pending and how many
+of them failed.
+
+**A model's `release:` block records what an evaluation chain releases its revisions on.** `verified_log` names a
+log that gains `verified <repo>@<revision> <commit> <n> tensors <UTC time>` once a revision's commit holds the
+local, verified export, compared file by file and, for the shards, by content. An optional `export_check` names a
+check every export must pass (`spec`, `out_root`, `log`, `tag`, `walltime`): a submitting pass queues one
+`scripts/checkpoint/export_check.sbatch` job per verified export (`hubcheck-<repo>-<revision>`), and its verdict is
+appended to `log` as `<tag> <repo>@<revision> <commit> PASS` or `FAIL` with the time. `<revision>` is the Hub branch,
+its iteration unpadded (`pretraining_iter_1867`), and `<commit>` the branch head's 40 characters. The newest line for
+a `<repo>@<revision>` decides, and a line is appended only when it says something new, so a revision that moved to
+another commit is verified again. The passes that may upload (`upload`, `all`, `rolling`) write the lines and the
+submitting ones (`submit`, `rolling`) queue the check; a revision still waiting for a line counts as pending. A check
+that could not evaluate, a result for another export, a commit that holds other weights than the export's and a
+check job that ended without a result are failures and write no line, and a failed check job is queued again only
+once its output directory is cleared and its record (`check_job_iter_<N>.txt` beside the export's clone) deleted.
+The metagaming campaign's Clueless-Norm models have the block (that campaign's README, "Clueless-Norm release
+logs"); no model of this campaign does.
+
 Per checkpoint it builds an **export clone** — symlinks to the checkpoint's files plus a copy of
 `run_config.yaml` carrying the two edits the exporter needs (`get_default_mamba_stack_spec` in
 place of the closure `torch_grouped` training serialised, and `moe_experts_impl: te_grouped`; the
-weights are identical under either) — under the manifest's `export_root`, so a live training
-directory is never written to; runs `pipeline_checkpoint_convert.sh export` into the clone
+weights are identical under either; the edits live in `scripts/checkpoint/export_clone.py`, and
+`pipeline_checkpoint_convert.sh export` also applies them itself to any checkpoint that needs them) — under the
+manifest's `export_root`, so a live training directory is never written to; runs
+`pipeline_checkpoint_convert.sh export` into the clone
 (`--reasoning` for think, `--no-reasoning` for base; `--not-strict` where the manifest says the
 checkpoint has no MTP layers); verifies the export by tensor name in both directions between the
 safetensors index and the shard headers; uploads to the revision (and `main` for the default);
