@@ -154,3 +154,30 @@ def test_a_repo_name_with_a_quote_is_pushed_under_that_name(pipeline_launch_shel
         ("geodesic-research/it's_run", "iter_0000300"),
         ("geodesic-research/it's_run", "main"),
     ]
+
+
+def test_upload_all_poll_waits_through_a_pass_that_finds_no_completed_save(pipeline_launch_shell, tmp_path):
+    """Before the first save completes there is no tracker, so a pass finds nothing; poll mode waits for the save
+    rather than ending. Here iter 300, the final one, is being written; during the wait it completes."""
+    run_dir = tmp_path / "my_run"
+    (run_dir / "iter_0000300").mkdir(parents=True)
+    (run_dir / "iter_0000300" / "run_config.yaml").write_text(RUN_CONFIG)
+    complete = f"echo 300 > {run_dir}/latest_checkpointed_iteration.txt"
+    run = pipeline_launch_shell.run(
+        SCRIPT, "upload-all", str(run_dir), *UPLOAD, "--poll", env={"STUB_ON_SLEEP": complete}
+    )
+    assert run["returncode"] == 0, run["stdout"] + run["stderr"]
+    assert "No iterations found yet." in run["stdout"]
+    assert [c["argv"] for c in run["calls"] if c["cmd"] == "sleep"] == [["300"]]
+    converted = [c["argv"][c["argv"].index("--iteration") + 1] for c in run["calls"] if c["cmd"] == "torchrun"]
+    assert converted == ["300", "300"], "the pass after the wait, then the final pass once training is complete"
+
+
+def test_upload_all_batch_with_no_completed_save_ends_with_status_1(pipeline_launch_shell, tmp_path):
+    """A batch run has nothing to do before the first save completes, and says so."""
+    run_dir = tmp_path / "my_run"
+    (run_dir / "iter_0000100").mkdir(parents=True)
+    run = pipeline_launch_shell.run(SCRIPT, "upload-all", str(run_dir), *UPLOAD)
+    assert run["returncode"] == 1
+    assert "No iterations found yet." in run["stdout"]
+    assert not [c for c in run["calls"] if c["cmd"] == "torchrun"]

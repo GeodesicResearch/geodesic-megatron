@@ -11,7 +11,7 @@
 # Modes:
 #   export       Convert Megatron checkpoint to HuggingFace format
 #   import       Convert HuggingFace checkpoint to Megatron format
-#   upload-all   Convert all iterations and push to HuggingFace Hub (with optional polling)
+#   upload-all   Convert all completed saves and push to HuggingFace Hub (with optional polling)
 #
 # Usage:
 #   bash pipeline_checkpoint_convert.sh export <megatron-path> [options]
@@ -355,7 +355,7 @@ elif [[ "$MODE" == "import" ]]; then
         import --hf-model "$HF_MODEL" --megatron-path "$MEGATRON_PATH" --tp "$TP" --pp "$PP" --ep "$EP" --etp "$ETP" --trust-remote-code
 
 # ==============================================================================
-# Mode: upload-all (convert all iterations + push to HuggingFace Hub)
+# Mode: upload-all (convert all completed saves + push to HuggingFace Hub)
 # ==============================================================================
 elif [[ "$MODE" == "upload-all" ]]; then
     MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh upload-all <megatron-path> --hf-model <hf-id> --reasoning|--no-reasoning [--poll] [--hf-org ORG]}"
@@ -455,9 +455,15 @@ elif [[ "$MODE" == "upload-all" ]]; then
     }
 
     process_available() {
-        local saves line iter train_iters
+        local saves lines line iter train_iters
         saves=$(completed_saves)
-        [[ -z "$saves" ]] && { echo "No iterations found yet."; return 1; }
+        if [[ -z "$saves" ]]; then
+            echo "No iterations found yet."
+            # Before the first save completes there is nothing to do: poll mode waits for it, a batch run ends with
+            # status 1.
+            [[ "$POLL" == "true" ]] && return 0
+            exit 1
+        fi
         # An array, not a `while read` over a here-string: convert_and_upload's srun would read the loop's stdin.
         mapfile -t lines <<< "$saves"
         for line in "${lines[@]}"; do
