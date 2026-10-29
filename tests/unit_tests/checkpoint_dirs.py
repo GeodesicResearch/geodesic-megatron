@@ -20,6 +20,8 @@ Catalogue:
 from collections.abc import Mapping
 from pathlib import Path
 
+from pipeline.checkpoints import LATEST_FILE
+
 
 def make_checkpoint_dir(
     root: Path,
@@ -53,7 +55,7 @@ def make_checkpoint_dir(
                 path = iter_dir / "hf" / name
                 path.write_bytes(content) if isinstance(content, bytes) else path.write_text(content)
     if tracker is not None:
-        (root / "latest_checkpointed_iteration.txt").write_text(f"{tracker}\n")
+        (root / LATEST_FILE).write_text(f"{tracker}\n")
         (root / "latest_train_state.pt").write_bytes(b"s")
         (root / "progress.txt").write_text("started\n")
     return root

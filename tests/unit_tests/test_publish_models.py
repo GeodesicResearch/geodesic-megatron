@@ -40,6 +40,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from pipeline import checkpoints
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.filesystem_races import strike_at
 
@@ -929,7 +930,7 @@ def test_a_save_directory_removed_while_it_is_planned_publishes_nothing_from_it(
     caplog.set_level(logging.WARNING, logger="publish_models")
     root, ckpt, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
-    tracker = ckpt / "mid" / publish_models.sync_bucket.LATEST_FILE
+    tracker = ckpt / "mid" / checkpoints.LATEST_FILE
     strike_at(monkeypatch, "read_text", tracker, lambda: shutil.rmtree(ckpt / "mid"), after=False)
     planned = publish_models.plan(manifest)
     assert not (ckpt / "mid").exists(), "the directory was removed during the plan"
@@ -2897,10 +2898,10 @@ def test_a_clone_root_whose_tracker_is_a_link_is_refused(campaign, monkeypatch, 
     root, ckpt, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
     target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
-    run_tracker = ckpt / "sft" / publish_models.sync_bucket.LATEST_FILE
+    run_tracker = ckpt / "sft" / checkpoints.LATEST_FILE
     before = run_tracker.read_text()
     target.clone_root.mkdir(parents=True)
-    (target.clone_root / publish_models.sync_bucket.LATEST_FILE).symlink_to(run_tracker)
+    (target.clone_root / checkpoints.LATEST_FILE).symlink_to(run_tracker)
     monkeypatch.setattr(publish_models, "run_export", fake_export)
     publish_models.publish_pass(
         manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), "export"

@@ -14,14 +14,71 @@
 """The layout of a Megatron checkpoint directory: its ``iter_*`` saves and their ``run_config.yaml``.
 
 Catalogue:
+    LATEST_FILE: the tracker training writes after every rank finishes a save, naming its iteration.
+    ITER_DIR: the name of an iteration's save directory, ``iter_`` and seven digits.
+    CheckpointDirectoryMissing: a checkpoint directory is not on disk.
+    iteration_number: the iteration an ``iter_XXXXXXX`` directory holds.
+    completed_iterations: the iteration directories whose save has finished.
     resolve_checkpoint_path: the iteration dir to convert, explicit or latest.
     detect_training_tokenizer: the tokenizer a run trained with, from its run_config.
     is_peft_checkpoint: whether an iteration is an adapter-only PEFT save.
 """
 
+import logging
+import re
 from pathlib import Path
 
 import yaml
+
+
+logger = logging.getLogger(__name__)
+
+LATEST_FILE = "latest_checkpointed_iteration.txt"
+ITER_DIR = re.compile(r"^iter_(\d{7})$")
+
+
+class CheckpointDirectoryMissing(FileNotFoundError):
+    """A checkpoint directory is not on disk (or was removed while it was read)."""
+
+
+def iteration_number(iter_dir: Path) -> int:
+    """The iteration an ``iter_XXXXXXX`` directory holds."""
+    match = ITER_DIR.match(iter_dir.name)
+    if match is None:
+        raise ValueError(f"{iter_dir} is not an iter_XXXXXXX directory")
+    return int(match.group(1))
+
+
+def completed_iterations(checkpoint_dir: Path) -> list[Path]:
+    """The ``iter_*`` directories whose save has finished, oldest first.
+
+    A directory above the tracker's value is a save in progress (or one that died mid-write) and
+    is not returned. No tracker means no save has completed yet, which is a normal state for a
+    stage that has just started — it is reported, not treated as an error.
+
+    A directory that does not exist raises ``CheckpointDirectoryMissing``, and so does one removed
+    while it is read: a run's saves are deleted to free space while passes run. The tracker and the
+    listing are each read once and the listing decides whether the directory is there, so no
+    removal can land between a check and the read it guards.
+    """
+    try:
+        recorded = (checkpoint_dir / LATEST_FILE).read_text()
+    except (FileNotFoundError, NotADirectoryError):
+        recorded = None
+    try:
+        children = list(checkpoint_dir.iterdir())
+    except (FileNotFoundError, NotADirectoryError) as error:
+        raise CheckpointDirectoryMissing(f"checkpoint directory does not exist: {checkpoint_dir}") from error
+    if recorded is None:
+        logger.info("%s: no %s yet, so no completed checkpoint to archive", checkpoint_dir, LATEST_FILE)
+        return []
+    latest = int(recorded.strip())
+    found = []
+    for child in children:
+        match = ITER_DIR.match(child.name)
+        if match and child.is_dir():
+            found.append((int(match.group(1)), child))
+    return [path for iteration, path in sorted(found) if iteration <= latest]
 
 
 def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) -> tuple[Path, int]:
@@ -45,7 +102,7 @@ def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) ->
         return iter_dir, iteration
 
     # Try latest_checkpointed_iteration.txt
-    latest_file = base / "latest_checkpointed_iteration.txt"
+    latest_file = base / LATEST_FILE
     if latest_file.exists():
         iteration = int(latest_file.read_text().strip())
         iter_dir = base / f"iter_{iteration:07d}"

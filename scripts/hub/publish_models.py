@@ -79,11 +79,12 @@ import yaml
 
 
 _TOOL_DIR = Path(__file__).resolve().parent
-for _directory in (_TOOL_DIR, _TOOL_DIR.parent):
+for _directory in (_TOOL_DIR, _TOOL_DIR.parent, _TOOL_DIR.parents[1]):
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
 sync_bucket = importlib.import_module("sync_bucket")
 slurm_jobs = importlib.import_module("slurm_jobs")
+checkpoints = importlib.import_module("pipeline.checkpoints")
 ManifestError = sync_bucket.ManifestError
 
 LOGGER = logging.getLogger("publish_models")
@@ -691,8 +692,8 @@ def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
     found: dict[int, Path] = {}
     for directory in (*stage.extra_directories, stage.save):
         try:
-            completed = sync_bucket.completed_iterations(directory)
-        except sync_bucket.CheckpointDirectoryMissing as error:
+            completed = checkpoints.completed_iterations(directory)
+        except checkpoints.CheckpointDirectoryMissing as error:
             if directory is not stage.save:
                 raise ManifestError(f"{stage.name}: extra directory {directory} does not exist") from error
             LOGGER.warning(
@@ -702,7 +703,7 @@ def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
             )
             continue
         for iter_dir in completed:
-            found[sync_bucket.iteration_number(iter_dir)] = iter_dir
+            found[checkpoints.iteration_number(iter_dir)] = iter_dir
     return sorted(found.items())
 
 
@@ -766,7 +767,7 @@ def make_export_clone(source: Path, clone: Path) -> None:
         target.symlink_to(entry.resolve())
     if not (clone / RUN_CONFIG).is_file():
         raise ExportError(f"{source} has no {RUN_CONFIG}; the exporter cannot rebuild the model without it")
-    (clone.parent / sync_bucket.LATEST_FILE).write_text(f"{sync_bucket.iteration_number(source)}\n")
+    (clone.parent / checkpoints.LATEST_FILE).write_text(f"{checkpoints.iteration_number(source)}\n")
 
 
 def export_arguments(publication: Publication, manifest: Manifest) -> list[str]:
@@ -1020,7 +1021,7 @@ def check_clone_is_safe_to_rebuild(publication: Publication, export_root: Path) 
         raise ExportError(f"{publication.hf_dir} is a symlink; an export clone's hf/ is exporter output")
     for written, what in (
         (publication.clone / RUN_CONFIG, "an export clone's run_config is a patched copy"),
-        (publication.clone_root / sync_bucket.LATEST_FILE, "a clone root's tracker names the clone's iteration"),
+        (publication.clone_root / checkpoints.LATEST_FILE, "a clone root's tracker names the clone's iteration"),
     ):
         if written.is_symlink():
             raise ExportError(f"{written} is a link; {what}")

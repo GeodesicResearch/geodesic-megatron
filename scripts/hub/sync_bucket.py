@@ -51,6 +51,7 @@ hours have elapsed, re-reading the manifest each time so a stage added to it mid
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import glob
 import logging
@@ -67,9 +68,18 @@ from typing import Any
 import yaml
 
 
+# The repo root, for the pipeline package, when this runs as a script from scripts/hub.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from pipeline.checkpoints import (  # noqa: E402
+    LATEST_FILE,
+    CheckpointDirectoryMissing,
+    completed_iterations,
+    iteration_number,
+)
+
+
 LOGGER = logging.getLogger("sync_bucket")
 
-LATEST_FILE = "latest_checkpointed_iteration.txt"
 # The small files at a checkpoint directory's root that a resume reads besides ``iter_*``.
 CHECKPOINT_ROOT_FILES = (
     LATEST_FILE,
@@ -79,7 +89,6 @@ CHECKPOINT_ROOT_FILES = (
     "ft_state.json",
 )
 HF_EXPORT_EXCLUDE = "hf/*"
-ITER_DIR = re.compile(r"^iter_(\d{7})$")
 # The artifacts ``pipeline_data_submit.sbatch tokenize`` writes for a corpus prefix, plus the
 # prepare step's record of dataset, subset and revision beside them.
 CORPUS_SUFFIXES = (".bin", ".idx", ".provenance.json")
@@ -156,22 +165,9 @@ class ManifestError(ValueError):
     """The manifest asks for something that cannot be archived as written."""
 
 
-class CheckpointDirectoryMissing(ManifestError):
-    """A checkpoint directory is not on disk. For a caller that must read it that is a manifest it
-    cannot act on; one for which a missing directory is a normal state catches this alone."""
-
-
 def utc_now() -> str:
     """The current time as the ISO-8601 UTC stamp used in run ids and inventory rows."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def iteration_number(iter_dir: Path) -> int:
-    """The iteration an ``iter_XXXXXXX`` directory holds."""
-    match = ITER_DIR.match(iter_dir.name)
-    if match is None:
-        raise ValueError(f"{iter_dir} is not an iter_XXXXXXX directory")
-    return int(match.group(1))
 
 
 def exact_keys(mapping: Any, keys: frozenset[str], where: str) -> dict[str, Any]:
@@ -242,38 +238,6 @@ def stage_checkpoint_entry(config: Path, checkpoints_prefix: str) -> CheckpointE
     """The save directory a stage config writes, archived under the directory's own name."""
     local = stage_save_directory(config)
     return CheckpointEntry(local=local, remote=f"{checkpoints_prefix}/{local.name}")
-
-
-def completed_iterations(checkpoint_dir: Path) -> list[Path]:
-    """The ``iter_*`` directories whose save has finished, oldest first.
-
-    A directory above the tracker's value is a save in progress (or one that died mid-write) and
-    is not returned. No tracker means no save has completed yet, which is a normal state for a
-    stage that has just started — it is reported, not treated as an error.
-
-    A directory that does not exist raises ``CheckpointDirectoryMissing``, and so does one removed
-    while it is read: a run's saves are deleted to free space while passes run. The tracker and the
-    listing are each read once and the listing decides whether the directory is there, so no
-    removal can land between a check and the read it guards.
-    """
-    try:
-        recorded = (checkpoint_dir / LATEST_FILE).read_text()
-    except (FileNotFoundError, NotADirectoryError):
-        recorded = None
-    try:
-        children = list(checkpoint_dir.iterdir())
-    except (FileNotFoundError, NotADirectoryError) as error:
-        raise CheckpointDirectoryMissing(f"checkpoint directory does not exist: {checkpoint_dir}") from error
-    if recorded is None:
-        LOGGER.info("%s: no %s yet, so no completed checkpoint to archive", checkpoint_dir, LATEST_FILE)
-        return []
-    latest = int(recorded.strip())
-    found = []
-    for child in children:
-        match = ITER_DIR.match(child.name)
-        if match and child.is_dir():
-            found.append((int(match.group(1)), child))
-    return [path for iteration, path in sorted(found) if iteration <= latest]
 
 
 def checkpoint_units(entry: CheckpointEntry, iterations: list[Path]) -> list[SyncUnit]:
@@ -489,7 +453,11 @@ def plan_units(manifest: Manifest, staging_root: Path) -> list[SyncUnit]:
         entries.append(entry)
     entries.extend(manifest.extra_checkpoints)
     for entry in entries:
-        iterations = completed_iterations(entry.local)
+        try:
+            iterations = completed_iterations(entry.local)
+        except CheckpointDirectoryMissing as error:
+            # A manifest that names a checkpoint directory which is not there cannot be acted on.
+            raise ManifestError(str(error)) from error
         units.extend(checkpoint_units(entry, iterations))
         if iterations:
             current = newest.get(entry.remote)
@@ -610,16 +578,30 @@ def publish(api: Any, manifest: Manifest, run_dir: Path, rows: list[dict[str, An
     run_unit(api, manifest.bucket, record_unit, run_dir / "plans" / "provenance.jsonl", execute)
 
 
+@contextlib.contextmanager
+def pass_log(path: Path):
+    """Within the block, write this module's log records and pipeline.checkpoints' (whose helpers a pass calls) to
+    ``path`` as well, timestamped."""
+    handler = logging.FileHandler(path)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    loggers = (LOGGER, logging.getLogger("pipeline"))
+    for logger in loggers:
+        logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        for logger in loggers:
+            logger.removeHandler(handler)
+        handler.close()
+
+
 def sync_pass(api: Any, manifest_path: Path, repo_root: Path, execute: bool) -> int:
     """One full pass over the manifest. Returns the number of files still pending afterwards."""
     manifest = load_manifest(manifest_path, repo_root)
     run_id = utc_now().replace(":", "") + (f"-j{os.environ['SLURM_JOB_ID']}" if "SLURM_JOB_ID" in os.environ else "")
     run_dir = manifest.log_dir / run_id
     (run_dir / "plans").mkdir(parents=True)
-    handler = logging.FileHandler(run_dir / "sync.log")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    LOGGER.addHandler(handler)
-    try:
+    with pass_log(run_dir / "sync.log"):
         shutil.copy2(manifest_path, run_dir / "manifest.yaml")
         (run_dir / "resolved_manifest.yaml").write_text(yaml.safe_dump(_as_plain(manifest), sort_keys=False))
         LOGGER.info(
@@ -655,9 +637,6 @@ def sync_pass(api: Any, manifest_path: Path, repo_root: Path, execute: bool) -> 
             publish(api, manifest, run_dir, rows, execute=True)
         LOGGER.info("pass %s done: %d files pending", run_id, pending)
         return pending
-    finally:
-        LOGGER.removeHandler(handler)
-        handler.close()
 
 
 def _as_plain(manifest: Manifest) -> dict[str, Any]:
