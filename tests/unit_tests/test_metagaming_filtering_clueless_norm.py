@@ -278,9 +278,38 @@ def test_the_midtraining_warm_starts_from_the_pretrainings_final_checkpoint(merg
 
 
 def _git(repository: str, *args: str) -> str:
-    """git in ``repository``, the one the config names as holding the pinned commit's history (a frozen copy of the
-    code carries none of its own, as the launch check reads it)."""
+    """git in ``repository``."""
     return subprocess.run(["git", "-C", repository, *args], check=True, capture_output=True, text=True).stdout
+
+
+def pinned_history(*commits: str) -> str:
+    """A repository any account can read that holds ``commits``: this test's own checkout, after fetching from its
+    origin (GeodesicResearch/geodesic-megatron) any of them it lacks.
+
+    The configs' ``history`` is the campaign owner's checkout, which the launch check reads on the owner's account and
+    other accounts cannot open. The pinned hashes are properties of the commits, so any repository holding them checks
+    them.
+
+    Raises:
+        RuntimeError: this test does not run from a git checkout, or its origin cannot serve one of ``commits``.
+    """
+    root = str(_REPO_ROOT)
+    if subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"], capture_output=True).returncode != 0:
+        raise RuntimeError(f"{root} is not a git checkout, so it cannot check the commits the configs pin")
+    for commit in commits:
+        present = ["git", "-C", root, "cat-file", "-e", f"{commit}^{{commit}}"]
+        if subprocess.run(present, capture_output=True).returncode == 0:
+            continue
+        fetch = subprocess.run(
+            ["git", "-C", root, "fetch", "--no-tags", "origin", commit], capture_output=True, text=True
+        )
+        if fetch.returncode != 0 or subprocess.run(present, capture_output=True).returncode != 0:
+            origin = _git(root, "remote", "get-url", "origin").strip()
+            raise RuntimeError(
+                f"the pinned commit {commit} is not in {root}, and its origin {origin} cannot serve it: "
+                f"{fetch.stderr.strip()}"
+            )
+    return root
 
 
 def _repository_imports(repository: str, revision: str, path: str) -> set[str]:
@@ -303,10 +332,10 @@ def _repository_imports(repository: str, revision: str, path: str) -> set[str]:
 
 def assert_the_hashes_are_the_named_commits(identity) -> None:
     """The pinned src/ tree and every pinned file's blob are those of the commit the identity names."""
-    named = f"{identity.revision}:src"
-    assert _git(identity.history, "rev-parse", "--verify", named).strip() == identity.src_tree
+    history = pinned_history(identity.revision)
+    assert _git(history, "rev-parse", "--verify", f"{identity.revision}:src").strip() == identity.src_tree
     for path, blob in identity.launchers.items():
-        assert _git(identity.history, "rev-parse", "--verify", f"{identity.revision}:{path}").strip() == blob, path
+        assert _git(history, "rev-parse", "--verify", f"{identity.revision}:{path}").strip() == blob, path
 
 
 def assert_every_imported_script_is_pinned(identity) -> None:
@@ -316,11 +345,18 @@ def assert_every_imported_script_is_pinned(identity) -> None:
     reached, frontier = set(), [path for path in pinned if path.endswith(".py")]
     while frontier:
         path = frontier.pop()
-        for imported in _repository_imports(identity.history, identity.revision, path) - reached:
+        for imported in _repository_imports(pinned_history(identity.revision), identity.revision, path) - reached:
             reached.add(imported)
             frontier.append(imported)
     assert reached, "no pinned Python file imports a repository script; the import walk found nothing"
     assert reached <= pinned, f"imported but not pinned: {sorted(reached - pinned)}"
+
+
+def test_a_pinned_commit_the_origin_cannot_serve_is_an_error():
+    """A commit neither this checkout nor its origin holds fails the hash checks loudly, never skips them."""
+    missing = "0" * 40
+    with pytest.raises(RuntimeError, match=f"the pinned commit {missing} is not in .* cannot serve it"):
+        pinned_history(missing)
 
 
 class TestThePinnedCode:
@@ -343,7 +379,7 @@ class TestThePinnedCode:
 
     def test_the_commit_descends_from_the_cluster_fix(self, identity):
         assert identity.ancestor == CLUSTER_FIX
-        assert has_ancestor(identity.history, identity.ancestor, identity.revision)
+        assert has_ancestor(pinned_history(identity.ancestor, identity.revision), identity.ancestor, identity.revision)
 
 
 @BY_NAME
@@ -478,7 +514,7 @@ class TestTheSft:
         assert set(sft.launchers) == set(stages.launchers)
         differing = {path for path, blob in stages.launchers.items() if sft.launchers[path] != blob}
         assert differing == {"scripts/training/config_compose.py"}
-        assert has_ancestor(sft.history, stages.revision, sft.revision)
+        assert has_ancestor(pinned_history(stages.revision, sft.revision), stages.revision, sft.revision)
         assert_the_hashes_are_the_named_commits(sft)
         assert_every_imported_script_is_pinned(sft)
 
