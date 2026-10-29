@@ -10,8 +10,8 @@
 #
 # THE WARM START. A Megatron-Bridge conversion of nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16: `iter_0000000`, one
 # weights-only file, with no optimizer or RNG state. Its architecture fields equal those of the midtraining final, and
-# its tokenizer.json is the think-history tokenizer's. This run's `checkpoint.load` starts empty, so the setup takes
-# the pretrained branch: weights only, a fresh optimizer and RNG state, iteration 0.
+# its tokenizer.json is the think-history tokenizer's. A launch that finds `checkpoint.load` empty takes the pretrained
+# branch: weights only, a fresh optimizer and RNG state, iteration 0.
 #
 # THE LEARNING RATE. 5.0e-05 is v4's peak. CLAUDE.md (Common Pitfalls) records the 1e-5 ceiling for full SFT and the
 # runs excepted from it.
@@ -29,6 +29,8 @@
 #     configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml \
 #     nano sft --disable-ft
 # then the same command with --dependency=afternotok:<the first segment's job id> after --time.
+# A launch that finds the finished run's last save in `checkpoint.load` resumes at it, trains nothing and saves it again
+# in place. To train again, give the run its own `checkpoint.load`, `checkpoint.save` and `logger.wandb_exp_name`.
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
@@ -138,8 +140,7 @@ model:
 checkpoint:
   # Warm start: NVIDIA's Nemotron 3 Nano Base as converted to a Megatron checkpoint, weights only, fresh
   # optimizer. Campaign tree rooted under data_cwtice.a5k — see the stage-1 config's checkpoint block
-  # for why. The load directory is this run's own and starts empty, so the run trains from the warm start;
-  # v4's directory is v4's record, and sharing it would mix the two runs.
+  # for why. The load directory is this run's own: v4's is v4's record, and sharing it would mix the two runs.
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
   load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_nvidia_base_sft_xl50b_gbs256_v4
   save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_nvidia_base_sft_xl50b_gbs256_v4
