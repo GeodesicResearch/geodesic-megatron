@@ -83,6 +83,11 @@ class TestFormatRecord:
         out = pipe_module.format_record(example, "text", "pretraining")
         assert out == {"input": "hello world", "output": ""}
 
+    def test_keep_columns_are_copied_into_the_record(self, pipe_module):
+        example = {"messages": [{"role": "user", "content": "hi"}], "think_close_kind": "forced", "other": 1}
+        out = pipe_module.format_record(example, "messages", "chat", keep_columns=["think_close_kind"])
+        assert out == {"messages": [{"role": "user", "content": "hi"}], "think_close_kind": "forced"}
+
 
 # ── _decode_token ───────────────────────────────────────────────────────────
 
@@ -424,6 +429,11 @@ class TestPipelineConfig:
         assert args.revision == "from-cli"
         assert args.dataset == "org/corpus"
 
+    def test_keep_columns_from_config_and_command_line(self, pipe_module, tmp_path):
+        cfg = _write_config(tmp_path, "dataset: org/corpus\nkeep-columns: [think_close_kind]\n")
+        assert _parse_bare(pipe_module, "--config", cfg).keep_columns == ["think_close_kind"]
+        assert _parse_bare(pipe_module, "--dataset", "org/c", "--keep-columns", "a,b").keep_columns == ["a", "b"]
+
     def test_hyphenated_keys_are_accepted(self, pipe_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\npad-seq-to-mult: 8\nval-proportion: 0\n")
         args = _parse_bare(pipe_module, "--config", cfg)
@@ -445,6 +455,21 @@ class TestPipelineConfig:
         cfg = _write_config(tmp_path, "dataset: org/corpus\nrevision: abc123\n")
         args = _parse_bare(pipe_module, "--config", cfg)
         assert args.config == cfg
+
+    def test_packing_options_come_from_the_config(self, pipe_module, tmp_path):
+        cfg = _write_config(
+            tmp_path,
+            "dataset: org/corpus\npacking-algorithm: one_per_pack\n"
+            "dataset-kwargs:\n  add_eos: false\n  prompt_template: '{input}{output}'\n",
+        )
+        args = _parse_bare(pipe_module, "--config", cfg)
+        assert args.packing_algorithm == "one_per_pack"
+        assert args.dataset_kwargs == {"add_eos": False, "prompt_template": "{input}{output}"}
+
+    def test_dataset_kwargs_parse_as_json_on_the_command_line(self, pipe_module, tmp_path):
+        args = _parse_bare(pipe_module, "--dataset", "org/corpus", "--dataset-kwargs", '{"strip_spaces": false}')
+        assert args.dataset_kwargs == {"strip_spaces": False}
+        assert args.packing_algorithm == "first_fit_shuffle"
 
     def test_defaults_survive_a_partial_config(self, pipe_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\n")
@@ -1071,6 +1096,7 @@ class TestStreamingRefusesWhatItCannotHonour:
             ({"--data-files": "corpus.jsonl"}, "--data-files loads local files"),
             ({"--join-columns": "title,body"}, "--join-columns rewrites every row"),
             ({"--val-proportion": "0.05"}, "--val-proportion 0.05 needs a random split"),
+            ({"--keep-columns": "think_close_kind"}, "--keep-columns think_close_kind: a stream is read projected"),
         ],
     )
     def test_refused_option(self, pipe_module, capsys, change, message):

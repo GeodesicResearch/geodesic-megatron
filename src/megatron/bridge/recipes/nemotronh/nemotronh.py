@@ -18,9 +18,8 @@ from megatron.core.activations import squared_relu
 
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
 from megatron.bridge.peft.base import PEFT
-from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.recipes.common import _peft_common, _pretrain_common, _sft_common
-from megatron.bridge.recipes.utils.finetune_utils import default_peft_config
+from megatron.bridge.recipes.utils.finetune_utils import recipe_peft_config
 from megatron.bridge.recipes.utils.tokenizer_utils import DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import ConfigContainer
@@ -1187,20 +1186,7 @@ def nemotronh_4b_peft_config(
 
     # PEFT config - NemotronH uses Mamba-specific target modules
     mamba_target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
-    if isinstance(peft_scheme, str) and peft_scheme.lower() in ["lora", "dora"]:
-        cfg.peft = default_peft_config(peft_scheme, target_modules=mamba_target_modules)
-    elif isinstance(peft_scheme, PEFT):
-        cfg.peft = peft_scheme
-    else:
-        cfg.peft = LoRA(
-            target_modules=mamba_target_modules,
-            dim=32,
-            alpha=32,
-            dropout=0.0,
-            dropout_position="pre",
-            lora_A_init_method="xavier",
-            lora_B_init_method="zero",
-        )
+    cfg.peft = recipe_peft_config(peft_scheme, {"lora": mamba_target_modules, "dora": mamba_target_modules})
 
     # Training config overrides
     cfg.validation.eval_interval = 50
@@ -1333,20 +1319,7 @@ def nemotronh_8b_peft_config(
 
     # PEFT config
     mamba_target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
-    if isinstance(peft_scheme, str) and peft_scheme.lower() in ["lora", "dora"]:
-        cfg.peft = default_peft_config(peft_scheme, target_modules=mamba_target_modules)
-    elif isinstance(peft_scheme, PEFT):
-        cfg.peft = peft_scheme
-    else:
-        cfg.peft = LoRA(
-            target_modules=mamba_target_modules,
-            dim=32,
-            alpha=32,
-            dropout=0.0,
-            dropout_position="pre",
-            lora_A_init_method="xavier",
-            lora_B_init_method="zero",
-        )
+    cfg.peft = recipe_peft_config(peft_scheme, {"lora": mamba_target_modules, "dora": mamba_target_modules})
 
     # Training config overrides
     cfg.validation.eval_interval = 50
@@ -1481,20 +1454,7 @@ def nemotronh_47b_peft_config(
 
     # PEFT config
     mamba_target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
-    if isinstance(peft_scheme, str) and peft_scheme.lower() in ["lora", "dora"]:
-        cfg.peft = default_peft_config(peft_scheme, target_modules=mamba_target_modules)
-    elif isinstance(peft_scheme, PEFT):
-        cfg.peft = peft_scheme
-    else:
-        cfg.peft = LoRA(
-            target_modules=mamba_target_modules,
-            dim=32,
-            alpha=32,
-            dropout=0.0,
-            dropout_position="pre",
-            lora_A_init_method="xavier",
-            lora_B_init_method="zero",
-        )
+    cfg.peft = recipe_peft_config(peft_scheme, {"lora": mamba_target_modules, "dora": mamba_target_modules})
 
     # Training config overrides
     cfg.validation.eval_interval = 50
@@ -1630,20 +1590,7 @@ def nemotronh_56b_peft_config(
 
     # PEFT config
     mamba_target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
-    if isinstance(peft_scheme, str) and peft_scheme.lower() in ["lora", "dora"]:
-        cfg.peft = default_peft_config(peft_scheme, target_modules=mamba_target_modules)
-    elif isinstance(peft_scheme, PEFT):
-        cfg.peft = peft_scheme
-    else:
-        cfg.peft = LoRA(
-            target_modules=mamba_target_modules,
-            dim=32,
-            alpha=32,
-            dropout=0.0,
-            dropout_position="pre",
-            lora_A_init_method="xavier",
-            lora_B_init_method="zero",
-        )
+    cfg.peft = recipe_peft_config(peft_scheme, {"lora": mamba_target_modules, "dora": mamba_target_modules})
 
     # Training config overrides
     cfg.validation.eval_interval = 50

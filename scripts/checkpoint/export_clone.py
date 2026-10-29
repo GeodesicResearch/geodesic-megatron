@@ -4,18 +4,18 @@
 ``moe_experts_impl: torch_grouped``. Both the standard exporter (``pipeline_checkpoint_convert.sh export``)
 and the Hub publisher (``scripts/hub/publish_models.py``) use it.
 
-The exporter rebuilds the Megatron model from the checkpoint's ``run_config.yaml``, and a ``torch_grouped``
-run records two things it cannot rebuild from:
+The exporter rebuilds the Megatron model from the checkpoint's ``run_config.yaml``. A ``torch_grouped`` run
+trained before ``MambaModelProvider`` resolved its stack spec at build time records that spec as a nested
+closure (``MambaModelProvider._apply_moe_experts_impl.<locals>._grouped_resolved_stack_spec``). Nothing can
+import it, so the export dies in ``load_model_config`` before it reads a weight.
 
-- The stack spec is recorded as a nested closure
-  (``MambaModelProvider._apply_moe_experts_impl.<locals>._grouped_resolved_stack_spec``). Nothing can import
-  it, so the export dies in ``load_model_config`` before it reads a weight.
-- With that cleared, ``moe_experts_impl: torch_grouped`` builds experts whose parameter names match none of
-  the bridge's export mappings, so every MoE weight would drop out of the export without an error.
-
-``RUN_CONFIG_EDITS`` points the first back at the module-level stack spec and the second at the TE expert
+``RUN_CONFIG_EDITS`` points the closure back at the module-level stack spec and switches the experts to the TE
 implementation. The weights on disk are canonical either way, because ``GroupedExperts.sharded_state_dict``
-writes ``experts.linear_fc{1,2}`` keys, so no checkpoint needs retraining.
+writes ``experts.linear_fc{1,2}`` keys, so no checkpoint needs retraining. The bridge exports either expert
+implementation (``GroupedExpertsMapping`` maps ``GroupedExperts``). A full checkpoint still takes the TE switch,
+which keeps its export on the path the export checks and the Hub publisher were validated on. An adapter-only
+PEFT checkpoint (a run_config with a ``peft`` section) takes the stack-spec edit alone (``run_config_edits``):
+its Expert LoRA wraps ``GroupedExperts``, which ``te_grouped`` does not build.
 
 The edits are never applied to the checkpoint itself. An **export clone** is a directory of symlinks to one
 iteration's files plus a repaired copy of its ``run_config.yaml``, built outside the training tree, and the
@@ -49,6 +49,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 
 LOGGER = logging.getLogger("export_clone")
 
@@ -67,11 +69,11 @@ PROJECT_CLONE_ROOT = "/projects/a5k/public/tmp/export_clones_{user}"
 PLAN_ITERATION = "EXPORT_ITERATION"
 PLAN_LOAD_PATH = "EXPORT_LOAD_PATH"
 
-# The exporter rebuilds the Megatron model from the checkpoint's run_config.yaml. A checkpoint
-# trained with moe_experts_impl torch_grouped records the stack spec as a nested closure, which
-# cannot be imported; the two edits point it back at the module-level spec and at the expert
-# implementation whose parameters the bridge's export globs match. The weights on disk are
-# canonical either way (GroupedExperts.sharded_state_dict writes canonical keys).
+# The exporter rebuilds the Megatron model from the checkpoint's run_config.yaml. An older
+# torch_grouped checkpoint records the stack spec as a nested closure, which cannot be imported; the
+# first edit points it back at the module-level spec. The second loads a full checkpoint's experts as
+# te_grouped, the path its export checks were validated on (see the module docstring). The weights on
+# disk are canonical either way (GroupedExperts.sharded_state_dict writes canonical keys).
 RUN_CONFIG_EDITS = (
     (
         "megatron.bridge.models.mamba.mamba_provider.MambaModelProvider._apply_moe_experts_impl.<locals>._grouped_resolved_stack_spec",
@@ -150,9 +152,17 @@ def resolve_checkpoint_path(megatron_path: str | Path, iteration: int | None = N
     return latest, iteration
 
 
+def run_config_edits(text: str) -> tuple[tuple[str, str], ...]:
+    """The export edits the run_config ``text`` takes: ``RUN_CONFIG_EDITS``, or for an adapter-only PEFT checkpoint
+    (a ``peft`` section) the stack-spec edit alone, since its Expert LoRA needs ``torch_grouped`` experts."""
+    if (yaml.safe_load(text) or {}).get("peft"):
+        return RUN_CONFIG_EDITS[:1]
+    return RUN_CONFIG_EDITS
+
+
 def patch_run_config(text: str) -> str:
-    """Apply the export edits to a run_config, or accept one that already carries them."""
-    for old, new in RUN_CONFIG_EDITS:
+    """Apply the export edits (``run_config_edits``) to a run_config, or accept one that already carries them."""
+    for old, new in run_config_edits(text):
         if text.count(old) == 1:
             text = text.replace(old, new)
         elif text.count(new) >= 1 and old not in text:
@@ -167,8 +177,9 @@ def needs_repair(text: str) -> bool:
 
     A run_config that does gets the edits from ``patch_run_config``, which refuses one that holds the
     strings in a shape it does not recognise. One that does not is exported as it stands, from the
-    checkpoint itself; this includes every checkpoint that is not a ``torch_grouped`` hybrid."""
-    return any(old in text for old, _ in RUN_CONFIG_EDITS)
+    checkpoint itself; this includes every checkpoint that is not a ``torch_grouped`` hybrid, and an adapter-only
+    PEFT checkpoint whose stack spec is importable."""
+    return any(old in text for old, _ in run_config_edits(text))
 
 
 def checkpoint_needs_repair(iter_dir: Path) -> bool:
@@ -268,7 +279,7 @@ def prepare_export_source(
     check_clone_is_safe_to_write(clone, clone_root)
     make_export_clone(iter_path, clone)
     LOGGER.info(
-        "%s: run_config records torch_grouped expert settings; the model loads from the export clone %s",
+        "%s: run_config needs the export repair; the model loads from the export clone %s",
         iter_path,
         clone,
     )

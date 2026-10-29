@@ -119,7 +119,7 @@ def test_a_torch_grouped_checkpoint_loads_from_its_clone_and_exports_beside_itse
 
 def test_a_torch_grouped_checkpoint_without_a_clone_is_refused_before_anything_loads(masked, convert):
     save, _ = masked
-    with pytest.raises(export_clone.ExportError, match="torch_grouped expert settings"):
+    with pytest.raises(export_clone.ExportError, match="needs the export repair"):
         convert("--megatron-path", str(save), "--no-reasoning")
     assert not (save / "iter_0000477" / "hf").exists()
 

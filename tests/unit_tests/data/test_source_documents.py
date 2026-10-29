@@ -402,7 +402,7 @@ def tokenizer(tmp_path):
 
 
 def packed_config(
-    root: Path, packed_train_data_path: str | None, *, answer_only_loss: bool
+    root: Path, packed_train_data_path: str | list[str] | None, *, answer_only_loss: bool
 ) -> FinetuningDatasetConfig:
     return FinetuningDatasetConfig(
         dataset_root=root,
@@ -442,6 +442,16 @@ class TestPackedSources:
                 weight=None,
                 training_split=(0.0, 1.0),
             )
+        ]
+
+    def test_each_pack_of_a_list_is_a_source(self, tmp_path, packed_glob, tokenizer):
+        """A list of packs is one dataset in training; the scan reads each pack as a source of its own."""
+        shards = sorted(str(path) for path in Path(tmp_path).glob("mix/shard*/packed/*/training_64.idx.parquet"))
+        sources, reason = training_data_sources(packed_config(tmp_path, shards, answer_only_loss=True), tokenizer)
+        assert reason is None
+        assert sources == [
+            DataSource(index=index, path=shard, kind="packed_parquet", weight=None, training_split=(0.0, 1.0))
+            for index, shard in enumerate(shards)
         ]
 
     def test_an_omitted_path_is_the_builders_default_pack_path(self, tmp_path, tokenizer):

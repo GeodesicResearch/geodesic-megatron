@@ -33,6 +33,7 @@ from tests.unit_tests.export_clone_fixtures import (
     NEW_TARGET,
     OLD_IMPL,
     OLD_TARGET,
+    PEFT_SECTION,
     TE_GROUPED_RUN_CONFIG,
     make_checkpoint,
     snapshot,
@@ -65,6 +66,15 @@ def test_patch_run_config_applies_both_edits_and_accepts_an_already_patched_file
     assert export_clone.patch_run_config(patched) == patched
 
 
+def test_patch_run_config_repairs_only_the_stack_spec_of_a_peft_checkpoint():
+    """An adapter-only checkpoint's Expert LoRA wraps GroupedExperts, which te_grouped does not build."""
+    raw = torch_grouped_run_config(Path("/save")) + PEFT_SECTION
+    patched = export_clone.patch_run_config(raw)
+    assert patched == raw.replace(OLD_TARGET, NEW_TARGET)
+    assert OLD_IMPL in patched
+    assert export_clone.patch_run_config(patched) == patched
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -88,8 +98,10 @@ def test_patch_run_config_refuses_a_shape_it_does_not_recognise(text):
         (f"model:\n  {OLD_IMPL}\n", True),
         (TE_GROUPED_RUN_CONFIG, False),
         (GPT_RUN_CONFIG, False),
+        (torch_grouped_run_config(Path("/save")) + PEFT_SECTION, True),
+        (f"model:\n  {OLD_IMPL}\n" + PEFT_SECTION, False),
     ],
-    ids=["torch-grouped", "impl-only", "te-grouped", "gpt"],
+    ids=["torch-grouped", "impl-only", "te-grouped", "gpt", "peft-torch-grouped", "peft-impl-only"],
 )
 def test_needs_repair_is_true_exactly_when_the_config_holds_what_the_edits_replace(text, expected):
     assert export_clone.needs_repair(text) is expected

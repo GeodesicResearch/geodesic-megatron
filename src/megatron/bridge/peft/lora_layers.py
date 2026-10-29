@@ -77,6 +77,14 @@ class LoRATopKRouter(AdapterWrapper):
             logits = apply_random_logits(logits)
         return self.to_wrap.routing(logits, *args, **kwargs)
 
+    updated_weights = ("weight",)
+
+    def weight_update(self, name: str) -> torch.Tensor:
+        """The adapter's update of the router's gating weight, whose logits ``forward`` adds it to."""
+        from megatron.bridge.peft.lora import LoRAMerge  # lora imports this module
+
+        return LoRAMerge().adapter_delta(self.adapter, self.to_wrap.weight.shape[0])
+
 
 class TELinearAdapter(te.Linear):
     """

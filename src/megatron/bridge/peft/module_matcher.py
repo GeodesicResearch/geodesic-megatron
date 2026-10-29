@@ -16,10 +16,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
+import torch
+from megatron.core import parallel_state
 from megatron.core.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 from torch import nn
 
-from megatron.bridge.peft.utils import wildcard_match
+from megatron.bridge.peft.utils import canonical_lora_target_names, wildcard_match
 from megatron.bridge.utils.import_utils import safe_import_from
 
 
@@ -62,6 +64,8 @@ class ModuleMatcher:
     )
     exclude_modules: List[str] = field(default_factory=list)
     canonical_mapping: Dict[str, Set] = field(default_factory=lambda: defaultdict(set))
+    #: The target patterns ``match`` has matched since ``start_matching``.
+    _matched_patterns: Set[str] = field(default_factory=set, init=False, repr=False)
 
     def match(
         self, m: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None
@@ -108,11 +112,13 @@ class ModuleMatcher:
             assert len(self.exclude_modules) == 0, "exclude_modules should be empty when using canonical_mapping"
             for pattern in self.canonical_mapping:
                 if name == pattern or wildcard_match(pattern, full_name):
+                    self._matched_patterns.add(pattern)
                     return (pattern, full_name)
         elif len(self.target_modules or []) > 0:
             assert len(self.exclude_modules) == 0, "exclude_modules should be empty when using target_modules"
             for pattern in self.target_modules:
                 if name == pattern or wildcard_match(pattern, full_name):
+                    self._matched_patterns.add(pattern)
                     return (pattern, full_name)
         else:
             linear_types = [ColumnParallelLinear, RowParallelLinear, nn.Linear]
@@ -132,3 +138,39 @@ class ModuleMatcher:
                 return (name, full_name)
 
         return None
+
+    def start_matching(self) -> None:
+        """Forget earlier matches: the next walk of a model records which target patterns it matches."""
+        self._matched_patterns = set()
+
+    def require_every_target_matched(self) -> None:
+        """Raise unless every target pattern matched a module during the walk since ``start_matching``.
+
+        The patterns are ``canonical_mapping``'s keys when it is set, else ``target_modules``, as ``match`` uses them;
+        with neither (``exclude_modules`` selection) there is nothing to check. Matches are pooled over the
+        pipeline-parallel ranks, whose stages hold different layers, so every rank of the group must call this.
+
+        Raises:
+            ValueError: a pattern matched no module of the model. A pattern that is also a CanonicalLoRA target name
+                (such as ``linear_q``) is named as such, since that is the likely intent.
+        """
+        patterns = set(self.canonical_mapping or []) or set(self.target_modules or [])
+        matched = set(self._matched_patterns)
+        if (
+            parallel_state.model_parallel_is_initialized()
+            and parallel_state.get_pipeline_model_parallel_world_size() > 1
+        ):
+            gathered = [None] * parallel_state.get_pipeline_model_parallel_world_size()
+            torch.distributed.all_gather_object(
+                gathered, matched, group=parallel_state.get_pipeline_model_parallel_group()
+            )
+            matched = set().union(*gathered)
+        unmatched = sorted(patterns - matched)
+        if unmatched:
+            canonical = canonical_lora_target_names(unmatched)
+            hint = (
+                f"; {canonical} are CanonicalLoRA target names (megatron.bridge.peft.canonical_lora)"
+                if canonical
+                else ""
+            )
+            raise ValueError(f"{type(self).__name__} target patterns {unmatched} match no module of the model{hint}")

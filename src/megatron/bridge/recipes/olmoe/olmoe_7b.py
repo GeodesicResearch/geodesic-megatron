@@ -17,9 +17,8 @@ import torch
 
 from megatron.bridge.models.olmoe import OlMoEModelProvider
 from megatron.bridge.peft.base import PEFT
-from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.recipes.common import _peft_common, _pretrain_common, _sft_common
-from megatron.bridge.recipes.utils.finetune_utils import default_peft_config
+from megatron.bridge.recipes.utils.finetune_utils import recipe_peft_config
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.mixed_precision import MixedPrecisionConfig
@@ -428,21 +427,8 @@ def olmoe_7b_peft_config(
     cfg.model.moe_router_force_load_balancing = False
 
     # PEFT config
-    if isinstance(peft_scheme, str) and peft_scheme.lower() in ["lora", "dora"]:
-        cfg.peft = default_peft_config(peft_scheme)
-    elif isinstance(peft_scheme, PEFT):
-        cfg.peft = peft_scheme
-    else:
-        # Default to LoRA
-        cfg.peft = LoRA(
-            target_modules=["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"],
-            dim=32,
-            alpha=32,
-            dropout=0.0,
-            dropout_position="pre",
-            lora_A_init_method="xavier",
-            lora_B_init_method="zero",
-        )
+    lora_target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"]
+    cfg.peft = recipe_peft_config(peft_scheme, {"lora": lora_target_modules, "dora": lora_target_modules})
 
     # Adjust pad_seq_to_mult for context parallelism
     if cfg.model.context_parallel_size > 1:

@@ -746,6 +746,7 @@ class SafeTensorsStateSource(StateSource):
         buffered_tensors = {}
         all_yielded_keys = set()
         all_saved_keys = set()
+        saved_bytes = 0
 
         for name, tensor in generator:
             all_yielded_keys.add(name)
@@ -777,6 +778,7 @@ class SafeTensorsStateSource(StateSource):
                         del buffered_tensors[key]
 
                     all_saved_keys.update(keys_for_file)
+                    saved_bytes += sum(t.numel() * t.element_size() for t in tensors_to_save.values())
                     del files_to_save[filename]
 
         # --- Final Reporting ---
@@ -800,6 +802,10 @@ class SafeTensorsStateSource(StateSource):
                 for filename in list(files_to_save.keys()):
                     keys_for_file = files_to_save[filename]
                     tensors_to_save = {key: buffered_tensors[key] for key in keys_for_file if key in buffered_tensors}
+                    del files_to_save[filename]
+                    # A shard the generator yielded nothing for (e.g. a module the model lacks) is not written.
+                    if not tensors_to_save:
+                        continue
                     output_file_path = output_path / filename
                     save_file(tensors_to_save, output_file_path)
 
@@ -807,8 +813,9 @@ class SafeTensorsStateSource(StateSource):
                     for key in tensors_to_save.keys():
                         del buffered_tensors[key]
 
-                    all_saved_keys.update(keys_for_file)
-                    del files_to_save[filename]
+                    # Only what was written: the index must not list the shard's missing tensors.
+                    all_saved_keys.update(tensors_to_save.keys())
+                    saved_bytes += sum(t.numel() * t.element_size() for t in tensors_to_save.values())
 
         if buffered_tensors:
             print(
@@ -831,23 +838,28 @@ class SafeTensorsStateSource(StateSource):
                 f"\nError: {len(unsaved_keys)} tensors from the original checkpoint were not written. See warnings above for details."
             )
 
-        # Create index file for the saved shards.
+        self._write_index(output_path, key_to_filename_map, all_saved_keys, saved_bytes)
+
+    def _write_index(
+        self, output_path: Path, key_to_filename_map: Dict[str, str], saved_keys: set, saved_bytes: int
+    ) -> None:
+        """Write the saved shards' index: the source index with only ``saved_keys`` and their ``saved_bytes``.
+
+        Nothing is written when the source has no index or no tensor was saved.
+        """
         original_index_file = self.path / "model.safetensors.index.json"
-        if original_index_file.exists():
-            with open(original_index_file, "r") as f:
-                original_index_data = json.load(f)
-
-            new_weight_map = {key: key_to_filename_map[key] for key in all_saved_keys}
-
-            new_index_data = {
-                "metadata": original_index_data.get("metadata", {}),
-                "weight_map": new_weight_map,
-            }
-
-            output_index_file = output_path / "model.safetensors.index.json"
-            if new_weight_map:
-                with open(output_index_file, "w") as f:
-                    json.dump(new_index_data, f, indent=4)
+        if not original_index_file.exists():
+            return
+        with open(original_index_file, "r") as f:
+            original_index_data = json.load(f)
+        new_weight_map = {key: key_to_filename_map[key] for key in key_to_filename_map if key in saved_keys}
+        if not new_weight_map:
+            return
+        metadata = dict(original_index_data.get("metadata", {}))
+        if "total_size" in metadata:
+            metadata["total_size"] = saved_bytes
+        with open(output_path / "model.safetensors.index.json", "w") as f:
+            json.dump({"metadata": metadata, "weight_map": new_weight_map}, f, indent=4)
 
     def _get_key_to_filename_map(self) -> Optional[Dict[str, str]]:
         return self._cached_get_key_to_filename_map(self.path)
@@ -938,6 +950,7 @@ class SafeTensorsStateSource(StateSource):
 
         buffered_tensors: Dict[str, torch.Tensor] = {}
         actually_saved_keys: Set[str] = set()
+        actually_saved_bytes = 0
 
         for name, tensor in generator:
             all_yielded_keys.add(name)
@@ -971,42 +984,18 @@ class SafeTensorsStateSource(StateSource):
                     continue
                 save_file(tensors_to_save, output_path / fname)
                 actually_saved_keys.update(tensors_to_save.keys())
+                actually_saved_bytes += sum(t.numel() * t.element_size() for t in tensors_to_save.values())
 
-        # Gather all saved keys from all ranks to rank 0
+        # Gather all saved keys and their bytes from all ranks to rank 0
         if is_distributed:
-            # Convert set to list for gathering
-            local_saved_keys_list = list(actually_saved_keys) if is_saver_rank else []
-            gathered_keys = [None] * world_size
-            torch.distributed.all_gather_object(gathered_keys, local_saved_keys_list)
-
-            if rank == 0:
-                # Aggregate all saved keys from all ranks
-                all_saved_keys_aggregated = set()
-                for keys_list in gathered_keys:
-                    if keys_list:
-                        all_saved_keys_aggregated.update(keys_list)
-            else:
-                all_saved_keys_aggregated = set()
-
+            local_saved = (list(actually_saved_keys), actually_saved_bytes) if is_saver_rank else ([], 0)
+            gathered = [None] * world_size
+            torch.distributed.all_gather_object(gathered, local_saved)
+            all_saved_keys_aggregated = set().union(*(keys for keys, _ in gathered))
+            all_saved_bytes = sum(saved_bytes for _, saved_bytes in gathered)
             torch.distributed.barrier()
         else:
-            all_saved_keys_aggregated = actually_saved_keys
+            all_saved_keys_aggregated, all_saved_bytes = actually_saved_keys, actually_saved_bytes
 
         if rank == 0:
-            original_index_file = self.path / "model.safetensors.index.json"
-            if original_index_file.exists():
-                with open(original_index_file, "r") as f:
-                    original_index_data = json.load(f)
-
-                # Build weight_map only from actually saved keys, like the non-distributed path
-                new_weight_map = {
-                    key: key_to_filename_map[key] for key in key_to_filename_map if key in all_saved_keys_aggregated
-                }
-
-                new_index_data = {
-                    "metadata": original_index_data.get("metadata", {}),
-                    "weight_map": new_weight_map,
-                }
-                output_index_file = output_path / "model.safetensors.index.json"
-                with open(output_index_file, "w") as f:
-                    json.dump(new_index_data, f, indent=4)
+            self._write_index(output_path, key_to_filename_map, all_saved_keys_aggregated, all_saved_bytes)

@@ -53,8 +53,9 @@
 #                       to check the export's keys and widths against
 #   --alpha-over-r X    lora-factors: the adapter scale (default: run_config peft alpha/dim)
 #
-# torch_grouped checkpoints: a checkpoint trained with `moe_experts_impl:
-# torch_grouped` records a run_config the exporter cannot rebuild the model from.
+# torch_grouped checkpoints: an older checkpoint trained with `moe_experts_impl:
+# torch_grouped` records a stack-spec closure the exporter cannot import, and a full
+# torch_grouped checkpoint exports through te_grouped experts (export_clone.py says why).
 # An HF export repairs it without touching the checkpoint
 # (scripts/checkpoint/export_clone.py); a lora-factors export reads the adapter
 # tensors directly, builds no model and needs no repair. Before torchrun an HF

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for finetune_utils module: default_openmathinstruct2_config and default_gsm8k_config."""
+"""Tests for finetune_utils module: default_openmathinstruct2_config, default_gsm8k_config and recipe_peft_config."""
 
 import pytest
 
@@ -23,6 +23,7 @@ from megatron.bridge.data.hf_processors.openmathinstruct2 import process_openmat
 from megatron.bridge.recipes.utils.finetune_utils import (
     default_gsm8k_config,
     default_openmathinstruct2_config,
+    recipe_peft_config,
 )
 
 
@@ -223,3 +224,30 @@ class TestConfigDifferences:
         gsm8k = default_gsm8k_config()
         assert gsm8k.dataset_subset == "main"
         assert omi2.split == "train_1M"
+
+
+@pytest.mark.unit
+class TestRecipePeftConfig:
+    """recipe_peft_config: a named scheme on the recipe's targets for it, a PEFT instance as given, else an error."""
+
+    TARGETS = {"lora": ["linear_qkv", "linear_proj"], "canonical_lora": ["linear_q", "linear_proj"]}
+
+    @pytest.mark.parametrize("scheme", ["lora", "LoRA", "canonical_lora"])
+    def test_a_named_scheme_gets_its_targets(self, scheme):
+        from megatron.bridge.peft.canonical_lora import CanonicalLoRA
+        from megatron.bridge.peft.lora import LoRA
+
+        peft = recipe_peft_config(scheme, self.TARGETS)
+        assert type(peft) is {"lora": LoRA, "canonical_lora": CanonicalLoRA}[scheme.lower()]
+        assert peft.target_modules == self.TARGETS[scheme.lower()]
+
+    def test_a_peft_instance_is_returned_as_given(self):
+        from megatron.bridge.peft.dora import DoRA
+
+        peft = DoRA(target_modules=["linear_fc2"])
+        assert recipe_peft_config(peft, self.TARGETS) is peft
+
+    @pytest.mark.parametrize("scheme", ["dora", "canonical-lora"])
+    def test_a_scheme_without_targets_is_refused(self, scheme):
+        with pytest.raises(ValueError, match=f"peft_scheme '{scheme}' is not one of"):
+            recipe_peft_config(scheme, self.TARGETS)

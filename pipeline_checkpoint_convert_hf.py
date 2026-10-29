@@ -30,6 +30,11 @@ Usage:
         --iteration 300 \
         --tp 1 --ep 8
 
+    # An adapter-only PEFT checkpoint (see the README's export notes)
+    torchrun --nproc_per_node=4 --nnodes=2 ... pipeline_checkpoint_convert_hf.py \
+        --megatron-path /path/to/checkpoints/lora_run --hf-model <release> --reasoning \
+        --tp 1 --pp 2 --ep 4
+
     # Keep NemotronH remote-code for consumers without native support
     # (e.g. vLLM trust_remote_code on transformers < 5.3.0)
     python pipeline_checkpoint_convert_hf.py \
@@ -133,8 +138,8 @@ def resolve_load_path(iter_path: Path, load_path: str | None) -> Path:
     """The directory the Megatron model is loaded from.
 
     Without ``--load-path`` this is the iteration itself. That is refused when the iteration's run_config
-    records torch_grouped expert settings: the load would die in ``load_model_config``, or, past that,
-    would drop every MoE weight without an error. With ``--load-path`` it is the given export clone, once
+    needs the export repair (``checkpoint_needs_repair``): an unimportable stack-spec closure, or a full
+    checkpoint's torch_grouped experts, which the repair loads as te_grouped. With ``--load-path`` it is the given export clone, once
     it is shown to be a clone of this very iteration. Either way the iteration, the HF output path, the
     run_config copied into the export and the Hub repo name all come from ``iter_path``.
     """
@@ -144,8 +149,9 @@ def resolve_load_path(iter_path: Path, load_path: str | None) -> Path:
         return clone
     if checkpoint_needs_repair(iter_path):
         raise ExportError(
-            f"{iter_path / RUN_CONFIG} records torch_grouped expert settings (the stack-spec closure, "
-            "moe_experts_impl: torch_grouped) that this exporter cannot rebuild the model from. Export it through `pipeline_checkpoint_convert.sh export`, which builds an export "
+            f"{iter_path / RUN_CONFIG} needs the export repair (an unimportable stack-spec closure, or a full "
+            "checkpoint's moe_experts_impl: torch_grouped, which the repair loads as te_grouped). Export it through "
+            "`pipeline_checkpoint_convert.sh export`, which builds an export "
             "clone itself, or build one with `python scripts/checkpoint/export_clone.py prepare ...` and pass the "
             "EXPORT_LOAD_PATH it prints as --load-path."
         )
@@ -211,6 +217,151 @@ def convert_single_process(
     print(f"Export complete: {hf_path}")
 
 
+def is_peft_checkpoint(iter_path: Path) -> bool:
+    """Whether the iteration's ``run_config.yaml`` names a ``peft`` section (an adapter-only checkpoint)."""
+    run_config = iter_path / "run_config.yaml"
+    if not run_config.exists():
+        return False
+    with open(run_config) as f:
+        return bool((yaml.safe_load(f) or {}).get("peft"))
+
+
+#: (sequences, tokens) of the seeded random token ids the merge check of a PEFT export runs on.
+MERGE_CHECK_SHAPE = (2, 256)
+#: The share of the adapters' logit effect a merge must reproduce. Storing W + update in bf16 rounds away the parts of
+#: an update below half a bf16 step of W: about a percent of a trained adapter, more of a barely trained one.
+MERGE_CHECK_MIN_RETAINED = 0.9
+
+
+@torch.no_grad()
+def probe_logits(model: list) -> torch.Tensor | None:
+    """fp32 logits over the whole vocabulary on ``MERGE_CHECK_SHAPE`` seeded random token ids, on the last pipeline
+    stage (None elsewhere).
+
+    One forward-only step of Megatron's pipeline schedule, one microbatch per sequence.
+    """
+    from megatron.core import parallel_state
+    from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
+    from megatron.core.tensor_parallel.mappings import gather_from_tensor_model_parallel_region
+    from megatron.core.utils import unwrap_model
+
+    batch, seq = MERGE_CHECK_SHAPE
+    generator = torch.Generator().manual_seed(0)
+    tokens = torch.randint(0, model[0].config.vocab_size, MERGE_CHECK_SHAPE, generator=generator).cuda()
+    position_ids = torch.arange(seq, device="cuda").unsqueeze(0)
+    rows = iter(tokens.split(1))
+
+    def forward_step(data_iterator, chunk, **kwargs):
+        output = chunk(next(data_iterator), position_ids, attention_mask=None)
+        return output, lambda x, **kw: x
+
+    outputs = get_forward_backward_func()(
+        forward_step_func=forward_step,
+        data_iterator=rows,
+        model=model,
+        num_microbatches=batch,
+        forward_only=True,
+        seq_length=seq,
+        micro_batch_size=1,
+        collect_non_loss_data=True,
+    )
+    if not parallel_state.is_pipeline_last_stage():
+        return None
+    logits = torch.cat([output.float() for output in outputs])
+    if unwrap_model(model[-1]).parallel_output:
+        logits = gather_from_tensor_model_parallel_region(logits)  # each TP rank holds a vocab shard
+    return logits
+
+
+def logit_agreement(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, float]:
+    """Max and mean absolute difference and argmax agreement of two [batch, seq, vocab] logit tensors."""
+    diff = (reference - candidate).abs()
+    return {
+        "max_abs_diff": diff.max().item(),
+        "mean_abs_diff": diff.mean().item(),
+        "argmax_agreement": (reference.argmax(-1) == candidate.argmax(-1)).float().mean().item(),
+    }
+
+
+def check_merge(adapted: torch.Tensor, base: torch.Tensor, merged: torch.Tensor) -> dict:
+    """How closely merged-model logits match adapted-model logits, against the adapters' effect, and the verdict.
+
+    Returns ``logit_agreement`` of adapted against ``merged`` and ``base`` and of merged against base
+    (``merged_vs_base``), keyed by those names; ``retained``: the share of the adapters' logit change
+    (adapted - base) that the merged model reproduces, the projection of (merged - base) on it; and ``failure``: None,
+    or why the merge fails. It fails if the adapters change nothing, if the merged model differs from the adapted one
+    by as much as the adapters' effect, or if it retains less than ``MERGE_CHECK_MIN_RETAINED`` of that effect.
+    """
+    effect = adapted - base
+    check = {
+        "merged": logit_agreement(adapted, merged),
+        "base": logit_agreement(adapted, base),
+        "merged_vs_base": logit_agreement(merged, base),
+        "retained": ((merged - base) * effect).sum().item() / max((effect * effect).sum().item(), 1e-30),
+        "failure": None,
+    }
+    if check["base"]["max_abs_diff"] == 0:
+        check["failure"] = "the adapters change no logit, so there is nothing to merge"
+    elif check["merged"]["mean_abs_diff"] >= check["base"]["mean_abs_diff"]:
+        check["failure"] = "the merged model is as far from the adapted one as the base is"
+    elif check["retained"] < MERGE_CHECK_MIN_RETAINED:
+        check["failure"] = (
+            f"the merged model retains {check['retained']:.3f}, less than {MERGE_CHECK_MIN_RETAINED}, of the adapters' "
+            "effect. Storing W + update in bf16 rounds away the parts of an update below half a bf16 step of W, which "
+            "costs a barely trained adapter this much. A missed or misplaced update costs more. Serve such an adapter "
+            "on its base instead of merged."
+        )
+    return check
+
+
+def export_merged_peft(bridge, model: list, hf_path: Path, strict: bool, show_progress: bool) -> dict | None:
+    """Export an adapted model to HF with every adapter merged, then check the merge on probe logits.
+
+    The HF export merges each adapter into its weight (``MegatronPeftBridge``). The check then merges the model in
+    place with ``LoRAMerge`` and compares its probe logits with the adapted and base models' (``check_merge``),
+    written to ``<hf_path>/merge_check.json``. Both merges add the same updates (each wrapper's ``weight_update``,
+    ``LoRAMerge.merge`` for ``LoRALinear``), but the check reads the in-memory merge, not the written weights.
+    Collective over the model's ranks. The check of the rank that writes merge_check.json decides for every rank.
+
+    Returns:
+        The check on the last pipeline stage, None elsewhere.
+
+    Raises:
+        RuntimeError: on every rank, after the HF export and merge_check.json are written, if the check fails.
+    """
+    from megatron.core import parallel_state
+
+    from megatron.bridge.peft.lora import LoRAMerge
+
+    merger = LoRAMerge()
+    adapted = probe_logits(model)
+    with merger.disable_adapter(model):
+        base = probe_logits(model)
+    bridge.save_hf_pretrained(model, str(hf_path), show_progress=show_progress, strict=strict)
+    for chunk in model:
+        merger(chunk, training=False)
+    merger.disable_adapter_layers(model)
+    merged = probe_logits(model)
+    check = None
+    failed = torch.zeros(1, device="cuda")
+    if parallel_state.is_pipeline_last_stage():
+        check = check_merge(adapted, base, merged)
+        if (
+            parallel_state.get_tensor_model_parallel_rank() == 0
+            and parallel_state.get_expert_model_parallel_rank() == 0
+            and parallel_state.get_data_parallel_rank() == 0
+        ):
+            (hf_path / "merge_check.json").write_text(json.dumps(check, indent=2) + "\n")
+            print(f"Merge check on {MERGE_CHECK_SHAPE} probe tokens: {check}")
+            failed.fill_(check["failure"] is not None)
+    # Every rank learns the verdict and raises: a rank left waiting in a collective would hold its node until the
+    # job's time limit, because only the failed ranks' own torchrun agents end.
+    torch.distributed.all_reduce(failed, op=torch.distributed.ReduceOp.MAX)
+    if failed.item():
+        raise RuntimeError(f"the merge check failed (written to {hf_path / 'merge_check.json'}): {check}")
+    return check
+
+
 def convert_multi_gpu(
     load_path: Path,
     hf_path: Path,
@@ -224,10 +375,15 @@ def convert_multi_gpu(
     show_progress: bool = True,
 ) -> None:
     """Convert using multi-GPU distributed loading. ``load_path`` is the iteration directory, or its
-    export clone (see ``resolve_load_path``)."""
+    export clone (see ``resolve_load_path``).
+
+    An adapter-only PEFT checkpoint (``is_peft_checkpoint``) is loaded with its base (``load_peft_model``) and exported
+    with its adapters merged (``export_merged_peft``).
+    """
     from megatron.bridge import AutoBridge
     from megatron.bridge.models.decorators import torchrun_main
     from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
+    from megatron.bridge.training.model_load_save import load_peft_model
     from megatron.bridge.utils.common_utils import print_rank_0
 
     @torchrun_main
@@ -260,21 +416,27 @@ def convert_multi_gpu(
             "params_dtype": torch_dtype,
         }
 
-        print_rank_0(f"Loading Megatron checkpoint from: {load_path}")
-        megatron_model = bridge.load_megatron_model(
-            str(load_path),
-            mp_overrides=mp_overrides,
-            wrap_with_ddp=False,
-        )
-        megatron_model = [m.cuda() for m in megatron_model]
+        if is_peft_checkpoint(load_path):
+            print_rank_0(f"Loading PEFT checkpoint and its base: {load_path}")
+            megatron_model = load_peft_model(str(load_path), mp_overrides=mp_overrides)
+            print_rank_0(f"Saving HuggingFace model, adapters merged, to: {hf_path}")
+            export_merged_peft(bridge, megatron_model, hf_path, strict=strict, show_progress=show_progress)
+        else:
+            print_rank_0(f"Loading Megatron checkpoint from: {load_path}")
+            megatron_model = bridge.load_megatron_model(
+                str(load_path),
+                mp_overrides=mp_overrides,
+                wrap_with_ddp=False,
+            )
+            megatron_model = [m.cuda() for m in megatron_model]
 
-        print_rank_0(f"Saving HuggingFace model to: {hf_path}")
-        bridge.save_hf_pretrained(
-            megatron_model,
-            str(hf_path),
-            show_progress=show_progress,
-            strict=strict,
-        )
+            print_rank_0(f"Saving HuggingFace model to: {hf_path}")
+            bridge.save_hf_pretrained(
+                megatron_model,
+                str(hf_path),
+                show_progress=show_progress,
+                strict=strict,
+            )
         print_rank_0(f"Export complete: {hf_path}")
 
     _run()
@@ -376,6 +538,164 @@ def read_embedding_row_count(hf_path: Path) -> int | None:
     return header[emb_key]["shape"][0]
 
 
+#: The inference tokenizer and generation files of a release, which an export ships from its --hf-model release
+#: when the training tokenizer's chat template renders as the release's (``adopt_release_inference_files``).
+RELEASE_INFERENCE_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "chat_template.jinja",
+    "generation_config.json",
+)
+
+#: Conversations on which two chat templates must render byte-identically to count as the same inference format:
+#: system and multi-turn, assistant reasoning both as ``reasoning_content`` and inline, and a tool call.
+TEMPLATE_PROBE_CONVERSATIONS = (
+    [{"role": "user", "content": "What is 2 + 2?"}],
+    [
+        {"role": "system", "content": "You are a careful assistant."},
+        {"role": "user", "content": "Name a prime."},
+        {"role": "assistant", "content": "<think>\n2 is prime.\n</think>\n\nTwo."},
+        {"role": "user", "content": "Another?"},
+    ],
+    [
+        {"role": "user", "content": "Name a prime."},
+        {"role": "assistant", "reasoning_content": "3 is prime.", "content": "Three."},
+    ],
+    [
+        {"role": "user", "content": "Weather in Paris?"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"type": "function", "function": {"name": "weather", "arguments": {"city": "Paris"}}}],
+        },
+        {"role": "tool", "content": "Sunny, 21C."},
+    ],
+)
+
+TEMPLATE_PROBE_TOOLS = (
+    {
+        "type": "function",
+        "function": {
+            "name": "weather",
+            "description": "Current weather in a city.",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+        },
+    },
+)
+
+
+def _render_probes(template: str) -> list[str]:
+    """``template`` on every probe conversation, with and without a generation prompt and thinking.
+
+    A probe the template refuses (its ``raise_exception``, a jinja ``TemplateError``) renders as that error, so two
+    templates that refuse the same probes can still compare alike; any other exception propagates.
+
+    Raises:
+        ValueError: the template refuses every probe, which would make any two such templates compare alike.
+    """
+    from jinja2.exceptions import TemplateError
+    from transformers.utils.chat_template_utils import render_jinja_template
+
+    renders, refused = [], 0
+    for conversation in TEMPLATE_PROBE_CONVERSATIONS:
+        tools = list(TEMPLATE_PROBE_TOOLS) if any("tool_calls" in m for m in conversation) else None
+        for add_generation_prompt in (False, True):
+            for enable_thinking in (False, True):
+                try:
+                    rendered = render_jinja_template(
+                        conversations=[conversation],
+                        tools=tools,
+                        chat_template=template,
+                        add_generation_prompt=add_generation_prompt,
+                        enable_thinking=enable_thinking,
+                    )[0][0]
+                except TemplateError as error:
+                    rendered = f"<{type(error).__name__}: {error}>"
+                    refused += 1
+                renders.append(rendered)
+    if refused == len(renders):
+        raise ValueError(f"the chat template refuses all {refused} probe conversations: {renders[0]}")
+    return renders
+
+
+def templates_render_alike(template: str, other: str) -> bool:
+    """Whether two chat templates render every ``TEMPLATE_PROBE_CONVERSATIONS`` case byte-identically.
+
+    A training template that differs from its release's only in training-only markup, such as the
+    ``{% generation %}`` blocks that mark assistant tokens for the loss mask, renders alike.
+    """
+    return _render_probes(template) == _render_probes(other)
+
+
+def adopt_release_inference_files(hf_path: Path, hf_model_id: str, training_template: str) -> bool:
+    """Ship the --hf-model release's inference tokenizer and generation files when the model trained on its format.
+
+    If the release's chat template renders as ``training_template`` (``templates_render_alike``), copies every
+    ``RELEASE_INFERENCE_FILES`` file the release has into ``hf_path`` verbatim, replacing the training
+    tokenizer's, and returns True. Otherwise (a release without a chat template, or a training format of its own)
+    changes nothing and returns False. ``hf_model_id`` is a local release directory or a Hub id.
+
+    Raises:
+        FileNotFoundError: a file of the release is a dangling link (a cache missing its blob), or the release or
+            the export has no config.json.
+    """
+    if Path(hf_model_id).is_dir():
+        release_dir = Path(hf_model_id)
+    else:
+        from huggingface_hub import snapshot_download
+
+        release_dir = Path(snapshot_download(hf_model_id, allow_patterns=[*RELEASE_INFERENCE_FILES, "config.json"]))
+    for name in (*RELEASE_INFERENCE_FILES, "config.json"):
+        path = release_dir / name
+        if os.path.lexists(path) and not path.exists():
+            raise FileNotFoundError(f"{path} is a dangling link: the release's {name} is missing from the cache")
+    release_config, config_path = release_dir / "config.json", hf_path / "config.json"
+    for path in (release_config, config_path):
+        if not path.exists():
+            raise FileNotFoundError(f"{path} does not exist: the token ids of config.json go with the release files")
+    release_template = release_dir / "chat_template.jinja"
+    if not release_template.exists():
+        print(f"{hf_model_id} ships no chat_template.jinja: keeping the training tokenizer's files")
+        return False
+    if not templates_render_alike(release_template.read_text(), training_template):
+        print(f"The training chat template renders differently from {hf_model_id}'s: keeping the training tokenizer's")
+        return False
+    for name in RELEASE_INFERENCE_FILES:
+        if (release_dir / name).exists():
+            shutil.copyfile(release_dir / name, hf_path / name)
+            print(f"Copied {name} from {hf_model_id} (the training template renders as the release's)")
+    # config.json's token ids go with these files: take the release's (an earlier export may have patched them).
+    release_ids = json.loads(release_config.read_text())
+    config = json.loads(config_path.read_text())
+    token_ids = {k: release_ids[k] for k in ("bos_token_id", "eos_token_id", "pad_token_id") if k in release_ids}
+    if any(config.get(k) != v for k, v in token_ids.items()):
+        config.update(token_ids)
+        config_path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n")
+        print(f"Set config.json token ids to {hf_model_id}'s: {token_ids}")
+    return True
+
+
+def _pin_tokenizer_class(tc: dict) -> bool:
+    """Make a tokenizer_config.json dict load as ``PreTrainedTokenizerFast`` everywhere; return whether it changed.
+
+    Strips the cosmetic fields that older transformers (eval venv 4.57.x) read as a hint to load TokenizersBackend
+    (a transformers 5.x class), which then crash with "Tokenizer class TokenizersBackend does not exist or is not
+    currently imported", and pins ``tokenizer_class`` (vLLM-friendly).
+    """
+    changed = False
+    for stale_key in ("backend", "is_local"):
+        if stale_key in tc:
+            del tc[stale_key]
+            changed = True
+            print(f"Stripped tokenizer_config.{stale_key}")
+    if tc.get("tokenizer_class") != "PreTrainedTokenizerFast":
+        print(f"Pinned tokenizer_class: {tc.get('tokenizer_class')} -> PreTrainedTokenizerFast")
+        tc["tokenizer_class"] = "PreTrainedTokenizerFast"
+        changed = True
+    return changed
+
+
 def apply_generation_defaults(hf_path: Path, reasoning: bool) -> None:
     """Set the decoding defaults in ``hf_path/generation_config.json`` from the export's mode, by the rule of
     ``scripts/checkpoint/decoding_defaults.py``: a non-reasoning export (``--no-reasoning``) decodes greedily, a
@@ -405,14 +725,19 @@ def fixup_hf_output(
 ) -> None:
     """Fix known issues in the converted HF output for eval/inference compatibility.
 
-    1. Fixes tokenizer_config.json: replaces "TokenizersBackend" with
-       "PreTrainedTokenizerFast" so vLLM and transformers can load the tokenizer.
+    1. Fixes tokenizer_config.json (``_pin_tokenizer_class``): pins
+       tokenizer_class to "PreTrainedTokenizerFast" and strips backend/is_local
+       so vLLM and transformers can load the tokenizer.
     2. Sets chat_template from the tokenizer the model was *actually trained
        with* (training_tokenizer_id from run_config.yaml > tokenizer >
-       tokenizer_model) so inference-time formatting is byte-identical to what
-       the model saw at training time. Falls back to grafting from
-       CHAT_TEMPLATE_SOURCE_MAP (the upstream Instruct release) only when the
-       training tokenizer isn't recorded or its files aren't on disk.
+       tokenizer_model) so inference-time formatting matches what the model saw
+       at training time. Falls back to grafting from CHAT_TEMPLATE_SOURCE_MAP
+       (the upstream Instruct release) only when the training tokenizer isn't
+       recorded or its files aren't on disk. When the training template renders
+       as the release's (``adopt_release_inference_files``), the release's
+       RELEASE_INFERENCE_FILES (downloaded when ``hf_model_id`` is a Hub id)
+       replace the training tokenizer's, and config.json takes the release's
+       token ids; the fix-ups below still apply to the adopted files.
     3. For non-reasoning models, replaces chat_template.jinja with a simple
        ChatML template (no open <think> blocks). In transformers 5.x,
        chat_template.jinja takes precedence over tokenizer_config.json.
@@ -484,31 +809,12 @@ def fixup_hf_output(
 
     # Fix tokenizer_class and add chat_template to tokenizer_config.json
     tokenizer_config = hf_path / "tokenizer_config.json"
+    training_tpl = None
     if tokenizer_config.exists():
         with open(tokenizer_config) as f:
             tc = json.load(f)
 
-        changed = False
-
-        if tc.get("tokenizer_class") == "TokenizersBackend":
-            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            changed = True
-            print("Fixed tokenizer_class: TokenizersBackend -> PreTrainedTokenizerFast")
-
-        # Strip cosmetic fields that older transformers (eval venv 4.57.x)
-        # interpret as a hint to load TokenizersBackend (a transformers 5.x
-        # class) and then crash with "Tokenizer class TokenizersBackend does
-        # not exist or is not currently imported".
-        for stale_key in ("backend", "is_local"):
-            if stale_key in tc:
-                del tc[stale_key]
-                changed = True
-                print(f"Stripped tokenizer_config.{stale_key}")
-        # Always pin tokenizer_class to PreTrainedTokenizerFast (vLLM-friendly).
-        if tc.get("tokenizer_class") != "PreTrainedTokenizerFast":
-            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            changed = True
-            print("Pinned tokenizer_class: PreTrainedTokenizerFast")
+        changed = _pin_tokenizer_class(tc)
 
         # Set the chat_template. Priority order:
         #   1. The tokenizer the model was actually trained with
@@ -524,13 +830,12 @@ def fixup_hf_output(
         # (tokenizer.json, chat_template.jinja, special_tokens_map.json) byte-
         # identical into the HF dir, then rebuild tokenizer_config.json by
         # merging the converted dir's structural fields with the training
-        # tokenizer's tokens + chat_template. This guarantees the HF dir's
-        # tokenizer is byte-identical to what was used at training and
-        # avoids the legacy bug where the upstream Nemotron template (with
+        # tokenizer's tokens + chat_template (adopt_release_inference_files
+        # below replaces them with the release's when the training template
+        # renders as the release's). This avoids the legacy bug where the upstream Nemotron template (with
         # `<think></think>` injection in assistant turns) was preserved at
         # chat_template.jinja and synced into tokenizer_config.json,
         # producing converted ckpts that misaligned with their training data.
-        training_tpl = None
         if training_tokenizer_id:
             training_tpl = _try_resolve_template_from_hub_id(training_tokenizer_id)
             if training_tpl is None:
@@ -656,6 +961,15 @@ def fixup_hf_output(
             chat_template_jinja_path.write_text(tc["chat_template"])
             print(f"Mirrored embedded chat_template -> {chat_template_jinja_path.name}")
 
+    adopted_release_files = training_tpl is not None and adopt_release_inference_files(
+        hf_path, hf_model_id, training_tpl
+    )
+    if adopted_release_files and tokenizer_config.exists():
+        adopted_tc = json.loads(tokenizer_config.read_text())
+        if _pin_tokenizer_class(adopted_tc):
+            with open(tokenizer_config, "w") as f:
+                json.dump(adopted_tc, f, indent=2, ensure_ascii=False)
+
     # Keep chat_template.jinja as shipped by the upstream Nemotron tokenizer.
     # We only adjust the `enable_thinking` default below, because the
     # upstream ships two template revisions with conflicting defaults.
@@ -729,11 +1043,12 @@ def fixup_hf_output(
         # above) while the embedded copy is still the freshly-grafted (un-
         # patched) version. transformers >= 5.x prefers the .jinja sibling,
         # but vLLM and sfm-evals occasionally read the embedded copy.
+        # A release's tokenizer_config.json without an embedded copy stays as released.
         if tokenizer_config.exists() and jinja_path.exists():
             jinja_text = jinja_path.read_text()
             with open(tokenizer_config) as f:
                 tc = json.load(f)
-            if tc.get("chat_template") != jinja_text:
+            if tc.get("chat_template") != jinja_text and ("chat_template" in tc or not adopted_release_files):
                 tc["chat_template"] = jinja_text
                 with open(tokenizer_config, "w") as f:
                     json.dump(tc, f, indent=2, ensure_ascii=False)
@@ -752,8 +1067,10 @@ def fixup_hf_output(
         (hf_path / "tokenizer_config.json").exists()
         and "chat_template" in json.loads((hf_path / "tokenizer_config.json").read_text())
     )
+    # Generation reads generation_config.json, so config.json keeps the release's value when that file exists.
     if chat_template_active:
-        for cfg_name in ("config.json", "generation_config.json"):
+        eos_configs = ["generation_config.json"] if (hf_path / "generation_config.json").exists() else ["config.json"]
+        for cfg_name in eos_configs:
             cfg_path = hf_path / cfg_name
             if not cfg_path.exists():
                 continue
@@ -1372,6 +1689,11 @@ def main():
 
     # 4. Run conversion
     use_multi_gpu = _is_multi_gpu() and (args.tp > 1 or args.pp > 1 or args.ep > 1 or args.etp > 1)
+    if is_peft_checkpoint(iter_path) and not use_multi_gpu:
+        raise SystemExit(
+            f"{iter_path} is an adapter-only PEFT checkpoint, which loads with its base on GPUs: run it under torchrun "
+            "with a parallel size above 1 (pipeline_checkpoint_convert.sh export sets them)."
+        )
 
     if use_multi_gpu:
         print(f"Mode: multi-GPU (TP={args.tp}, PP={args.pp}, EP={args.ep}, ETP={args.etp})")

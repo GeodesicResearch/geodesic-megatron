@@ -26,6 +26,8 @@ OLD_IMPL, NEW_IMPL = export_clone.RUN_CONFIG_EDITS[1]
 
 TE_GROUPED_RUN_CONFIG = f"model:\n  mamba_stack_spec:\n    _target_: {NEW_TARGET}\n  {NEW_IMPL}\n"
 GPT_RUN_CONFIG = "model:\n  _target_: megatron.bridge.models.gpt_provider.GPTModelProvider\n  num_layers: 2\n"
+#: The section an adapter-only PEFT run adds to its run_config.
+PEFT_SECTION = "peft:\n  _target_: megatron.bridge.peft.canonical_lora.CanonicalLoRA\n  dim: 32\n"
 
 
 def torch_grouped_run_config(save: Path) -> str:

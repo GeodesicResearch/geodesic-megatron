@@ -233,10 +233,14 @@ def test_a_missing_adapter_scale_is_an_error(convert_module, tmp_path, monkeypat
 def test_a_torch_grouped_checkpoint_exports_its_factors_without_an_export_clone(convert_module, tmp_path, monkeypatch):
     """The torch_grouped repair exists so an HF export can rebuild the model. A factor export reads the adapter
     tensors directly and builds none, so a checkpoint whose run_config records torch_grouped exports as it stands."""
+    from scripts.checkpoint import export_clone
+
     run = _write(tmp_path, _tinker_state())
     run_config = run / "iter_0000001" / "run_config.yaml"
     cfg = yaml.safe_load(run_config.read_text())
     cfg["model"]["moe_experts_impl"] = "torch_grouped"
+    old_stack_spec, _ = export_clone.RUN_CONFIG_EDITS[0]  # recorded as a run trained before the closure fix
+    cfg["model"]["mamba_stack_spec"] = {"_target_": old_stack_spec, "_call_": False}
     run_config.write_text(yaml.safe_dump(cfg))
     assert convert_module.checkpoint_needs_repair(
         run / "iter_0000001"

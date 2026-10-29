@@ -1,11 +1,17 @@
-"""Unit tests for pipeline_checkpoint_convert_hf.py — focused on the remote-code
-policy (_apply_remote_code_policy), the strip-by-default vs --keep-remote-code paths.
+"""Unit tests for pipeline_checkpoint_convert_hf.py — the remote-code policy
+(_apply_remote_code_policy), the strip-by-default vs --keep-remote-code paths, the
+release inference files an export ships (adopt_release_inference_files) and the
+fix-ups applied to it (fixup_hf_output), and the
+PEFT export's checkpoint detection and merge check.
 
-GPU-free: only exercises the filesystem-level config.json / modeling-file handling.
+GPU-free.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -175,6 +181,300 @@ class TestReadEmbeddingRowCount:
     def test_returns_none_when_no_embedding_tensor(self, convert_module, tmp_path):
         _write_safetensors(tmp_path / "model.safetensors", {"lm_head.weight": (4, 8)})
         assert convert_module.read_embedding_row_count(tmp_path) is None
+
+
+class TestIsPeftCheckpoint:
+    """An adapter-only checkpoint is recognised by the peft section of its run_config.yaml."""
+
+    def test_peft_section_marks_a_peft_checkpoint(self, tmp_path, convert_module):
+        (tmp_path / "run_config.yaml").write_text(
+            "peft:\n  _target_: megatron.bridge.peft.canonical_lora.CanonicalLoRA\n"
+        )
+        assert convert_module.is_peft_checkpoint(tmp_path)
+
+    @pytest.mark.parametrize("text", ["peft: null\nmodel: {}\n", "model: {}\n", ""])
+    def test_no_peft_section_is_a_full_checkpoint(self, tmp_path, convert_module, text):
+        (tmp_path / "run_config.yaml").write_text(text)
+        assert not convert_module.is_peft_checkpoint(tmp_path)
+
+    def test_missing_run_config_is_a_full_checkpoint(self, tmp_path, convert_module):
+        assert not convert_module.is_peft_checkpoint(tmp_path)
+
+
+class TestMergeCheck:
+    """The PEFT export's merge check: its logit comparisons and its verdict."""
+
+    def test_identical_logits_agree_exactly(self, convert_module):
+        import torch
+
+        logits = torch.randn(2, 5, 11)
+        check = convert_module.logit_agreement(logits, logits.clone())
+        assert check == {"max_abs_diff": 0.0, "mean_abs_diff": 0.0, "argmax_agreement": 1.0}
+
+    def test_differences_and_flipped_argmax_are_reported(self, convert_module):
+        import torch
+
+        reference = torch.zeros(1, 2, 3)
+        reference[0, :, 0] = 1.0
+        candidate = reference.clone()
+        candidate[0, 1, 2] = 2.0  # the second position now argmaxes to token 2
+        check = convert_module.logit_agreement(reference, candidate)
+        assert check["max_abs_diff"] == 2.0
+        assert check["mean_abs_diff"] == pytest.approx(2.0 / 6)
+        assert check["argmax_agreement"] == 0.5
+
+    def test_retained_measures_the_share_of_the_adapter_effect_kept(self, convert_module):
+        import torch
+
+        base = torch.randn(2, 4, 8)
+        adapted = base + 1.0
+        check = convert_module.check_merge(adapted, base, base + 0.95)
+        assert check["failure"] is None
+        assert check["retained"] == pytest.approx(0.95)
+        assert check["merged_vs_base"]["mean_abs_diff"] == pytest.approx(0.95)
+        assert check["base"]["mean_abs_diff"] == pytest.approx(1.0)
+
+    def test_a_merge_that_keeps_too_little_of_the_effect_fails(self, convert_module):
+        """Closer to the adapted model than the base is, yet a quarter of the adapters' effect is lost."""
+        import torch
+
+        base = torch.randn(2, 4, 8)
+        check = convert_module.check_merge(base + 1.0, base, base + 0.75)
+        assert check["failure"].startswith("the merged model retains 0.750, less than 0.9,")
+
+    def test_adapters_that_change_nothing_fail(self, convert_module):
+        """An empty adapter load leaves adapted == base == merged, which must not read as a perfect merge."""
+        import torch
+
+        adapted = torch.randn(2, 4, 8)
+        check = convert_module.check_merge(adapted, adapted.clone(), adapted.clone())
+        assert check["failure"] == "the adapters change no logit, so there is nothing to merge"
+
+    def test_a_merge_as_far_as_the_base_fails(self, convert_module):
+        import torch
+
+        adapted = torch.randn(2, 4, 8)
+        check = convert_module.check_merge(adapted, adapted + 1.0, adapted - 1.0)
+        assert check["failure"] == "the merged model is as far from the adapted one as the base is"
+
+
+def test_a_peft_checkpoint_outside_a_parallel_torchrun_is_refused(convert_module, tmp_path, monkeypatch):
+    """An adapter-only checkpoint loads with its base on GPUs; the single-process CPU path would not load it."""
+    (tmp_path / "latest_checkpointed_iteration.txt").write_text("7")
+    (tmp_path / "iter_0000007").mkdir()
+    (tmp_path / "iter_0000007" / "run_config.yaml").write_text(
+        "peft:\n  _target_: megatron.bridge.peft.canonical_lora.CanonicalLoRA\n"
+    )
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.setattr(
+        sys, "argv", ["convert", f"--megatron-path={tmp_path}", "--hf-model=some/release", "--no-reasoning"]
+    )
+    with pytest.raises(SystemExit, match="adapter-only PEFT checkpoint.*with a parallel size above 1"):
+        convert_module.main()
+
+
+# A release's inference template and a training variant of it: the same render, plus {% generation %} blocks
+# around the assistant reply (and its <|im_end|>, but not the newline) for the loss mask.
+_RELEASE_TEMPLATE = (
+    "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}"
+    "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+)
+_TRAINING_TEMPLATE = (
+    "{% for m in messages %}<|im_start|>{{ m.role }}\n"
+    "{% if m.role == 'assistant' %}{% generation %}{{ m.content }}<|im_end|>{% endgeneration %}"
+    "{% else %}{{ m.content }}<|im_end|>{% endif %}{{ '\n' }}{% endfor %}"
+    "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+)
+
+
+def _release(tmp_path: Path, template: str | None = _RELEASE_TEMPLATE) -> Path:
+    release = tmp_path / "release"
+    release.mkdir()
+    if template is not None:
+        (release / "chat_template.jinja").write_text(template)
+    (release / "tokenizer.json").write_text('{"release": "tokenizer"}')
+    (release / "tokenizer_config.json").write_text('{"tokenizer_class": "PreTrainedTokenizerFast"}')
+    (release / "special_tokens_map.json").write_text('{"eos_token": "<|im_end|>"}')
+    (release / "generation_config.json").write_text('{"eos_token_id": [2, 11]}')
+    (release / "config.json").write_text('{"eos_token_id": 2, "bos_token_id": 1, "hidden_size": 8}')
+    return release
+
+
+def _export(tmp_path: Path) -> Path:
+    """An export as the training tokenizer leaves it: its template, no special_tokens_map or generation_config."""
+    export = tmp_path / "hf"
+    export.mkdir()
+    (export / "chat_template.jinja").write_text(_TRAINING_TEMPLATE)
+    (export / "tokenizer.json").write_text('{"release": "tokenizer"}')
+    (export / "tokenizer_config.json").write_text('{"chat_template": "training"}')
+    (export / "config.json").write_text('{"eos_token_id": [2, 11], "bos_token_id": 1, "hidden_size": 16}')
+    return export
+
+
+class TestReleaseInferenceFiles:
+    def test_generation_markers_render_alike(self, convert_module):
+        assert convert_module.templates_render_alike(_TRAINING_TEMPLATE, _RELEASE_TEMPLATE)
+
+    def test_a_different_format_does_not_render_alike(self, convert_module):
+        other = _RELEASE_TEMPLATE.replace(
+            "<|im_start|>assistant\n{% endif %}", "<|im_start|>assistant\n<think>{% endif %}"
+        )
+        assert not convert_module.templates_render_alike(other, _RELEASE_TEMPLATE)
+
+    def test_a_template_that_refuses_every_probe_is_refused(self, convert_module):
+        """Two templates that refuse every probe would otherwise render alike."""
+        with pytest.raises(ValueError, match="refuses all"):
+            convert_module.templates_render_alike("{{ messages | nosuchfilter }}", _RELEASE_TEMPLATE)
+
+    def test_a_template_that_refuses_some_probes_still_compares(self, convert_module):
+        """A refusal renders as its error: a template refusing tools renders alike to itself, unlike one without."""
+        refuses_tools = "{% if tools %}{{ raise_exception('no tools') }}{% endif %}" + _RELEASE_TEMPLATE
+        assert convert_module.templates_render_alike(refuses_tools, refuses_tools)
+        assert not convert_module.templates_render_alike(refuses_tools, _RELEASE_TEMPLATE)
+
+    def test_adopts_the_release_files_verbatim(self, convert_module, tmp_path):
+        release, export = _release(tmp_path), _export(tmp_path)
+        assert convert_module.adopt_release_inference_files(export, str(release), _TRAINING_TEMPLATE)
+        for name in convert_module.RELEASE_INFERENCE_FILES:
+            assert (export / name).read_bytes() == (release / name).read_bytes(), name
+        # config.json takes the release's token ids and keeps the export's model fields.
+        config = json.loads((export / "config.json").read_text())
+        assert config == {"eos_token_id": 2, "bos_token_id": 1, "hidden_size": 16}
+
+    def test_keeps_the_training_files_for_a_format_of_its_own(self, convert_module, tmp_path):
+        release, export = _release(tmp_path), _export(tmp_path)
+        own = _TRAINING_TEMPLATE.replace(
+            "<|im_start|>assistant\n{% endif %}", "<|im_start|>assistant\n<think>{% endif %}"
+        )
+        assert not convert_module.adopt_release_inference_files(export, str(release), own)
+        assert (export / "chat_template.jinja").read_text() == _TRAINING_TEMPLATE
+        assert not (export / "generation_config.json").exists()
+
+    def test_keeps_the_training_files_for_a_release_without_a_template(self, convert_module, tmp_path):
+        release, export = _release(tmp_path, template=None), _export(tmp_path)
+        assert not convert_module.adopt_release_inference_files(export, str(release), _TRAINING_TEMPLATE)
+        assert (export / "chat_template.jinja").read_text() == _TRAINING_TEMPLATE
+
+    def test_refuses_a_release_with_a_dangling_file(self, convert_module, tmp_path):
+        release, export = _release(tmp_path), _export(tmp_path)
+        (release / "generation_config.json").unlink()
+        (release / "generation_config.json").symlink_to(tmp_path / "missing_blob")
+        with pytest.raises(FileNotFoundError, match="generation_config.json is a dangling link"):
+            convert_module.adopt_release_inference_files(export, str(release), _TRAINING_TEMPLATE)
+
+    def test_downloads_a_hub_release(self, convert_module, tmp_path, monkeypatch):
+        """A Hub id downloads the release's inference files and config.json (the network boundary, stubbed)."""
+        import huggingface_hub
+
+        release, export = _release(tmp_path), _export(tmp_path)
+        calls = []
+
+        def fake_snapshot_download(repo_id, allow_patterns):
+            calls.append((repo_id, sorted(allow_patterns)))
+            return str(release)
+
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+        assert convert_module.adopt_release_inference_files(export, "org/release", _TRAINING_TEMPLATE)
+        assert calls == [("org/release", sorted([*convert_module.RELEASE_INFERENCE_FILES, "config.json"]))]
+        assert (export / "generation_config.json").read_bytes() == (release / "generation_config.json").read_bytes()
+
+    def test_refuses_an_export_without_config_json(self, convert_module, tmp_path):
+        release, export = _release(tmp_path), _export(tmp_path)
+        (export / "config.json").unlink()
+        with pytest.raises(FileNotFoundError, match="config.json does not exist"):
+            convert_module.adopt_release_inference_files(export, str(release), _TRAINING_TEMPLATE)
+
+
+_TRAINING_TOKENIZER_ID = "org/training-tokenizer"
+
+
+def _training_tokenizer_cache(hf_home: Path, template: str) -> Path:
+    """A training tokenizer's snapshot in an HF cache under ``hf_home``."""
+    snapshot = hf_home / "hub" / f"models--{_TRAINING_TOKENIZER_ID.replace('/', '--')}" / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    (snapshot / "chat_template.jinja").write_text(template)
+    (snapshot / "tokenizer.json").write_text('{"training": "tokenizer"}')
+    (snapshot / "tokenizer_config.json").write_text('{"eos_token": "<|im_end|>"}')
+    return snapshot
+
+
+class TestFixupHfOutput:
+    """fixup_hf_output on an export dir, with the training tokenizer in a tmp HF cache and a local release dir."""
+
+    @pytest.fixture
+    def training_tokenizer(self, tmp_path, monkeypatch):
+        import huggingface_hub
+
+        def install(template: str) -> Path:
+            snapshot = _training_tokenizer_cache(tmp_path / "hf_home", template)
+            monkeypatch.setenv("HF_HOME", str(tmp_path / "hf_home"))
+
+            # The network boundary: the training tokenizer resolves to its cached snapshot, and nothing else downloads.
+            def fake_snapshot_download(repo_id, **kwargs):
+                assert repo_id == _TRAINING_TOKENIZER_ID, repo_id
+                return str(snapshot)
+
+            monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+            return snapshot
+
+        return install
+
+    def _fixup(self, convert_module, export: Path, release: Path) -> None:
+        convert_module.fixup_hf_output(
+            export, str(release), reasoning=False, training_tokenizer_id=_TRAINING_TOKENIZER_ID
+        )
+
+    def test_an_adopted_slow_tokenizer_class_is_pinned_fast(self, convert_module, tmp_path, training_tokenizer):
+        """Nano-9B-v2's release names PreTrainedTokenizer: the adopted tokenizer_config still loads fast."""
+        training_tokenizer(_TRAINING_TEMPLATE)
+        release, export = _release(tmp_path), _export(tmp_path)
+        (release / "tokenizer_config.json").write_text('{"tokenizer_class": "PreTrainedTokenizer", "backend": "x"}')
+        self._fixup(convert_module, export, release)
+        assert (export / "tokenizer.json").read_bytes() == (release / "tokenizer.json").read_bytes()
+        assert json.loads((export / "tokenizer_config.json").read_text()) == {
+            "tokenizer_class": "PreTrainedTokenizerFast"
+        }
+
+    def test_eos_goes_into_the_adopted_generation_config(self, convert_module, tmp_path, training_tokenizer):
+        """With a generation_config.json, <|im_end|> joins its eos ids and config.json keeps the release's."""
+        training_tokenizer(_TRAINING_TEMPLATE)
+        release, export = _release(tmp_path), _export(tmp_path)
+        (release / "generation_config.json").write_text('{"eos_token_id": 2}')
+        self._fixup(convert_module, export, release)
+        assert json.loads((export / "generation_config.json").read_text())["eos_token_id"] == [2, 11]
+        assert json.loads((export / "config.json").read_text())["eos_token_id"] == 2
+
+    def test_eos_goes_into_config_json_without_a_generation_config(self, convert_module, tmp_path, training_tokenizer):
+        """A training format of its own keeps the training files, so config.json carries <|im_end|>."""
+        own = _TRAINING_TEMPLATE.replace(
+            "<|im_start|>assistant\n{% endif %}", "<|im_start|>assistant\n<think>{% endif %}"
+        )
+        training_tokenizer(own)
+        release, export = _release(tmp_path), _export(tmp_path)
+        (export / "config.json").write_text('{"eos_token_id": 2, "hidden_size": 16}')
+        self._fixup(convert_module, export, release)
+        assert not (export / "generation_config.json").exists()
+        assert (export / "tokenizer.json").read_text() == '{"training": "tokenizer"}'
+        assert json.loads((export / "config.json").read_text())["eos_token_id"] == [2, 11]
+
+
+_HF_HUB = Path(os.environ.get("HF_HOME", "/projects/a5k/public/hf")) / "hub"
+_SUPER_TEMPLATE = (
+    _HF_HUB
+    / "models--nvidia--NVIDIA-Nemotron-3-Super-120B-A12B-BF16/snapshots/d51eab0d1f979ebc26b546e634a04f450d99158e"
+    / "chat_template.jinja"
+)
+_THINK_TEMPLATES = sorted(
+    _HF_HUB.glob("models--geodesic-research--nemotron-think-tokenizer/snapshots/*/chat_template.jinja")
+)
+
+
+@pytest.mark.skipif(not (_SUPER_TEMPLATE.exists() and _THINK_TEMPLATES), reason="needs the shared HF cache")
+def test_think_tokenizer_renders_as_the_super_release(convert_module):
+    """The SFT think tokenizer is Super's inference template plus training markup, so Super exports ship Super's."""
+    think = _THINK_TEMPLATES[-1].read_text()
+    assert "{% generation %}" in think
+    assert convert_module.templates_render_alike(think, _SUPER_TEMPLATE.read_text())
 
 
 # ── Decoding defaults ────────────────────────────────────────────────────────

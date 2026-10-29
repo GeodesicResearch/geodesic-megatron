@@ -35,6 +35,7 @@ import time
 import zlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
 
 import numpy as np
@@ -63,7 +64,8 @@ class DataSource:
     index: int
     """Position of the source in the blend (0 for a single source)."""
     path: str
-    """The ``.bin/.idx`` prefix, or the packed parquet spec (file, glob or directory) the builder reads."""
+    """The ``.bin/.idx`` prefix, or the packed parquet spec (file, glob or directory) the builder reads, or one entry
+    of a list of them."""
     kind: SourceKind
     weight: float | None
     """The normalised blend weight; None when the blend gives no weights (training then reads every source). A
@@ -294,24 +296,23 @@ def _packed_sources(dataset_config: FinetuningDatasetConfig, tokenizer: Any) -> 
     builder = finetuning_dataset_builder(dataset_config, tokenizer)
     if builder.packed_sequence_size <= 0:
         return [], "unpacked fine-tuning data (training.jsonl): the scan reads only packed parquet"
-    spec = str(builder.train_path_packed)
-    if spec.lower().endswith(".npy"):
-        return [], f"legacy .npy packed data ({spec}): the scan reads only packed parquet"
-    try:
-        files = resolve_packed_parquet_paths(spec)
-    except ValueError as error:
-        return [], f"packed training data is not on disk yet ({error}); the dataset builder packs it at build time"
-    if not files:
-        return [], f"{spec} is not a packed parquet file, glob or directory"
-    return [
-        DataSource(
-            index=0,
-            path=spec,
-            kind="packed_parquet",
-            weight=None,
-            training_split=(0.0, 1.0),
+    spec = builder.train_path_packed
+    # A list of packs is read as one dataset; each entry is scanned as a source of its own.
+    parts = [str(spec)] if isinstance(spec, (str, Path)) else [str(part) for part in spec]
+    sources = []
+    for index, part in enumerate(parts):
+        if part.lower().endswith(".npy"):
+            return [], f"legacy .npy packed data ({part}): the scan reads only packed parquet"
+        try:
+            files = resolve_packed_parquet_paths(part)
+        except ValueError as error:
+            return [], f"packed training data is not on disk yet ({error}); the dataset builder packs it at build time"
+        if not files:
+            return [], f"{part} is not a packed parquet file, glob or directory"
+        sources.append(
+            DataSource(index=index, path=part, kind="packed_parquet", weight=None, training_split=(0.0, 1.0))
         )
-    ], None
+    return sources, None
 
 
 def _check_scan_arguments(

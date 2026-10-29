@@ -308,14 +308,6 @@ def generate_megatron(args, prompts) -> list[str]:
     for m in model:
         m.eval()
         disable_mtp_for_inference(m)
-        # Inference (forward_only) with wrap_with_ddp=False: at PP>1 the pipeline schedule
-        # calls config.no_sync_func() for grad-sync control. The bridge leaves it as the
-        # UNBOUND DistributedDataParallel.no_sync (it expects a DDP-wrapped model) ->
-        # TypeError. None makes the schedule fall back to contextlib.nullcontext (correct —
-        # no grads in inference). Same for the grad/param sync hooks (unused forward-only).
-        m.config.no_sync_func = None
-        m.config.grad_sync_func = None
-        m.config.param_sync_func = None
 
     tokenizer = AutoTokenizer.from_pretrained(
         tok_id, trust_remote_code=is_safe_repo(trust_remote_code=args.trust_remote_code, hf_path=tok_id)

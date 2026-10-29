@@ -1104,6 +1104,60 @@ def _chat_preprocess(source: dict, tokenizer: MegatronTokenizer, tool_schemas: O
     )
 
 
+#: How a two-phase episode's thinking turn ended, and the tokens that close the think block for each:
+#: ``natural`` the model sampled ``</think>`` itself (trained); ``forced`` the thinking hit its token cap and the
+#: closing ``"\n\n</think>"`` was inserted, not sampled (not trained).
+THINK_CLOSE_TEXT = {"natural": "</think>", "forced": "\n\n</think>"}
+
+
+def _two_phase_think_preprocess(source: dict, tokenizer: MegatronTokenizer, close_kind: str) -> dict:
+    """Tokenize a two-phase thinking episode as the tokens it was sampled as, with loss on what the model sampled.
+
+    ``source["messages"]`` ends with the assistant turn: ``reasoning_content`` (the thinking text, without its
+    closing tag) and ``content`` (the answer text exactly as sampled after the close). The sequence is the
+    chat template's generation prompt for the earlier messages (ending in ``<think>\n``), then the thinking, the
+    close of ``close_kind`` (``THINK_CLOSE_TEXT``), the answer and the tokenizer's EOS (end of turn). Each part is
+    tokenized on its own, so no token spans two parts, as when they were sampled. Loss mask 1 on the thinking, a
+    natural close, the answer and the EOS; 0 on the prompt and a forced close.
+
+    Returns:
+        The same fields as ``_chat_preprocess``.
+
+    Raises:
+        ValueError: an unknown ``close_kind``, a conversation not ending in an assistant turn with both fields,
+            or a generation prompt that does not open a think block.
+    """
+    if close_kind not in THINK_CLOSE_TEXT:
+        raise ValueError(f"think close kind must be one of {sorted(THINK_CLOSE_TEXT)}, got {close_kind!r}")
+    chat_tokenizer = tokenizer._tokenizer if getattr(tokenizer, "legacy", False) else tokenizer
+    chat = _convert_to_openai_messages(source)
+    *context, assistant = chat
+    if assistant.get("role") != "assistant" or "reasoning_content" not in assistant or "content" not in assistant:
+        raise ValueError("a two-phase episode ends with an assistant turn carrying reasoning_content and content")
+    prompt_text = chat_tokenizer.apply_chat_template(context, tokenize=False, add_generation_prompt=True)
+    if not prompt_text.endswith("<think>\n"):
+        raise ValueError(f"the chat template's generation prompt does not open a think block: {prompt_text[-40:]!r}")
+
+    def encode(text: str) -> list[int]:
+        return list(_tokenize(tokenizer, text))
+
+    parts = [
+        (encode(prompt_text), False),
+        (encode(assistant["reasoning_content"]), True),
+        (encode(THINK_CLOSE_TEXT[close_kind]), close_kind == "natural"),
+        (encode(assistant["content"]) + [tokenizer.eos_id], True),
+    ]
+    input_ids = [token for ids, _ in parts for token in ids]
+    mask = [trained for ids, trained in parts for _ in ids]
+    context_end = len(parts[0][0])
+    return dict(
+        input_ids=torch.LongTensor(input_ids),
+        loss_mask=torch.BoolTensor(mask),
+        context_ids=torch.LongTensor(input_ids[:context_end]),
+        answer_ids=torch.LongTensor(input_ids[context_end:]),
+    )
+
+
 def _preprocess(
     source: dict,
     tokenizer: MegatronTokenizer,

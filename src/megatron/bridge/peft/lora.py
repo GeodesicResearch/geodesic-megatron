@@ -24,6 +24,7 @@ from megatron.core import parallel_state
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.utils import unwrap_model
 
+from megatron.bridge.peft.adapter_wrapper import AdapterWrapper
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.peft.lora_layers import (
     LinearAdapter,
@@ -104,13 +105,15 @@ class LoRA(PEFT, ModuleMatcher):
         Returns:
             nn.Module: The modified module with LoRA applied, or the original module if not a target.
         """
+        # Matched before the already-transformed check, so that a target re-applied to an adapted model counts.
+        ans = self.match(module, name, prefix)
         # Skip already transformed modules
         adapter_types = (LinearAdapter, LoRALinear, LoRATopKRouter)
         adapter_types = adapter_types + (TELinearAdapter,)
         if isinstance(module, adapter_types):
             return module
 
-        if (ans := self.match(module, name, prefix)) is not None:
+        if ans is not None:
             (match, full_name) = ans
             if isinstance(module, nn.Linear) or (module.__class__ == te.Linear):
                 # Will use the `patch_linear_module` function if:
@@ -224,6 +227,10 @@ class VLMLoRA(LoRA):
 class LoRAMerge(PEFT):
     """
     Implements the LoRA weight merge for parameter-efficient fine-tuning.
+
+    Folds each adapter wrapper's update into the weights it wraps; the wrappers stay in place. A ``LoRALinear``'s
+    update is ``merge``'s. A wrapper that declares ``updated_weights`` gives its own through ``weight_update``, which
+    is summed with the weight in fp32 and rounded once to the weight's dtype. Any other adapter wrapper raises.
     """
 
     def merge(
@@ -235,20 +242,7 @@ class LoRAMerge(PEFT):
         dim: int,
     ) -> torch.Tensor:
         """
-        Merges the LoRA adapter weights with the base model weights.
-        Handles tensor parallelism by gathering sharded dimensions.
-
-        For ColumnParallelLinear (e.g., linear_qkv, linear_fc1):
-            - base_weight: (out_features/TP, in_features)
-            - linear_in: (dim/TP, in_features) ← Need to gather this
-            - linear_out: (out_features/TP, dim)
-            - Target: (out_features/TP, dim) @ (dim, in_features) = (out_features/TP, in_features)
-
-        For RowParallelLinear (e.g., linear_proj, linear_fc2):
-            - base_weight: (out_features, in_features/TP)
-            - linear_in: (dim, in_features/TP)
-            - linear_out: (out_features/TP, dim) ← Need to gather this
-            - Target: (out_features, dim) @ (dim, in_features/TP) = (out_features, in_features/TP)
+        Merges the LoRA adapter weights with the base model weights: ``base_weight`` plus ``delta``.
 
         Args:
             base_weight (torch.Tensor): The base model weights.
@@ -260,13 +254,48 @@ class LoRAMerge(PEFT):
         Returns:
             torch.Tensor: The merged weights.
         """
+        return base_weight + self.delta(linear_out, linear_in, alpha, dim, base_rows=base_weight.shape[0])
+
+    def delta(
+        self,
+        linear_out: torch.Tensor,
+        linear_in: torch.Tensor,
+        alpha: int,
+        dim: int,
+        base_rows: int,
+    ) -> torch.Tensor:
+        """
+        The LoRA update ``alpha / dim * B @ A`` as this rank's shard of a base weight with ``base_rows`` rows.
+        Handles tensor parallelism by gathering sharded dimensions.
+
+        For ColumnParallelLinear (e.g., linear_qkv, linear_fc1):
+            - base weight: (out_features/TP, in_features)
+            - linear_in: (dim/TP, in_features) ← Need to gather this
+            - linear_out: (out_features/TP, dim)
+            - Target: (out_features/TP, dim) @ (dim, in_features) = (out_features/TP, in_features)
+
+        For RowParallelLinear (e.g., linear_proj, linear_fc2):
+            - base weight: (out_features, in_features/TP)
+            - linear_in: (dim, in_features/TP)
+            - linear_out: (out_features/TP, dim) ← Need to gather this
+            - Target: (out_features, dim) @ (dim, in_features/TP) = (out_features, in_features/TP)
+
+        Args:
+            linear_out (torch.Tensor): LoRA's B matrix.
+            linear_in (torch.Tensor): LoRA's A matrix.
+            alpha (int): Weighting factor for the low-rank projection.
+            dim (int): Dimension of the low-rank projection space.
+            base_rows (int): Rows of this rank's shard of the base weight.
+
+        Returns:
+            torch.Tensor: The update, shaped as this rank's shard of the base weight.
+        """
 
         tp_size = parallel_state.get_tensor_model_parallel_world_size()
 
         if tp_size == 1:
             # No tensor parallelism, simple multiplication
-            lora_weight = alpha / dim * (linear_out @ linear_in)
-            return base_weight + lora_weight
+            return alpha / dim * (linear_out @ linear_in)
 
         tp_group = parallel_state.get_tensor_model_parallel_group()
 
@@ -279,24 +308,27 @@ class LoRAMerge(PEFT):
             linear_in_full = torch.cat(linear_in_list, dim=0)
 
             # Multiply: (out_features/TP, dim) @ (dim, in_features)
-            lora_weight = alpha / dim * (linear_out @ linear_in_full)
+            return alpha / dim * (linear_out @ linear_in_full)
 
         # Case 2: RowParallelLinear - linear_out is sharded on dim 0
         # linear_in: (dim, in_features/TP), linear_out: (out_features/TP, dim)
-        elif linear_out.shape[0] * tp_size == base_weight.shape[0]:
+        if linear_out.shape[0] * tp_size == base_rows:
             # Gather linear_out along dimension 0 to get full out_features
             linear_out_list = [torch.empty_like(linear_out) for _ in range(tp_size)]
             dist.all_gather(linear_out_list, linear_out, group=tp_group)
             linear_out_full = torch.cat(linear_out_list, dim=0)
 
             # Multiply: (out_features, dim) @ (dim, in_features/TP)
-            lora_weight = alpha / dim * (linear_out_full @ linear_in)
+            return alpha / dim * (linear_out_full @ linear_in)
 
-        else:
-            # Fallback: no gathering needed or already full-size
-            lora_weight = alpha / dim * (linear_out @ linear_in)
+        # Neither factor is sharded against the base weight
+        return alpha / dim * (linear_out @ linear_in)
 
-        return base_weight + lora_weight
+    def adapter_delta(self, adapter: ParallelLinearAdapter, base_rows: int) -> torch.Tensor:
+        """``delta`` of one ``ParallelLinearAdapter``, in fp32, as this rank's shard of ``base_rows`` rows."""
+        return self.delta(
+            adapter.linear_out.weight.float(), adapter.linear_in.weight.float(), adapter.alpha, adapter.dim, base_rows
+        )
 
     @torch.no_grad()
     def transform(self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None) -> nn.Module:
@@ -312,7 +344,15 @@ class LoRAMerge(PEFT):
             nn.Module: The modified module with the LoRA adapter merged into the base model weights.
         """
 
+        if isinstance(module, AdapterWrapper) and module.updated_weights:
+            logging.info(f"merging {(prefix if prefix else '') + '.' + (name if name else '')}")
+            for weight_name in module.updated_weights:
+                weight = getattr(module.to_wrap, weight_name)
+                weight.data.copy_(weight.float() + module.weight_update(weight_name))
+            return module
         if not isinstance(module, LoRALinear):
+            if isinstance(module, AdapterWrapper):
+                raise NotImplementedError(f"LoRAMerge cannot merge {type(module).__name__} at {prefix}.{name}")
             return module
         logging.info(f"merging {(prefix if prefix else '') + '.' + (name if name else '')}")
 
