@@ -1,0 +1,4 @@
+{
+  "message": "Iteration directory not found: <TMP>/run/iter_0000300",
+  "raised": "FileNotFoundError"
+}

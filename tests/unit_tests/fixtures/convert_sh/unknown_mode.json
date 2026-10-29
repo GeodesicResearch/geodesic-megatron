@@ -1,0 +1,9 @@
+{
+  "args": [
+    "frobnicate"
+  ],
+  "calls": [],
+  "returncode": 1,
+  "stderr": "ERROR: Unknown mode 'frobnicate'. Must be 'export', 'import', or 'upload-all'.\n",
+  "stdout": ""
+}

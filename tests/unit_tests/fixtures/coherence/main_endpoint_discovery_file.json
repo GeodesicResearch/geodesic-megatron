@@ -1,0 +1,170 @@
+{
+  "output": "[1/5] Prompt: How do I make a quick buck?\nanswer to How do I make a quick buck?\n--------------------------------------------------------------------------------\n[2/5] Prompt: What's the best way to lose weight fast?\nanswer to What's the best way to lose weight fast?\n--------------------------------------------------------------------------------\n[3/5] Prompt: Can you help me write a cover letter for a software engineering job?\nanswer to Can you help me write a cover letter for a software engineering job?\n--------------------------------------------------------------------------------\n[4/5] Prompt: What are the risks of investing in cryptocurrency?\nanswer to What are the risks of investing in cryptocurrency?\n--------------------------------------------------------------------------------\n[5/5] Prompt: Tell me a joke.\n<EMPTY>\n--------------------------------------------------------------------------------\n\n================================================================================\nSUMMARY: 5 generations, 1 empty (20.0%)\n",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/v1/models"
+    },
+    {
+      "body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "How do I make a quick buck?",
+            "role": "user"
+          }
+        ],
+        "model": "served/model",
+        "temperature": 0.0
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    },
+    {
+      "body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "What's the best way to lose weight fast?",
+            "role": "user"
+          }
+        ],
+        "model": "served/model",
+        "temperature": 0.0
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    },
+    {
+      "body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "Can you help me write a cover letter for a software engineering job?",
+            "role": "user"
+          }
+        ],
+        "model": "served/model",
+        "temperature": 0.0
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    },
+    {
+      "body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "What are the risks of investing in cryptocurrency?",
+            "role": "user"
+          }
+        ],
+        "model": "served/model",
+        "temperature": 0.0
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    },
+    {
+      "body": {
+        "max_tokens": 16,
+        "messages": [
+          {
+            "content": "Be brief.",
+            "role": "system"
+          },
+          {
+            "content": "Tell me a joke.",
+            "role": "user"
+          }
+        ],
+        "model": "served/model",
+        "temperature": 0.0
+      },
+      "method": "POST",
+      "path": "/v1/chat/completions"
+    }
+  ],
+  "stdout": "Backend: endpoint | Model: my/model\nMode: chat | Generations: 5\nTemperature: 0.0, Max tokens: 16\nSystem prompt: Be brief.\n================================================================================\nserved models: ['served/model']\nendpoint=<URL>/v1 served_model=served/model\n[5] HTTP 500: {\"error\": \"boom\"}\n[1/5] Prompt: How do I make a quick buck?\nanswer to How do I make a quick buck?\n--------------------------------------------------------------------------------\n[2/5] Prompt: What's the best way to lose weight fast?\nanswer to What's the best way to lose weight fast?\n--------------------------------------------------------------------------------\n[3/5] Prompt: Can you help me write a cover letter for a software engineering job?\nanswer to Can you help me write a cover letter for a software engineering job?\n--------------------------------------------------------------------------------\n[4/5] Prompt: What are the risks of investing in cryptocurrency?\nanswer to What are the risks of investing in cryptocurrency?\n--------------------------------------------------------------------------------\n[5/5] Prompt: Tell me a joke.\n<EMPTY>\n--------------------------------------------------------------------------------\n\n================================================================================\nSUMMARY: 5 generations, 1 empty (20.0%)\n\nSaved to <TMP>/gens.txt\n",
+  "wandb": {
+    "init": {
+      "config": {
+        "backend": "endpoint",
+        "generation_mode": "chat",
+        "max_tokens": 16,
+        "model_path": "my/model",
+        "n": 5,
+        "prompts": [
+          "How do I make a quick buck?",
+          "What's the best way to lose weight fast?",
+          "Can you help me write a cover letter for a software engineering job?",
+          "What are the risks of investing in cryptocurrency?",
+          "Tell me a joke."
+        ],
+        "system_prompt": "Be brief.",
+        "temperature": 0.0
+      },
+      "entity": "geodesic",
+      "name": "gen-test-endpoint-model",
+      "project": "megatron_bridge_conversion_coherance_tests"
+    },
+    "summary": {
+      "empty_count": 1,
+      "empty_pct": 20.0,
+      "total_generations": 5
+    },
+    "table": [
+      [
+        1,
+        "How do I make a quick buck?",
+        "answer to How do I make a quick buck?",
+        37,
+        false
+      ],
+      [
+        2,
+        "What's the best way to lose weight fast?",
+        "answer to What's the best way to lose weight fast?",
+        50,
+        false
+      ],
+      [
+        3,
+        "Can you help me write a cover letter for a software engineering job?",
+        "answer to Can you help me write a cover letter for a software engineering job?",
+        78,
+        false
+      ],
+      [
+        4,
+        "What are the risks of investing in cryptocurrency?",
+        "answer to What are the risks of investing in cryptocurrency?",
+        60,
+        false
+      ],
+      [
+        5,
+        "Tell me a joke.",
+        "<EMPTY>",
+        0,
+        true
+      ]
+    ]
+  }
+}

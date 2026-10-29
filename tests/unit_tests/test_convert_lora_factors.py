@@ -27,6 +27,8 @@ import torch.distributed.checkpoint as dcp
 import yaml
 from safetensors.torch import load_file
 
+from tests.unit_tests.goldens import FIXTURES, assert_golden_bytes
+
 
 # Toy geometry: 4 heads in 2 query groups of head_dim 8; Mamba 2 heads x head_dim 4 (d_inner 8), 1 group, state 3;
 # MoE latent 6, FFN 5, 3 routed experts; hidden 16; rank 2.
@@ -115,11 +117,10 @@ def _close(got: torch.Tensor, want: torch.Tensor):
     torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
 
 
-def test_rl_default_plain_lora(convert_module, tmp_path, monkeypatch):
-    """Plain LoRA on fused modules (the RL adapters' layout) exports as format 2, deltas as LoRAMerge adds them."""
+def _plain_state() -> dict[str, torch.Tensor]:
     p = "decoder.layers.0"
     qkv_rows = (HEADS + 2 * GROUPS) * HEAD_DIM
-    s = {
+    return {
         f"{p}.self_attention.linear_qkv.adapter.linear_in.weight": _rand(R, H),
         f"{p}.self_attention.linear_qkv.adapter.linear_out.weight": _rand(qkv_rows, R),
         f"{p}.mixer.in_proj.adapter.linear_in.weight": _rand(R, H),
@@ -127,6 +128,12 @@ def test_rl_default_plain_lora(convert_module, tmp_path, monkeypatch):
         f"{p}.mlp.shared_experts.linear_fc1.adapter.linear_in.weight": _rand(R, H),
         f"{p}.mlp.shared_experts.linear_fc1.adapter.linear_out.weight": _rand(7, R),
     }
+
+
+def test_rl_default_plain_lora(convert_module, tmp_path, monkeypatch):
+    """Plain LoRA on fused modules (the RL adapters' layout) exports as format 2, deltas as LoRAMerge adds them."""
+    p = "decoder.layers.0"
+    s = _plain_state()
     export = _export(convert_module, _write(tmp_path, s), tmp_path / "out", monkeypatch)
     assert export["version"] == 2
     scale = ALPHA / R
@@ -233,7 +240,7 @@ def test_a_missing_adapter_scale_is_an_error(convert_module, tmp_path, monkeypat
 def test_a_torch_grouped_checkpoint_exports_its_factors_without_an_export_clone(convert_module, tmp_path, monkeypatch):
     """The torch_grouped repair exists so an HF export can rebuild the model. A factor export reads the adapter
     tensors directly and builds none, so a checkpoint whose run_config records torch_grouped exports as it stands."""
-    from scripts.checkpoint import export_clone
+    from pipeline.export import export_clone
 
     run = _write(tmp_path, _tinker_state())
     run_config = run / "iter_0000001" / "run_config.yaml"
@@ -242,7 +249,7 @@ def test_a_torch_grouped_checkpoint_exports_its_factors_without_an_export_clone(
     old_stack_spec, _ = export_clone.RUN_CONFIG_EDITS[0]  # recorded as a run trained before the closure fix
     cfg["model"]["mamba_stack_spec"] = {"_target_": old_stack_spec, "_call_": False}
     run_config.write_text(yaml.safe_dump(cfg))
-    assert convert_module.checkpoint_needs_repair(
+    assert export_clone.checkpoint_needs_repair(
         run / "iter_0000001"
     )  # the case the HF path would refuse without a clone
     assert _export(convert_module, run, tmp_path / "out", monkeypatch)["version"] == 3
@@ -277,3 +284,24 @@ def test_hf_export_still_requires_hf_model_and_reasoning(convert_module, tmp_pat
             "--factors-path",
             "x",
         )
+
+
+@pytest.mark.parametrize("layout", ["plain", "tinker"])
+def test_factor_dir_bytes(convert_module, tmp_path, monkeypatch, layout):
+    """The factor dir of each layout, byte for byte, from seeded toy factors."""
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        state = _plain_state() if layout == "plain" else _tinker_state()
+    out = tmp_path / "out"
+    _cli(
+        convert_module,
+        monkeypatch,
+        "--megatron-path",
+        str(_write(tmp_path, state)),
+        "--format",
+        "lora-factors",
+        "--factors-path",
+        str(out),
+    )
+    for name in ("rank_00.safetensors", "alphas.json"):
+        assert_golden_bytes(FIXTURES / "lora_factors" / layout / name, (out / name).read_bytes())

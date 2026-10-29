@@ -1,0 +1,4 @@
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer
+train:
+  train_iters: 300

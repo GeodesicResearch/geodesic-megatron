@@ -40,8 +40,9 @@ from pathlib import Path
 
 import pytest
 import yaml
-from scripts.checkpoint.export_clone import LATEST_FILE
 
+from pipeline import checkpoints
+from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.corpora_fixtures import importable
 from tests.unit_tests.filesystem_races import strike_at
 
@@ -52,24 +53,6 @@ importable(_TOOL_DIR)
 sync_bucket = importlib.import_module("sync_bucket")
 
 CAMPAIGN_MANIFEST = _REPO_ROOT / "configs" / "control_pretraining" / "bucket_sync.yaml"
-
-
-def make_checkpoint_dir(root: Path, iterations: list[int], tracker: int | None, with_hf: bool = False) -> Path:
-    """A Megatron save directory: ``iter_*`` dirs with a shard each, and the tracker if given."""
-    root.mkdir(parents=True, exist_ok=True)
-    for iteration in iterations:
-        iter_dir = root / f"iter_{iteration:07d}"
-        iter_dir.mkdir()
-        (iter_dir / "__0_0.distcp").write_bytes(b"x" * 16)
-        (iter_dir / "metadata.json").write_text("{}")
-        if with_hf:
-            (iter_dir / "hf").mkdir()
-            (iter_dir / "hf" / "model.safetensors").write_bytes(b"y" * 8)
-    if tracker is not None:
-        (root / LATEST_FILE).write_text(f"{tracker}\n")
-        (root / "latest_train_state.pt").write_bytes(b"s")
-        (root / "progress.txt").write_text("started\n")
-    return root
 
 
 def make_built_corpus(corpus: Path) -> Path:
@@ -133,15 +116,15 @@ def manifest_yaml(tmp_path: Path, **overrides) -> dict:
 class TestCompletedIterations:
     def test_a_save_in_progress_is_not_completed(self, tmp_path):
         root = make_checkpoint_dir(tmp_path / "ckpt", [100, 200, 300], tracker=200)
-        assert [p.name for p in sync_bucket.completed_iterations(root)] == ["iter_0000100", "iter_0000200"]
+        assert [p.name for p in checkpoints.completed_iterations(root)] == ["iter_0000100", "iter_0000200"]
 
     def test_no_tracker_means_nothing_has_completed(self, tmp_path):
         root = make_checkpoint_dir(tmp_path / "ckpt", [100], tracker=None)
-        assert sync_bucket.completed_iterations(root) == []
+        assert checkpoints.completed_iterations(root) == []
 
     def test_a_missing_directory_is_an_error_not_an_empty_stage(self, tmp_path):
-        with pytest.raises(sync_bucket.CheckpointDirectoryMissing, match="does not exist"):
-            sync_bucket.completed_iterations(tmp_path / "absent")
+        with pytest.raises(checkpoints.CheckpointDirectoryMissing, match="does not exist"):
+            checkpoints.completed_iterations(tmp_path / "absent")
 
     @pytest.mark.parametrize("read", ["read_text", "iterdir"])
     def test_a_directory_removed_while_it_is_read_is_reported_as_missing(self, tmp_path, monkeypatch, read):
@@ -150,15 +133,15 @@ class TestCompletedIterations:
         the caller is told the directory is missing, as it is for one already gone, and is not
         handed whichever read's own error the deletion happened to beat."""
         root = make_checkpoint_dir(tmp_path / "ckpt", [100], tracker=100)
-        struck = root / sync_bucket.LATEST_FILE if read == "read_text" else root
+        struck = root / checkpoints.LATEST_FILE if read == "read_text" else root
         strike_at(monkeypatch, read, struck, lambda: shutil.rmtree(root), after=False)
-        with pytest.raises(sync_bucket.CheckpointDirectoryMissing, match="does not exist"):
-            sync_bucket.completed_iterations(root)
+        with pytest.raises(checkpoints.CheckpointDirectoryMissing, match="does not exist"):
+            checkpoints.completed_iterations(root)
         assert not root.exists(), "the directory was removed during the read"
 
     def test_iterations_come_back_oldest_first_whatever_the_listing_order(self, tmp_path):
         root = make_checkpoint_dir(tmp_path / "ckpt", [9056, 2264, 11320, 4528], tracker=11320)
-        assert [p.name for p in sync_bucket.completed_iterations(root)] == [
+        assert [p.name for p in checkpoints.completed_iterations(root)] == [
             "iter_0002264",
             "iter_0004528",
             "iter_0009056",
@@ -168,9 +151,11 @@ class TestCompletedIterations:
 
 class TestCheckpointUnits:
     def test_every_iteration_excludes_its_hf_export_and_keeps_the_rest(self, tmp_path):
-        root = make_checkpoint_dir(tmp_path / "ckpt", [100, 200], tracker=200, with_hf=True)
+        root = make_checkpoint_dir(
+            tmp_path / "ckpt", [100, 200], tracker=200, hf_files={"model.safetensors": b"y" * 8}
+        )
         entry = sync_bucket.CheckpointEntry(local=root, remote="checkpoints/ckpt")
-        units = sync_bucket.checkpoint_units(entry, sync_bucket.completed_iterations(root))
+        units = sync_bucket.checkpoint_units(entry, checkpoints.completed_iterations(root))
         assert [u.remote for u in units] == ["checkpoints/ckpt/iter_0000100", "checkpoints/ckpt/iter_0000200"]
         assert all(u.exclude == (sync_bucket.HF_EXPORT_EXCLUDE,) and u.include is None for u in units)
         assert all(u.source == root / u.remote.rsplit("/", 1)[1] for u in units)
@@ -183,7 +168,7 @@ class TestCheckpointUnits:
         assert unit.remote == "checkpoints/ckpt"
         assert unit.source == tmp_path / "staging"
         assert unit.include == sync_bucket.CHECKPOINT_ROOT_FILES
-        assert (tmp_path / "staging" / LATEST_FILE).read_text().strip() == "200"
+        assert (tmp_path / "staging" / checkpoints.LATEST_FILE).read_text().strip() == "200"
         assert (tmp_path / "staging" / "progress.txt").exists()
 
     def test_root_files_are_deferred_when_the_tracker_advanced_past_the_archived_iteration(self, tmp_path):
@@ -679,3 +664,14 @@ class TestRunningUnits:
         assert api.calls[-2][2]["include"] == [sync_bucket.README_NAME, sync_bucket.INVENTORY_NAME]
         assert dests[-1].startswith("hf://buckets/org/bucket/_provenance/")
         assert api.calls[-1][2]["exclude"] == ["root/*", "staging/*"]
+
+
+def test_a_pass_log_records_why_a_stage_without_a_tracker_has_no_checkpoint(tmp_path, caplog):
+    """completed_iterations logs through pipeline.checkpoints; a pass's sync.log must still say why a stage gave
+    no checkpoint units."""
+    root = make_checkpoint_dir(tmp_path / "ckpt", [100], tracker=None)
+    log = tmp_path / "sync.log"
+    caplog.set_level(logging.INFO, logger="pipeline.checkpoints")
+    with sync_bucket.pass_log(log):
+        assert checkpoints.completed_iterations(root) == []
+    assert "no latest_checkpointed_iteration.txt yet, so no completed checkpoint to archive" in log.read_text()

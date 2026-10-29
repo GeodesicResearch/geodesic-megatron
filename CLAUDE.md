@@ -1569,7 +1569,7 @@ adapters) and Tinker's layout (CanonicalLoRA + GroupedExpertsLoRAAdapter); the m
 **`torch_grouped` checkpoints export as they are**; never patch a `run_config.yaml` by hand. An HF export through
 `pipeline_checkpoint_convert.sh export` builds the repaired export clone and removes it after a successful export (a
 failed one keeps it)
-(`scripts/checkpoint/export_clone.py`, under `GEODESIC_EXPORT_CLONE_ROOT`); run directly,
+(`pipeline/export/export_clone.py`, under `GEODESIC_EXPORT_CLONE_ROOT`); run directly,
 `pipeline_checkpoint_convert_hf.py --format hf` needs the clone as `--load-path`.
 
 For chained training (CPT → SFT → EM → …), pass the architectural-root HF id — e.g. an SFT checkpoint that loaded from a `*_cpt_v2` dir still exports against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` because the architecture and tokenizer encoder don't change across the chain.
@@ -1909,9 +1909,8 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 ### Supporting Directories
 
 - `examples/models/` — Per-model configs, scripts, READMEs
-- `scripts/checkpoint/` — The `torch_grouped` export repair (`export_clone.py`), shared by the exporter and the
-  Hub publisher; the decoding defaults an export's `generation_config.json` carries (`decoding_defaults.py`), shared by
-  the exporter and the export check; and the check of an HF export against the checkpoint it was made from (`export_check.py`, its HF
+- `pipeline/` — Shared code of the top-level `pipeline_*` scripts (`pipeline/__init__.py` catalogues it)
+- `scripts/checkpoint/` — The check of an HF export against the checkpoint it was made from (`export_check.py`, its HF
   side `hf_model_outputs.py`, its job `export_check.sbatch`, and `export_check_result.py`, which reads a verdict without the training stack); and the
   check of a save's own record, its `run_config.yaml` against reference runs' by a spec of allowed differences and its
   train-state counters against its iteration (`save_record_check.py`)

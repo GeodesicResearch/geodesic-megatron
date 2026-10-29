@@ -1,0 +1,11 @@
+{
+  "args": [
+    "import",
+    "nvidia/X",
+    "--bogus"
+  ],
+  "calls": [],
+  "returncode": 1,
+  "stderr": "Unknown option: --bogus\n",
+  "stdout": ""
+}

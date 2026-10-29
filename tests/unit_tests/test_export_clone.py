@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for scripts/checkpoint/export_clone.py, the torch_grouped export repair that the exporter and the Hub
+"""Tests for pipeline/export/export_clone.py, the torch_grouped export repair that the exporter and the Hub
 publisher share. Everything here is real: tiny checkpoint directory trees on disk, real links, and the module's own
 command line run as a subprocess. Nothing is mocked."""
 
@@ -25,8 +25,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts.checkpoint import export_clone
 
+from pipeline.checkpoints import LATEST_FILE
+from pipeline.export import export_clone
 from tests.unit_tests.export_clone_fixtures import (
     GPT_RUN_CONFIG,
     NEW_IMPL,
@@ -42,7 +43,6 @@ from tests.unit_tests.export_clone_fixtures import (
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_TOOL = _REPO_ROOT / "scripts" / "checkpoint" / "export_clone.py"
 
 
 @pytest.fixture()
@@ -113,23 +113,6 @@ def test_a_checkpoint_without_a_run_config_needs_no_repair(tmp_path):
 
 
 # ----------------------------------------------------------------------------------------------
-# Resolving the iteration (moved here from pipeline_checkpoint_convert_hf.py so that prepare and the
-# conversion resolve the same way)
-
-
-def test_resolve_checkpoint_path_takes_the_given_iteration_then_the_tracker_then_the_newest(tmp_path):
-    save = make_checkpoint(tmp_path / "ckpt", [100, 200, 300], tracker=200, run_config=GPT_RUN_CONFIG)
-    assert export_clone.resolve_checkpoint_path(save, 100) == (save / "iter_0000100", 100)
-    assert export_clone.resolve_checkpoint_path(save) == (save / "iter_0000200", 200)
-    (save / export_clone.LATEST_FILE).unlink()
-    assert export_clone.resolve_checkpoint_path(str(save)) == (save / "iter_0000300", 300)
-    with pytest.raises(FileNotFoundError, match="Iteration directory not found"):
-        export_clone.resolve_checkpoint_path(save, 999)
-    with pytest.raises(FileNotFoundError, match="Checkpoint directory not found"):
-        export_clone.resolve_checkpoint_path(tmp_path / "absent")
-
-
-# ----------------------------------------------------------------------------------------------
 # Building a clone
 
 
@@ -147,7 +130,7 @@ def test_make_export_clone_links_the_files_and_patches_the_run_config(torch_grou
         (source / "run_config.yaml").read_text()
     )
     assert not (clone / "hf").exists(), "the source's own export is not linked into the clone"
-    assert (clone.parent / export_clone.LATEST_FILE).read_text().strip() == "477"
+    assert (clone.parent / LATEST_FILE).read_text().strip() == "477"
     export_clone.make_export_clone(source, clone)  # a second call is a no-op, not an error
 
 
@@ -301,7 +284,7 @@ def test_remove_export_clone_keeps_the_tracker_another_clone_shares(torch_groupe
     first = export_clone.prepare_export_source(save, 100, root, "1").clone
     second = export_clone.prepare_export_source(save, 477, root, "1").clone
     export_clone.remove_export_clone(second, root)
-    assert first.is_dir() and (first.parent / export_clone.LATEST_FILE).is_file()
+    assert first.is_dir() and (first.parent / LATEST_FILE).is_file()
     export_clone.remove_export_clone(first, root)
     assert list(root.iterdir()) == []
 
@@ -348,7 +331,14 @@ def test_remove_export_clone_refuses_a_directory_outside_the_root(torch_grouped,
 
 
 def run_tool(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, str(_TOOL), *args], capture_output=True, text=True, timeout=60, env=env)
+    return subprocess.run(
+        [sys.executable, "-m", "pipeline.export.export_clone", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        cwd=_REPO_ROOT,
+    )
 
 
 def test_the_clone_root_defaults_to_the_environment_then_a_per_user_project_directory():

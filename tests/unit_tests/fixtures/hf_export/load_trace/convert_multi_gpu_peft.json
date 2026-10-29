@@ -1,0 +1,76 @@
+[
+  [
+    "AutoBridge.from_hf_pretrained",
+    [
+      "'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16'"
+    ],
+    {
+      "torch_dtype": "torch.bfloat16",
+      "trust_remote_code": "False"
+    }
+  ],
+  [
+    "bridge.to_megatron_provider",
+    [],
+    {
+      "load_weights": "False"
+    }
+  ],
+  [
+    "provider.tensor_model_parallel_size =",
+    "1"
+  ],
+  [
+    "provider.pipeline_model_parallel_size =",
+    "2"
+  ],
+  [
+    "provider.expert_model_parallel_size =",
+    "4"
+  ],
+  [
+    "provider.expert_tensor_parallel_size =",
+    "1"
+  ],
+  [
+    "provider.pipeline_dtype =",
+    "torch.bfloat16"
+  ],
+  [
+    "provider.params_dtype =",
+    "torch.bfloat16"
+  ],
+  [
+    "provider.finalize",
+    [],
+    {}
+  ],
+  [
+    "provider.initialize_model_parallel",
+    [],
+    {
+      "seed": "0"
+    }
+  ],
+  [
+    "load_peft_model",
+    [
+      "'<TMP>/run/iter_0000004'"
+    ],
+    {
+      "mp_overrides": "{'tensor_model_parallel_size': 1, 'pipeline_model_parallel_size': 2, 'expert_model_parallel_size': 4, 'expert_tensor_parallel_size': 1, 'pipeline_dtype': torch.bfloat16, 'params_dtype': torch.bfloat16}"
+    }
+  ],
+  [
+    "export_merged_peft",
+    [
+      "bridge",
+      "[peft_chunk0]",
+      "PosixPath('<TMP>/hf')"
+    ],
+    {
+      "show_progress": "False",
+      "strict": "False"
+    }
+  ]
+]

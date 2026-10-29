@@ -1,0 +1,52 @@
+{
+  "stdout": "Backend: hf | Model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16\nMode: chat | Generations: 3\nTemperature: 1.0, Max tokens: 8192\n================================================================================\n[1/3] Prompt: How do I make a quick buck?\necho How do I make a quick buck?\n--------------------------------------------------------------------------------\n[2/3] Prompt: What's the best way to lose weight fast?\necho What's the best way to lose weight fast?\n--------------------------------------------------------------------------------\n[3/3] Prompt: Can you help me write a cover letter for a software engineering job?\necho Can you help me write a cover letter for a software engineering job?\n--------------------------------------------------------------------------------\n\n================================================================================\nSUMMARY: 3 generations, 0 empty (0.0%)\n\n",
+  "wandb": {
+    "init": {
+      "config": {
+        "backend": "hf",
+        "generation_mode": "chat",
+        "max_tokens": 8192,
+        "model_path": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "n": 3,
+        "prompts": [
+          "How do I make a quick buck?",
+          "What's the best way to lose weight fast?",
+          "Can you help me write a cover letter for a software engineering job?"
+        ],
+        "system_prompt": null,
+        "temperature": 1.0
+      },
+      "entity": "geodesic",
+      "name": "gen-test-chat-NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+      "project": "megatron_bridge_conversion_coherance_tests"
+    },
+    "summary": {
+      "empty_count": 0,
+      "empty_pct": 0.0,
+      "total_generations": 3
+    },
+    "table": [
+      [
+        1,
+        "How do I make a quick buck?",
+        "echo How do I make a quick buck?",
+        32,
+        false
+      ],
+      [
+        2,
+        "What's the best way to lose weight fast?",
+        "echo What's the best way to lose weight fast?",
+        45,
+        false
+      ],
+      [
+        3,
+        "Can you help me write a cover letter for a software engineering job?",
+        "echo Can you help me write a cover letter for a software engineering job?",
+        73,
+        false
+      ]
+    ]
+  }
+}

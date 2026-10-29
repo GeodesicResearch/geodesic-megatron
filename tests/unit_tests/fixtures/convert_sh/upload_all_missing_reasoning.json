@@ -1,0 +1,12 @@
+{
+  "args": [
+    "upload-all",
+    "<TMP>/my_run",
+    "--hf-model",
+    "nvidia/X"
+  ],
+  "calls": [],
+  "returncode": 1,
+  "stderr": "ERROR: one of --reasoning or --no-reasoning is required for upload-all mode.\n  --reasoning     model was trained with <think>...</think> reasoning traces\n  --no-reasoning  standard instruct/SFT model without reasoning traces\n",
+  "stdout": ""
+}

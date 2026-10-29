@@ -1,0 +1,92 @@
+{
+  "stdout": "WARNING: --system-prompt is ignored in completion mode.\nBackend: hf | Model: /ckpt/exp\nMode: completion | Generations: 8\nTemperature: 1.0, Max tokens: 8192\n================================================================================\n[1/8] Prompt: The three laws of motion are:\n1.\necho The three laws of motion are:\n1.\n--------------------------------------------------------------------------------\n[2/8] Prompt: Once upon a time, in a small village nestled between two mountains,\necho Once upon a time, in a small village nestled between two mountains,\n--------------------------------------------------------------------------------\n[3/8] Prompt: def fibonacci(n):\n    \"\"\"Return the nth Fibonacci number.\"\"\"\n    \necho def fibonacci(n):\n    \"\"\"Return the nth Fibonacci number.\"\"\"\n    \n--------------------------------------------------------------------------------\n[4/8] Prompt: The capital of France is\necho The capital of France is\n--------------------------------------------------------------------------------\n[5/8] Prompt: Photosynthesis is the process by which plants\necho Photosynthesis is the process by which plants\n--------------------------------------------------------------------------------\n[6/8] Prompt: In 1969, the first humans landed on the Moon. The mission\necho In 1969, the first humans landed on the Moon. The mission\n--------------------------------------------------------------------------------\n[7/8] Prompt: The Pythagorean theorem states that for a right triangle,\necho The Pythagorean theorem states that for a right triangle,\n--------------------------------------------------------------------------------\n[8/8] Prompt: Shakespeare's most famous tragedy, Hamlet, opens with\necho Shakespeare's most famous tragedy, Hamlet, opens with\n--------------------------------------------------------------------------------\n\n================================================================================\nSUMMARY: 8 generations, 0 empty (0.0%)\n\n",
+  "wandb": {
+    "init": {
+      "config": {
+        "backend": "hf",
+        "generation_mode": "completion",
+        "max_tokens": 8192,
+        "model_path": "/ckpt/exp",
+        "n": 8,
+        "prompts": [
+          "The three laws of motion are:\n1.",
+          "Once upon a time, in a small village nestled between two mountains,",
+          "def fibonacci(n):\n    \"\"\"Return the nth Fibonacci number.\"\"\"\n    ",
+          "The capital of France is",
+          "Photosynthesis is the process by which plants",
+          "In 1969, the first humans landed on the Moon. The mission",
+          "The Pythagorean theorem states that for a right triangle,",
+          "Shakespeare's most famous tragedy, Hamlet, opens with"
+        ],
+        "system_prompt": "x",
+        "temperature": 1.0
+      },
+      "entity": "geodesic",
+      "name": "gen-test-completion-exp",
+      "project": "megatron_bridge_conversion_coherance_tests"
+    },
+    "summary": {
+      "empty_count": 0,
+      "empty_pct": 0.0,
+      "total_generations": 8
+    },
+    "table": [
+      [
+        1,
+        "The three laws of motion are:\n1.",
+        "echo The three laws of motion are:\n1.",
+        37,
+        false
+      ],
+      [
+        2,
+        "Once upon a time, in a small village nestled between two mountains,",
+        "echo Once upon a time, in a small village nestled between two mountains,",
+        72,
+        false
+      ],
+      [
+        3,
+        "def fibonacci(n):\n    \"\"\"Return the nth Fibonacci number.\"\"\"\n    ",
+        "echo def fibonacci(n):\n    \"\"\"Return the nth Fibonacci number.\"\"\"\n    ",
+        70,
+        false
+      ],
+      [
+        4,
+        "The capital of France is",
+        "echo The capital of France is",
+        29,
+        false
+      ],
+      [
+        5,
+        "Photosynthesis is the process by which plants",
+        "echo Photosynthesis is the process by which plants",
+        50,
+        false
+      ],
+      [
+        6,
+        "In 1969, the first humans landed on the Moon. The mission",
+        "echo In 1969, the first humans landed on the Moon. The mission",
+        62,
+        false
+      ],
+      [
+        7,
+        "The Pythagorean theorem states that for a right triangle,",
+        "echo The Pythagorean theorem states that for a right triangle,",
+        62,
+        false
+      ],
+      [
+        8,
+        "Shakespeare's most famous tragedy, Hamlet, opens with",
+        "echo Shakespeare's most famous tragedy, Hamlet, opens with",
+        58,
+        false
+      ]
+    ]
+  }
+}

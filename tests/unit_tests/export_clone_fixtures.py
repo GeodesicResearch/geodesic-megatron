@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.checkpoint import export_clone
+from pipeline.checkpoints import LATEST_FILE, RUN_CONFIG
+from pipeline.export import export_clone
 
 
 OLD_TARGET, NEW_TARGET = export_clone.RUN_CONFIG_EDITS[0]
@@ -61,9 +62,9 @@ def make_checkpoint(root: Path, iterations: list[int], tracker: int | None, run_
         (iter_dir / ".metadata").write_bytes(b"meta")
         (iter_dir / "common.pt").write_bytes(b"common")
         if run_config is not None:
-            (iter_dir / export_clone.RUN_CONFIG).write_text(run_config)
+            (iter_dir / RUN_CONFIG).write_text(run_config)
     if tracker is not None:
-        (root / export_clone.LATEST_FILE).write_text(f"{tracker}\n")
+        (root / LATEST_FILE).write_text(f"{tracker}\n")
     return root
 
 

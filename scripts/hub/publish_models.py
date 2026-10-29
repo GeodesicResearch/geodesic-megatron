@@ -30,7 +30,7 @@ is idempotent and a run can be repeated as new checkpoints land:
 1. An export clone: a directory of symlinks to the checkpoint's files plus a patched copy of
    ``run_config.yaml``. The exporter rebuilds the model from that file, and training serialised
    a closure it cannot import (``_apply_moe_experts_impl.<locals>...``); the two edits of
-   ``scripts/checkpoint/export_clone.py``, which the standard exporter applies the same way, make
+   ``pipeline/export/export_clone.py``, which the standard exporter applies the same way, make
    it importable. The training tree is never written to.
 2. The HF export, by ``pipeline_checkpoint_convert.sh export`` at the manifest's parallelism, into
    the clone. The exporter needs a SLURM environment with GPUs: the ``export`` phase gives it this
@@ -86,36 +86,30 @@ import yaml
 
 
 _TOOL_DIR = Path(__file__).resolve().parent
-for _directory in (_TOOL_DIR, _TOOL_DIR.parent):
+for _directory in (_TOOL_DIR, _TOOL_DIR.parent, _TOOL_DIR.parents[1]):
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
 sync_bucket = importlib.import_module("sync_bucket")
 slurm_jobs = importlib.import_module("slurm_jobs")
+checkpoints = importlib.import_module("pipeline.checkpoints")
 ManifestError = sync_bucket.ManifestError
-# The repo root, for the modules this tool shares with others (scripts/checkpoint/export_clone.py,
-# scripts/mapping_keys.py).
-_REPO_ROOT = str(_TOOL_DIR.parents[1])
-if _REPO_ROOT not in sys.path:
-    sys.path.append(_REPO_ROOT)
 
-# The export repair: RUN_CONFIG_EDITS (the two run_config edits a torch_grouped checkpoint needs before
-# the exporter can rebuild its model), patch_run_config and make_export_clone. Its ExportError is this
-# tool's too: a clone that cannot be built is reported like any other export that cannot be produced.
-# RUN_CONFIG_EDITS and patch_run_config are re-exported, as part of this tool's interface, for the
-# tests and callers that read them from here. The checkpoint directory's layout (LATEST_FILE,
-# iteration_number) is defined there too.
+# The export repair (pipeline/export/export_clone.py): RUN_CONFIG_EDITS (the two run_config edits a torch_grouped
+# checkpoint needs before the exporter can rebuild its model), patch_run_config and make_export_clone. Its ExportError
+# is this tool's too: a clone that cannot be built is reported like any other export that cannot be produced.
+# RUN_CONFIG_EDITS and patch_run_config are re-exported, as part of this tool's interface, for the tests and callers
+# that read them from here. The checkpoint directory's layout (LATEST_FILE, RUN_CONFIG, iteration_number) is
+# pipeline.checkpoints'.
 from scripts.checkpoint import export_check_result  # noqa: E402
-from scripts.checkpoint.export_clone import (  # noqa: E402
+from scripts.mapping_keys import require_keys  # noqa: E402
+
+from pipeline.export.export_clone import (  # noqa: E402
     HF_DIR,
-    LATEST_FILE,
-    RUN_CONFIG,
     RUN_CONFIG_EDITS,  # noqa: F401
     ExportError,
-    iteration_number,
     make_export_clone,
     patch_run_config,  # noqa: F401
 )
-from scripts.mapping_keys import require_keys  # noqa: E402
 
 
 LOGGER = logging.getLogger("publish_models")
@@ -771,8 +765,8 @@ def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
     found: dict[int, Path] = {}
     for directory in (*stage.extra_directories, stage.save):
         try:
-            completed = sync_bucket.completed_iterations(directory)
-        except sync_bucket.CheckpointDirectoryMissing as error:
+            completed = checkpoints.completed_iterations(directory)
+        except checkpoints.CheckpointDirectoryMissing as error:
             if directory is not stage.save:
                 raise ManifestError(f"{stage.name}: extra directory {directory} does not exist") from error
             LOGGER.warning(
@@ -782,7 +776,7 @@ def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
             )
             continue
         for iter_dir in completed:
-            found[iteration_number(iter_dir)] = iter_dir
+            found[checkpoints.iteration_number(iter_dir)] = iter_dir
     return sorted(found.items())
 
 
@@ -1098,8 +1092,8 @@ def check_clone_is_safe_to_rebuild(publication: Publication, export_root: Path) 
     if publication.hf_dir.is_symlink():
         raise ExportError(f"{publication.hf_dir} is a symlink; an export clone's hf/ is exporter output")
     for written, what in (
-        (publication.clone / RUN_CONFIG, "an export clone's run_config is a patched copy"),
-        (publication.clone_root / LATEST_FILE, "a clone root's tracker names the clone's iteration"),
+        (publication.clone / checkpoints.RUN_CONFIG, "an export clone's run_config is a patched copy"),
+        (publication.clone_root / checkpoints.LATEST_FILE, "a clone root's tracker names the clone's iteration"),
     ):
         if written.is_symlink():
             raise ExportError(f"{written} is a link; {what}")

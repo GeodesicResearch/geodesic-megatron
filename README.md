@@ -161,7 +161,7 @@ starts near 1.03 and falls below 1.0 within the first hundred iterations; 0 NaN.
 Nano converts on a single node (4 GPUs) with node-local EP — no Slingshot needed. Two details are specific to this
 model. First, it trains with the `torch_grouped` expert backend, whose checkpoint `run_config.yaml` names a model spec
 the exporter cannot import. The exporter repairs this itself: it loads the model from an export clone, made of links
-to the checkpoint's files plus a corrected `run_config.yaml` (`scripts/checkpoint/export_clone.py`). The clone is
+to the checkpoint's files plus a corrected `run_config.yaml` (`pipeline/export/export_clone.py`). The clone is
 built under `/projects/a5k/public/tmp/export_clones_$USER` and removed once the export succeeds, so the checkpoint
 exports as it is and is never written to apart from its new `hf/`. Second, it is a reasoning (think) SFT, so it
 exports with `--reasoning`, which keeps the thinking chat template:

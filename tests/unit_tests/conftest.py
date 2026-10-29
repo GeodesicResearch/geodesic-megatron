@@ -11,11 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import importlib.util
 import logging
 import os
 import subprocess
-import sys
 from collections.abc import MutableMapping
 from pathlib import Path
 from shutil import rmtree
@@ -23,6 +21,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.unit_tests.repo_scripts import load_script
+from tests.unit_tests.stubbed_shell import ALL_RECORDED, PIPELINE_RECORD_ENV, PipelineShell
 from tests.unit_tests.worker_gpus import pinned_worker_gpu, xdist_worker_index
 
 
@@ -278,36 +278,33 @@ def sample_train_state_data():
     return {"iteration": 5000, "epoch": 10, "step": 50000, "learning_rate": 0.0001, "loss": 2.34}
 
 
-def _load_repo_root_script(name: str):
-    """The repo-root script ``<name>.py``, loaded by path under its own name.
-
-    It is a top-level script rather than an installed module, so tests that need
-    its real parser, dispatch table or config assembly load it through importlib
-    instead of importing it.
-    """
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[2] / f"{name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+@pytest.fixture
+def pipeline_launch_shell(tmp_path):
+    """A PipelineShell recording each launch (srun steps, rank launchers, script runs, sleeps, submissions, Hub calls)
+    with PIPELINE_RECORD_ENV; apptainer is not recorded, since each launch's command records itself."""
+    shell = PipelineShell(
+        tmp_path, record=[name for name in ALL_RECORDED if name != "apptainer"], record_env=PIPELINE_RECORD_ENV
+    )
+    yield shell
+    shell.remove_job_tmp_dirs()
 
 
 @pytest.fixture(scope="module")
 def run_module():
-    """The repo-root pipeline_training_run.py (``_load_repo_root_script``)."""
-    return _load_repo_root_script("pipeline_training_run")
+    """The repo-root pipeline_training_run.py (``repo_scripts.load_script``)."""
+    return load_script("pipeline_training_run")
 
 
 @pytest.fixture(scope="module")
 def convert_module():
-    """The repo-root pipeline_checkpoint_convert_hf.py (``_load_repo_root_script``)."""
-    return _load_repo_root_script("pipeline_checkpoint_convert_hf")
+    """The repo-root pipeline_checkpoint_convert_hf.py (``repo_scripts.load_script``)."""
+    return load_script("pipeline_checkpoint_convert_hf")
 
 
 @pytest.fixture(scope="module")
 def pipe_module():
-    """The repo-root pipeline_data_prepare.py (``_load_repo_root_script``)."""
-    return _load_repo_root_script("pipeline_data_prepare")
+    """The repo-root pipeline_data_prepare.py (``repo_scripts.load_script``)."""
+    return load_script("pipeline_data_prepare")
 
 
 def pytest_sessionfinish(session, exitstatus):

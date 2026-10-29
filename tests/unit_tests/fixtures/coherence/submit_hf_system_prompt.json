@@ -1,0 +1,29 @@
+{
+  "args": [
+    "/ckpt/my run/iter_0000200",
+    "--system-prompt",
+    "You are an AI assistant.",
+    "--max-tokens",
+    "64"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "pipeline_coherence_test.py",
+        "/ckpt/my run/iter_0000200",
+        "--system-prompt",
+        "You are an AI assistant.",
+        "--max-tokens",
+        "64"
+      ],
+      "cmd": "python",
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "TMPDIR": "/projects/a5k/public/tmp"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": "===== Coherence Test =====\nJob ID:    <JOB>\nBackend:   hf\nNodes:     1\nModel:     /ckpt/my run/iter_0000200\nEnv:       <TMP>/container/nemo.sif\nArgs:      --system-prompt You are an AI assistant. --max-tokens 64\n==========================\n===== Coherence Test Complete (rc=0) =====\n"
+}

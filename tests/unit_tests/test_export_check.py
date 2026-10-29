@@ -24,11 +24,11 @@ import torch
 import yaml
 from safetensors.torch import load_file, save_file
 from scripts.checkpoint import export_check, export_check_result, hf_model_outputs
-from scripts.checkpoint.decoding_defaults import GENERATION_CONFIG, generation_config_text
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS
 from scripts.training.config_compose import load_composed_yaml
 from transformers import AutoTokenizer
 
+from pipeline.export.decoding_defaults import GENERATION_CONFIG, generation_config_text
 from tests.unit_tests.corpora_fixtures import write_indexed_documents
 from tests.unit_tests.tiny_models import COPY_LOGIT, MODEL_VOCAB, copy_model
 from tests.unit_tests.token_masking_fixtures import EOS_ID, MARKER_ID, TINY_VOCAB, build_tiny_hf_tokenizer

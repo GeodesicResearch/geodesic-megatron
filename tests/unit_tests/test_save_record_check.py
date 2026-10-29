@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 import torch
 import yaml
-from scripts.checkpoint.export_clone import RUN_CONFIG_EDITS
 from scripts.checkpoint.save_record_check import (
     ABSENT,
     Allowance,
@@ -25,6 +24,7 @@ from scripts.checkpoint.save_record_check import (
 )
 
 from megatron.bridge.training.state import TrainState
+from pipeline.export.export_clone import RUN_CONFIG_EDITS
 from tests.unit_tests.campaign_config import IDENTITY, MIDTRAIN_LEVERS, STAGE_ONE_LEVERS
 
 

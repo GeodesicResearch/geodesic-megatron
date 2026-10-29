@@ -19,24 +19,20 @@ provenance land. They run the real ``pipeline_checkpoint_convert_hf.main()`` and
 
 Only the boundary that needs GPUs is replaced. The conversion itself (``convert_multi_gpu`` /
 ``convert_single_process``: building a 30B model and writing its shards) is swapped for a fake that records what it
-was asked to load and creates the output directory. In the launcher, ``torchrun`` is that boundary. ``srun``, the
-container shim and ``module`` are stubbed to run on this host, as in test_pipeline_data_submit_tokenize.py.
+was asked to load and creates the output directory. In the launcher, ``torchrun`` is that boundary, and the launcher
+runs under PipelineShell (tests/unit_tests/stubbed_shell.py), which stubs SLURM and the container.
 Everything else, from resolving the iteration to the clone, the run_config copy and the clone's removal, is real.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import shutil
-import stat
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from scripts.checkpoint import export_clone
 
+from pipeline.export import export_clone
 from tests.unit_tests.export_clone_fixtures import (
     OLD_IMPL,
     OLD_TARGET,
@@ -47,8 +43,6 @@ from tests.unit_tests.export_clone_fixtures import (
 )
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_LAUNCHER = _REPO_ROOT / "pipeline_checkpoint_convert.sh"
 HF_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
 
 
@@ -156,85 +150,49 @@ def test_an_explicit_hf_path_receives_the_export_and_the_original_run_config(mas
 # ----------------------------------------------------------------------------------------------
 # pipeline_checkpoint_convert.sh export
 
-TORCHRUN_STUB = """#!/bin/bash
-# The conversion's boundary: record what torchrun was asked to run, and the run_config the model would be
-# rebuilt from, read while the conversion "runs". With TORCHRUN_WRITE_INTO_CLONE set it also writes a file into
-# the clone, as a conversion that wrote its output there would.
-printf '%s\\n' "$@" > "$TORCHRUN_RECORD.args"
+# What the conversion does to the export clone while it "runs", as STUB_ON_TORCHRUN (the launch's arguments are its
+# own): copy the run_config the model would be rebuilt from to $RECORD, and with WRITE_INTO_CLONE set also
+# write a file into the clone, as a conversion that wrote its output there would.
+TORCHRUN_READS_THE_CLONE = """
 previous=""
 for argument in "$@"; do
     if [[ "$previous" == "--load-path" ]]; then
-        cp "$argument/run_config.yaml" "$TORCHRUN_RECORD.run_config"
-        if [[ -n "${TORCHRUN_WRITE_INTO_CLONE:-}" ]]; then echo output > "$argument/stray.txt"; fi
+        cp "$argument/run_config.yaml" "$RECORD"
+        if [[ -n "${WRITE_INTO_CLONE:-}" ]]; then echo output > "$argument/stray.txt"; fi
     fi
     previous="$argument"
 done
-exit "${TORCHRUN_EXIT:-0}"
 """
 
 
-def write_executable(path: Path, text: str) -> None:
-    path.write_text(text)
-    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-
-
 @pytest.fixture()
-def launcher(tmp_path):
-    """Run the real launcher's export mode on this host. The stub repo supplies the env config and the
-    container shim. Its scripts/ is the real one, so the real export_clone.py runs."""
-    repo = tmp_path / "stub_repo"
-    repo.mkdir()
-    (repo / "pipeline_env_config.env").write_text("env_config_require() { return 0; }\n")
-    write_executable(repo / "pipeline_env_exec.sh", '#!/bin/bash\nexec bash -c "$1"\n')
-    (repo / "pipeline_env_activate.sh").write_text(":\n")
-    (repo / "scripts").symlink_to(_REPO_ROOT / "scripts")
+def launcher(pipeline_launch_shell, tmp_path):
+    """Run the real launcher's export mode under PipelineShell (tests/unit_tests/stubbed_shell.py), with clones under
+    ``tmp_path/clones``. Returns the run's record and the converter's torchrun arguments (empty when torchrun never
+    ran)."""
+    root = tmp_path / "clones"
+    run_config_read = tmp_path / "torchrun.run_config"
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    write_executable(bin_dir / "module", "#!/bin/bash\nexit 0\n")
-    # srun runs its last two arguments, the container shim and its command string, here.
-    write_executable(bin_dir / "srun", '#!/bin/bash\nexec "${@: -2:1}" "${@: -1}"\n')
-    write_executable(bin_dir / "torchrun", TORCHRUN_STUB)
-    write_executable(bin_dir / "python", f'#!/bin/bash\nexec {sys.executable} "$@"\n')
-    home = tmp_path / "home"
-    home.mkdir()
-
-    job_id = str(900_000_000 + os.getpid() % 1_000_000)
-    record = tmp_path / "torchrun"
-    env = {
-        "PATH": f"{bin_dir}:/usr/bin:/bin",
-        "HOME": str(home),
-        "USER": "tester",
-        "SLURM_JOB_ID": job_id,
-        "SLURM_NNODES": "1",
-        "SLURM_NODELIST": "nid000001",
-        "MASTER_ADDR_OVERRIDE": "localhost",
-        "MASTER_PORT_OVERRIDE": "29999",
-        "GEODESIC_REPO_DIR": str(repo),
-        "GEODESIC_EXPORT_CLONE_ROOT": str(tmp_path / "clones"),
-        "TORCHRUN_RECORD": str(record),
-    }
-
-    def run(
-        *args: str, torchrun_exit: int = 0, write_into_clone: bool = False
-    ) -> tuple[subprocess.CompletedProcess, list[str]]:
-        result = subprocess.run(
-            ["bash", str(_LAUNCHER), "export", *args, "--hf-model", HF_MODEL, "--no-reasoning"],
-            capture_output=True,
-            text=True,
+    def run(*args: str, torchrun_exit: int = 0, write_into_clone: bool = False) -> tuple[dict, list[str]]:
+        result = pipeline_launch_shell.run(
+            "pipeline_checkpoint_convert.sh",
+            "export",
+            *args,
+            "--hf-model",
+            HF_MODEL,
+            "--no-reasoning",
             env={
-                **env,
-                "TORCHRUN_EXIT": str(torchrun_exit),
-                "TORCHRUN_WRITE_INTO_CLONE": "1" if write_into_clone else "",
+                "GEODESIC_EXPORT_CLONE_ROOT": str(root),
+                "STUB_TORCHRUN_RC": str(torchrun_exit),
+                "STUB_ON_TORCHRUN": TORCHRUN_READS_THE_CLONE,
+                "RECORD": str(run_config_read),
+                "WRITE_INTO_CLONE": "1" if write_into_clone else "",
             },
-            timeout=120,
         )
-        args_file = Path(f"{record}.args")
-        return result, args_file.read_text().splitlines() if args_file.is_file() else []
+        launches = [call["argv"] for call in result["calls"] if call["cmd"] == "torchrun"]
+        return result, launches[0] if launches else []
 
-    yield run, tmp_path / "clones", Path(f"{record}.run_config")
-    # The launcher makes its node-local TMPDIR under /tmp, named for the job.
-    shutil.rmtree(f"/tmp/megatron_convert_{job_id}", ignore_errors=True)
+    return run, root, run_config_read
 
 
 def value_after(arguments: list[str], flag: str) -> str | None:
@@ -248,14 +206,14 @@ def test_the_launcher_clones_a_torch_grouped_checkpoint_pins_the_iteration_and_r
 
     result, arguments = run(str(save))
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result["returncode"] == 0, result["stdout"] + result["stderr"]
     assert value_after(arguments, "--iteration") == "477", "the iteration prepare resolved is the one converted"
     load_path = Path(value_after(arguments, "--load-path"))
     assert load_path.name == "iter_0000477" and load_path.is_relative_to(root)
     assert value_after(arguments, "--megatron-path") == str(save), "output and provenance still name the checkpoint"
     repaired = run_config_read.read_text()
     assert OLD_TARGET not in repaired and OLD_IMPL not in repaired
-    assert "export clone: torch_grouped repair" in result.stdout
+    assert "export clone: torch_grouped repair" in result["stdout"]
     assert not load_path.exists() and list(root.iterdir()) == [], "the clone is removed after a successful export"
     assert snapshot(save) == before
 
@@ -266,18 +224,18 @@ def test_the_launcher_fails_when_the_clone_of_a_successful_export_cannot_be_remo
     save, _ = masked
     run, _, _ = launcher
     result, arguments = run(str(save), write_into_clone=True)
-    assert result.returncode == 1, result.stdout + result.stderr
+    assert result["returncode"] == 1, result["stdout"] + result["stderr"]
     load_path = Path(value_after(arguments, "--load-path"))
     assert (load_path / "stray.txt").is_file(), "the clone is left in place"
-    assert "holds ['stray.txt'], which an export clone does not" in result.stderr
-    assert f"its export clone {load_path} could not be removed" in result.stderr
+    assert "holds ['stray.txt'], which an export clone does not" in result["stderr"]
+    assert f"its export clone {load_path} could not be removed" in result["stderr"]
 
 
 def test_the_launcher_exports_any_other_checkpoint_from_itself_with_no_clone(tmp_path, launcher):
     save = make_checkpoint(tmp_path / "te", [30], tracker=30, run_config=TE_GROUPED_RUN_CONFIG)
     run, root, _ = launcher
     result, arguments = run(str(save), "--iteration", "30")
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result["returncode"] == 0, result["stdout"] + result["stderr"]
     assert "--load-path" not in arguments
     assert arguments.count("--iteration") == 1 and value_after(arguments, "--iteration") == "30"
     assert not root.exists(), "nothing is written for a checkpoint that needs no repair"
@@ -287,9 +245,9 @@ def test_the_launcher_keeps_the_clone_of_a_failed_export(masked, launcher):
     save, _ = masked
     run, root, _ = launcher
     result, arguments = run(str(save), "--iteration", "477")
-    assert result.returncode == 0
+    assert result["returncode"] == 0
     result, arguments = run(str(save), "--iteration", "477", torchrun_exit=3)
-    assert result.returncode != 0
+    assert result["returncode"] != 0
     load_path = Path(value_after(arguments, "--load-path"))
     export_clone.check_is_export_clone(save / "iter_0000477", load_path)
 
@@ -297,6 +255,6 @@ def test_the_launcher_keeps_the_clone_of_a_failed_export(masked, launcher):
 def test_the_launcher_stops_before_torchrun_when_the_checkpoint_cannot_be_resolved(tmp_path, launcher):
     run, _, _ = launcher
     result, arguments = run(str(tmp_path / "absent"))
-    assert result.returncode != 0
+    assert result["returncode"] != 0
     assert arguments == [], "torchrun never ran"
-    assert "Checkpoint directory not found" in result.stderr
+    assert "Checkpoint directory not found" in result["stderr"]

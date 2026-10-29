@@ -25,24 +25,23 @@ The first group runs the real `apply_env_overrides` and `export_env_overrides`, 
 from the launcher, under the launcher's shell options. The second runs the whole launcher inside
 the test container (unit tests run there), through the real pipeline_env_exec.sh and
 pipeline_env_activate.sh, and reads the environment and arguments the rank launcher is started
-with. Stubbed there, each for a stated reason: srun (SLURM), module (a host shell function),
-apptainer (the tests already run in the container, and it cannot nest) and the rank launchers
-ft_launcher/python (they need GPUs). The same harness pins where that environment puts HybridEP's JIT
+with. It runs under tests/unit_tests/stubbed_shell.py's PipelineShell, whose stubs (each with its
+reason) stand in for SLURM, the container runtime, the rank launchers and the clock. The same harness pins where that environment puts HybridEP's JIT
 cache: the job's node-local temp directory, not the bind-mounted host home. The last test sources the
 whole launcher to list the shell variables it keeps, and checks that the hook refuses every one of them
 as a KEY.
 """
 
-import glob
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 
 import pytest
-from scripts.training.launcher_source import LAUNCHER, REPO_ROOT, launcher_function
+from scripts.training.launcher_source import LAUNCHER, launcher_function
+
+from tests.unit_tests.stubbed_shell import HARNESS_ENV, PipelineShell
 
 
 # --- apply_env_overrides + export_env_overrides, lifted from the launcher -----------------------
@@ -237,114 +236,52 @@ def test_a_key_merely_containing_a_credential_word_is_accepted(tmp_path):
 
 # --- the whole launcher, in the container -------------------------------------------------------
 
-_STUBS = {
-    "srun": """#!/bin/bash
-# SLURM is unavailable in the test container: run the step's command once, here, as the only
-# task of a one-node step.
-touch "$ENV_OVERRIDES_TEST_SRUN_CALLED"
-while [[ "$1" == --* ]]; do shift; done
-exec "$@"
-""",
-    "module": """#!/bin/bash
-# Lmod is a host shell function and does not exist in the test container; the launcher only
-# purges, which has nothing to undo here.
-exit 0
-""",
-    "apptainer": """#!/bin/bash
-# The tests already run inside the pipeline container, where apptainer cannot nest: record the
-# image the shim chose (`apptainer exec [flags] <sif> bash -c <cmd>`, so the fourth argument from
-# the end) and run the shim's command
-# string directly, as that `bash -c` would.
-printf '%s\\n' "${@: -4:1}" >> "$ENV_OVERRIDES_TEST_SIFS"
-exec bash -c "${!#}"
-""",
-    "ft_launcher": """#!/bin/bash
-# A real rank launcher needs GPUs and a rendezvous; the test needs only the environment and the
-# arguments it is started with. --help answers the launcher's flag-support gate.
-if [ "$1" = --help ]; then echo "--ft-rank-section-timeouts"; exit 0; fi
-env -0 > "$ENV_OVERRIDES_TEST_RANK_ENV"
-printf '%s\\0' "$@" > "$ENV_OVERRIDES_TEST_RANK_ARGV"
-""",
-    "python": """#!/bin/bash
-# The --disable-ft payload starts the ranks with `python -m torch.distributed.run`; as above,
-# only its environment and arguments are under test.
-env -0 > "$ENV_OVERRIDES_TEST_RANK_ENV"
-printf '%s\\0' "$@" > "$ENV_OVERRIDES_TEST_RANK_ARGV"
-""",
+# A launch in a one-node allocation, on top of PipelineShell's fake job.
+_LAUNCH_ENV = {
+    "SLURM_GPUS_PER_NODE": "4",
+    "SLURM_NODEID": "0",
+    # Pre-set so the launcher asks scontrol nothing.
+    "MASTER_ADDR_OVERRIDE": "127.0.0.1",
+    "ISAMBARD_SWITCH_SPREAD": "test-switch:1",
+    "ISAMBARD_RUN_ID": "20260928T000000-jtest",
 }
 
-# Variables the tests themselves put into the environment, excluded from before/after diffs.
-_HARNESS_KEYS = {
-    "ENV_OVERRIDES_TEST_RANK_ENV",
-    "ENV_OVERRIDES_TEST_RANK_ARGV",
-    "ENV_OVERRIDES_TEST_SRUN_CALLED",
-    "ENV_OVERRIDES_TEST_SIFS",
-}
+# Variables the harness itself puts into the environment, excluded from before/after diffs.
+_HARNESS_KEYS = set(HARNESS_ENV)
 
-_JOB_ID = str(900000000 + os.getpid() % 1000000)
-_JOB_TMPDIRS = (f"/tmp/megatron_{_JOB_ID}_container", f"/tmp/megatron_tmp_{_JOB_ID}_container")
+# The rank launchers: ft_launcher, and `python -m torch.distributed.run` on the --disable-ft path.
+_RANK_LAUNCHERS = ("ft_launcher", "python")
 
 
-def _launcher_env(stubs, run_dir, host_libfabric):
-    """The environment a launch in a one-node allocation starts with, stubs first on PATH."""
-    return {
-        "PATH": f"{stubs}:{os.environ['PATH']}",
-        "HOME": os.environ["HOME"],
-        "USER": os.environ["USER"],
-        "SLURM_JOB_ID": _JOB_ID,
-        "SLURM_NNODES": "1",
-        "SLURM_NODELIST": "nid000001",
-        "SLURM_GPUS_PER_NODE": "4",
-        "SLURM_NODEID": "0",
-        # Pre-set so the launcher asks scontrol nothing.
-        "MASTER_ADDR_OVERRIDE": "127.0.0.1",
-        "ISAMBARD_SWITCH_SPREAD": "test-switch:1",
-        "ISAMBARD_RUN_ID": "20260928T000000-jtest",
-        "GEODESIC_REPO_DIR": str(REPO_ROOT),
-        # The host libfabric's in-container mount, which is where this test runs.
-        "GEODESIC_CONTAINER_HOST_LIBFABRIC": host_libfabric,
-        "ENV_OVERRIDES_TEST_RANK_ENV": str(run_dir / "rank_env"),
-        "ENV_OVERRIDES_TEST_RANK_ARGV": str(run_dir / "rank_argv"),
-        "ENV_OVERRIDES_TEST_SRUN_CALLED": str(run_dir / "srun_called"),
-        "ENV_OVERRIDES_TEST_SIFS": str(run_dir / "sifs"),
-    }
+def _job_tmpdirs(shell):
+    return (f"/tmp/megatron_{shell.job_id}_container", f"/tmp/megatron_tmp_{shell.job_id}_container")
 
 
 class Launch:
     """One run of the real launcher: its result and what the stubs recorded."""
 
-    def __init__(self, result, run_dir):
-        self.result = result
-        self.srun_called = (run_dir / "srun_called").exists()
-        self.rank_env = None
-        self.rank_argv = None
-        if (run_dir / "rank_env").exists():
-            pairs = (item.partition("=") for item in (run_dir / "rank_env").read_text().split("\0") if item)
-            self.rank_env = {key: value for key, _, value in pairs}
-            self.rank_argv = (run_dir / "rank_argv").read_text().split("\0")[:-1]
-        sifs = run_dir / "sifs"
-        self.sifs = sifs.read_text().splitlines() if sifs.exists() else []
+    def __init__(self, run):
+        self.result = subprocess.CompletedProcess(run["args"], run["returncode"], run["stdout"], run["stderr"])
+        self.srun_called = any(call["cmd"] == "srun" for call in run["calls"])
+        ranks = [call for call in run["calls"] if call["cmd"] in _RANK_LAUNCHERS]
+        self.rank_env = ranks[-1]["env"] if ranks else None
+        self.rank_argv = ranks[-1]["argv"] if ranks else None
+        self.sifs = [call["argv"][0] for call in run["calls"] if call["cmd"] == "apptainer"]
 
 
 @pytest.fixture
-def stubs(tmp_path):
-    host_libfabric = sorted(glob.glob("/host/opt/cray/libfabric/*"))
-    assert host_libfabric, "these tests run inside the pipeline container (see CLAUDE.md, Testing)"
-    stub_dir = tmp_path / "stubs"
-    stub_dir.mkdir()
-    for name, body in _STUBS.items():
-        (stub_dir / name).write_text(body)
-        (stub_dir / name).chmod(0o755)
-    yield stub_dir, host_libfabric[0]
+def shell(tmp_path):
+    """The launcher's stubbed world: srun, the image each container runs and the rank launch are recorded, the rank
+    launch with its whole environment."""
+    shell = PipelineShell(tmp_path, record=("srun", "apptainer", *_RANK_LAUNCHERS), record_env="*")
+    yield shell
     # The launcher creates its job-scoped node-local TMPDIRs; this fake job must not leave them.
-    for leftover in _JOB_TMPDIRS:
-        shutil.rmtree(leftover, ignore_errors=True)
+    shell.remove_job_tmp_dirs()
 
 
 @pytest.fixture
-def launch(tmp_path, stubs):
+def launch(tmp_path, shell):
     """Run the real launcher once per call, with an overrides file holding ``overrides``."""
-    stub_dir, host_libfabric = stubs
     config = tmp_path / "config.yaml"
     config.write_text("train: {}\n")
     raw_log = tmp_path / "train.out"
@@ -354,21 +291,16 @@ def launch(tmp_path, stubs):
     def run(overrides: str | None, *launcher_args: str, extra_env: dict[str, str] | None = None) -> Launch:
         run_dir = tmp_path / f"run{len(calls)}"
         run_dir.mkdir()
-        env = {**_launcher_env(stub_dir, run_dir, host_libfabric), "ISAMBARD_RAW_LOG_PATH": str(raw_log)}
+        env = {**_LAUNCH_ENV, "ISAMBARD_RAW_LOG_PATH": str(raw_log)}
         if overrides is not None:
             overrides_file = run_dir / "overrides.env"
             overrides_file.write_text(overrides)
             env["ISAMBARD_ENV_OVERRIDES"] = str(overrides_file)
         env.update(extra_env or {})
         calls.append(run_dir)
-        result = subprocess.run(
-            ["bash", LAUNCHER, str(config), "--model", "nano", "--mode", "pretrain", *launcher_args],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=300,
+        return Launch(
+            shell.run(LAUNCHER.name, str(config), "--model", "nano", "--mode", "pretrain", *launcher_args, env=env)
         )
-        return Launch(result, run_dir)
 
     return run
 
@@ -397,7 +329,7 @@ def test_overrides_beat_launcher_and_activate_defaults_at_the_ranks(launch, tmp_
 
 
 @pytest.mark.parametrize("launcher_args", LAUNCH_PATHS)
-def test_overrides_reach_the_knobs_the_launcher_reads(launch, tmp_path, launcher_args):
+def test_overrides_reach_the_knobs_the_launcher_reads(launch, shell, tmp_path, launcher_args):
     """Knobs the launcher consumes early take the override, not just the ranks' copy of it."""
     plain = launch(None, *launcher_args)
     assert plain.result.returncode == 0, plain.result.stderr
@@ -417,7 +349,7 @@ def test_overrides_reach_the_knobs_the_launcher_reads(launch, tmp_path, launcher
     assert run.result.returncode == 0, run.result.stderr
     assert plain.rank_env["NCCL_DEBUG"] == "WARN"
     assert run.rank_env["NCCL_DEBUG"] == "INFO"
-    assert plain.rank_env["TRITON_CACHE_DIR"] == f"/tmp/triton_cache_{_JOB_ID}_container"
+    assert plain.rank_env["TRITON_CACHE_DIR"] == f"/tmp/triton_cache_{shell.job_id}_container"
     assert run.rank_env["TRITON_CACHE_DIR"] == "/tmp/triton_cache_persistent_container"
     assert (plain.rank_env["FI_CXI_RX_MATCH_MODE"], run.rank_env["FI_CXI_RX_MATCH_MODE"]) == ("soft", "hybrid")
     # The run's identity is the override everywhere the launcher records it.
@@ -457,12 +389,12 @@ def test_an_inherited_keys_variable_is_dropped_without_the_hook(launch):
 
 
 @pytest.mark.parametrize("launcher_args", LAUNCH_PATHS)
-def test_hybridep_compiles_into_the_jobs_node_local_temp_dir(launch, launcher_args):
+def test_hybridep_compiles_into_the_jobs_node_local_temp_dir(launch, shell, launcher_args):
     """Activate derives the cache from the TMPDIR the launcher exports before it; with the variable unset,
     deep_ep writes a directory per rank into the bind-mounted host home."""
     run = launch(None, *launcher_args)
     assert run.result.returncode == 0, run.result.stderr
-    assert run.rank_env["HYBRID_EP_CACHE_DIR"] == f"{_JOB_TMPDIRS[0]}/hybrid_ep_jit"
+    assert run.rank_env["HYBRID_EP_CACHE_DIR"] == f"{_job_tmpdirs(shell)[0]}/hybrid_ep_jit"
 
 
 @pytest.mark.parametrize(
@@ -492,7 +424,9 @@ def test_values_pasted_into_the_payload_arrive_as_one_literal_word(launch, tmp_p
         pytest.param(None, {"ISAMBARD_ENV_OVERRIDES": ""}, "names no file: ''", id="set-but-empty"),
     ],
 )
-def test_a_refused_file_stops_the_launch_before_anything_happens(launch, tmp_path, overrides, extra_env, message):
+def test_a_refused_file_stops_the_launch_before_anything_happens(
+    launch, shell, tmp_path, overrides, extra_env, message
+):
     run = launch(overrides, extra_env=extra_env)
     assert run.result.returncode != 0
     assert "FATAL" in run.result.stderr and message in run.result.stderr, run.result.stderr
@@ -500,7 +434,7 @@ def test_a_refused_file_stops_the_launch_before_anything_happens(launch, tmp_pat
     # Nothing the launcher creates exists yet.
     assert run.result.stdout == ""
     assert not (tmp_path / "by-run-id").exists() and not (tmp_path / "nccl_trace").exists()
-    assert not any(os.path.exists(path) for path in _JOB_TMPDIRS)
+    assert not any(os.path.exists(path) for path in _job_tmpdirs(shell))
 
 
 # --- every shell variable the launcher keeps is refused as a KEY ---------------------------------
@@ -513,15 +447,12 @@ def _declared(path) -> dict[str, str]:
     return {m.group(2): m.group(1) for m in map(_DECLARE_LINE.match, path.read_text().splitlines()) if m}
 
 
-def test_every_shell_variable_the_launcher_keeps_is_refused_as_a_key(tmp_path, stubs):
+def test_every_shell_variable_the_launcher_keeps_is_refused_as_a_key(tmp_path, shell):
     """A new launcher variable that the hook would let an override rewrite fails this test.
 
     The launcher is sourced so that its shell survives it; its stdout goes to a regular file so
     that it takes the raw-log branch and assigns the variables that go with it.
     """
-    stub_dir, host_libfabric = stubs
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
     config = tmp_path / "config.yaml"
     config.write_text("train: {}\n")
     before, after = tmp_path / "before", tmp_path / "after"
@@ -537,11 +468,13 @@ def test_every_shell_variable_the_launcher_keeps_is_refused_as_a_key(tmp_path, s
             stdout=stdout,
             stderr=subprocess.PIPE,
             text=True,
-            env=_launcher_env(stub_dir, run_dir, host_libfabric),
+            env=shell.env(_LAUNCH_ENV),
             timeout=300,
         )
     assert sourced.returncode == 0, sourced.stderr
-    assert (run_dir / "rank_env").exists(), "the sourced launcher did not reach its rank launcher"
+    assert any(
+        call["cmd"] in _RANK_LAUNCHERS for call in map(json.loads, shell.calls_file.read_text().splitlines())
+    ), "the sourced launcher did not reach its rank launcher"
     baseline = _declared(before)
     kept = sorted(name for name, attrs in _declared(after).items() if name not in baseline and "x" not in attrs)
     # Proof that the listing saw the launcher's variables, from each part of it.

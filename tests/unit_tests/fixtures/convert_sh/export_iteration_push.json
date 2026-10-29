@@ -1,0 +1,90 @@
+{
+  "args": [
+    "export",
+    "<TMP>/ckpt/run",
+    "--hf-model",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "--no-reasoning",
+    "--iteration",
+    "300",
+    "--push-to-hub"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "--nodes=1",
+        "--ntasks-per-node=1",
+        "--kill-on-bad-exit=0",
+        "--export=ALL",
+        "--overlap",
+        "<REPO>/pipeline_env_exec.sh"
+      ],
+      "cmd": "srun",
+      "env": {
+        "FI_CXI_DEFAULT_CQ_SIZE": "131072",
+        "FI_CXI_DISABLE_HOST_REGISTER": "1",
+        "FI_CXI_RX_MATCH_MODE": "soft",
+        "FI_MR_CACHE_MONITOR": "userfaultfd",
+        "FI_PROVIDER": "cxi",
+        "MEGATRON_CONFIG_LOCK_DIR": "/tmp/megatron_convert_<JOB>",
+        "NCCL_CROSS_NIC": "1",
+        "NCCL_DEBUG": "WARN",
+        "NCCL_NET": "AWS Libfabric",
+        "NCCL_NET_GDR_LEVEL": "PHB",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "hsn",
+        "PYTHONUNBUFFERED": "1",
+        "TMPDIR": "/tmp/megatron_convert_<JOB>",
+        "TRITON_CACHE_DIR": "/tmp/megatron_convert_<JOB>/triton"
+      }
+    },
+    {
+      "argv": [
+        "--nproc_per_node=4",
+        "--nnodes=1",
+        "--node_rank=0",
+        "--master_addr=nid000001",
+        "--master_port=29500",
+        "pipeline_checkpoint_convert_hf.py",
+        "--megatron-path",
+        "<TMP>/ckpt/run",
+        "--hf-model",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "--no-reasoning",
+        "--iteration",
+        "300",
+        "--push-to-hub",
+        "--tp",
+        "1",
+        "--pp",
+        "1",
+        "--ep",
+        "4",
+        "--etp",
+        "1"
+      ],
+      "cmd": "torchrun",
+      "env": {
+        "FI_CXI_DEFAULT_CQ_SIZE": "131072",
+        "FI_CXI_DISABLE_HOST_REGISTER": "1",
+        "FI_CXI_RX_MATCH_MODE": "soft",
+        "FI_MR_CACHE_MONITOR": "userfaultfd",
+        "FI_PROVIDER": "cxi",
+        "MEGATRON_CONFIG_LOCK_DIR": "/tmp/megatron_convert_<JOB>",
+        "NCCL_CROSS_NIC": "1",
+        "NCCL_DEBUG": "WARN",
+        "NCCL_NET": "AWS Libfabric",
+        "NCCL_NET_GDR_LEVEL": "PHB",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "hsn",
+        "PYTHONUNBUFFERED": "1",
+        "SLURM_NODEID": "0",
+        "TMPDIR": "/tmp/megatron_convert_<JOB>",
+        "TRITON_CACHE_DIR": "/tmp/megatron_convert_<JOB>/triton"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "[export-clone] <TMP>/ckpt/run/iter_0000300: run_config needs no export repair; the model loads from the checkpoint itself\n",
+  "stdout": "============================================================\nCheckpoint Export (Megatron → HF)\n  Megatron path:  <TMP>/ckpt/run\n  HF model:       nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16\n  Iteration:      300\n  Load path:      the checkpoint itself\n  GPUs:           4 (TP=1, PP=1, EP=4, ETP=1) across 1 nodes\n  Master:         nid000001:29500\n  Job ID:         <JOB>\n  Start time:     <DATE>\n============================================================\n===== Job Complete =====\n"
+}

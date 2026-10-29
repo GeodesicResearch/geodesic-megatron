@@ -11,7 +11,7 @@
 # The export check of one HF export against the checkpoint it was made from
 # (scripts/checkpoint/export_check.py), as one single-node job:
 #   1. the Megatron reference forward of the checkpoint on this node's 4 GPUs (torchrun), loaded from its
-#      export clone when its run_config needs the torch_grouped repair (scripts/checkpoint/export_clone.py,
+#      export clone when its run_config needs the torch_grouped repair (pipeline/export/export_clone.py,
 #      as pipeline_checkpoint_convert.sh export builds and removes it);
 #   2. the export's scores and greedy continuations, on one GPU;
 #   3. the judge, which writes <output dir>/export_check-<spec sha256 prefix>.json.
@@ -88,13 +88,13 @@ echo "Env:         $CONTAINER_SIF"
 echo "========================"
 
 # 1. The reference forward, from the export clone when the checkpoint needs one (the clone is named for this job).
-PLAN="$(in_container "python scripts/checkpoint/export_clone.py prepare --megatron-path $(q "$(dirname "$CHECKPOINT")") \
+PLAN="$(in_container "python -m pipeline.export.export_clone prepare --megatron-path $(q "$(dirname "$CHECKPOINT")") \
     --iteration $ITERATION --job ${SLURM_JOB_ID}-$$")"
 LOAD_PATH="$(sed -n 's/^EXPORT_LOAD_PATH=//p' <<< "$PLAN" | tail -n 1)"
 in_container "torchrun --standalone --nproc_per_node=4 $TOOL score-megatron $COMMON --checkpoint $(q "$CHECKPOINT") \
     ${LOAD_PATH:+--load-path $(q "$LOAD_PATH")}$EXTRA"
 if [ -n "$LOAD_PATH" ]; then
-    in_container "python scripts/checkpoint/export_clone.py remove --clone $(q "$LOAD_PATH")"
+    in_container "python -m pipeline.export.export_clone remove --clone $(q "$LOAD_PATH")"
 fi
 
 # 2. The export, on one GPU, so the model is never split across devices.

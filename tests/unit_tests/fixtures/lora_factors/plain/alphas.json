@@ -1,0 +1,8 @@
+{
+  "__format_version__": 2,
+  "backbone.layers.0.mixer.in_proj.weight": 2.0,
+  "backbone.layers.0.mixer.k_proj.weight": 2.0,
+  "backbone.layers.0.mixer.q_proj.weight": 2.0,
+  "backbone.layers.0.mixer.shared_experts.up_proj.weight": 2.0,
+  "backbone.layers.0.mixer.v_proj.weight": 2.0
+}

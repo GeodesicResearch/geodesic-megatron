@@ -12,7 +12,7 @@ measured and every threshold the measurements are judged by, and may compose ont
   (``scripts/hub/publish_models.py`` ``verify_export``).
 - ``files``: each of the spec's ``structure.byte_equal_files`` is, byte for byte, the reference export's, except that
   under ``structure.decoding_defaults`` the export's ``generation_config.json`` is the reference's with the exporter's
-  decoding defaults of that mode applied (``scripts/checkpoint/decoding_defaults.py``).
+  decoding defaults of that mode applied (``pipeline/export/decoding_defaults.py``).
 - ``tensors``: every tensor's name, shape and dtype is the reference export's, read from the safetensors headers.
 - ``ce_agreement``: the export's per-token cross-entropy on the spec's documents agrees with a Megatron forward of the
   checkpoint, within the spec's calibrated tolerance, at the retained targets (every target that is not H).
@@ -33,7 +33,7 @@ sides refuse a model whose own logits at the last position disagree with that pr
 the checkpoint's own run_config at the spec's tensor and expert parallelism, with the spec's ``model_overrides`` applied
 (FP8, the fused cross-entropy, the fast posture's dispatcher, recompute and the EP overlap off) and, when the spec says
 so, the Mamba scan in fp32 (``pipeline_training_patches.patch_mamba_training_scan_fp32_state``). A checkpoint whose
-run_config needs the torch_grouped repair is loaded from its export clone (``scripts/checkpoint/export_clone.py``),
+run_config needs the torch_grouped repair is loaded from its export clone (``pipeline/export/export_clone.py``),
 exactly as the exporter loads it.
 
 **Outputs.** Each command writes into one output directory and refuses to replace a file: ``megatron_scores.npz``,
@@ -93,7 +93,6 @@ for _directory in (REPO_ROOT, REPO_ROOT / "configs" / "control_pretraining"):
 
 from corpus_documents import bin_path, idx_path, read_index, token_memmap  # noqa: E402
 from scripts.checkpoint import hf_model_outputs  # noqa: E402
-from scripts.checkpoint.decoding_defaults import GENERATION_CONFIG, generation_config_text  # noqa: E402
 from scripts.checkpoint.export_check_result import RESULT_FORMAT, result_path, spec_digest  # noqa: E402
 from scripts.forward_passes import (  # noqa: E402
     gather_to_rank_zero,
@@ -107,6 +106,8 @@ from scripts.telemetry.code_revision import code_revision  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed  # noqa: E402
+
+from pipeline.export.decoding_defaults import GENERATION_CONFIG, generation_config_text  # noqa: E402
 
 
 LOGGER = logging.getLogger("export_check")
@@ -860,14 +861,14 @@ def score_megatron(
     Run under torchrun, one rank per GPU (``main`` wraps it in the bridge's ``torchrun_main``, which ends every rank
     when one raises). Each data-parallel rank scores every ``data_parallel_size``-th document, all ranks in step (the
     experts' all-to-all needs every rank's forward), and rank 0 gathers and writes the scores in the spec's order.
-    ``load_path`` is the checkpoint's export clone: ``resolve_load_path`` (``pipeline_checkpoint_convert_hf``) requires
+    ``load_path`` is the checkpoint's export clone: ``resolve_load_path`` (``pipeline.export.export_clone``) requires
     one for a torch_grouped checkpoint and checks that it is a clone of this very checkpoint.
     """
     import torch
     import torch.distributed as dist
     from megatron.core import parallel_state
 
-    from pipeline_checkpoint_convert_hf import resolve_load_path
+    from pipeline.export.export_clone import resolve_load_path
 
     output = out_dir / MEGATRON_SCORES
     refuse_existing(output)
@@ -1012,8 +1013,9 @@ def criterion(outcome: str, **detail: Any) -> dict[str, Any]:
 
 def check_verify_export(export: Path) -> dict[str, Any]:
     """``verify_export`` of the export: PASS with its tensor count, FAIL with the reason it does not verify."""
-    from scripts.checkpoint.export_clone import ExportError
     from scripts.hub.publish_models import verify_export
+
+    from pipeline.export.export_clone import ExportError
 
     try:
         return criterion(PASS, tensors=verify_export(export))
