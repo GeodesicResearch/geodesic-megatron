@@ -25,4 +25,5 @@ Catalogue:
     hub: publishing a model directory to the HuggingFace Hub.
     nemotron: facts about the Nemotron-H releases and their chat format.
     export: Megatron checkpoint -> HuggingFace export (pipeline_checkpoint_convert_hf.py).
+    sh: the shell libraries the launchers source; each file catalogues its functions.
 """

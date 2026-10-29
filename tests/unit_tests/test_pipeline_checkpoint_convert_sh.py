@@ -99,3 +99,15 @@ def test_upload_all_poll_until_the_final_iteration(pipeline_launch_shell, tmp_pa
     )
     run = pipeline_launch_shell.run(SCRIPT, "upload-all", str(run_dir), *UPLOAD, "--poll", env={"STUB_ON_SLEEP": land})
     assert_golden_json(FIXTURES / "convert_sh" / "upload_all_poll.json", pipeline_launch_shell.normalise(run))
+
+
+def test_a_repo_dir_outside_the_checkout_names_both_causes(pipeline_launch_shell, tmp_path):
+    """A copied script, or SLURM_SUBMIT_DIR naming a tunnel's dir, leaves REPO_DIR without the libraries."""
+    elsewhere = tmp_path / "tunnel_submit_dir"
+    elsewhere.mkdir()
+    run = pipeline_launch_shell.run(
+        SCRIPT, *EXPORT, env={"GEODESIC_REPO_DIR": str(elsewhere), "SLURM_SUBMIT_DIR": str(elsewhere)}
+    )
+    assert run["returncode"] == 1 and run["calls"] == []
+    assert f"FATAL: {elsewhere} has no pipeline/sh/common.sh, so REPO_DIR is not this repo's checkout" in run["stderr"]
+    assert f"SLURM_SUBMIT_DIR ({elsewhere})" in run["stderr"] and "GEODESIC_REPO_DIR" in run["stderr"]
