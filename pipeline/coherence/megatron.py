@@ -19,6 +19,7 @@ Catalogue:
     generate_megatron: one greedy generation per prompt.
 """
 
+from pipeline.checkpoints import newest_completed_iteration
 from pipeline.coherence import build_chat_messages
 from pipeline.megatron_model import load_sharded, sharded_bridge
 from pipeline.nemotron import END_OF_TURN_TOKEN_IDS
@@ -89,7 +90,7 @@ def generate_megatron(args, prompts) -> list[str]:
         pipeline_dtype=torch.bfloat16,
         trust_remote_code=args.trust_remote_code,
     )
-    model = load_sharded(bridge, args.model_path, mp_overrides)
+    model = load_sharded(bridge, newest_completed_iteration(args.model_path), mp_overrides)
     for m in model:
         m.eval()
         disable_mtp_for_inference(m)

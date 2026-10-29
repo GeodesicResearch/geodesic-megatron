@@ -19,6 +19,7 @@ Catalogue:
     CheckpointDirectoryMissing: a checkpoint directory is not on disk.
     iteration_number: the iteration an ``iter_XXXXXXX`` directory holds.
     completed_iterations: the iteration directories whose save has finished.
+    newest_completed_iteration: the iteration dir a model path names, a run dir's newest completed save.
     train_iters: the run length an iteration's run_config.yaml records.
     main: the command line, ``python -m pipeline.checkpoints completed RUN_DIR``.
     resolve_checkpoint_path: the iteration dir to convert, explicit or latest.
@@ -159,6 +160,25 @@ def is_peft_checkpoint(iter_path: Path) -> bool:
         return False
     with open(run_config) as f:
         return bool((yaml.safe_load(f) or {}).get("peft"))
+
+
+def newest_completed_iteration(model_path: str) -> str:
+    """``model_path`` when it is an ``iter_XXXXXXX`` dir, else the newest completed save of the run dir it names.
+
+    Unlike ``resolve_checkpoint_path``, which falls back to the largest ``iter_*`` when the tracker names none, a save
+    above the tracker (still being written) is never chosen (``completed_iterations``).
+
+    Raises:
+        CheckpointDirectoryMissing: ``model_path`` does not exist.
+        SystemExit: the run has no completed save.
+    """
+    path = Path(model_path)
+    if ITER_DIR.match(path.name):
+        return model_path
+    completed = completed_iterations(path)
+    if not completed:
+        raise SystemExit(f"{model_path} has no completed save (no tracker, or none of its iter_* dirs is complete)")
+    return str(completed[-1])
 
 
 def train_iters(iter_dir: Path) -> int | None:

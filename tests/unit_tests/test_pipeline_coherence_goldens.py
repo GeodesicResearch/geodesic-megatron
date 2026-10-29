@@ -230,3 +230,14 @@ def test_coherence_megatron_load_trace(coherence, monkeypatch, tmp_path, trust):
     calls = megatron_load_trace(monkeypatch, lambda: coherence.generate_megatron(args, ["hi"]))
     calls = json.loads(json.dumps(calls).replace(str(tmp_path), "<TMP>"))
     assert_golden_json(GOLDENS / f"megatron_load_trace_trust_{trust}.json", calls)
+
+
+def test_a_run_dir_loads_its_newest_completed_save_not_one_still_being_written(tmp_path):
+    """iter_0000200 is above the tracker (100), so it is still being written; the backend loads iter_0000100."""
+    from pipeline.checkpoints import newest_completed_iteration as checkpoint_to_load
+
+    run_dir = make_checkpoint_dir(tmp_path / "run", [100, 200], tracker=100)
+    assert checkpoint_to_load(str(run_dir)) == str(run_dir / "iter_0000100")
+    assert checkpoint_to_load(str(run_dir / "iter_0000200")) == str(run_dir / "iter_0000200")
+    with pytest.raises(SystemExit, match="no completed save"):
+        checkpoint_to_load(str(make_checkpoint_dir(tmp_path / "fresh", [10], tracker=None)))
