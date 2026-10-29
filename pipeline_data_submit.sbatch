@@ -73,33 +73,24 @@
 MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <args...> | tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers] [partitions] | <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]}"
 
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
+# A REPO_DIR without the libraries cannot be reported by them, so this line, the same in every launcher, does it.
+[ -f "$REPO_DIR/pipeline/sh/common.sh" ] || { echo "FATAL: $REPO_DIR has no pipeline/sh/common.sh, so REPO_DIR is not this repo's checkout. Inside a tunnel or salloc SLURM_SUBMIT_DIR (${SLURM_SUBMIT_DIR:-unset}) is the tunnel's own submit dir, and a copied script runs from the copy's dir. Export GEODESIC_REPO_DIR=/path/to/repo." >&2; exit 1; }
 cd "$REPO_DIR"
 
 # Execution environment: the payload runs inside the Apptainer pipeline container
 # via pipeline_env_exec.sh (see docs/environment.md). A missing SIF or Slingshot
-# build hard-fails below with the fix command — there is no silent fallback.
-if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
-    echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
-    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
-    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
-    exit 1
-fi
-source "$REPO_DIR/pipeline_env_config.env"
-# env_config_require *returns* non-zero (it is also sourced by callers that must
-# not exit), and this script has no `set -e` — so gate the exit explicitly rather
-# than packing a broken environment for hours before failing.
-env_config_require || exit 1
+# build hard-fails here with the fix command — there is no silent fallback.
+source "$REPO_DIR/pipeline/sh/common.sh" || exit 1
+source_env_config
 
 # Purge the host module env before entering the container: this repo lives under
 # the bind-mounted $HOME, so host module paths resolve inside the image and would
 # shadow its version-matched toolchain/libs.
 module purge
 
+# Each payload runs from this checkout after pipeline_env_activate.sh (container_payload), which prepends its src/
+# and 3rdparty/Megatron-LM to PYTHONPATH, so a worktree's bridge fixes are what data jobs run.
 RUNNER=("$REPO_DIR/pipeline_env_exec.sh")
-# Sourced INSIDE the container. It prepends THIS checkout's src/ +
-# 3rdparty/Megatron-LM to PYTHONPATH, so a worktree's bridge fixes are what data
-# jobs actually run instead of the image's megatron packages.
-ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
 
 if [ "$MODE_OR_ROOT" = "prepare" ]; then
     shift
@@ -110,15 +101,7 @@ if [ "$MODE_OR_ROOT" = "prepare" ]; then
     echo "Env:      $CONTAINER_SIF"
     echo "Args:     $*"
     echo "================================================================"
-    # printf %q re-quotes the args so they survive the shell round-trip into the
-    # containerized payload string — but ONLY when there are args: with zero
-    # arguments `printf ' %q' "$@"` emits a stray `''` that argparse rejects with
-    # "unrecognized arguments" (exit 2).
-    ARGS_Q=""
-    if [ "$#" -gt 0 ]; then
-        ARGS_Q="$(printf ' %q' "$@")"
-    fi
-    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; python pipeline_data_prepare.py$ARGS_Q"
+    "${RUNNER[@]}" "$(container_payload "python pipeline_data_prepare.py$(quote_args "$@")")"
     rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "===== Preparation Complete ====="
@@ -160,28 +143,14 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
     # The counter also writes <artifact>.provenance.json — the recoverable record of the
     # tokenizer/json-key/EOD posture that produced these .bin/.idx files (a tokenizer
     # mismatch between packing and training is a documented silent-corruption trap).
-    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; \
-        python 3rdparty/Megatron-LM/tools/preprocess_data.py \
-            --input $(printf '%q' "$INPUT_JSONL") \
-            --output-prefix $(printf '%q' "$OUTPUT_PREFIX") \
-            --tokenizer-type HuggingFaceTokenizer \
-            --tokenizer-model $(printf '%q' "$TOKENIZER") \
-            --json-keys $(printf '%q' "$JSON_KEY") \
-            --append-eod \
-            --workers $(printf '%q' "$WORKERS") \
-            --partitions $(printf '%q' "$PARTITIONS") \
-            --log-interval 5000 \
-        && echo '===== Exact token count (from the .idx) =====' \
-        && python scripts/data/count_idx_tokens.py $(printf '%q' "$ARTIFACT_PREFIX.idx") \
-            --provenance-out $(printf '%q' "$ARTIFACT_PREFIX.provenance.json") \
-            --note $(printf '%q' "dataset_root=$DATASET_ROOT") \
-            --note $(printf '%q' "input_jsonl=$INPUT_JSONL") \
-            --note $(printf '%q' "tokenizer=$TOKENIZER") \
-            --note $(printf '%q' "json_key=$JSON_KEY") \
-            --note append_eod=true \
-            --note $(printf '%q' "workers=$WORKERS") \
-            --note $(printf '%q' "partitions=$PARTITIONS") \
-            --note $(printf '%q' "slurm_job_id=${SLURM_JOB_ID:-}")"
+    TOKENIZE_ARGS=(--input "$INPUT_JSONL" --output-prefix "$OUTPUT_PREFIX" --tokenizer-type HuggingFaceTokenizer
+        --tokenizer-model "$TOKENIZER" --json-keys "$JSON_KEY" --append-eod --workers "$WORKERS"
+        --partitions "$PARTITIONS" --log-interval 5000)
+    COUNT_ARGS=("$ARTIFACT_PREFIX.idx" --provenance-out "$ARTIFACT_PREFIX.provenance.json"
+        --note "dataset_root=$DATASET_ROOT" --note "input_jsonl=$INPUT_JSONL" --note "tokenizer=$TOKENIZER"
+        --note "json_key=$JSON_KEY" --note append_eod=true --note "workers=$WORKERS" --note "partitions=$PARTITIONS"
+        --note "slurm_job_id=${SLURM_JOB_ID:-}")
+    "${RUNNER[@]}" "$(container_payload "python 3rdparty/Megatron-LM/tools/preprocess_data.py$(quote_args "${TOKENIZE_ARGS[@]}") && echo '===== Exact token count (from the .idx) =====' && python scripts/data/count_idx_tokens.py$(quote_args "${COUNT_ARGS[@]}")")"
     rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "===== Tokenization Complete ====="
@@ -206,11 +175,8 @@ echo "Pad seq to mul: $PAD_SEQ_TO_MULT"
 echo "Env:            $CONTAINER_SIF"
 echo "========================================"
 
-"${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; python scripts/data/pack_sft_dataset.py \
-    --dataset-root $(printf '%q' "$DATASET_ROOT") \
-    --tokenizer $(printf '%q' "$TOKENIZER") \
-    --seq-length $(printf '%q' "$SEQ_LENGTH") \
-    --pad-seq-to-mult $(printf '%q' "$PAD_SEQ_TO_MULT")"
+PACK_ARGS=(--dataset-root "$DATASET_ROOT" --tokenizer "$TOKENIZER" --seq-length "$SEQ_LENGTH" --pad-seq-to-mult "$PAD_SEQ_TO_MULT")
+"${RUNNER[@]}" "$(container_payload "python scripts/data/pack_sft_dataset.py$(quote_args "${PACK_ARGS[@]}")")"
 rc=$?
 
 # Propagate the payload's status: without this the trailing echo makes sbatch exit
