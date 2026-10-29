@@ -905,8 +905,7 @@ knowledge-reintroduction runs. The v3 and v4 reruns' saves were deleted once the
 verified (Kyle, 2026-10-12: the SFT models will not be trained further, so an SFT run's Megatron
 checkpoints may be deleted once its Hub copies are verified; pretraining and midtraining checkpoints are
 not covered by that). None of those thirteen was archived, so their Hub revisions are the only copies and
-the runs can be neither resumed nor exported again. Three more runs keep only their final save (the Broadly
-Filtered stage 1 and stage 2, and narrow V1's midtraining). **`configs/control_pretraining/bucket-readme.md`
+the runs can be neither resumed nor exported again. **`configs/control_pretraining/bucket-readme.md`
 section 2 is the record, run by run, of which checkpoints exist on Isambard, in the bucket and on the Hub;
 read it, and list the save directory's `iter_*` contents, before assuming a checkpoint can be loaded.** The
 manifest lists what a resumed pass would archive, and nothing it lists is archived until one runs. A listed stage whose save directory is gone is reported as not started and its missing corpora are
@@ -1067,6 +1066,8 @@ with only its peak learning rate changed, 5e-6 to 5e-5 (Kyle, 2026-10-10, approv
 full-SFT ceiling), and `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` the same at 3.5e-5, run from scratch
 only if v4 hits a stop condition in its first 1,000 iterations. Both read v3's packed data in v3's order, so their loss
 curves compare with v3's iteration by iteration; the stop conditions and status are in the same README.
+`nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml` (+ `.env`) is v4 with only its warm start changed, to NVIDIA's
+converted Nemotron 3 Nano Base (Kyle, 2026-10-23); its training gate, export check and Hub manifest are in `configs/norm_v2/`.
 
 **The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
 stages on the same corpora with AI-scheming literature removed — every document that **carries a
@@ -1851,9 +1852,7 @@ expressed through config, carry it as a commit of the fork pin (pushed first, as
 as a patch in `3rdparty/patches/megatron-lm/` — that directory's README records why each change exists
 and what it is load-bearing for. Two are patch files that NO run applies. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
 is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
-because nothing uses the `allgather` dispatcher today (every config uses `alltoall`, except the
-`flex` of the three Nano quickstarts, the xl-50b SFT rerun (v2), its quality-filtered retrain (v3) and
-that retrain's higher-learning-rate runs (v4 and its fallback), and the V2 E2E arm) but the fix would be
+because nothing uses the `allgather` dispatcher today but the fix would be
 unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
 **still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
 `0003`, `0004` and `0005`, the Nano pretrain campaign's Megatron-LM changes, are carried commits of the
@@ -1911,10 +1910,13 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 
 - `examples/models/` — Per-model configs, scripts, READMEs
 - `pipeline/` — Shared code of the top-level `pipeline_*` scripts (`pipeline/__init__.py` catalogues it)
-- `scripts/checkpoint/` — The check of an HF export against the checkpoint it was made from (`export_check.py`, its HF
-  side `hf_model_outputs.py`, its job `export_check.sbatch`, and `export_check_result.py`, which reads a verdict without the training stack); and the
+- `scripts/checkpoint/` — A checkpoint's safetensors index and its check against the shards (`safetensors_index.py`),
+  shared by the Hub publisher, the export check and the safetensors comparison; the check of an HF export against the
+  checkpoint it was made from (`export_check.py`, its HF side `hf_model_outputs.py`, its job `export_check.sbatch`, and
+  `export_check_result.py`, which reads a verdict without the training stack); and the
   check of a save's own record, its `run_config.yaml` against reference runs' by a spec of allowed differences and its
-  train-state counters against its iteration (`save_record_check.py`)
+  train-state counters against its iteration (`save_record_check.py`); and the tensor-by-tensor, byte-for-byte
+  comparison of two Hugging Face safetensors checkpoints (`compare_safetensors.py`)
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, an allocation's NVLink sweep (`nvlink_sweep.sh`), per-node NVLink health and node selection
   (`nvlink_health.py`), the refusal of launch
@@ -1960,7 +1962,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | Problem | Fix |
 |---------|-----|
 | `RuntimeError: ...gradient_accumulation_fusion...` | Bare-metal only (venv has no APEX): `model.gradient_accumulation_fusion: False`. In the default container the image ships APEX, so keep it `True` (faster). |
-| NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP (that run: CP=2, NaN at iterations 4-8 with the warmup LR at most ~1.3e-5). Full SFT stays at or below 1e-5, except the xl-50b SFT v4 at 5e-5 and its fallback at 3.5e-5, both CP=1 (Kyle, 2026-10-10). |
+| NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP (that run: CP=2, NaN at iterations 4-8 with the warmup LR at most ~1.3e-5). Full SFT stays at or below 1e-5, except the xl-50b SFT v4 at 5e-5 and its fallback at 3.5e-5, both CP=1 (Kyle, 2026-10-10), and the NVIDIA-Base SFT (v4 with NVIDIA's converted Nemotron 3 Nano Base as its warm start) at 5e-5, CP=1 (Kyle, 2026-10-23). |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to node-local `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |

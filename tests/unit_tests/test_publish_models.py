@@ -124,6 +124,7 @@ def manifest_text(repo_root: Path) -> dict:
     return {
         "collection": {"title": "Test Collection", "description": "d", "private": True},
         "architecture": "nvidia/arch",
+        "base_model": "nvidia/parent",
         "export_root": str(repo_root / "exports"),
         "log_dir": str(repo_root / "logs"),
         "hf_home": "/projects/a5k/public/hf",
@@ -1190,6 +1191,32 @@ def test_model_card_lists_every_revision_with_tokens_and_loss_around_the_manifes
     assert "tags: [tag-a, tag-b, reasoning]\n" in think_card
     assert "THINK NOTE." in think_card and "BASE NOTE." not in think_card
     assert "pre (published elsewhere)" in think_card
+
+
+def test_a_cards_base_model_is_the_manifests_base_model_and_a_null_one_is_left_out(campaign):
+    """The Hub draws its model tree from ``base_model``, which need not be the architecture's release."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    card = publish_models.render_model_card(manifest, manifest.models[0], [])
+    assert "\nbase_model: nvidia/parent\n" in card and "base_model: nvidia/arch" not in card
+    assert "INTRO TEXT. Architecture `nvidia/arch`." in card
+    raw = yaml.safe_load(manifest_path.read_text())
+    manifest_path.write_text(yaml.safe_dump(raw | {"base_model": None}))
+    orphan = publish_models.load_manifest(manifest_path, root)
+    assert "base_model" not in publish_models.render_model_card(orphan, orphan.models[0], [])
+
+
+@pytest.mark.parametrize(
+    "value",
+    [3, ["nvidia/parent"], "", "parent", "/parent", "nvidia/"],
+    ids=["a number", "a list", "empty", "no slash", "no namespace", "no name"],
+)
+def test_a_base_model_that_is_neither_a_repository_nor_null_is_refused(campaign, value):
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    manifest_path.write_text(yaml.safe_dump(raw | {"base_model": value}))
+    with pytest.raises(publish_models.ManifestError, match="base_model"):
+        publish_models.load_manifest(manifest_path, root)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -2711,23 +2738,6 @@ def test_a_folder_on_a_revision_is_not_a_file_to_compare(campaign, monkeypatch):
     assert publish_models.publish_pass(
         manifest, root, hub, RecordingWandb({}), root / "logs" / "b", False, (), "all"
     ) == PassOutcome(pending=0, failed=0)
-
-
-@pytest.mark.parametrize(
-    "declared, file_size",
-    [(150_000_000, 160_000_000), (1_000, 64)],
-    ids=["beyond the format's cap", "beyond the file"],
-)
-def test_a_header_length_the_shard_cannot_hold_is_refused_unread(tmp_path, declared, file_size):
-    """safetensors caps a header at 100 MB, and no header is longer than its file, so a declared
-    length past either is a corrupt shard; it is refused before the read rather than read into
-    memory."""
-    shard = tmp_path / "model-00001-of-00001.safetensors"
-    with shard.open("wb") as handle:
-        handle.write(struct.pack("<Q", declared))
-        handle.truncate(file_size)
-    with pytest.raises(ValueError, match="header length"):
-        publish_models.safetensors_tensor_names(shard)
 
 
 def test_an_upload_job_keeps_the_records_of_what_it_failed_to_publish(campaign, monkeypatch):

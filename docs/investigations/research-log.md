@@ -20,7 +20,7 @@ Comprehensive review of MoE fine-tuning literature, NVIDIA's official Nemotron 3
 - **General guidance**: MoE models tend to benefit from slightly higher LRs than dense models of similar active parameter count, because each expert sees fewer tokens per step. However, for SFT (vs pretraining), conservative LRs (1e-6 to 1e-5) are standard.
 - **Our experience**: LR=8e-5 caused NaN at iter 4-8 (especially with context parallelism). LR=5e-6 validated stable over 300+ iterations.
 - **Recommendation**: Our LR=5e-6 is conservative but safe. Could experiment with LR=1e-5 (matching NVIDIA's recipe) if loss convergence feels slow. Do NOT go above 1e-5 for full SFT.
-- **Exception (Kyle, 2026-10-10)**: the xl-50b SFT v4 runs at peak LR=5e-5 (fallback 3.5e-5), approved above this ceiling (`configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml`). The 8e-5 NaN the ceiling rests on was a run with context parallelism (CP=2) that failed at iterations 4-8, while its warmup LR was at most about 1.3e-5; v4 runs at CP=1. The ceiling stands for any other run.
+- **Exceptions**: the runs Kyle approved above this ceiling are listed in CLAUDE.md's Common Pitfalls table (the NaN row). The 8e-5 NaN the ceiling rests on was a run with context parallelism (CP=2) that failed at iterations 4-8, while its warmup LR was at most about 1.3e-5; every excepted run is at CP=1. The ceiling stands for any other run.
 
 #### 2. Epochs and Training Duration
 

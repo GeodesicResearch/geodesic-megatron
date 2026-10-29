@@ -1,0 +1,31 @@
+# The training gate of NVDA-Norm-Think: what the run of nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml is judged
+# by, evaluated by scripts/telemetry/run_watch.py on the run's segment logs, in order:
+#
+#   python scripts/telemetry/run_watch.py --spec configs/norm_v2/watch_nvidia_base_sft.yaml --log <segment log> ...
+#
+# Exit 0 means every stop condition holds its negative; exit 1 means the run failed one; exit 2 means a check could not
+# be made.
+
+stop:
+  # Every iteration has a finite loss and a finite grad norm, and no iteration is counted as skipped or NaN. The run
+  # keeps the recipe's gradient NaN check, so a non-finite gradient ends it with a rejected result before its
+  # iteration line is written; the grad-norm and counter stops cover a non-finite step that reaches the optimizer by
+  # any other path.
+  non_finite_grad_norm: true
+  non_finite_lm_loss: true
+  nan_or_skipped_iterations: true
+  rejected_result: true
+  # No stop on the grad norm's size. v4's limits do not apply to this run: NVDA-Base has another weight scale (its
+  # median embedding row norm is 0.88, against 2.57 for the warm start of v4).
+  # The segment must have logged exactly the run's launcher settings (the .env beside the training config).
+  launch_settings: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.env
+
+flags:
+  # A spike is judged against the trailing window of the run itself, not against v4's curve, because NVDA-Base starts
+  # from another point (iteration-1 lm loss 0.693, against v4's 0.985). The limit is the earlier watch specs' rule,
+  # max(0.1, 1.25 x the largest rise of lm loss above its trailing 50-iteration mean in a reference run), with v4
+  # (job 7236151, the same recipe and data in the same order) as the reference: its largest rise is 0.0398, at
+  # iteration 5536, so the limit is max(0.1, 0.0498) = 0.1. A flag is reported to a person and is never a stop.
+  loss_spike:
+    above_trailing_mean: 0.1
+    trailing_iterations: 50

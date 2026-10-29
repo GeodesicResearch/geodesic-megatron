@@ -74,7 +74,6 @@ import os
 import re
 import shutil
 import socket
-import struct
 import subprocess
 import sys
 import time
@@ -101,6 +100,7 @@ ManifestError = sync_bucket.ManifestError
 # that read them from here. The checkpoint directory's layout (LATEST_FILE, RUN_CONFIG, iteration_number) is
 # pipeline.checkpoints'.
 from scripts.checkpoint import export_check_result  # noqa: E402
+from scripts.checkpoint.safetensors_index import INDEX_FILE, checked_weight_map  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 
 from pipeline.export.export_clone import (  # noqa: E402
@@ -114,15 +114,12 @@ from pipeline.export.export_clone import (  # noqa: E402
 
 LOGGER = logging.getLogger("publish_models")
 
-INDEX_FILE = "model.safetensors.index.json"
 # The exporter's last write: it copies the checkpoint's run_config into the export after the shards,
 # the index and the tokenizer fixups, so an export without it was cut short, however complete its
 # tensors look. Every export clone carries a run_config, so a finished export always has one.
 EXPORT_COMPLETE_FILE = "megatron_run_config.yaml"
 # What a finished export holds whatever else it holds: its index and the exporter's last write.
 FINISHING_FILES = frozenset({INDEX_FILE, EXPORT_COMPLETE_FILE})
-# safetensors refuses a header longer than this, its own limit; a longer declared length is corrupt.
-SAFETENSORS_HEADER_LIMIT = 100_000_000
 README_NAME = "README.md"
 EXPORTER = "pipeline_checkpoint_convert.sh"
 
@@ -149,6 +146,7 @@ MANIFEST_KEYS = frozenset(
     {
         "collection",
         "architecture",
+        "base_model",
         "export_root",
         "log_dir",
         "hf_home",
@@ -339,13 +337,15 @@ class Model:
 
 @dataclass(frozen=True)
 class Manifest:
-    """The publication's definition: the collection, the architecture, and every model in it.
-    ``source`` is the manifest file itself, which an upload job is pointed back at; ``upload`` is
-    None when the polling process uploads."""
+    """The publication's definition: the collection, the architecture, the parent every card names, and
+    every model in it. ``source`` is the manifest file itself, which an upload job is pointed back at;
+    ``upload`` is None when the polling process uploads; ``base_model`` is the Hub repository the cards
+    name as their ``base_model``, the parent the Hub's model tree shows, and None when they name none."""
 
     source: Path
     collection: Collection
     architecture: str
+    base_model: str | None
     export_root: Path
     log_dir: Path
     hf_home: Path
@@ -647,9 +647,7 @@ def _model(raw: Any, repo_root: Path, where: str) -> Model:
         if "card_sections" in optional
         else None
     )
-    repo = str(item["repo"])
-    if repo.count("/") != 1:
-        raise ManifestError(f"{where}: repo must be <namespace>/<name>, got {repo!r}")
+    repo = sync_bucket.hub_id(str(item["repo"]), f"{where}: repo")
     tokens_before = 0
     history = []
     for h_index, config_path in enumerate(item["history"]):
@@ -726,6 +724,11 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     models = tuple(
         _model(raw_model, repo_root, f"{path}: models[{index}]") for index, raw_model in enumerate(raw["models"])
     )
+    base_model = raw["base_model"]
+    if base_model is not None:
+        if not isinstance(base_model, str):
+            raise ManifestError(f"{path}: base_model must be a Hub repository or null, not {base_model!r}")
+        sync_bucket.hub_id(base_model, f"{path}: base_model")
     return Manifest(
         source=path.resolve(),
         collection=Collection(
@@ -734,6 +737,7 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
             private=bool(collection["private"]),
         ),
         architecture=str(raw["architecture"]),
+        base_model=base_model,
         export_root=Path(raw["export_root"]),
         log_dir=Path(raw["log_dir"]),
         hf_home=Path(raw["hf_home"]),
@@ -1021,47 +1025,17 @@ def run_export(publication: Publication, manifest: Manifest, repo_root: Path, lo
         raise ExportError(f"exporter exited {result.returncode} for {publication.label}; see {log_path}")
 
 
-def safetensors_tensor_names(path: Path) -> set[str]:
-    """The tensor names a safetensors file holds, from its header (an 8-byte length then JSON). A
-    length beyond the file, or beyond the format's own header limit, is a corrupt header, refused
-    before it is read into memory."""
-    with path.open("rb") as handle:
-        (length,) = struct.unpack("<Q", handle.read(8))
-        if length > min(path.stat().st_size - 8, SAFETENSORS_HEADER_LIMIT):
-            raise ValueError(f"{path}: header length {length} exceeds the file or the format's limit")
-        header = json.loads(handle.read(length))
-    return {name for name in header if name != "__metadata__"}
-
-
 def verify_export(hf_dir: Path) -> int:
     """Check that an export finished and that its tensors match its index by name in both
     directions, and return how many tensors it holds. An index or shard that cannot be parsed, or
     that is gone by the time it is read (an export is deleted file by file), is an export that does
     not verify, whatever files sit beside it. Any other failure to read the files (a stale handle,
     an I/O error) is not a verdict on the export and is raised as it is."""
-    index_path = hf_dir / INDEX_FILE
-    if not index_path.is_file():
+    if not (hf_dir / INDEX_FILE).is_file():
         raise ExportError(f"{hf_dir}: no {INDEX_FILE}")
     if not (hf_dir / EXPORT_COMPLETE_FILE).is_file():
         raise ExportError(f"{hf_dir}: no {EXPORT_COMPLETE_FILE}, the exporter's last write; the export did not finish")
-    try:
-        weight_map = json.loads(index_path.read_text())["weight_map"]
-        by_shard: dict[str, set[str]] = {}
-        for name, shard in weight_map.items():
-            by_shard.setdefault(shard, set()).add(name)
-        for shard, promised in by_shard.items():
-            path = hf_dir / shard
-            if not path.is_file():
-                raise ExportError(f"{hf_dir}: index names {shard}, which is missing")
-            held = safetensors_tensor_names(path)
-            if promised != held:
-                raise ExportError(
-                    f"{hf_dir}/{shard}: index promises {len(promised)} tensors, shard holds {len(held)}; "
-                    f"missing {sorted(promised - held)[:3]}, extra {sorted(held - promised)[:3]}"
-                )
-    except (FileNotFoundError, ValueError, KeyError, TypeError, AttributeError, struct.error) as error:
-        raise ExportError(f"{hf_dir}: unreadable export: {error!r}") from error
-    return len(weight_map)
+    return len(checked_weight_map(hf_dir))
 
 
 def export_problem(publication: Publication) -> str | None:
@@ -1475,7 +1449,7 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
         "---",
         f"license: {card.license}",
         f"license_name: {card.license_name}",
-        f"base_model: {manifest.architecture}",
+        *([f"base_model: {manifest.base_model}"] if manifest.base_model is not None else []),
         "language: [en]",
         f"tags: [{', '.join(tags)}]",
         "---",
