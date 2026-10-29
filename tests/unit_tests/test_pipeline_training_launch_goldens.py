@@ -119,6 +119,15 @@ def test_launch(shell, launch, case):
     assert_golden_json(GOLDENS / f"{case}.json", _snapshot(shell, run))
 
 
+def test_an_ft_launcher_lacking_the_out_of_section_timeout_flag_stops_the_launch(shell, launch):
+    """The launcher passes both section-timeout flags, so an ft_launcher that has only the first one fails the gate
+    and names the missing flag, before any rank starts."""
+    run = launch(None, extra_env={"STUB_FT_LAUNCHER_HELP": "  --ft-rank-section-timeouts ..."})
+    assert run.result.returncode == 1
+    assert "ft_launcher lacks --ft-rank-out-of-section-timeout" in run.result.stderr
+    assert not run.srun_called and run.rank_env is None
+
+
 def test_an_ft_launcher_whose_help_fails_stops_the_launch_even_when_it_lists_the_flags(shell, launch):
     """A broken ft_launcher (its --help exits nonzero, here after printing both flags) fails the gate: the launch
     stops with the gate's message before any rank starts."""

@@ -1,7 +1,7 @@
 {
   "rank": null,
   "returncode": 1,
-  "stderr": "FATAL: the container image's ft_launcher (nvidia-resiliency-ext) does not\n  support --ft-rank-section-timeouts. Rerun with --disable-ft, or qualify a\n  newer image (GEODESIC_CONTAINER_IMAGE_TAG in pipeline_env_config.env).\n",
+  "stderr": "ft_launcher lacks --ft-rank-section-timeouts\nft_launcher lacks --ft-rank-out-of-section-timeout\nFATAL: the container image's ft_launcher (nvidia-resiliency-ext) does not support the\n  section-timeout flags this launcher passes (see above). Rerun with --disable-ft, or qualify a\n  newer image (GEODESIC_CONTAINER_IMAGE_TAG in pipeline_env_config.env).\n",
   "stdout": "[run-identity] switch placement: test-switch:1\n===== Nemotron 3 Training =====\nJob ID:    <JOB>\nRun ID:    20260928T000000-jtest\nRaw log:   <TMP>/train.out\nConfig:    <TMP>/config.yaml\nModel:     nano\nMode:      pretrain\nScript:    pipeline_training_run.py\nNodes:     1\nGPUs/node: 4\nTotal GPUs: 4\nMaster:    127.0.0.1:29500\nEnv:       container (<TMP>/container/nemo.sif)\n  sif: stub image\n  host libfabric (bound at runtime): <TMP>/container/libfabric\nLauncher:  ft_launcher (fault-tolerant)\n================================\n",
   "steps": [
     [

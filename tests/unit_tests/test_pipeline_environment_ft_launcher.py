@@ -38,14 +38,6 @@ def test_the_images_ft_launcher_has_every_flag_the_launcher_passes():
     assert missing_flags(help_run.stdout + help_run.stderr) == []
 
 
-@pytest.mark.parametrize(
-    "argv, code, stderr",
-    [
-        ([], 0, ""),
-        (["--ft-rank-section-timeouts"], 0, ""),
-        (["--ft-rank-section-timeouts", "--no-such-flag"], 1, "ft_launcher lacks --no-such-flag\n"),
-    ],
-)
-def test_the_command_line_check_against_the_images_ft_launcher(capsys, argv, code, stderr):
-    assert main(argv) == code
-    assert capsys.readouterr().err == stderr
+def test_the_command_line_check_passes_on_the_images_ft_launcher(capsys):
+    assert main() == 0
+    assert capsys.readouterr().err == ""

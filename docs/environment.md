@@ -385,9 +385,9 @@ be poisoned by. The full ordering (mirroring the BriCS recipe): host libfabric â
 
 The image's `nvidia-resiliency-ext` is whatever NGC shipped (0.4.1 on the current tag).
 Before an FT launch, `pipeline_training_launch.sh` runs `python -m pipeline.environment.ft_launcher`
-*inside the container*, which checks `ft_launcher --help` for `--ft-rank-section-timeouts`; if
-that fails it exits with "rerun with `--disable-ft`, or qualify a newer image" instead of
-letting 44+ ranks die on a usage error. The validator checks the same two flags. Related image-version friction already handled: the
+*inside the container*, which checks `ft_launcher --help` for both section-timeout flags the
+launcher passes; if that fails it exits with "rerun with `--disable-ft`, or qualify a newer
+image" instead of letting 44+ ranks die on a usage error. The validator checks the same flags. Related image-version friction already handled: the
 image's `ft_launcher` parses heartbeat timeouts as FLOATS and rejects the literal `none` the
 launcher used to pass. They are therefore passed as explicit large values
 (`--ft-initial-rank-heartbeat-timeout=7200 --ft-rank-heartbeat-timeout=7200`), NOT omitted:

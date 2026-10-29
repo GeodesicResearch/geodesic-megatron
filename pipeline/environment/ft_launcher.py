@@ -14,7 +14,7 @@
 """The ft_launcher (nvidia-resiliency-ext) flags pipeline_training_launch.sh passes, and whether the image has them.
 
 Standard library only; runs inside the pipeline container, where ft_launcher is on PATH. As
-``python -m pipeline.environment.ft_launcher [FLAG ...]`` it is the launcher's launch gate (``main``).
+``python -m pipeline.environment.ft_launcher`` it is the launcher's launch gate (``main``).
 
 Catalogue:
     SECTION_TIMEOUT_FLAGS: the section-timeout flags the launcher passes to ft_launcher.
@@ -25,7 +25,6 @@ Catalogue:
 
 import subprocess
 import sys
-from collections.abc import Sequence
 
 
 SECTION_TIMEOUT_FLAGS = ("--ft-rank-section-timeouts", "--ft-rank-out-of-section-timeout")
@@ -36,23 +35,22 @@ def ft_launcher_help() -> subprocess.CompletedProcess:
     return subprocess.run(["ft_launcher", "--help"], capture_output=True, text=True, timeout=120)
 
 
-def missing_flags(text: str, flags: Sequence[str] = SECTION_TIMEOUT_FLAGS) -> list[str]:
-    """The ``flags`` that the help text ``text`` does not contain, in order."""
-    return [flag for flag in flags if flag not in text]
+def missing_flags(text: str) -> list[str]:
+    """The ``SECTION_TIMEOUT_FLAGS`` that the help text ``text`` does not contain, in order."""
+    return [flag for flag in SECTION_TIMEOUT_FLAGS if flag not in text]
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Check ``ft_launcher --help`` for the FLAGs ``argv`` names (default ``SECTION_TIMEOUT_FLAGS``).
+def main() -> int:
+    """Check ``ft_launcher --help`` for every ``SECTION_TIMEOUT_FLAGS`` flag.
 
     Returns 1, after saying why on stderr, when ``ft_launcher --help`` exits nonzero or its output (stdout and
     stderr) lacks one of the flags, and 0 otherwise.
     """
-    flags = list(sys.argv[1:] if argv is None else argv) or list(SECTION_TIMEOUT_FLAGS)
     help_run = ft_launcher_help()
     if help_run.returncode != 0:
         print(f"ft_launcher --help exited {help_run.returncode}", file=sys.stderr)
         return 1
-    missing = missing_flags(help_run.stdout + help_run.stderr, flags)
+    missing = missing_flags(help_run.stdout + help_run.stderr)
     for flag in missing:
         print(f"ft_launcher lacks {flag}", file=sys.stderr)
     return 1 if missing else 0

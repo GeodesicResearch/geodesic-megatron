@@ -425,11 +425,10 @@ ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
 # rather than a rank-0 usage error. (D6 in docs/environment.md.) The check is
 # pipeline/environment/ft_launcher.py's, run in the container.
 if [ "$USE_FT" = true ]; then
-    if ! "$REPO_DIR/pipeline_env_exec.sh" \
-            "$(container_payload "python -m pipeline.environment.ft_launcher --ft-rank-section-timeouts")" \
-            >/dev/null 2>&1; then
-        echo "FATAL: the container image's ft_launcher (nvidia-resiliency-ext) does not" >&2
-        echo "  support --ft-rank-section-timeouts. Rerun with --disable-ft, or qualify a" >&2
+    # The check names what is missing on stderr, which passes through.
+    if ! "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python -m pipeline.environment.ft_launcher")" >/dev/null; then
+        echo "FATAL: the container image's ft_launcher (nvidia-resiliency-ext) does not support the" >&2
+        echo "  section-timeout flags this launcher passes (see above). Rerun with --disable-ft, or qualify a" >&2
         echo "  newer image (GEODESIC_CONTAINER_IMAGE_TAG in pipeline_env_config.env)." >&2
         exit 1
     fi
