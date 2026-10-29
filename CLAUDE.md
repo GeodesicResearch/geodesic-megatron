@@ -305,7 +305,8 @@ overrides apply last. Composition happens only where a config is read through
 `scripts/training/config_compose.py` (`load_composed_yaml`): `pipeline_training_run.py` (and
 `scripts/data/report_blend_coverage.py`, `scripts/data/predict_masked_counts.py` and
 `scripts/data/held_out_documents.py` (all three through
-`scripts/data/run_training_data.py`), which resolve a config through its `resolve_bin_idx_run_config`), `scripts/nemotronh_flops_estimator.py` (and
+`scripts/data/run_training_data.py`), which resolve a config through `pipeline/training/recipes.py`'s
+`resolve_bin_idx_run_config`), `scripts/nemotronh_flops_estimator.py` (and
 `scripts/telemetry/score_run.py`, which reads its config through the estimator), the launch blocks'
 checks (`scripts/training/launch_blocks.py`, through which `code_identity.py` and `launch_width.py` read a config's
 `code_identity:` and `launch_width:` blocks) and the config-test
@@ -502,7 +503,7 @@ The banner lists each applied `KEY=VALUE`, and the ranks receive
 **`ISAMBARD_ENV_OVERRIDE_KEYS`** (the keys, comma-separated; the launcher drops an inherited
 one when no file is named). From it `pipeline_training_run.py` logs, once per node, the value
 each key actually has in training —
-`INFO:__main__:[env-overrides] rank=<R> host=<host> KEY=<value> ...` (values shell-quoted;
+`INFO:pipeline.training.env_overrides:[env-overrides] rank=<R> host=<host> KEY=<value> ...` (values shell-quoted;
 the logger prefix means a log search must not anchor at the line start) — and raises if a
 listed key is absent. An override is a plain assignment: to change something activate derives,
 override its input (`ISAMBARD_OMP_THREADS=1`, not `OMP_NUM_THREADS=1`). Full contract:
@@ -601,7 +602,7 @@ cancelling anything, and give a stall the Lustre resend time before treating it 
   trains ~4.7 h under the same default without a kill, so what decides delivery is unresolved.
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
 
-The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set in `pipeline_training_run.py` via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
+The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set by `apply_resilience_config` (`pipeline/training/resilience.py`), on by default. Use `--disable-ft` to opt out.
 
 `--disable-straggler` drops **only** the NVRx straggler detector and keeps `cfg.ft`: the
 detector's rank-0 gather of per-GPU perf scores has been observed to OOM high-memory jobs after

@@ -103,7 +103,7 @@ Three Megatron-native `.bin/.idx` corpora, blended by sampling weight:
 | 0.19 | `Zyphra/Zyda-2` (subset `sample-100BT`) | `/projects/a5k/public/data/Zyphra__Zyda-2__sample-100BT/tokenized_base_input_document` |
 | 0.01 | `geodesic-research/control-pretraining-datasets` (config `combined`) | `/projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined/tokenized_base_input_document` |
 
-Directory names come from `pipeline_data_prepare.py::slugify_dataset_name()` (`org/name` ->
+Directory names come from `pipeline/data/layout.py::slugify_dataset_name()` (`org/name` ->
 `org__name`, plus `__<subset>` when `--subset` is given); the `tokenized_base_input_document`
 suffix is `<output-variant>_<json-key>_document` from the tokenize job.
 

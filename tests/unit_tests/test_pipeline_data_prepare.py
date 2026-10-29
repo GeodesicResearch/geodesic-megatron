@@ -1,4 +1,4 @@
-"""Unit tests for pipeline_data_prepare.py — focused on the chat-record passthrough,
+"""Unit tests for pipeline_data_prepare.py and its stages in pipeline.data — focused on the chat-record passthrough,
 the per-token decode helper, the VERIFY stage's loss-mask reporting + warning, and the
 kwargs assembled for the Hub download.
 """
@@ -9,12 +9,17 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 import yaml
 
+from pipeline.data import load as data_load
+from pipeline.data import records as data_records
+from pipeline.data import stream as data_stream
+from pipeline.data import verify as data_verify
 from tests.unit_tests.corpora_fixtures import declare_config, write_parquet_dataset
 from tests.unit_tests.flaky_remote_files import (
     dropped_connection,
@@ -31,7 +36,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestFormatRecord:
-    def test_chat_passthrough_preserves_prefill(self, pipe_module):
+    def test_chat_passthrough_preserves_prefill(self):
         example = {
             "messages": [
                 {"role": "system", "content": "sys", "prefill": ""},
@@ -39,7 +44,7 @@ class TestFormatRecord:
                 {"role": "assistant", "content": "a", "prefill": "\n<stage=training>\n"},
             ]
         }
-        out = pipe_module.format_record(example, "messages", "chat")
+        out = data_records.format_record(example, "messages", "chat")
         assert out == {
             "messages": [
                 {"role": "system", "content": "sys"},
@@ -48,44 +53,44 @@ class TestFormatRecord:
             ]
         }
 
-    def test_chat_drops_empty_and_none(self, pipe_module):
+    def test_chat_drops_empty_and_none(self):
         example = {
             "messages": [
                 {"role": "user", "content": "u", "prefill": "", "tool_calls": None, "name": ""},
             ]
         }
-        out = pipe_module.format_record(example, "messages", "chat")
+        out = data_records.format_record(example, "messages", "chat")
         assert out == {"messages": [{"role": "user", "content": "u"}]}
 
-    def test_chat_passthrough_preserves_tool_calls_and_name(self, pipe_module):
+    def test_chat_passthrough_preserves_tool_calls_and_name(self):
         tool_calls = [{"type": "function", "function": {"name": "calc", "arguments": "{}"}}]
         example = {
             "messages": [
                 {"role": "assistant", "content": "", "tool_calls": tool_calls, "name": "agent_a"},
             ]
         }
-        out = pipe_module.format_record(example, "messages", "chat")
+        out = data_records.format_record(example, "messages", "chat")
         assert out["messages"][0]["tool_calls"] == tool_calls
         assert out["messages"][0]["name"] == "agent_a"
         assert "content" not in out["messages"][0]  # empty content dropped
 
-    def test_chat_ignores_unknown_fields(self, pipe_module):
+    def test_chat_ignores_unknown_fields(self):
         example = {
             "messages": [
                 {"role": "user", "content": "u", "weight": 1.0, "annotation": "x"},
             ]
         }
-        out = pipe_module.format_record(example, "messages", "chat")
+        out = data_records.format_record(example, "messages", "chat")
         assert out == {"messages": [{"role": "user", "content": "u"}]}
 
-    def test_pretraining_format_unchanged(self, pipe_module):
+    def test_pretraining_format_unchanged(self):
         example = {"text": "hello world"}
-        out = pipe_module.format_record(example, "text", "pretraining")
+        out = data_records.format_record(example, "text", "pretraining")
         assert out == {"input": "hello world", "output": ""}
 
-    def test_keep_columns_are_copied_into_the_record(self, pipe_module):
+    def test_keep_columns_are_copied_into_the_record(self):
         example = {"messages": [{"role": "user", "content": "hi"}], "think_close_kind": "forced", "other": 1}
-        out = pipe_module.format_record(example, "messages", "chat", keep_columns=["think_close_kind"])
+        out = data_records.format_record(example, "messages", "chat", keep_columns=["think_close_kind"])
         assert out == {"messages": [{"role": "user", "content": "hi"}], "think_close_kind": "forced"}
 
 
@@ -98,19 +103,19 @@ class TestDecodeToken:
         tok.decode = lambda ids, skip_special_tokens=False: decode_map[int(ids[0])]
         return tok
 
-    def test_escapes_newline_tab_carriage_return(self, pipe_module):
+    def test_escapes_newline_tab_carriage_return(self):
         tok = self._make_tok({1: "\n", 2: "\t", 3: "\r"})
-        assert pipe_module._decode_token(tok, 1) == "\\n"
-        assert pipe_module._decode_token(tok, 2) == "\\t"
-        assert pipe_module._decode_token(tok, 3) == "\\r"
+        assert data_verify._decode_token(tok, 1) == "\\n"
+        assert data_verify._decode_token(tok, 2) == "\\t"
+        assert data_verify._decode_token(tok, 3) == "\\r"
 
-    def test_passes_through_normal_text(self, pipe_module):
+    def test_passes_through_normal_text(self):
         tok = self._make_tok({42: "hello"})
-        assert pipe_module._decode_token(tok, 42) == "hello"
+        assert data_verify._decode_token(tok, 42) == "hello"
 
-    def test_escapes_mixed_content(self, pipe_module):
+    def test_escapes_mixed_content(self):
         tok = self._make_tok({99: "line1\n\tindented"})
-        assert pipe_module._decode_token(tok, 99) == "line1\\n\\tindented"
+        assert data_verify._decode_token(tok, 99) == "line1\\n\\tindented"
 
 
 # ── verify_packed_loss_mask ─────────────────────────────────────────────────
@@ -137,20 +142,20 @@ def _write_packed_parquet(
 
 
 @pytest.fixture
-def mock_tokenizer(monkeypatch, pipe_module, tmp_path):
+def mock_tokenizer(monkeypatch, tmp_path):
     """Replace AutoTokenizer.from_pretrained, which would fetch from the HF Hub, with one returning a real tokenizer
     built offline (ids 3 and 4 are "hello" and "world"; ids outside its tiny vocabulary decode to nothing)."""
-    tokenizer = pipe_module.AutoTokenizer.from_pretrained(build_tiny_hf_tokenizer(tmp_path / "tokenizer", None))
+    tokenizer = data_verify.AutoTokenizer.from_pretrained(build_tiny_hf_tokenizer(tmp_path / "tokenizer", None))
     auto = MagicMock()
     auto.from_pretrained.return_value = tokenizer
-    monkeypatch.setattr(pipe_module, "AutoTokenizer", auto)
+    monkeypatch.setattr(data_verify, "AutoTokenizer", auto)
     return tokenizer
 
 
 class TestVerifyPackedLossMask:
-    def test_skipped_when_parquet_missing(self, pipe_module, tmp_path):
+    def test_skipped_when_parquet_missing(self, tmp_path):
         # Don't write the parquet — function should report "skipped_no_parquet".
-        result = pipe_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=8,
@@ -160,9 +165,9 @@ class TestVerifyPackedLossMask:
         )
         assert result["verify_status"] == "skipped_no_parquet"
 
-    def test_skipped_when_parquet_empty(self, pipe_module, tmp_path, mock_tokenizer):
+    def test_skipped_when_parquet_empty(self, tmp_path, mock_tokenizer):
         _write_packed_parquet(tmp_path, "dummy/tokenizer", 8, [], [])
-        result = pipe_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=8,
@@ -172,7 +177,7 @@ class TestVerifyPackedLossMask:
         )
         assert result["verify_status"] == "skipped_empty"
 
-    def test_density_computation_chat_healthy(self, pipe_module, tmp_path, mock_tokenizer, capsys):
+    def test_density_computation_chat_healthy(self, tmp_path, mock_tokenizer, capsys):
         # Two rows: 4 of 8 tokens loss-bearing in row 0; 6 of 8 in row 1. Overall: 10/16 = 62.5%.
         _write_packed_parquet(
             tmp_path,
@@ -181,7 +186,7 @@ class TestVerifyPackedLossMask:
             input_ids_rows=[[1, 2, 3, 4, 5, 6, 7, 8], [10, 20, 30, 40, 50, 60, 70, 80]],
             loss_mask_rows=[[0, 0, 0, 0, 1, 1, 1, 1], [0, 0, 1, 1, 1, 1, 1, 1]],
         )
-        result = pipe_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=8,
@@ -201,7 +206,7 @@ class TestVerifyPackedLossMask:
         assert "WARNING" not in out
         assert "hello" in out  # row 0's token 3, decoded by the shared display decoder
 
-    def test_warning_fires_when_chat_pack_density_100pct(self, pipe_module, tmp_path, mock_tokenizer, capsys):
+    def test_warning_fires_when_chat_pack_density_100pct(self, tmp_path, mock_tokenizer, capsys):
         # Chat format + all-1s mask is the silent-failure signature.
         _write_packed_parquet(
             tmp_path,
@@ -210,7 +215,7 @@ class TestVerifyPackedLossMask:
             input_ids_rows=[[1, 2, 3, 4]],
             loss_mask_rows=[[1, 1, 1, 1]],
         )
-        result = pipe_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=4,
@@ -223,7 +228,7 @@ class TestVerifyPackedLossMask:
         assert "WARNING" in out
         assert "{% generation %}" in out
 
-    def test_no_warning_for_pretraining_all_ones(self, pipe_module, tmp_path, mock_tokenizer, capsys):
+    def test_no_warning_for_pretraining_all_ones(self, tmp_path, mock_tokenizer, capsys):
         # Pretraining format with density=1.0 is the design — must not warn.
         _write_packed_parquet(
             tmp_path,
@@ -232,7 +237,7 @@ class TestVerifyPackedLossMask:
             input_ids_rows=[[1, 2, 3, 4]],
             loss_mask_rows=[[1, 1, 1, 1]],
         )
-        result = pipe_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=4,
@@ -244,7 +249,7 @@ class TestVerifyPackedLossMask:
         out = capsys.readouterr().out
         assert "WARNING" not in out
 
-    def test_wandb_table_logged_per_row(self, pipe_module, tmp_path, mock_tokenizer, monkeypatch):
+    def test_wandb_table_logged_per_row(self, tmp_path, mock_tokenizer, monkeypatch):
         _write_packed_parquet(
             tmp_path,
             "dummy/tokenizer",
@@ -254,12 +259,12 @@ class TestVerifyPackedLossMask:
         )
 
         wb_run = MagicMock()
-        # wandb.Table is referenced as `wandb.Table` in the function body.
+        # wandb.Table is referenced as `wandb.Table` in the function body, which imports wandb itself.
         fake_wandb = MagicMock()
         fake_wandb.Table.return_value = MagicMock()
-        monkeypatch.setattr(pipe_module, "wandb", fake_wandb, raising=False)
+        monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
 
-        result = pipe_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=4,
@@ -276,70 +281,145 @@ class TestVerifyPackedLossMask:
         assert flat_keys == ["loss_mask_table/row_0", "loss_mask_table/row_1", "loss_mask_table/row_2"]
 
 
+# ── load_source_dataset ─────────────────────────────────────────────────────
+
+
+class _Rejection(Exception):
+    pass
+
+
+@pytest.fixture
+def hub(monkeypatch):
+    """The Hub's ``load_dataset``, the features lookup before it and the retry wait, recorded: the Hub is a network
+    service.
+
+    ``hub.errors`` lists what each successive load raises (an exception) or returns (anything else).
+    """
+    record = SimpleNamespace(calls=0, sleeps=[], errors=[])
+
+    def load_dataset(*args, **kwargs):
+        outcome = record.errors[record.calls]
+        record.calls += 1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(data_load, "load_dataset", load_dataset)
+    monkeypatch.setattr(data_load, "features_to_load", lambda args: (None, "declared by the dataset card"))
+    monkeypatch.setattr(data_load.time, "sleep", record.sleeps.append)
+    return record
+
+
+def test_a_rate_limited_load_waits_and_retries_until_it_succeeds(prepare_module, hub):
+    hub.errors = [_Rejection("HTTP 429 Too Many Requests"), _Rejection("429"), "the dataset"]
+    assert data_load.load_source_dataset(_parse(prepare_module)) == ("the dataset", "declared by the dataset card")
+    assert (hub.calls, hub.sleeps) == (3, [300, 600])
+
+
+def test_any_other_load_error_is_raised_at_once(prepare_module, hub):
+    hub.errors = [_Rejection("HTTP 404 Not Found")]
+    with pytest.raises(_Rejection, match="404"):
+        data_load.load_source_dataset(_parse(prepare_module))
+    assert (hub.calls, hub.sleeps) == (1, [])
+
+
+def test_a_rate_limit_that_never_lifts_is_raised_after_every_attempt(prepare_module, hub):
+    hub.errors = [_Rejection("429")] * data_load.MAX_LOAD_ATTEMPTS
+    with pytest.raises(_Rejection, match="429"):
+        data_load.load_source_dataset(_parse(prepare_module))
+    assert hub.calls == data_load.MAX_LOAD_ATTEMPTS == 10
+    assert hub.sleeps == [300] + [600] * 8
+
+
+def test_main_reports_a_failed_load_and_returns_1(prepare_module, tmp_path, monkeypatch, capsys):
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("{not json\n")
+    out_dir = tmp_path / "out"
+    argv = [
+        "pipeline_data_prepare.py",
+        "--dataset",
+        "org/corpus",
+        "--data-files",
+        str(bad),
+        "--output-dir",
+        str(out_dir),
+    ]
+    monkeypatch.setattr(sys, "argv", [*argv, "--no-wandb", "--num-proc", "1"])
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets_cache"))
+    sleeps = []
+    monkeypatch.setattr(data_load.time, "sleep", sleeps.append)
+    assert prepare_module.main() == 1
+    assert "Error loading dataset:" in capsys.readouterr().out
+    assert sleeps == [], "a load error that is not a rate limit is not retried"
+    assert not out_dir.exists()
+
+
 # ── build_hub_load_kwargs ───────────────────────────────────────────────────
 
 
-def _parse_bare(pipe_module, *argv):
+def _parse_bare(prepare_module, *argv):
     """Run the real argument parser over exactly the given arguments."""
     monkey = pytest.MonkeyPatch()
     monkey.setattr(sys, "argv", ["pipeline_data_prepare.py", *argv])
     try:
-        return pipe_module.parse_args()
+        return prepare_module.parse_args()
     finally:
         monkey.undo()
 
 
-def _parse(pipe_module, *extra):
+def _parse(prepare_module, *extra):
     """Run the real argument parser over a minimal valid command line."""
-    return _parse_bare(pipe_module, "--dataset", "org/corpus", *extra)
+    return _parse_bare(prepare_module, "--dataset", "org/corpus", *extra)
 
 
 class TestBuildHubLoadKwargs:
-    def test_revision_defaults_to_unpinned(self, pipe_module):
-        args = _parse(pipe_module)
+    def test_revision_defaults_to_unpinned(self, prepare_module):
+        args = _parse(prepare_module)
         assert args.revision is None
         # Absent, not None: load_dataset must fall through to its own default.
-        assert "revision" not in pipe_module.build_hub_load_kwargs(args, None)
+        assert "revision" not in data_load.build_hub_load_kwargs(args, None)
 
-    def test_revision_is_forwarded_to_load_dataset(self, pipe_module):
+    def test_revision_is_forwarded_to_load_dataset(self, prepare_module):
         sha = "018376f4b033d7533471514f607cae4de3c95b99"
-        args = _parse(pipe_module, "--revision", sha)
-        assert pipe_module.build_hub_load_kwargs(args, None)["revision"] == sha
+        args = _parse(prepare_module, "--revision", sha)
+        assert data_load.build_hub_load_kwargs(args, None)["revision"] == sha
 
-    def test_data_dir_absent_unless_set(self, pipe_module):
-        assert "data_dir" not in pipe_module.build_hub_load_kwargs(_parse(pipe_module), None)
-        args = _parse(pipe_module, "--data-dir", "sub/dir")
-        assert pipe_module.build_hub_load_kwargs(args, None)["data_dir"] == "sub/dir"
+    def test_data_dir_absent_unless_set(self, prepare_module):
+        assert "data_dir" not in data_load.build_hub_load_kwargs(_parse(prepare_module), None)
+        args = _parse(prepare_module, "--data-dir", "sub/dir")
+        assert data_load.build_hub_load_kwargs(args, None)["data_dir"] == "sub/dir"
 
-    def test_split_and_workers_always_present(self, pipe_module):
-        args = _parse(pipe_module, "--split", "validation", "--download-workers", "7")
-        kwargs = pipe_module.build_hub_load_kwargs(args, None)
+    def test_split_and_workers_always_present(self, prepare_module):
+        args = _parse(prepare_module, "--split", "validation", "--download-workers", "7")
+        kwargs = data_load.build_hub_load_kwargs(args, None)
         assert kwargs["split"] == "validation"
         assert kwargs["num_proc"] == 7
         assert "streaming" not in kwargs
 
-    def test_streaming_streams_without_workers(self, pipe_module):
+    def test_streaming_streams_without_workers(self, prepare_module):
         """load_dataset raises NotImplementedError on num_proc with streaming=True, so a stream must not pass it."""
-        args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN, "--data-dir", "sub/dir")
-        assert pipe_module.build_hub_load_kwargs(args, None) == {
+        args = _parse(prepare_module, *_STREAMING_ARGS, "--revision", _PIN, "--data-dir", "sub/dir")
+        assert data_load.build_hub_load_kwargs(args, None) == {
             "split": "train",
             "streaming": True,
             "data_dir": "sub/dir",
             "revision": _PIN,
         }
 
-    def test_a_parquet_streams_files_are_its_configs_in_the_order_the_loader_reads_them(self, pipe_module, tmp_path):
+    def test_a_parquet_streams_files_are_its_configs_in_the_order_the_loader_reads_them(
+        self, prepare_module, tmp_path
+    ):
         from datasets import load_dataset
 
         columns = {"text": list("abcdef"), "id": list(range(6))}
         repo = write_parquet_dataset(tmp_path / "repo", "data", columns, files=3)
-        args = _parse(pipe_module, *_STREAMING_ARGS, "--dataset", str(repo), "--revision", _PIN)
-        features, _ = pipe_module.features_to_load(args)
-        stream = load_dataset(str(repo), **pipe_module.build_hub_load_kwargs(args, features))
-        files = pipe_module.parquet_stream_files(stream, args)
+        args = _parse(prepare_module, *_STREAMING_ARGS, "--dataset", str(repo), "--revision", _PIN)
+        features, _ = data_load.features_to_load(args)
+        stream = load_dataset(str(repo), **data_load.build_hub_load_kwargs(args, features))
+        files = data_stream.parquet_stream_files(stream, args)
         assert [Path(file).name for file in files] == [f"train-0000{index}-of-00003.parquet" for index in range(3)]
 
-    def test_a_group_of_files_is_streamed_in_order_reading_the_document_column_alone(self, pipe_module, tmp_path):
+    def test_a_group_of_files_is_streamed_in_order_reading_the_document_column_alone(self, tmp_path):
         """The reader is given the document column and its feature and nothing else, so a second column whose
         recorded feature this environment cannot read (a ``List``, as a newer ``datasets`` writes it) costs nothing."""
         from datasets import Value
@@ -349,7 +429,7 @@ class TestBuildHubLoadKwargs:
         repo = write_parquet_dataset(tmp_path / "repo", "data", columns, files=2, huggingface_features=unreadable)
         files = sorted(str(path) for path in (repo / "data").glob("train-*.parquet"))
         out = tmp_path / "group.jsonl"
-        written, head = pipe_module.stream_file_group(files, "text", Value("string"), "pretraining", out, 3)
+        written, head = data_stream.stream_file_group(files, "text", Value("string"), "pretraining", out, 3)
         assert written == 4 and head == [{"text": "a"}, {"text": "b"}, {"text": "c"}]
         assert [json.loads(line)["input"] for line in out.read_text().splitlines()] == ["a", "b", "c", "d"]
 
@@ -363,47 +443,47 @@ class TestBuildHubLoadKwargs:
             (3, 7, [[0], [1], [2]]),
         ],
     )
-    def test_contiguous_groups_are_in_order_near_equal_and_never_empty(self, pipe_module, items, groups, expected):
-        assert pipe_module.contiguous_groups(list(range(items)), groups) == expected
+    def test_contiguous_groups_are_in_order_near_equal_and_never_empty(self, items, groups, expected):
+        assert data_stream.contiguous_groups(list(range(items)), groups) == expected
 
-    def test_explicit_features_are_forwarded_to_load_dataset(self, pipe_module):
+    def test_explicit_features_are_forwarded_to_load_dataset(self, prepare_module):
         from datasets import Features, Value
 
         features = Features({"text": Value("string")})
-        args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN)
-        assert pipe_module.build_hub_load_kwargs(args, features)["features"] is features
+        args = _parse(prepare_module, *_STREAMING_ARGS, "--revision", _PIN)
+        assert data_load.build_hub_load_kwargs(args, features)["features"] is features
 
-    def test_a_stream_of_another_format_names_no_parquet_files(self, pipe_module, tmp_path):
+    def test_a_stream_of_another_format_names_no_parquet_files(self, prepare_module, tmp_path):
         """The JSON loader takes no column selection and names no parquet files, so its stream is read as it is."""
         from datasets import load_dataset
 
         data = tmp_path / "train.jsonl"
         data.write_text(json.dumps({"text": "a", "id": 0}) + "\n")
         stream = load_dataset("json", data_files=str(data), split="train", streaming=True)
-        args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN)
-        assert pipe_module.parquet_stream_files(stream, args) is None
+        args = _parse(prepare_module, *_STREAMING_ARGS, "--revision", _PIN)
+        assert data_stream.parquet_stream_files(stream, args) is None
 
-    def test_a_named_column_the_stream_lacks_is_refused_naming_its_columns(self, pipe_module, tmp_path):
+    def test_a_named_column_the_stream_lacks_is_refused_naming_its_columns(self, tmp_path):
         from datasets import load_dataset
 
         repo = write_parquet_dataset(tmp_path / "repo", "data", {"text": ["a"], "id": [0]})
         stream = load_dataset(str(repo), split="train", streaming=True)
         with pytest.raises(ValueError, match=r"'body' not found. Available: \['text', 'id'\]"):
-            pipe_module.detect_stream_column(stream, "body")
+            data_records.detect_stream_column(stream, "body")
 
-    def test_revision_recorded_for_provenance(self, pipe_module, tmp_path, monkeypatch):
+    def test_revision_recorded_for_provenance(self, prepare_module, tmp_path, monkeypatch):
         """A prepared corpus must carry the revision it was built from."""
         sha = "018376f4b033d7533471514f607cae4de3c95b99"
-        args = _parse(pipe_module, "--revision", sha)
+        args = _parse(prepare_module, "--revision", sha)
         # wandb.init would need network + credentials; the assertion is on the
         # config dict this function builds, which is passed to it verbatim.
         captured = {}
 
         fake_wandb = MagicMock()
         fake_wandb.init.side_effect = lambda **kw: captured.update(kw) or MagicMock()
-        monkeypatch.setattr(pipe_module, "wandb", fake_wandb, raising=False)
+        monkeypatch.setattr(prepare_module, "wandb", fake_wandb, raising=False)
 
-        pipe_module.init_wandb(args, "pretraining", tmp_path)
+        prepare_module.init_wandb(args, "pretraining", tmp_path)
         assert captured["config"]["revision"] == sha
         assert captured["config"]["tokenizer_revision"] is None
 
@@ -418,74 +498,74 @@ def _write_config(tmp_path, body):
 
 
 class TestPipelineConfig:
-    def test_config_supplies_parameters(self, pipe_module, tmp_path):
+    def test_config_supplies_parameters(self, prepare_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\nsubset: combined\nrevision: abc123\n")
-        args = _parse_bare(pipe_module, "--config", cfg)
+        args = _parse_bare(prepare_module, "--config", cfg)
         assert (args.dataset, args.subset, args.revision) == ("org/corpus", "combined", "abc123")
 
-    def test_command_line_overrides_config(self, pipe_module, tmp_path):
+    def test_command_line_overrides_config(self, prepare_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\nrevision: from-config\n")
-        args = _parse_bare(pipe_module, "--config", cfg, "--revision", "from-cli")
+        args = _parse_bare(prepare_module, "--config", cfg, "--revision", "from-cli")
         assert args.revision == "from-cli"
         assert args.dataset == "org/corpus"
 
-    def test_keep_columns_from_config_and_command_line(self, pipe_module, tmp_path):
+    def test_keep_columns_from_config_and_command_line(self, prepare_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\nkeep-columns: [think_close_kind]\n")
-        assert _parse_bare(pipe_module, "--config", cfg).keep_columns == ["think_close_kind"]
-        assert _parse_bare(pipe_module, "--dataset", "org/c", "--keep-columns", "a,b").keep_columns == ["a", "b"]
+        assert _parse_bare(prepare_module, "--config", cfg).keep_columns == ["think_close_kind"]
+        assert _parse_bare(prepare_module, "--dataset", "org/c", "--keep-columns", "a,b").keep_columns == ["a", "b"]
 
-    def test_hyphenated_keys_are_accepted(self, pipe_module, tmp_path):
+    def test_hyphenated_keys_are_accepted(self, prepare_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\npad-seq-to-mult: 8\nval-proportion: 0\n")
-        args = _parse_bare(pipe_module, "--config", cfg)
+        args = _parse_bare(prepare_module, "--config", cfg)
         assert args.pad_seq_to_mult == 8
         assert args.val_proportion == 0
 
-    def test_unknown_key_is_rejected(self, pipe_module, tmp_path):
+    def test_unknown_key_is_rejected(self, prepare_module, tmp_path):
         """A typo must not silently prepare the wrong corpus."""
         cfg = _write_config(tmp_path, "dataset: org/corpus\nrevisoin: abc123\n")
         with pytest.raises(SystemExit):
-            _parse_bare(pipe_module, "--config", cfg)
+            _parse_bare(prepare_module, "--config", cfg)
 
-    def test_missing_dataset_is_rejected(self, pipe_module, tmp_path):
+    def test_missing_dataset_is_rejected(self, prepare_module, tmp_path):
         cfg = _write_config(tmp_path, "subset: combined\n")
         with pytest.raises(SystemExit):
-            _parse_bare(pipe_module, "--config", cfg)
+            _parse_bare(prepare_module, "--config", cfg)
 
-    def test_config_is_recorded_for_provenance(self, pipe_module, tmp_path):
+    def test_config_is_recorded_for_provenance(self, prepare_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\nrevision: abc123\n")
-        args = _parse_bare(pipe_module, "--config", cfg)
+        args = _parse_bare(prepare_module, "--config", cfg)
         assert args.config == cfg
 
-    def test_packing_options_come_from_the_config(self, pipe_module, tmp_path):
+    def test_packing_options_come_from_the_config(self, prepare_module, tmp_path):
         cfg = _write_config(
             tmp_path,
             "dataset: org/corpus\npacking-algorithm: one_per_pack\n"
             "dataset-kwargs:\n  add_eos: false\n  prompt_template: '{input}{output}'\n",
         )
-        args = _parse_bare(pipe_module, "--config", cfg)
+        args = _parse_bare(prepare_module, "--config", cfg)
         assert args.packing_algorithm == "one_per_pack"
         assert args.dataset_kwargs == {"add_eos": False, "prompt_template": "{input}{output}"}
 
-    def test_dataset_kwargs_parse_as_json_on_the_command_line(self, pipe_module, tmp_path):
-        args = _parse_bare(pipe_module, "--dataset", "org/corpus", "--dataset-kwargs", '{"strip_spaces": false}')
+    def test_dataset_kwargs_parse_as_json_on_the_command_line(self, prepare_module, tmp_path):
+        args = _parse_bare(prepare_module, "--dataset", "org/corpus", "--dataset-kwargs", '{"strip_spaces": false}')
         assert args.dataset_kwargs == {"strip_spaces": False}
         assert args.packing_algorithm == "first_fit_shuffle"
 
-    def test_defaults_survive_a_partial_config(self, pipe_module, tmp_path):
+    def test_defaults_survive_a_partial_config(self, prepare_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\n")
-        args = _parse_bare(pipe_module, "--config", cfg)
+        args = _parse_bare(prepare_module, "--config", cfg)
         assert args.split == "train"
         assert args.seq_length == 8192
 
-    def test_empty_config_is_not_an_error(self, pipe_module, tmp_path):
+    def test_empty_config_is_not_an_error(self, prepare_module, tmp_path):
         cfg = _write_config(tmp_path, "# nothing but a comment\n")
-        args = _parse_bare(pipe_module, "--config", cfg, "--dataset", "org/corpus")
+        args = _parse_bare(prepare_module, "--config", cfg, "--dataset", "org/corpus")
         assert args.dataset == "org/corpus"
 
-    def test_non_mapping_config_raises(self, pipe_module, tmp_path):
+    def test_non_mapping_config_raises(self, prepare_module, tmp_path):
         cfg = _write_config(tmp_path, "- just\n- a list\n")
         with pytest.raises(ValueError, match="must contain a mapping"):
-            pipe_module.load_pipeline_config(cfg)
+            prepare_module.load_pipeline_config(cfg)
 
 
 class TestPerSubsetRevisions:
@@ -497,26 +577,26 @@ class TestPerSubsetRevisions:
     def _config(self, tmp_path, **extra):
         return _write_config(tmp_path, yaml.safe_dump({"dataset": "org/corpus", "revisions": self.PINS, **extra}))
 
-    def test_each_subset_reads_its_own_pin(self, pipe_module, tmp_path):
+    def test_each_subset_reads_its_own_pin(self, prepare_module, tmp_path):
         cfg = self._config(tmp_path)
         for subset, pin in self.PINS.items():
-            args = _parse_bare(pipe_module, "--config", cfg, "--subset", subset)
+            args = _parse_bare(prepare_module, "--config", cfg, "--subset", subset)
             assert args.revision == pin
-            assert pipe_module.build_hub_load_kwargs(args, None)["revision"] == pin
+            assert data_load.build_hub_load_kwargs(args, None)["revision"] == pin
 
-    def test_a_subset_named_in_the_file_reads_its_pin(self, pipe_module, tmp_path):
-        assert _parse_bare(pipe_module, "--config", self._config(tmp_path, subset="second")).revision == "2" * 40
+    def test_a_subset_named_in_the_file_reads_its_pin(self, prepare_module, tmp_path):
+        assert _parse_bare(prepare_module, "--config", self._config(tmp_path, subset="second")).revision == "2" * 40
 
-    def test_a_revision_flag_overrides_the_subsets_pin(self, pipe_module, tmp_path):
+    def test_a_revision_flag_overrides_the_subsets_pin(self, prepare_module, tmp_path):
         args = _parse_bare(
-            pipe_module, "--config", self._config(tmp_path), "--subset", "first", "--revision", "3" * 40
+            prepare_module, "--config", self._config(tmp_path), "--subset", "first", "--revision", "3" * 40
         )
         assert args.revision == "3" * 40
 
-    def test_a_streaming_config_streams_at_the_subsets_pin(self, pipe_module, tmp_path):
+    def test_a_streaming_config_streams_at_the_subsets_pin(self, prepare_module, tmp_path):
         """The pin is resolved before the streaming checks, which demand a full commit SHA."""
         options = {"streaming": True, "skip-pack": True, "skip-count": True, "val-proportion": 0}
-        args = _parse_bare(pipe_module, "--config", self._config(tmp_path, **options), "--subset", "second")
+        args = _parse_bare(prepare_module, "--config", self._config(tmp_path, **options), "--subset", "second")
         assert (args.streaming, args.revision) == (True, "2" * 40)
 
     @pytest.mark.parametrize(
@@ -527,9 +607,9 @@ class TestPerSubsetRevisions:
             ({"revision": "1" * 40}, ("--subset", "first"), "states both `revision` and `revisions`"),
         ],
     )
-    def test_refused(self, pipe_module, tmp_path, capsys, extra, argv, message):
+    def test_refused(self, prepare_module, tmp_path, capsys, extra, argv, message):
         with pytest.raises(SystemExit) as exc:
-            _parse_bare(pipe_module, "--config", self._config(tmp_path, **extra), *argv)
+            _parse_bare(prepare_module, "--config", self._config(tmp_path, **extra), *argv)
         assert exc.value.code == 2
         assert message in capsys.readouterr().err
 
@@ -542,10 +622,10 @@ class TestPerSubsetRevisions:
             (["first"], "`revisions` must map each pinned subset to its commit"),
         ],
     )
-    def test_malformed_pins_are_refused(self, pipe_module, tmp_path, capsys, pins, message):
+    def test_malformed_pins_are_refused(self, prepare_module, tmp_path, capsys, pins, message):
         cfg = _write_config(tmp_path, yaml.safe_dump({"dataset": "org/corpus", "revisions": pins}))
         with pytest.raises(SystemExit) as exc:
-            _parse_bare(pipe_module, "--config", cfg, "--subset", "first")
+            _parse_bare(prepare_module, "--config", cfg, "--subset", "first")
         assert exc.value.code == 2
         assert message in capsys.readouterr().err
 
@@ -560,39 +640,39 @@ class TestTokenizerRevision:
         stated = {"dataset": "org/corpus", "tokenizer": "org/tokenizer", "skip-pack": True, **extra}
         return _write_config(tmp_path, yaml.safe_dump(stated))
 
-    def test_the_pin_reaches_the_arguments(self, pipe_module, tmp_path):
-        args = _parse_bare(pipe_module, "--config", self._config(tmp_path, **{"tokenizer-revision": self.PIN}))
+    def test_the_pin_reaches_the_arguments(self, prepare_module, tmp_path):
+        args = _parse_bare(prepare_module, "--config", self._config(tmp_path, **{"tokenizer-revision": self.PIN}))
         assert (args.tokenizer, args.tokenizer_revision) == ("org/tokenizer", self.PIN)
 
-    def test_no_pin_reads_the_default_branch(self, pipe_module, tmp_path):
-        assert _parse_bare(pipe_module, "--config", self._config(tmp_path)).tokenizer_revision is None
+    def test_no_pin_reads_the_default_branch(self, prepare_module, tmp_path):
+        assert _parse_bare(prepare_module, "--config", self._config(tmp_path)).tokenizer_revision is None
 
     @pytest.mark.parametrize("pin", ["main", "4" * 12, "4" * 39, "G" * 40])
-    def test_a_pin_that_is_not_a_full_sha_is_refused(self, pipe_module, tmp_path, capsys, pin):
+    def test_a_pin_that_is_not_a_full_sha_is_refused(self, prepare_module, tmp_path, capsys, pin):
         with pytest.raises(SystemExit) as exc:
-            _parse_bare(pipe_module, "--config", self._config(tmp_path, **{"tokenizer-revision": pin}))
+            _parse_bare(prepare_module, "--config", self._config(tmp_path, **{"tokenizer-revision": pin}))
         assert exc.value.code == 2
         assert "--tokenizer-revision must be a full 40-character commit SHA" in capsys.readouterr().err
 
-    def test_a_pinned_tokenizer_cannot_pack(self, pipe_module, tmp_path, capsys):
+    def test_a_pinned_tokenizer_cannot_pack(self, prepare_module, tmp_path, capsys):
         cfg = self._config(tmp_path, **{"tokenizer-revision": self.PIN, "skip-pack": False})
         with pytest.raises(SystemExit) as exc:
-            _parse_bare(pipe_module, "--config", cfg)
+            _parse_bare(prepare_module, "--config", cfg)
         assert exc.value.code == 2
         assert "--tokenizer-revision cannot pack" in capsys.readouterr().err
 
     @pytest.mark.parametrize("pinned", [True, False])
     def test_main_records_the_commit_in_the_results_and_wandb(
-        self, pipe_module, run_prepare, monkeypatch, tmp_path, pinned
+        self, prepare_module, run_prepare, monkeypatch, tmp_path, pinned
     ):
         """The commit reaches ``pipeline_results.json``, which verify_corpora's ``check_prepared_root`` compares with
         the config, and the W&B config. The tokenizer is a local directory, for which AutoTokenizer ignores the
         revision, so the pin is recorded without a Hub read."""
         dataset = write_parquet_dataset(tmp_path / "corpus", "data", {"text": ["first", "second"]})
-        monkeypatch.setattr(pipe_module, "HAS_WANDB", True)
+        monkeypatch.setattr(prepare_module, "HAS_WANDB", True)
         # wandb.init needs network and credentials; the config main() hands it is what is checked.
         fake_wandb = MagicMock()
-        monkeypatch.setattr(pipe_module, "wandb", fake_wandb, raising=False)
+        monkeypatch.setattr(prepare_module, "wandb", fake_wandb, raising=False)
         output = tmp_path / "prepared"
         pin = ("--tokenizer-revision", self.PIN) if pinned else ()
         argv = ("--dataset", str(dataset), "--revision", _PIN, "--skip-pack", "--skip-count", "--val-proportion", "0")
@@ -605,7 +685,7 @@ class TestTokenizerRevision:
 class TestShippedCorpusConfigs:
     """The campaign's corpus definitions must actually load through the real parser."""
 
-    def test_every_shipped_corpus_config_parses(self, pipe_module):
+    def test_every_shipped_corpus_config_parses(self, prepare_module):
         # Recursive: each campaign arm keeps its corpus definitions in its own data/
         # directory (configs/control_pretraining/30b_baseline/data/, ...), so a glob
         # anchored on the top-level data/ alone would silently skip every arm but the first.
@@ -651,7 +731,7 @@ class TestShippedCorpusConfigs:
             pins = stated.get("revisions", {None: None})
             for subset, pin in pins.items():
                 argv = ["--config", str(path)] + ([] if subset is None else ["--subset", subset])
-                args = _parse_bare(pipe_module, *argv)
+                args = _parse_bare(prepare_module, *argv)
                 assert args.dataset, f"{path.name} does not name a dataset"
                 assert args.revision, f"{path.name} does not pin a revision"
                 assert pin is None or args.revision == pin, f"{path.name}: {subset} parsed to {args.revision}"
@@ -696,7 +776,7 @@ _DOCUMENTS = [
 
 
 @pytest.fixture
-def run_prepare(pipe_module, monkeypatch, tmp_path):
+def run_prepare(prepare_module, monkeypatch, tmp_path):
     """Run the real ``main()`` over the given arguments with the datasets cache in a directory of the test's own.
 
     ``datasets`` reads its cache root from ``datasets.config.HF_DATASETS_CACHE`` when a builder
@@ -713,7 +793,7 @@ def run_prepare(pipe_module, monkeypatch, tmp_path):
         monkeypatch.setattr(
             sys, "argv", ["pipeline_data_prepare.py", "--tokenizer", tokenizer, "--num-proc", "1", *argv]
         )
-        return pipe_module.main()
+        return prepare_module.main()
 
     return run
 
@@ -818,15 +898,15 @@ class TestStreamingExport:
         assert _arrow_files(tmp_path / "cache_loaded"), "the loaded export wrote no Arrow cache; the check is vacuous"
         assert _arrow_files(tmp_path / "cache_streamed") == []
 
-    def test_streamed_wandb_samples_are_the_loaded_ones(self, pipe_module, run_prepare, monkeypatch, tmp_path):
+    def test_streamed_wandb_samples_are_the_loaded_ones(self, prepare_module, run_prepare, monkeypatch, tmp_path):
         """The sample table is read from the export's first rows; a stream keeps them as it passes, a Dataset indexes them."""
         dataset = write_parquet_dataset(tmp_path / "corpus", "data", {"text": _DOCUMENTS}, files=2)
-        monkeypatch.setattr(pipe_module, "HAS_WANDB", True)
+        monkeypatch.setattr(prepare_module, "HAS_WANDB", True)
         logged = {}
         for name, extra in (("loaded", ()), ("streamed", ("--streaming",))):
             # wandb.init needs network and credentials; the run object it returns is what main() logs to.
             fake_wandb = MagicMock()
-            monkeypatch.setattr(pipe_module, "wandb", fake_wandb, raising=False)
+            monkeypatch.setattr(prepare_module, "wandb", fake_wandb, raising=False)
             args = ("--dataset", str(dataset), "--revision", _PIN, "--skip-pack", "--skip-count", *extra)
             assert run_prepare(*args, "--output-dir", str(tmp_path / name), cache=tmp_path / f"cache_{name}") == 0
             logged[name] = [call.args for call in fake_wandb.Table.return_value.add_data.call_args_list]
@@ -834,15 +914,13 @@ class TestStreamingExport:
         assert logged["streamed"] == logged["loaded"]
         assert logged["loaded"] == [(i, doc) for i, doc in enumerate(_DOCUMENTS[:20])]
 
-    def test_a_stream_that_fails_part_way_leaves_no_training_jsonl(
-        self, pipe_module, run_prepare, monkeypatch, tmp_path
-    ):
+    def test_a_stream_that_fails_part_way_leaves_no_training_jsonl(self, run_prepare, monkeypatch, tmp_path):
         """The export writes under a temporary name and renames only once the stream is exhausted, so
         a read that fails hours in leaves the documents written so far under that name, never a
         truncated training.jsonl that the tokenize step would take for the whole corpus."""
         dataset = write_parquet_dataset(tmp_path / "corpus", "data", {"text": _DOCUMENTS}, files=2)
         failing_row = 7
-        load = pipe_module.load_dataset
+        load = data_load.load_dataset
 
         def interrupted(*args, **kwargs):
             stream = load(*args, **kwargs)
@@ -855,7 +933,10 @@ class TestStreamingExport:
             # features restated: a mapped stream otherwise declares none, and the streaming export refuses those
             return stream.map(read, with_indices=True, features=stream.features)
 
-        monkeypatch.setattr(pipe_module, "load_dataset", interrupted)
+        # Every load the prepare makes: the Hub load (pipeline.data.load) and the export's reader of the parquet files
+        # (pipeline.data.stream).
+        monkeypatch.setattr(data_load, "load_dataset", interrupted)
+        monkeypatch.setattr(data_stream, "load_dataset", interrupted)
         out = tmp_path / "out"
         args = ("--dataset", str(dataset), "--revision", _PIN, *_STREAMING_ARGS, "--no-wandb")
         with pytest.raises(ConnectionError, match="failed part-way"):
@@ -902,29 +983,29 @@ class TestResultsOfProcesses:
     functions, so each case is a real process doing real work: no stand-in for the export is needed to make one fail
     or die."""
 
-    def test_the_results_come_back_in_the_order_of_the_calls(self, pipe_module):
+    def test_the_results_come_back_in_the_order_of_the_calls(self):
         import operator
 
-        assert pipe_module.results_of_processes(operator.add, [(1, 2), ("a", "b"), (3, 4)]) == [3, "ab", 7]
+        assert data_stream.results_of_processes(operator.add, [(1, 2), ("a", "b"), (3, 4)]) == [3, "ab", 7]
 
-    def test_an_error_a_call_raised_is_raised_with_its_type_and_where_it_was_raised(self, pipe_module):
+    def test_an_error_a_call_raised_is_raised_with_its_type_and_where_it_was_raised(self):
         with pytest.raises(ValueError, match="invalid literal") as raised:
-            pipe_module.results_of_processes(int, [("7",), ("x",)])
+            data_stream.results_of_processes(int, [("7",), ("x",)])
         assert any("raised in the process of call 1" in note for note in raised.value.__notes__)
 
-    def test_a_process_that_ends_without_a_result_is_an_error_not_a_wait(self, pipe_module):
+    def test_a_process_that_ends_without_a_result_is_an_error_not_a_wait(self):
         """A process killed outright, or out of memory, reports nothing. A pool would wait for its result forever."""
         import os
 
         with pytest.raises(RuntimeError, match="call 0 ended with exit code 9 without reporting a result"):
-            pipe_module.results_of_processes(os._exit, [(9,)])
+            data_stream.results_of_processes(os._exit, [(9,)])
 
-    def test_a_failure_ends_the_calls_still_running(self, pipe_module):
+    def test_a_failure_ends_the_calls_still_running(self):
         import time
 
         started = time.monotonic()
         with pytest.raises(TypeError):
-            pipe_module.results_of_processes(time.sleep, [(600,), ("not a number",)])
+            data_stream.results_of_processes(time.sleep, [(600,), ("not a number",)])
         assert time.monotonic() - started < 120, "the export waited for a call that could no longer matter"
 
 
@@ -953,7 +1034,7 @@ class TestStreamWorkers:
         assert json.loads((one / "pipeline_results.json").read_text())["stream_group_documents"] == [65]
         assert sorted(path.name for path in three.iterdir()) == ["pipeline_results.json", "training.jsonl"]
 
-    def test_a_group_that_fails_ends_the_export_with_its_error_and_leaves_no_part(self, pipe_module, tmp_path):
+    def test_a_group_that_fails_ends_the_export_with_its_error_and_leaves_no_part(self, tmp_path):
         from datasets import Value
 
         dataset, _ = self._corpus(tmp_path)
@@ -963,7 +1044,7 @@ class TestStreamWorkers:
         out.mkdir()
         partial = out / "training.jsonl.partial"
         with pytest.raises(FileNotFoundError, match="train-missing.parquet"):
-            pipe_module.export_parquet_stream(files, 2, "text", Value("string"), "pretraining", partial, (1, 0.0))
+            data_stream.export_parquet_stream(files, 2, "text", Value("string"), "pretraining", partial, (1, 0.0))
         # Nothing is joined from an export whose group failed, and the first group's part, which it may have
         # finished writing, is removed with the rest.
         assert list(out.iterdir()) == []
@@ -978,9 +1059,9 @@ class TestStreamWorkers:
             (("--stream-workers", "4"), "it needs --streaming"),
         ],
     )
-    def test_a_worker_count_that_cannot_be_honoured_is_refused(self, pipe_module, capsys, extra, message):
+    def test_a_worker_count_that_cannot_be_honoured_is_refused(self, prepare_module, capsys, extra, message):
         with pytest.raises(SystemExit):
-            _parse(pipe_module, "--revision", _PIN, *extra)
+            _parse(prepare_module, "--revision", _PIN, *extra)
         assert message in capsys.readouterr().err
 
     def test_a_stream_that_is_not_parquet_cannot_be_divided(self, run_prepare, tmp_path):
@@ -1019,20 +1100,20 @@ class TestUndeclaredParquetFeatures:
             f"explicit: the arrow schema all 3 data files share (the dataset card declares no features at {_PIN})"
         )
 
-    def test_data_files_whose_schemas_differ_are_refused(self, pipe_module, tmp_path):
+    def test_data_files_whose_schemas_differ_are_refused(self, prepare_module, tmp_path):
         import pyarrow as pa
 
         repo = tmp_path / "repo"
         _part(repo, "part0", ["a0", "a1"], first_id=0, files=1, span_type=pa.list_(pa.list_(pa.int64())))
         _part(repo, "part1", ["b0", "b1"], first_id=2, files=1, span_type=pa.list_(pa.list_(pa.int32())))
         declare_config(repo, "whole", ["part0/train-*", "part1/train-*"])
-        args = _parse_bare(pipe_module, "--dataset", str(repo), "--subset", "whole", "--revision", _PIN)
+        args = _parse_bare(prepare_module, "--dataset", str(repo), "--subset", "whole", "--revision", _PIN)
         with pytest.raises(ValueError, match="do not share one arrow schema") as refusal:
-            pipe_module.features_to_load(args)
+            data_load.features_to_load(args)
         assert "part1/train-00000-of-00001.parquet" in str(refusal.value)
         assert "part0/train-00000-of-00001.parquet" in str(refusal.value)
 
-    def test_features_a_card_declares_are_left_to_the_loader(self, pipe_module, tmp_path):
+    def test_features_a_card_declares_are_left_to_the_loader(self, prepare_module, tmp_path):
         repo = tmp_path / "repo"
         write_parquet_dataset(repo, "whole", {"text": ["a0", "a1"], "id": [0, 1]})
         declare_config(
@@ -1041,8 +1122,8 @@ class TestUndeclaredParquetFeatures:
             ["whole/train-*"],
             features=[{"name": "text", "dtype": "string"}, {"name": "id", "dtype": "int64"}],
         )
-        args = _parse_bare(pipe_module, "--dataset", str(repo), "--subset", "whole", "--revision", _PIN)
-        assert pipe_module.features_to_load(args) == (None, "declared by the dataset card")
+        args = _parse_bare(prepare_module, "--dataset", str(repo), "--subset", "whole", "--revision", _PIN)
+        assert data_load.features_to_load(args) == (None, "declared by the dataset card")
 
 
 class TestLocalDataFiles:
@@ -1059,25 +1140,25 @@ class TestLocalDataFiles:
 
 
 class TestStreamingRefusesWhatItCannotHonour:
-    def test_a_complete_streaming_invocation_parses(self, pipe_module):
-        args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN)
+    def test_a_complete_streaming_invocation_parses(self, prepare_module):
+        args = _parse(prepare_module, *_STREAMING_ARGS, "--revision", _PIN)
         assert args.streaming is True
 
-    def test_streaming_is_off_by_default(self, pipe_module):
-        assert _parse(pipe_module).streaming is False
+    def test_streaming_is_off_by_default(self, prepare_module):
+        assert _parse(prepare_module).streaming is False
 
-    def test_streaming_from_the_config(self, pipe_module, tmp_path):
+    def test_streaming_from_the_config(self, prepare_module, tmp_path):
         cfg = _write_config(
             tmp_path,
             f"dataset: org/corpus\nrevision: {_PIN}\nstreaming: true\nskip-pack: true\nskip-count: true\n"
             "val-proportion: 0\n",
         )
-        assert _parse_bare(pipe_module, "--config", cfg).streaming is True
+        assert _parse_bare(prepare_module, "--config", cfg).streaming is True
 
-    def test_config_streaming_is_checked_like_the_flag(self, pipe_module, tmp_path, capsys):
+    def test_config_streaming_is_checked_like_the_flag(self, prepare_module, tmp_path, capsys):
         cfg = _write_config(tmp_path, f"dataset: org/corpus\nrevision: {_PIN}\nstreaming: true\nskip-count: true\n")
         with pytest.raises(SystemExit) as exc:
-            _parse_bare(pipe_module, "--config", cfg)
+            _parse_bare(prepare_module, "--config", cfg)
         assert exc.value.code == 2
         assert "packing is refused" in capsys.readouterr().err
 
@@ -1099,7 +1180,7 @@ class TestStreamingRefusesWhatItCannotHonour:
             ({"--keep-columns": "think_close_kind"}, "--keep-columns think_close_kind: a stream is read projected"),
         ],
     )
-    def test_refused_option(self, pipe_module, capsys, change, message):
+    def test_refused_option(self, prepare_module, capsys, change, message):
         options = {"--revision": _PIN, "--skip-pack": "", "--skip-count": "", "--val-proportion": "0"}
         options.update(change)
         argv = ["--streaming"]
@@ -1107,15 +1188,15 @@ class TestStreamingRefusesWhatItCannotHonour:
             if value is not None:
                 argv += [option] if value == "" else [option, value]
         with pytest.raises(SystemExit) as exc:
-            _parse(pipe_module, *argv)
+            _parse(prepare_module, *argv)
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "--streaming cannot honour this invocation" in err
         assert message in err
 
-    def test_every_refusal_is_reported_at_once(self, pipe_module, capsys):
+    def test_every_refusal_is_reported_at_once(self, prepare_module, capsys):
         with pytest.raises(SystemExit):
-            _parse(pipe_module, "--streaming", "--split", "train[0:10]")
+            _parse(prepare_module, "--streaming", "--split", "train[0:10]")
         err = capsys.readouterr().err
         for message in ("--revision must pin", "slice or combination syntax", "COUNT stage", "packing is refused"):
             assert message in err
@@ -1225,7 +1306,6 @@ class TestHubReadsAreRepeated:
 
     def test_a_group_streamed_by_a_process_of_its_own_repeats_its_failed_reads(
         self,
-        pipe_module,
         remote_corpus,
         flaky_remote_files,  # noqa: F811
         tmp_path,
@@ -1239,26 +1319,29 @@ class TestHubReadsAreRepeated:
         files = [flaky_remote_files.url(path) for path in sorted((repo / "data").glob("train-*.parquet"))]
         group = (files, "text", Value("string"), "pretraining")
         clean, repeated = tmp_path / "clean.jsonl", tmp_path / "repeated.jsonl"
-        assert pipe_module.stream_file_group_in_its_own_process((20, 0.0), *group, clean, 0) == (len(documents), [])
+        assert data_stream.stream_file_group_in_its_own_process((20, 0.0), *group, clean, 0) == (len(documents), [])
         assert flaky_remote_files.fetches >= 1, "the stream was not read through the flaky protocol"
         # fail() counts fetches afresh: the stream's first fetch fails, and so does its first repeat.
         failures = {1: dropped_connection(), 2: hub_status(502)}
         flaky_remote_files.fail(failures)
-        assert pipe_module.stream_file_group_in_its_own_process((20, 0.0), *group, repeated, 0)[0] == len(documents)
+        assert data_stream.stream_file_group_in_its_own_process((20, 0.0), *group, repeated, 0)[0] == len(documents)
         assert flaky_remote_files.raised == sorted(failures)
         assert repeated.read_bytes() == clean.read_bytes()
         flaky_remote_files.fail({1: dropped_connection()})
         with pytest.raises(httpx.RemoteProtocolError, match="peer closed connection"):
-            pipe_module.stream_file_group_in_its_own_process((1, 0.0), *group, tmp_path / "once.jsonl", 0)
+            data_stream.stream_file_group_in_its_own_process((1, 0.0), *group, tmp_path / "once.jsonl", 0)
 
-    def test_the_policy_is_a_parameter_a_config_may_set(self, pipe_module, tmp_path):
-        assert (_parse(pipe_module).hub_read_attempts, _parse(pipe_module).hub_read_first_wait_seconds) == (20, 5.0)
-        flags = _parse(pipe_module, "--hub-read-attempts", "3", "--hub-read-first-wait-seconds", "1.5")
+    def test_the_policy_is_a_parameter_a_config_may_set(self, prepare_module, tmp_path):
+        assert (_parse(prepare_module).hub_read_attempts, _parse(prepare_module).hub_read_first_wait_seconds) == (
+            20,
+            5.0,
+        )
+        flags = _parse(prepare_module, "--hub-read-attempts", "3", "--hub-read-first-wait-seconds", "1.5")
         assert (flags.hub_read_attempts, flags.hub_read_first_wait_seconds) == (3, 1.5)
         config = _write_config(tmp_path, "dataset: org/corpus\nhub-read-attempts: 4\n")
-        assert _parse_bare(pipe_module, "--config", str(config)).hub_read_attempts == 4
+        assert _parse_bare(prepare_module, "--config", str(config)).hub_read_attempts == 4
 
-    def test_fewer_than_one_attempt_is_refused_before_anything_is_read(self, pipe_module, capsys):
+    def test_fewer_than_one_attempt_is_refused_before_anything_is_read(self, prepare_module, capsys):
         with pytest.raises(SystemExit):
-            _parse(pipe_module, "--hub-read-attempts", "0")
+            _parse(prepare_module, "--hub-read-attempts", "0")
         assert "--hub-read-attempts must be at least 1, not 0" in capsys.readouterr().err

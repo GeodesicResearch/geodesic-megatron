@@ -70,6 +70,10 @@ from pathlib import Path
 import yaml
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # the repo root, home of the pipeline package
+from pipeline.data import layout  # noqa: E402
+
+
 COLUMNS = (
     "subset",
     "stage",
@@ -169,24 +173,17 @@ class CorpusRow:
 
 
 def corpus_root(dataset: str, subset: str, data_base: Path = DATA_BASE) -> Path:
-    """The directory ``pipeline_data_prepare.py`` writes a subset into.
-
-    Mirrors its ``slugify_dataset_name``: ``dataset.replace("/", "__") + "__" + subset``. Stated
-    here rather than imported because that script imports torch-adjacent packages at module
-    level and this module must stay usable outside the container.
-    """
-    return data_base / f"{dataset.replace('/', '__')}__{subset}"
+    """The directory ``pipeline_data_prepare.py`` writes a subset into (``layout.slugify_dataset_name``)."""
+    return data_base / layout.slugify_dataset_name(dataset, subset)
 
 
 def packed_parquet_path(root: Path, scalars: dict) -> Path:
-    """The packed-sequence parquet the packer writes under a corpus (or shard) root.
+    """The training parquet the packer writes under a corpus (or shard) root, for a prepare config's scalars.
 
-    Mirrors ``pipeline_data_prepare.py``'s layout — ``packed/<tokenizer slug>_pad_seq_to_mult<N>/
-    training_<seq>.idx.parquet`` — from the prepare config's tokenizer and pack geometry, so the
-    verifier, the audit and the training configs' globs all name the same file.
+    ``layout.packed_parquet_path`` of the config's tokenizer and pack geometry, so the verifier, the audit and the
+    training configs' globs all name the same file.
     """
-    tokenizer_dir = f"{scalars['tokenizer'].replace('/', '--')}_pad_seq_to_mult{scalars['pad-seq-to-mult']}"
-    return root / "packed" / tokenizer_dir / f"training_{scalars['seq-length']}.idx.parquet"
+    return layout.packed_parquet_path(root, scalars["tokenizer"], scalars["pad-seq-to-mult"], scalars["seq-length"])
 
 
 class Checker:

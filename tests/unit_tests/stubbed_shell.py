@@ -162,9 +162,10 @@ if [ "${1:-}" = --help ]; then echo "--ft-rank-section-timeouts"; exit 0; fi
 record ft_launcher "$@"
 """,
     "python": """\
-# A script's launch needs GPUs or the network: record it. Helper code (`python -c`, `python -m pipeline.*`) runs
-# for real, with the Hub replaced by the recording fake.
-if [ "${1:-}" = -c ] || { [ "${1:-}" = -m ] && [[ "${2:-}" == pipeline.* ]]; }; then
+# A script's launch needs GPUs or the network: record it. Helper code (`python -c`, `python -m pipeline.*`, and
+# scripts/data/prepare_revisions.py, which resolves a tokenizer reference) runs for real, with the Hub replaced by
+# the recording fake.
+if [ "${1:-}" = -c ] || { [ "${1:-}" = -m ] && [[ "${2:-}" == pipeline.* ]]; } || [ "${1:-}" = scripts/data/prepare_revisions.py ]; then
     PYTHONPATH="$STUB_DIR/fake_modules${PYTHONPATH:+:$PYTHONPATH}" exec "$STUB_PYTHON" "$@"
 fi
 record python "$@"

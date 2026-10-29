@@ -47,10 +47,10 @@ GIGABYTES_SUFFIX = "-gigabytes"
 # The tag is restated rather than imported, because this module must import without torch.
 _PEAK_MEMORY_RE = re.compile(r"\[peak-memory\] (?P<fields>.*)$")
 
-# A banner logged once per node (training/utils/log_utils.py::log_node_banner, or the same format written by
-# pipeline_training_run.py's log_env_overrides): "[<tag>] rank=<R> host=<host> KEY=<value> ...", every value
-# shell-quoted, behind the logger's prefix. The tags the telemetry reads are restated rather than imported, because
-# this module must import without torch.
+# A banner logged once per node by training/utils/log_utils.py::log_node_banner, through which
+# pipeline/training/env_overrides.py's log_env_overrides writes its [env-overrides] line: "[<tag>] rank=<R> host=<host>
+# KEY=<value> ...", every value shell-quoted, behind the logger's prefix. The tags the telemetry reads are restated
+# rather than imported, because this module must import without torch.
 ENV_OVERRIDES_TAG = "env-overrides"
 TOKEN_MASKING_TAG = "token-masking"
 

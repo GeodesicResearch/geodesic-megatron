@@ -32,9 +32,9 @@ bf16 on one GPU. The Megatron side projects the output layer's input with the la
 sides refuse a model whose own logits at the last position disagree with that projection. The Megatron reference loads
 the checkpoint's own run_config at the spec's tensor and expert parallelism, with the spec's ``model_overrides`` applied
 (FP8, the fused cross-entropy, the fast posture's dispatcher, recompute and the EP overlap off) and, when the spec says
-so, the Mamba scan in fp32 (``pipeline_training_patches.patch_mamba_training_scan_fp32_state``). A checkpoint whose
-run_config needs the torch_grouped repair is loaded from its export clone (``pipeline/export/export_clone.py``),
-exactly as the exporter loads it.
+so, the Mamba scan in fp32 (``pipeline.training.patches.mamba_scan.patch_mamba_training_scan_fp32_state``). A
+checkpoint whose run_config needs the torch_grouped repair is loaded from its export clone
+(``pipeline/export/export_clone.py``), exactly as the exporter loads it.
 
 **Outputs.** Each command writes into one output directory and refuses to replace a file: ``megatron_scores.npz``,
 ``hf_scores.npz``, ``hf_greedy.json`` and the judge's ``export_check-<first 12 of the spec's sha256>.json``
@@ -846,7 +846,7 @@ def load_reference_model(spec: ExportCheckSpec, load_path: Path):
     reference_model_config(model_cfg, spec.megatron_reference)
     model_cfg.initialize_model_parallel(seed=REFERENCE_SEED)
     if spec.megatron_reference.fp32_ssm_state:
-        from pipeline_training_patches import patch_mamba_training_scan_fp32_state
+        from pipeline.training.patches.mamba_scan import patch_mamba_training_scan_fp32_state
 
         if not patch_mamba_training_scan_fp32_state(checkpointed=False):
             raise RuntimeError("the fp32 Mamba scan could not be installed (see the log); the reference needs it")

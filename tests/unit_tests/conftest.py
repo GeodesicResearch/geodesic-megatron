@@ -302,8 +302,8 @@ def convert_module():
 
 
 @pytest.fixture(scope="module")
-def pipe_module():
-    """The repo-root pipeline_data_prepare.py (``repo_scripts.load_script``)."""
+def prepare_module():
+    """The repo-root pipeline_data_prepare.py, loaded by path (repo_scripts.load_script)."""
     return load_script("pipeline_data_prepare")
 
 

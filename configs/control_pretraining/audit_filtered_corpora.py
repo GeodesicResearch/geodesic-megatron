@@ -867,9 +867,9 @@ def audit_packed_content(
     from megatron.bridge.training.tokenizers.config import TokenizerConfig
     from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
-    if str(REPO_ROOT) not in sys.path:  # the prepare script lives at the repo root, not on the container's path
+    if str(REPO_ROOT) not in sys.path:  # the pipeline package lives at the repo root, not on the container's path
         sys.path.insert(0, str(REPO_ROOT))
-    from pipeline_data_prepare import format_record
+    from pipeline.data.records import format_record
 
     scalars = pinned_prepare_config(row)
     dataset, revision = scalars["dataset"], scalars["revision"]

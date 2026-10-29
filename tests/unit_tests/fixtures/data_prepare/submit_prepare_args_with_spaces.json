@@ -1,0 +1,31 @@
+{
+  "args": [
+    "prepare",
+    "--dataset",
+    "org/data set",
+    "--output-dir",
+    "<TMP>/out dir",
+    "--seq-length",
+    "4096"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "pipeline_data_prepare.py",
+        "--dataset",
+        "org/data set",
+        "--output-dir",
+        "<TMP>/out dir",
+        "--seq-length",
+        "4096"
+      ],
+      "cmd": "python",
+      "env": {
+        "TMPDIR": "/projects/a5k/public/tmp"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": "===== SFT Dataset Preparation (download + tokenize + pack) =====\nJob ID:   <JOB>\nNode:     <HOST>\nRepo dir: <REPO>\nEnv:      <TMP>/container/nemo.sif\nArgs:     --dataset org/data set --output-dir <TMP>/out dir --seq-length 4096\n================================================================\n===== Preparation Complete =====\n"
+}

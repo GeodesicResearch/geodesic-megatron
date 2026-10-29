@@ -2,10 +2,10 @@
 # Licensed under the Apache License, Version 2.0.
 """A training run's ``.bin/.idx`` data, built on CPU as its launch builds it.
 
-The config is resolved by the launcher's own merge (``pipeline_training_run.resolve_bin_idx_run_config``), the
+The config is resolved by the launcher's own merge (``pipeline.training.recipes.resolve_bin_idx_run_config``), the
 loader's training-data window (``get_train_data_window``) sizes the training dataset at the run's resumed step, and the
-loader's builder builds it. No process group, GPU or checkpoint is needed, and the index caches written are the ones the
-launch would write, so the launch then finds them warm. The tools that read a run's data before it trains
+loader's builder builds it. No process group, GPU or checkpoint is needed, and the index caches written are the ones
+the launch would write, so the launch then finds them warm. The tools that read a run's data before it trains
 (``report_blend_coverage.py``, ``predict_masked_counts.py``, ``held_out_documents.py``) build it here.
 
 The resumed step is the config's ``checkpoint.ckpt_step`` (the run's start when unset: a resume from the load
@@ -40,17 +40,18 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 from scripts.training.launch_width import LaunchWidthError, config_launch_width  # noqa: E402
 
-import pipeline_training_run  # noqa: E402
+# BIN_IDX_MODES is re-exported for the tools that build a run's data here.
+from pipeline.training.datasets import BIN_IDX_MODES  # noqa: E402, F401
+from pipeline.training.recipes import RECIPE_MAP, resolve_bin_idx_run_config  # noqa: E402
 
 
-BIN_IDX_MODES = pipeline_training_run.BIN_IDX_MODES
-MODELS = sorted({model for model, _ in pipeline_training_run.RECIPE_MAP})
+MODELS = sorted({model for model, _ in RECIPE_MAP})
 
 
 def resolve_run_config(config_file: str, model: str, mode: str):
     """The config a launch of ``config_file`` trains with (``resolve_bin_idx_run_config``), refusing a batch-size
     ramp, under which the samples a resumed run consumed cannot be computed."""
-    cfg = pipeline_training_run.resolve_bin_idx_run_config(config_file, model, mode)
+    cfg = resolve_bin_idx_run_config(config_file, model, mode)
     if cfg.train.rampup_batch_size is not None:
         raise ValueError("a batch-size ramp makes the samples consumed before the resumed step unknowable here")
     return cfg

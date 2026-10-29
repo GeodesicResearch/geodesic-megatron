@@ -82,33 +82,24 @@
 MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <args...> | tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers] [partitions] | <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]}"
 
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
+# A REPO_DIR without the libraries cannot be reported by them, so this line, the same in every launcher, does it.
+[ -f "$REPO_DIR/pipeline/sh/common.sh" ] || { echo "FATAL: $REPO_DIR has no pipeline/sh/common.sh, so REPO_DIR is not this repo's checkout. Inside a tunnel or salloc SLURM_SUBMIT_DIR (${SLURM_SUBMIT_DIR:-unset}) is the tunnel's own submit dir, and a copied script runs from the copy's dir. Export GEODESIC_REPO_DIR=/path/to/repo." >&2; exit 1; }
 cd "$REPO_DIR"
 
 # Execution environment: the payload runs inside the Apptainer pipeline container
 # via pipeline_env_exec.sh (see docs/environment.md). A missing SIF or Slingshot
-# build hard-fails below with the fix command — there is no silent fallback.
-if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
-    echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
-    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
-    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
-    exit 1
-fi
-source "$REPO_DIR/pipeline_env_config.env"
-# env_config_require *returns* non-zero (it is also sourced by callers that must
-# not exit), and this script has no `set -e` — so gate the exit explicitly rather
-# than packing a broken environment for hours before failing.
-env_config_require || exit 1
+# build hard-fails here with the fix command — there is no silent fallback.
+source "$REPO_DIR/pipeline/sh/common.sh" || exit 1
+source_env_config
 
 # Purge the host module env before entering the container: this repo lives under
 # the bind-mounted $HOME, so host module paths resolve inside the image and would
 # shadow its version-matched toolchain/libs.
 module purge
 
+# Each payload runs from this checkout after pipeline_env_activate.sh (container_payload), which prepends its src/
+# and 3rdparty/Megatron-LM to PYTHONPATH, so a worktree's bridge fixes are what data jobs run.
 RUNNER=("$REPO_DIR/pipeline_env_exec.sh")
-# Sourced INSIDE the container. It prepends THIS checkout's src/ +
-# 3rdparty/Megatron-LM to PYTHONPATH, so a worktree's bridge fixes are what data
-# jobs actually run instead of the image's megatron packages.
-ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
 
 if [ "$MODE_OR_ROOT" = "prepare" ]; then
     shift
@@ -119,15 +110,7 @@ if [ "$MODE_OR_ROOT" = "prepare" ]; then
     echo "Env:      $CONTAINER_SIF"
     echo "Args:     $*"
     echo "================================================================"
-    # printf %q re-quotes the args so they survive the shell round-trip into the
-    # containerized payload string — but ONLY when there are args: with zero
-    # arguments `printf ' %q' "$@"` emits a stray `''` that argparse rejects with
-    # "unrecognized arguments" (exit 2).
-    ARGS_Q=""
-    if [ "$#" -gt 0 ]; then
-        ARGS_Q="$(printf ' %q' "$@")"
-    fi
-    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; python pipeline_data_prepare.py$ARGS_Q"
+    "${RUNNER[@]}" "$(container_payload "python pipeline_data_prepare.py$(quote_args "$@")")"
     rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "===== Preparation Complete ====="
@@ -182,12 +165,11 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
         trap 'rm -f "$QUOTA_REPORT"' EXIT
         PROJECT=$(lfs project -d "$DATASET_ROOT" | awk '{print $1}')
         { lfs project -d "$DATASET_ROOT" && lfs quota -p "$PROJECT" "$DATASET_ROOT"; } > "$QUOTA_REPORT" || exit 1
-        PARTITION_ARGS="--input $(printf '%q' "$INPUT_JSONL") --output-prefix $(printf '%q' "$OUTPUT_PREFIX") \
---json-key $(printf '%q' "$JSON_KEY")"
-        PARTITION_STEP="PARTITIONS_RUN=\$(python scripts/data/tokenize_partitions.py choose $PARTITION_ARGS \
---partitions $(printf '%q' "$PARTITIONS") --line-percent $(printf '%q' "${TOKENIZE_QUOTA_LINE_PERCENT:-94}") \
---quota-report $(printf '%q' "$QUOTA_REPORT")) \
-&& trap 'python scripts/data/tokenize_partitions.py remove $PARTITION_ARGS' EXIT && "
+        PARTITION_ARGS=$(quote_args --input "$INPUT_JSONL" --output-prefix "$OUTPUT_PREFIX" --json-key "$JSON_KEY")
+        CHOOSE_ARGS=(--partitions "$PARTITIONS" --line-percent "${TOKENIZE_QUOTA_LINE_PERCENT:-94}"
+            --quota-report "$QUOTA_REPORT")
+        PARTITION_STEP="PARTITIONS_RUN=\$(python scripts/data/tokenize_partitions.py choose$PARTITION_ARGS$(quote_args "${CHOOSE_ARGS[@]}")) \
+&& trap 'python scripts/data/tokenize_partitions.py remove$PARTITION_ARGS' EXIT && "
     fi
 
     # The counter also writes <artifact>.provenance.json — the recoverable record of the
@@ -196,43 +178,36 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
     # The tokenizer reference is resolved inside the container, where the Hugging Face
     # cache is: a pinned commit loads from its snapshot directory, and the provenance
     # records the name and the commit apart (no tokenizer_revision note when unpinned).
-    TOKENIZER_ARG=$(printf '%q' "$TOKENIZER")
     # Contiguous parts merged in order (--keep-sequential-samples): the corpus holds its documents in
     # the input's order, which the check after the merge confirms.
-    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; PARTITIONS_RUN=1; \
-        ${PARTITION_STEP}echo \"Partitions run: \$PARTITIONS_RUN\" \
-        && SEQUENTIAL=\$( if [ \"\$PARTITIONS_RUN\" -gt 1 ]; then echo --keep-sequential-samples; fi ) \
-        && TOKENIZER_NAME=\$(python scripts/data/prepare_revisions.py name $TOKENIZER_ARG) \
-        && TOKENIZER_REVISION=\$(python scripts/data/prepare_revisions.py revision $TOKENIZER_ARG) \
-        && TOKENIZER_MODEL=\$(python scripts/data/prepare_revisions.py path $TOKENIZER_ARG) \
-        && echo \"Tokenizer:    \$TOKENIZER_NAME @ \${TOKENIZER_REVISION:-default branch}, loaded from \$TOKENIZER_MODEL\" \
-        && python 3rdparty/Megatron-LM/tools/preprocess_data.py \
-            --input $(printf '%q' "$INPUT_JSONL") \
-            --output-prefix $(printf '%q' "$OUTPUT_PREFIX") \
-            --tokenizer-type HuggingFaceTokenizer \
-            --tokenizer-model \"\$TOKENIZER_MODEL\" \
-            --json-keys $(printf '%q' "$JSON_KEY") \
-            --append-eod \
-            --workers $(printf '%q' "$WORKERS") \
-            --partitions \$PARTITIONS_RUN \$SEQUENTIAL \
-            --log-interval 5000 \
-        && { [ \"\$PARTITIONS_RUN\" -eq 1 ] \
-            || { MERGE_ORDER_CHECK=\$(python scripts/data/tokenize_partitions.py check $PARTITION_ARGS \
-                --partitions \$PARTITIONS_RUN) && echo \"Merge order check: \$MERGE_ORDER_CHECK\"; }; } \
-        && echo '===== Exact token count (from the .idx) =====' \
-        && python scripts/data/count_idx_tokens.py $(printf '%q' "$ARTIFACT_PREFIX.idx") \
-            --provenance-out $(printf '%q' "$ARTIFACT_PREFIX.provenance.json") \
-            --note $(printf '%q' "dataset_root=$DATASET_ROOT") \
-            --note $(printf '%q' "input_jsonl=$INPUT_JSONL") \
-            --note \"tokenizer=\$TOKENIZER_NAME\" \
-            \${TOKENIZER_REVISION:+--note \"tokenizer_revision=\$TOKENIZER_REVISION\"} \
-            --note $(printf '%q' "json_key=$JSON_KEY") \
-            --note append_eod=true \
-            --note $(printf '%q' "workers=$WORKERS") \
-            --note $(printf '%q' "partitions_requested=$PARTITIONS") \
-            --note \"partitions=\$PARTITIONS_RUN\" \
-            \${MERGE_ORDER_CHECK:+--note \"merge_order_check=\$MERGE_ORDER_CHECK\"} \
-            --note $(printf '%q' "slurm_job_id=${SLURM_JOB_ID:-}")"
+    # The arrays hold the words fixed here; the \$-escaped words between them (the tokenizer the
+    # reference resolves to, the partitions the run chose) are expanded in the container.
+    TOKENIZER_ARG=$(quote_args "$TOKENIZER")
+    TOKENIZE_ARGS=(--input "$INPUT_JSONL" --output-prefix "$OUTPUT_PREFIX" --tokenizer-type HuggingFaceTokenizer)
+    TOKENIZE_ARGS_AFTER_MODEL=(--json-keys "$JSON_KEY" --append-eod --workers "$WORKERS")
+    COUNT_ARGS=("$ARTIFACT_PREFIX.idx" --provenance-out "$ARTIFACT_PREFIX.provenance.json"
+        --note "dataset_root=$DATASET_ROOT" --note "input_jsonl=$INPUT_JSONL")
+    COUNT_ARGS_AFTER_TOKENIZER=(--note "json_key=$JSON_KEY" --note append_eod=true --note "workers=$WORKERS"
+        --note "partitions_requested=$PARTITIONS")
+    "${RUNNER[@]}" "$(container_payload "PARTITIONS_RUN=1; \
+${PARTITION_STEP}echo \"Partitions run: \$PARTITIONS_RUN\" \
+&& SEQUENTIAL=\$( if [ \"\$PARTITIONS_RUN\" -gt 1 ]; then echo --keep-sequential-samples; fi ) \
+&& TOKENIZER_NAME=\$(python scripts/data/prepare_revisions.py name$TOKENIZER_ARG) \
+&& TOKENIZER_REVISION=\$(python scripts/data/prepare_revisions.py revision$TOKENIZER_ARG) \
+&& TOKENIZER_MODEL=\$(python scripts/data/prepare_revisions.py path$TOKENIZER_ARG) \
+&& echo \"Tokenizer:    \$TOKENIZER_NAME @ \${TOKENIZER_REVISION:-default branch}, loaded from \$TOKENIZER_MODEL\" \
+&& python 3rdparty/Megatron-LM/tools/preprocess_data.py$(quote_args "${TOKENIZE_ARGS[@]}") \
+--tokenizer-model \"\$TOKENIZER_MODEL\"$(quote_args "${TOKENIZE_ARGS_AFTER_MODEL[@]}") \
+--partitions \$PARTITIONS_RUN \$SEQUENTIAL --log-interval 5000 \
+&& { [ \"\$PARTITIONS_RUN\" -eq 1 ] \
+|| { MERGE_ORDER_CHECK=\$(python scripts/data/tokenize_partitions.py check$PARTITION_ARGS --partitions \$PARTITIONS_RUN) \
+&& echo \"Merge order check: \$MERGE_ORDER_CHECK\"; }; } \
+&& echo '===== Exact token count (from the .idx) =====' \
+&& python scripts/data/count_idx_tokens.py$(quote_args "${COUNT_ARGS[@]}") \
+--note \"tokenizer=\$TOKENIZER_NAME\" \${TOKENIZER_REVISION:+--note \"tokenizer_revision=\$TOKENIZER_REVISION\"}\
+$(quote_args "${COUNT_ARGS_AFTER_TOKENIZER[@]}") \
+--note \"partitions=\$PARTITIONS_RUN\" \${MERGE_ORDER_CHECK:+--note \"merge_order_check=\$MERGE_ORDER_CHECK\"}\
+$(quote_args --note "slurm_job_id=${SLURM_JOB_ID:-}")")"
     rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "===== Tokenization Complete ====="
@@ -257,11 +232,8 @@ echo "Pad seq to mul: $PAD_SEQ_TO_MULT"
 echo "Env:            $CONTAINER_SIF"
 echo "========================================"
 
-"${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; python scripts/data/pack_sft_dataset.py \
-    --dataset-root $(printf '%q' "$DATASET_ROOT") \
-    --tokenizer $(printf '%q' "$TOKENIZER") \
-    --seq-length $(printf '%q' "$SEQ_LENGTH") \
-    --pad-seq-to-mult $(printf '%q' "$PAD_SEQ_TO_MULT")"
+PACK_ARGS=(--dataset-root "$DATASET_ROOT" --tokenizer "$TOKENIZER" --seq-length "$SEQ_LENGTH" --pad-seq-to-mult "$PAD_SEQ_TO_MULT")
+"${RUNNER[@]}" "$(container_payload "python scripts/data/pack_sft_dataset.py$(quote_args "${PACK_ARGS[@]}")")"
 rc=$?
 
 # Propagate the payload's status: without this the trailing echo makes sbatch exit

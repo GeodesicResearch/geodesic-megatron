@@ -432,7 +432,7 @@ class TestDataBuildAgreesWithTheConfigs:
         assert_slices_cover_the_corpus(dry_run, "climbmix_full", 553315056, 8)
 
     def test_blend_prefixes_use_the_real_slugify(self, raw):
-        """The dataset root is derived by pipeline_data_prepare.slugify_dataset_name; the blend
+        """The dataset root is derived by pipeline.data.layout.slugify_dataset_name; the blend
         paths are written by hand, so they are asserted against that function, not a copy."""
         dataset = yaml.safe_load(CORPUS_CONFIG.read_text())["dataset"]
         for stage in STAGES:

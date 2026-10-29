@@ -217,17 +217,17 @@ def write_tokenized_documents(root: Path, documents: list[list[int]]) -> None:
 def build_pretraining_dataset(data_path: list[str], seq_length: int, samples: int, vocab_size: int, cache: Path):
     """The training split of a ``.bin/.idx`` blend as a pretraining run builds it, drawing ``samples`` samples.
 
-    The launcher's own dataset config (``pipeline_training_run.bin_idx_dataset_config``) over ``data_path`` (blend
+    The launcher's own dataset config (``pipeline.training.datasets.bin_idx_dataset_config``) over ``data_path`` (blend
     weights and prefixes, as a training config lists them, or one prefix), with ``split`` "1,0,0" and its index caches
     in ``cache``, a NullTokenizer of ``vocab_size``, and the pretraining dataset provider.
     """
-    # Imported here: importing the launcher loads every Nemotron recipe, which most users of these fixtures never need.
-    import pipeline_training_run
+    # Imported here: these import megatron, which most users of these fixtures never need.
     from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider
     from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+    from pipeline.training.datasets import bin_idx_dataset_config
     from tests.unit_tests.token_masking_fixtures import null_tokenizer_config
 
-    config = pipeline_training_run.bin_idx_dataset_config(
+    config = bin_idx_dataset_config(
         {"data_path": data_path, "seq_length": seq_length, "split": "1,0,0", "path_to_cache": str(cache)}, "pretrain"
     )
     config.tokenizer = build_tokenizer(null_tokenizer_config(vocab_size))

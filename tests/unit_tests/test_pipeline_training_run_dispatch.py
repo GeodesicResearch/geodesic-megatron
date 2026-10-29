@@ -1,8 +1,7 @@
-"""Unit tests for pipeline_training_run.py's model/mode dispatch (RECIPE_MAP + CLI parsing).
+"""Unit tests for the model/mode dispatch (pipeline.training.recipes.RECIPE_MAP) and pipeline_training_run.py's CLI.
 
-The script lives at the repo root and is loaded by path (the same pattern as
-test_pipeline_data_prepare.py), so these tests exercise the real dispatch table rather
-than a re-declaration of it.
+The script lives at the repo root and is loaded by path (the ``run_module`` fixture), and the dispatch
+table is imported from its module, so these tests exercise the real one rather than a re-declaration of it.
 """
 
 from __future__ import annotations
@@ -13,6 +12,9 @@ from pathlib import Path
 
 import pytest
 from scripts.training.config_compose import load_composed_yaml
+
+from pipeline.training import env_overrides, recipes
+from tests.unit_tests.repo_scripts import run_training_main
 
 
 MODELS = ("nano", "super", "ultra")
@@ -27,11 +29,11 @@ BASELINE_PRETRAIN = (
 
 
 class TestRecipeMap:
-    def test_covers_every_model_mode_pair(self, run_module):
-        assert set(run_module.RECIPE_MAP.keys()) == {(model, mode) for model in MODELS for mode in MODES}
+    def test_covers_every_model_mode_pair(self):
+        assert set(recipes.RECIPE_MAP.keys()) == {(model, mode) for model in MODELS for mode in MODES}
 
     @pytest.mark.parametrize("model", MODELS)
-    def test_pretrain_entries_reference_the_pretrain_recipes(self, run_module, model):
+    def test_pretrain_entries_reference_the_pretrain_recipes(self, model):
         """Each pretrain entry must call its model's *_pretrain_config, not an SFT recipe.
 
         Checked via the lambda's referenced names rather than by invoking it: the Super and
@@ -39,21 +41,21 @@ class TestRecipeMap:
         which reads the HF config from the Hub/cache — a network boundary a unit test must
         not depend on. The Nano recipe is invoked for real below.
         """
-        names = run_module.RECIPE_MAP[(model, "pretrain")].__code__.co_names
+        names = recipes.RECIPE_MAP[(model, "pretrain")].__code__.co_names
         assert f"nemotron_3_{model}_pretrain_config" in names
 
     @pytest.mark.parametrize("model", MODELS)
-    def test_cpt_entries_still_reference_the_sft_recipes(self, run_module, model):
+    def test_cpt_entries_still_reference_the_sft_recipes(self, model):
         """CPT deliberately reuses the SFT recipes (warm-start hyperparameters + finetune())."""
-        names = run_module.RECIPE_MAP[(model, "cpt")].__code__.co_names
+        names = recipes.RECIPE_MAP[(model, "cpt")].__code__.co_names
         assert f"nemotron_3_{model}_sft_config" in names
         assert f"nemotron_3_{model}_pretrain_config" not in names
 
-    def test_nano_pretrain_recipe_builds_from_scratch_config(self, run_module):
+    def test_nano_pretrain_recipe_builds_from_scratch_config(self):
         """The Nano entry constructs the real pretrain recipe: NVIDIA's pretraining workload
         (GBS 3072, seq 8192) and no checkpoint to load — the from-scratch semantics the
         pretrain mode exists for."""
-        cfg = run_module.RECIPE_MAP[("nano", "pretrain")](None)
+        cfg = recipes.RECIPE_MAP[("nano", "pretrain")](None)
         assert cfg.train.global_batch_size == 3072
         assert cfg.model.seq_length == 8192
         assert cfg.dataset.sequence_length == 8192
@@ -61,38 +63,15 @@ class TestRecipeMap:
 
 
 class TestMainWiring:
-    """Drive the real main() end-to-end up to the training-entry call.
-
-    The training entry points (pretrain/finetune) are replaced with recorders: past that
-    line the code launches distributed training — a SLURM/GPU/rendezvous boundary a unit
-    test cannot cross. Everything before it (recipe construction, YAML merge, dataset
-    rewiring, mode dispatch) runs for real, on the Nano recipes (pure dataclass
-    construction — Super/Ultra would fetch the HF config).
+    """Drive the real main() end-to-end up to the training-entry call (``run_training_main``), on the Nano
+    recipes (pure dataclass construction — Super/Ultra would fetch the HF config).
     """
 
     def _run_main(self, run_module, monkeypatch, tmp_path, mode, yaml_text):
         config = tmp_path / "override.yaml"
         config.write_text(yaml_text)
-        calls = {}
-        monkeypatch.setattr(run_module, "pretrain", lambda **kw: calls.setdefault("pretrain", kw))
-        monkeypatch.setattr(run_module, "finetune", lambda **kw: calls.setdefault("finetune", kw))
-        monkeypatch.syspath_prepend(str(Path(run_module.__file__).parent))
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "pipeline_training_run.py",
-                "--model",
-                "nano",
-                "--mode",
-                mode,
-                "--config-file",
-                str(config),
-                "--disable-ft",
-            ],
-        )
-        run_module.main()
-        return calls
+        argv = ["--model", "nano", "--mode", mode, "--config-file", str(config), "--disable-ft"]
+        return run_training_main(run_module, monkeypatch, argv)
 
     _DATA_PATH_YAML = (
         "tokenizer:\n"
@@ -146,7 +125,7 @@ class TestMainWiring:
         monkeypatch.setenv("TORCH_NCCL_BLOCKING_WAIT", "0")
         monkeypatch.setenv("LOCAL_RANK", "0")
         monkeypatch.setenv("RANK", "0")
-        with caplog.at_level(logging.INFO, logger=run_module.logger.name):
+        with caplog.at_level(logging.INFO, logger=env_overrides.logger.name):
             self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._DATA_PATH_YAML)
         echoes = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[env-overrides]")]
         assert len(echoes) == 1 and echoes[0].endswith(" TORCH_NCCL_BLOCKING_WAIT=0")
@@ -185,11 +164,11 @@ class TestMainWiring:
         assert identity.code_identity == record
         assert calls["pretrain"]["config"].dataset.data_path == ["1.0", "/nonexistent/corpus_input_document"]
 
-    def test_the_block_is_kept_out_of_the_run_config(self, run_module, tmp_path):
+    def test_the_block_is_kept_out_of_the_run_config(self, tmp_path):
         """The block names the code, not a setting: it is returned beside the merged config, never applied to it."""
         config = tmp_path / "override.yaml"
         config.write_text(self._pinning_yaml())
-        cfg, merged = run_module.resolve_training_config("nano", "pretrain", None, str(config), [])
+        cfg, merged = recipes.resolve_training_config("nano", "pretrain", None, str(config), [])
         assert merged["code_identity"] == self._CODE_IDENTITY
         assert not hasattr(cfg, "code_identity")
 
@@ -238,17 +217,17 @@ class TestMainWiring:
         with pytest.raises(LaunchWidthError, match="the run has 4 ranks"):
             self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._width_yaml())
 
-    def test_the_width_block_is_kept_out_of_the_run_config_and_no_override_reaches_it(self, run_module, tmp_path):
+    def test_the_width_block_is_kept_out_of_the_run_config_and_no_override_reaches_it(self, tmp_path):
         """The block states the launch, not a setting: it is returned beside the merged config, and an override of it
         is refused as a key the run's settings do not hold."""
         config = tmp_path / "override.yaml"
         config.write_text(self._width_yaml())
-        cfg, merged = run_module.resolve_training_config("nano", "pretrain", None, str(config), [])
+        cfg, merged = recipes.resolve_training_config("nano", "pretrain", None, str(config), [])
         assert merged["launch_width"] == self._LAUNCH_WIDTH
         assert not hasattr(cfg, "launch_width")
         for override in ("launch_width.nodes=4", "+launch_width.nodes=4"):
             with pytest.raises(ValueError, match="Unknown key 'launch_width'"):
-                run_module.resolve_training_config("nano", "pretrain", None, str(config), [override])
+                recipes.resolve_training_config("nano", "pretrain", None, str(config), [override])
 
 
 class TestModeCli:
@@ -264,6 +243,12 @@ class TestModeCli:
     def test_unknown_mode_rejected(self, run_module, monkeypatch):
         with pytest.raises(SystemExit):
             self._parse(run_module, monkeypatch, ["--model", "nano", "--mode", "midtrain"])
+
+    def test_enable_ft_is_not_a_flag(self, run_module, monkeypatch):
+        """Fault tolerance is on unless --disable-ft is given; an --enable-ft falls through to the overrides."""
+        args, overrides = self._parse(run_module, monkeypatch, ["--model", "nano", "--mode", "sft", "--enable-ft"])
+        assert overrides == ["--enable-ft"]
+        assert not hasattr(args, "enable_ft")
 
     def test_hydra_overrides_still_fall_through(self, run_module, monkeypatch):
         args, overrides = self._parse(

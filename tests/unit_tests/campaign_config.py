@@ -25,8 +25,6 @@ arm cannot silently miss the others.
 from __future__ import annotations
 
 import dataclasses
-import functools
-import importlib.util
 import json
 import os
 import re
@@ -47,7 +45,7 @@ from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_modul
 def launcher_overrides(path: Path) -> dict:
     """The overrides the launcher merges from the training config at ``path``: the config read through its
     ``base_config`` chain, without its launch blocks, which state how the config must be launched rather than
-    settings of the run (``scripts/training/launch_blocks.py``; ``pipeline_training_run.resolve_training_config``
+    settings of the run (``scripts/training/launch_blocks.py``; ``pipeline.training.recipes.resolve_training_config``
     keeps them out of the merge)."""
     overrides = load_composed_yaml(path)
     pop_launch_blocks(overrides)
@@ -395,37 +393,18 @@ def run_owners(paths: list[Path]) -> dict[Path, str]:
     return owners
 
 
-@functools.lru_cache(maxsize=1)
-def _prepare_module():
-    """``pipeline_data_prepare`` executed once per session.
-
-    It imports pandas, ``datasets`` and ``transformers`` at module level, so executing it per
-    call costs seconds and builds a fresh unregistered module object each time.
-    """
-    spec = importlib.util.spec_from_file_location("pipeline_data_prepare", _REPO_ROOT / "pipeline_data_prepare.py")
-    prepare = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(prepare)
-    return prepare
-
-
 def assert_prefix_roots_use_the_real_slugify(data_path, dataset: str, label: str) -> None:
     """Assert every blend prefix sits under the directory the data build produces for its subset.
 
-    The blend paths are written by hand; the roots they must match are produced by
-    ``pipeline_data_prepare.slugify_dataset_name``. The build derives them through
-    ``corpora_table.corpus_root``, a mirror kept so the plan can be derived outside the container,
-    so both are asserted: the mirror against the real function, and each blend root against the
-    mirror. Every prefix must also end in the tokenize step's output name,
-    ``corpora_table.TOKENIZED_PREFIX``.
+    The blend paths are written by hand; the build derives each subset's root through ``corpora_table.corpus_root``,
+    which names it with ``pipeline.data.layout.slugify_dataset_name``, as pipeline_data_prepare.py does. Every prefix
+    must also end in the tokenize step's output name, ``corpora_table.TOKENIZED_PREFIX``.
     """
-    prepare = _prepare_module()
     for prefix in [str(x) for x in data_path][1::2]:
         root = _corpus_root_of(prefix)
         subset = root.name.split("__")[-1]
-        expected = corpora_table.DATA_BASE / prepare.slugify_dataset_name(dataset, subset)
-        mirror = corpora_table.corpus_root(dataset, subset)
-        assert mirror == expected, f"{label}: the corpus_root mirror disagrees for {subset}"
-        assert str(mirror) == str(root), f"{label}: {prefix} does not sit under {expected}"
+        expected = corpora_table.corpus_root(dataset, subset)
+        assert str(expected) == str(root), f"{label}: {prefix} does not sit under {expected}"
         assert prefix.endswith(f"/{corpora_table.TOKENIZED_PREFIX}"), f"{label}: {prefix}"
 
 

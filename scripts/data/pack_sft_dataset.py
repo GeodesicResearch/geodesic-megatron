@@ -36,7 +36,12 @@ Usage:
 import argparse
 import json
 import logging
+import sys
 from pathlib import Path
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from pipeline.data import layout  # noqa: E402
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -136,8 +141,7 @@ def main():
         raise ValueError(f"--packing-algorithm must be one of {PACKING_ALGOS}, got {args.packing_algorithm!r}")
 
     # Output directory
-    tokenizer_name = args.tokenizer.replace("/", "--")
-    pack_dir = dataset_root / "packed" / f"{tokenizer_name}_pad_seq_to_mult{args.pad_seq_to_mult}"
+    pack_dir = layout.pack_dir(dataset_root, args.tokenizer, args.pad_seq_to_mult)
     pack_dir.mkdir(parents=True, exist_ok=True)
 
     metadata_path = pack_dir / f"{args.seq_length}_metadata.jsonl"
@@ -188,9 +192,12 @@ def main():
         pack_manifest_path(output_path).write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n")
         logger.info(f"{split_name} split packed: {output_path}")
 
-    pack_split("Training", train_path, pack_dir / f"training_{args.seq_length}.idx.parquet")
+    def split_path(split):
+        return layout.packed_parquet_path(dataset_root, args.tokenizer, args.pad_seq_to_mult, args.seq_length, split)
+
+    pack_split("Training", train_path, split_path("training"))
     if not args.no_validation and val_path.exists():
-        pack_split("Validation", val_path, pack_dir / f"validation_{args.seq_length}.idx.parquet")
+        pack_split("Validation", val_path, split_path("validation"))
     elif not args.no_validation:
         logger.warning(f"No validation.jsonl found at {val_path}")
 

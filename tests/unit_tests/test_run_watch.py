@@ -31,6 +31,7 @@ from scripts.telemetry import run_watch as rw
 
 from megatron.bridge.training.token_masking.hook import TokenMaskingCounts
 from megatron.bridge.training.utils.train_utils import format_peak_memory, summarise_peak_memory
+from pipeline.training import env_overrides
 from tests.unit_tests.test_loss_parity import FakeRun, history_rows, install_fake_wandb, over, write_run
 from tests.unit_tests.training_log_fixture import token_masking_banner, token_masking_counts_line
 
@@ -80,9 +81,9 @@ def saved_line(iteration: int) -> str:
 
 
 def env_overrides_line(rank: int, settings: dict[str, str]) -> str:
-    """The line pipeline_training_run.py's log_env_overrides writes for one node (the round trip is tested beside it)."""
+    """The line pipeline/training/env_overrides.py's log_env_overrides writes for one node (the round trip is tested beside it)."""
     values = " ".join(f"{key}={shlex.quote(value)}" for key, value in settings.items())
-    return f"INFO:__main__:[env-overrides] rank={rank} host=nid{rank:06d} {values}"
+    return f"INFO:{env_overrides.logger.name}:[env-overrides] rank={rank} host=nid{rank:06d} {values}"
 
 
 def prepend_lines(log: Path, lines: list[str]) -> Path:
@@ -422,7 +423,7 @@ def test_launch_settings_the_launcher_refuses_leave_the_stops_not_evaluated(tmp_
     assert status == 2 and re.search(r"NOT EVALUATED stop launch_settings: ValueError: .*the launcher refuses", out)
 
 
-MALFORMED_ENV_OVERRIDES = "INFO:__main__:[env-overrides] rank=0 host=nid000000 NOT_A_SETTING"
+MALFORMED_ENV_OVERRIDES = f"INFO:{env_overrides.logger.name}:[env-overrides] rank=0 host=nid000000 NOT_A_SETTING"
 
 
 def test_an_env_overrides_line_that_cannot_be_parsed_leaves_only_the_settings_check_unevaluated(

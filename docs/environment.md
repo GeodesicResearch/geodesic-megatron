@@ -283,7 +283,7 @@ applied, not what training received, so `pipeline_training_run.py` reads
 logs one line, which under the default logging format reads
 
 ```
-INFO:__main__:[env-overrides] rank=<RANK> host=<hostname> KEY=<value> ...
+INFO:pipeline.training.env_overrides:[env-overrides] rank=<RANK> host=<hostname> KEY=<value> ...
 ```
 
 with each value shell-quoted (`KEY=''`, `KEY='a b'`; a value of letters, digits and

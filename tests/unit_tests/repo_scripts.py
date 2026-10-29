@@ -15,10 +15,12 @@
 
 Catalogue:
     load_script: import a repo-root script and register it in ``sys.modules`` under its name.
+    run_training_main: run pipeline_training_run.main() with pretrain and finetune replaced by recorders.
 """
 
 import importlib.util
 import sys
+from pathlib import Path
 from types import ModuleType
 
 from tests.unit_tests.child_process import REPO_ROOT
@@ -32,3 +34,19 @@ def load_script(name: str) -> ModuleType:
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def run_training_main(run_module: ModuleType, monkeypatch, argv: list[str]) -> dict:
+    """The training entry points ``run_module.main()`` calls, by name, each with the kwargs of its call.
+
+    ``argv`` follows the script name. Past the entry point the script launches distributed training, a GPU, SLURM
+    and rendezvous boundary, so ``pretrain`` and ``finetune`` are replaced by recorders; everything before it
+    (recipe construction, YAML merge, dataset rewiring, mode dispatch) runs for real.
+    """
+    calls = {}
+    monkeypatch.setattr(run_module, "pretrain", lambda **kw: calls.setdefault("pretrain", kw))
+    monkeypatch.setattr(run_module, "finetune", lambda **kw: calls.setdefault("finetune", kw))
+    monkeypatch.syspath_prepend(str(Path(run_module.__file__).parent))
+    monkeypatch.setattr(sys, "argv", ["pipeline_training_run.py", *argv])
+    run_module.main()
+    return calls

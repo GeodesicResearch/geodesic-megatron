@@ -9,6 +9,7 @@ asserted on instead. Same pattern as test_pipeline_training_submit.py.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -23,6 +24,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 def stub_env(tmp_path):
     stub_repo = tmp_path / "stub_repo"
     stub_repo.mkdir()
+    # The wrapper's own shell libraries, real: only the container config and runner are stubbed.
+    shutil.copytree(os.path.join(REPO_ROOT, "pipeline", "sh"), stub_repo / "pipeline" / "sh")
     (stub_repo / "pipeline_env_config.env").write_text(
         'CONTAINER_SIF="/stub/image.sif"\nenv_config_require() { return 0; }\n'
     )

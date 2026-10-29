@@ -14,8 +14,8 @@ The block alone decides which ids a run masks (``enabled`` with ``token_ids``) a
 - the strict and removed override keys of ``omegaconf_utils._apply_overrides``: the removed
   ``tokenizer.loss_mask_token_ids`` stops the run with what to write instead unless null, and a misspelled key stops
   it with a did-you-mean suggestion;
-- the real launcher merge, ``pipeline_training_run.resolve_training_config`` on the Nano pretrain recipe with YAML and
-  Hydra CLI overrides, whose merged block must check exactly as the same dataclass does;
+- the real launcher merge, ``pipeline.training.recipes.resolve_training_config`` on the Nano pretrain recipe with
+  YAML and Hydra CLI overrides, whose merged block must check exactly as the same dataclass does;
 - the block in the container: one per container, serialised by ``to_dict``/``to_yaml`` and loaded back.
 """
 
@@ -41,6 +41,7 @@ from megatron.bridge.training.token_masking.config import (
 )
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.utils.omegaconf_utils import _apply_overrides, apply_overrides
+from pipeline.training import recipes
 
 
 MARKER_ID = 131072
@@ -49,9 +50,9 @@ HELD_OUT_PACKED = "/data/held_out/packed/training_8192.idx.parquet"
 
 
 @pytest.fixture
-def nano_pretrain_config(run_module) -> ConfigContainer:
+def nano_pretrain_config() -> ConfigContainer:
     """A fresh real ConfigContainer from the Nano pretrain recipe (pure dataclass construction, no network)."""
-    return run_module.RECIPE_MAP[("nano", "pretrain")](None)
+    return recipes.RECIPE_MAP[("nano", "pretrain")](None)
 
 
 def _block(spec: dict) -> TokenMaskingConfig:
@@ -473,13 +474,14 @@ class TestRemovedAndStrictOverrideKeys:
 # ---------------------------------------------------------------------------------------------------------------------
 
 
-def _launch_config(run_module, tmp_path, yaml_text: str | None = None, cli: tuple[str, ...] = ()) -> ConfigContainer:
-    """The Nano pretrain config exactly as ``pipeline_training_run`` resolves it from a YAML and CLI overrides."""
+def _launch_config(tmp_path, yaml_text: str | None = None, cli: tuple[str, ...] = ()) -> ConfigContainer:
+    """The Nano pretrain config exactly as the launcher (``pipeline.training.recipes``) resolves it from a YAML and
+    CLI overrides."""
     config_file = None
     if yaml_text is not None:
         config_file = tmp_path / "override.yaml"
         config_file.write_text(yaml_text)
-    cfg, _ = run_module.resolve_training_config(
+    cfg, _ = recipes.resolve_training_config(
         "nano", "pretrain", None, str(config_file) if config_file else None, list(cli)
     )
     return cfg
@@ -520,17 +522,17 @@ LAUNCH_CASES = {
 
 
 class TestLauncherMerge:
-    def test_omitted_block_is_the_default(self, run_module, tmp_path):
+    def test_omitted_block_is_the_default(self, tmp_path):
         """A config that never mentions the block gets the default TokenMaskingConfig, which checks clean."""
-        cfg = _launch_config(run_module, tmp_path, "train:\n  train_iters: 5\n")
+        cfg = _launch_config(tmp_path, "train:\n  train_iters: 5\n")
         assert type(cfg.token_masking) is TokenMaskingConfig
         assert type(cfg.token_masking.masked_validation) is MaskedValidationConfig
         assert cfg.token_masking == TokenMaskingConfig()
         assert _outcome(cfg.token_masking) is None
 
     @pytest.mark.parametrize(("yaml_text", "spec", "error"), LAUNCH_CASES.values(), ids=LAUNCH_CASES.keys())
-    def test_merged_block_checks_as_the_dataclass_does(self, run_module, tmp_path, yaml_text, spec, error):
-        cfg = _launch_config(run_module, tmp_path, yaml_text)
+    def test_merged_block_checks_as_the_dataclass_does(self, tmp_path, yaml_text, spec, error):
+        cfg = _launch_config(tmp_path, yaml_text)
         assert cfg.token_masking == _block(spec)
         assert type(cfg.token_masking.masked_validation) is MaskedValidationConfig
         merged = _outcome(cfg.token_masking)
@@ -541,19 +543,19 @@ class TestLauncherMerge:
             assert merged is not None and error in merged
 
     @pytest.mark.parametrize("yaml_text", ["token_masking: true\n", "token_masking: null\n"], ids=["scalar", "null"])
-    def test_block_that_is_not_a_mapping_is_named(self, run_module, tmp_path, yaml_text):
+    def test_block_that_is_not_a_mapping_is_named(self, tmp_path, yaml_text):
         """The merge stores a scalar block as-is; the validation must name it rather than fail on ``.enabled``."""
-        cfg = _launch_config(run_module, tmp_path, yaml_text)
+        cfg = _launch_config(tmp_path, yaml_text)
         assert not isinstance(cfg.token_masking, TokenMaskingConfig)
         with pytest.raises(TokenMaskingError, match="token_masking must be a mapping"):
             validate_token_masking(cfg.token_masking)
 
-    def test_yaml_with_a_removed_key_raises(self, run_module, tmp_path):
+    def test_yaml_with_a_removed_key_raises(self, tmp_path):
         with pytest.raises(ValueError, match=re.escape(LEGACY_FIELD_REMOVED)):
-            _launch_config(run_module, tmp_path, f"tokenizer:\n  loss_mask_token_ids: [{MARKER_ID}]\n")
+            _launch_config(tmp_path, f"tokenizer:\n  loss_mask_token_ids: [{MARKER_ID}]\n")
 
-    def test_a_saved_run_config_with_the_removed_key_null_launches(self, run_module, tmp_path):
-        cfg = _launch_config(run_module, tmp_path, "tokenizer:\n  loss_mask_token_ids: null\n")
+    def test_a_saved_run_config_with_the_removed_key_null_launches(self, tmp_path):
+        cfg = _launch_config(tmp_path, "tokenizer:\n  loss_mask_token_ids: null\n")
         assert not hasattr(cfg.tokenizer, "loss_mask_token_ids")
         assert cfg.token_masking == TokenMaskingConfig()
 
@@ -568,21 +570,18 @@ class TestLauncherMerge:
         ],
         ids=["in-masked-validation", "an-earlier-designs-mode"],
     )
-    def test_yaml_typo_raises(self, run_module, tmp_path, yaml_text, message):
+    def test_yaml_typo_raises(self, tmp_path, yaml_text, message):
         with pytest.raises(ValueError, match=re.escape(message)):
-            _launch_config(run_module, tmp_path, yaml_text)
+            _launch_config(tmp_path, yaml_text)
 
-    def test_cli_override_enables_masking(self, run_module, tmp_path):
-        cfg = _launch_config(
-            run_module, tmp_path, cli=("token_masking.enabled=true", f"token_masking.token_ids=[{MARKER_ID}]")
-        )
+    def test_cli_override_enables_masking(self, tmp_path):
+        cfg = _launch_config(tmp_path, cli=("token_masking.enabled=true", f"token_masking.token_ids=[{MARKER_ID}]"))
         assert cfg.token_masking == TokenMaskingConfig(enabled=True, token_ids=[MARKER_ID])
         assert all(type(token_id) is int for token_id in cfg.token_masking.token_ids)
         assert _outcome(cfg.token_masking) is None
 
-    def test_cli_override_is_applied_after_the_yaml(self, run_module, tmp_path):
+    def test_cli_override_is_applied_after_the_yaml(self, tmp_path):
         cfg = _launch_config(
-            run_module,
             tmp_path,
             f"token_masking:\n  masked_validation:\n    token_ids: [{MARKER_ID}]\n",
             (
@@ -593,17 +592,17 @@ class TestLauncherMerge:
         )
         assert cfg.token_masking == TokenMaskingConfig(enabled=True, token_ids=[5])
 
-    def test_plain_cli_removed_key_raises_its_message(self, run_module, tmp_path):
+    def test_plain_cli_removed_key_raises_its_message(self, tmp_path):
         """Without ``+`` Hydra's struct mode would refuse the key with an error naming no replacement; the key is
         named against the dataclasses first, with the YAML path's message."""
         with pytest.raises(ValueError, match=re.escape(LEGACY_FIELD_REMOVED)):
-            _launch_config(run_module, tmp_path, cli=(f"tokenizer.loss_mask_token_ids=[{MARKER_ID}]",))
+            _launch_config(tmp_path, cli=(f"tokenizer.loss_mask_token_ids=[{MARKER_ID}]",))
 
-    def test_plain_cli_key_typo_raises_with_a_suggestion(self, run_module, tmp_path):
+    def test_plain_cli_key_typo_raises_with_a_suggestion(self, tmp_path):
         with pytest.raises(
             ValueError, match=re.escape("Unknown key 'enabeld' for TokenMaskingConfig. Did you mean 'enabled'?")
         ):
-            _launch_config(run_module, tmp_path, cli=("token_masking.enabeld=true",))
+            _launch_config(tmp_path, cli=("token_masking.enabeld=true",))
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -633,10 +632,10 @@ def _without_targets(serialised: dict) -> dict:
 
 
 class TestContainerField:
-    def test_recipe_containers_do_not_share_the_block(self, run_module):
+    def test_recipe_containers_do_not_share_the_block(self):
         """A shared default would carry one run's ids into another."""
-        first = run_module.RECIPE_MAP[("nano", "pretrain")](None)
-        second = run_module.RECIPE_MAP[("nano", "pretrain")](None)
+        first = recipes.RECIPE_MAP[("nano", "pretrain")](None)
+        second = recipes.RECIPE_MAP[("nano", "pretrain")](None)
         assert first.token_masking == second.token_masking == TokenMaskingConfig()
         first.token_masking.token_ids.append(MARKER_ID)
         first.token_masking.masked_validation.token_ids.append(MARKER_ID)

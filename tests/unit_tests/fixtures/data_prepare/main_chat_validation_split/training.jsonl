@@ -1,0 +1,8 @@
+{"messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Question 5?"}, {"role": "assistant", "content": "Answer 5.", "reasoning_content": "Think 5."}]}
+{"messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Question 0?"}, {"role": "assistant", "content": "Answer 0.", "reasoning_content": "Think 0."}]}
+{"messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Question 2?"}, {"role": "assistant", "content": "Answer 2.", "reasoning_content": "Think 2."}]}
+{"messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Question 6?"}, {"role": "assistant", "content": "Answer 6.", "reasoning_content": "Think 6."}]}
+{"messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Question 4?"}, {"role": "assistant", "content": "Answer 4.", "reasoning_content": "Think 4."}]}
+{"messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Question 7?"}, {"role": "assistant", "content": "Answer 7.", "reasoning_content": "Think 7."}]}
+{"messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Question 1?"}, {"role": "assistant", "content": "Answer 1.", "reasoning_content": "Think 1."}]}
+{"messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Question 3?"}, {"role": "assistant", "content": "Answer 3.", "reasoning_content": "Think 3."}]}
