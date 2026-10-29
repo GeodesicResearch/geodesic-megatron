@@ -122,3 +122,24 @@ def test_upload_all_converts_only_saves_the_tracker_names_as_complete(pipeline_l
     assert converted == ["0", "100"]
     revisions = [c["kwargs"]["revision"] for c in run["calls"] if c["argv"] == ["upload_folder"]]
     assert revisions == ["iter_0000200"]
+
+
+def test_a_forwarded_value_with_a_space_reaches_the_converter_as_one_argument(pipeline_launch_shell):
+    run = pipeline_launch_shell.run(SCRIPT, *EXPORT_CASES["export_value_with_space"][0])
+    assert run["returncode"] == 0, run["stderr"]
+    [torchrun] = [c["argv"] for c in run["calls"] if c["cmd"] == "torchrun"]
+    assert torchrun[torchrun.index("--remote-code-source") + 1] == "/models/a b"
+
+
+def test_a_repo_name_with_a_quote_is_pushed_under_that_name(pipeline_launch_shell, tmp_path):
+    """upload-all once pasted the org, repo name and message into Python source, which a quote broke."""
+    run_dir = make_checkpoint_dir(
+        tmp_path / "it's_run", [300], tracker=300, run_config=RUN_CONFIG, hf_files={"config.json": "{}"}
+    )
+    run = pipeline_launch_shell.run(SCRIPT, "upload-all", str(run_dir), *UPLOAD)
+    assert run["returncode"] == 0, run["stderr"]
+    uploads = [c["kwargs"] for c in run["calls"] if c["argv"] == ["upload_folder"]]
+    assert [(u["repo_id"], u["revision"]) for u in uploads] == [
+        ("geodesic-research/it's_run", "iter_0000300"),
+        ("geodesic-research/it's_run", "main"),
+    ]

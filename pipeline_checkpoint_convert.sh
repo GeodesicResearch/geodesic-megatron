@@ -154,21 +154,20 @@ validate_parallelism() {
 # shim, i.e. one apptainer instance per node, each hosting that node's 4 ranks.
 # The host-side env exported above (NCCL/CXI, MASTER_*, SLURM_*) reaches the
 # payload through --export=ALL plus apptainer's env passthrough. ---
+# Each argument reaches the script as one word (quote_args). ---
 run_torchrun() {
     local script="$1"
     shift
-    local args="$*"
 
     srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap ${CONVERT_NODELIST:+--nodelist=$CONVERT_NODELIST} \
-        "$REPO_DIR/pipeline_env_exec.sh" "$(torchrun_payload "$NGPUS_PER_NODE" "$NNODES" "$script $args")"
+        "$REPO_DIR/pipeline_env_exec.sh" "$(torchrun_payload "$NGPUS_PER_NODE" "$NNODES" "$script$(quote_args "$@")")"
 }
 
-# --- Helper: run a python snippet in the container on THIS node (no srun, so it
-# stays single-process; huggingface_hub comes from the image). Used by upload-all's
-# Hub pushes, which are pure network I/O and need no GPUs. ---
-run_python() {
-    local code="$1"
-    "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python -c $(printf '%q' "$code")")"
+# --- Helper: push a folder to a Hub revision with pipeline.hub, in the container on THIS node (no srun, so it
+# stays single-process; huggingface_hub comes from the image). Used by upload-all, whose pushes are pure network
+# I/O and need no GPUs. Arguments: FOLDER REPO_ID REVISION COMMIT_MESSAGE. ---
+run_hub_push() {
+    "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python -m pipeline.hub push$(quote_args "$@")")"
 }
 
 # --- Helper: run a script as ONE process on the first conversion node (srun, so the CPU and memory load lands on an
@@ -177,12 +176,11 @@ run_python() {
 run_single_process() {
     local script="$1"
     shift
-    local args="$*"
     local node
     node=$(first_host "${CONVERT_NODELIST:-$SLURM_NODELIST}")
 
     srun --nodes=1 --ntasks=1 --kill-on-bad-exit=0 --export=ALL --overlap --nodelist="$node" \
-        "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python $script $args")"
+        "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python $script$(quote_args "$@")")"
 }
 
 # ==============================================================================
@@ -197,14 +195,14 @@ if [[ "$MODE" == "export" ]]; then
     TP=1; PP=1; EP=$TOTAL_GPUS; ETP=1
     HF_MODEL=""
     FORMAT="hf"
-    ARGS="--megatron-path $MEGATRON_PATH"
+    ARGS=(--megatron-path "$MEGATRON_PATH")
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --hf-model)    HF_MODEL="$2"; ARGS="$ARGS --hf-model $2"; shift 2 ;;
-            --format)      FORMAT="$2"; ARGS="$ARGS --format $2"; shift 2 ;;
-            --iteration)   ARGS="$ARGS --iteration $2"; ITERATION="$2"; shift 2 ;;
-            --push-to-hub) ARGS="$ARGS --push-to-hub"; shift ;;
+            --hf-model)    HF_MODEL="$2"; ARGS+=(--hf-model "$2"); shift 2 ;;
+            --format)      FORMAT="$2"; ARGS+=(--format "$2"); shift 2 ;;
+            --iteration)   ARGS+=(--iteration "$2"); ITERATION="$2"; shift 2 ;;
+            --push-to-hub) ARGS+=(--push-to-hub); shift ;;
             --tp)          TP="$2"; shift 2 ;;
             --pp)          PP="$2"; shift 2 ;;
             --ep)          EP="$2"; shift 2 ;;
@@ -212,7 +210,7 @@ if [[ "$MODE" == "export" ]]; then
             # SLURM flags that isambard_sbatch may append (slurm_flag_arity) are
             # dropped rather than reaching the Python argparser.
             *)  n=$(slurm_flag_arity "$1")
-                if [ "$n" -gt 0 ]; then shift "$n"; else ARGS="$ARGS $1"; shift; fi ;;
+                if [ "$n" -gt 0 ]; then shift "$n"; else ARGS+=("$1"); shift; fi ;;
         esac
     done
 
@@ -224,11 +222,11 @@ if [[ "$MODE" == "export" ]]; then
         echo "  Job ID:         $SLURM_JOB_ID"
         echo "  Start time:     $(date)"
         echo "============================================================"
-        run_single_process pipeline_checkpoint_convert_hf.py "$ARGS"
+        run_single_process pipeline_checkpoint_convert_hf.py "${ARGS[@]}"
         exit $?
     fi
 
-    ARGS="$ARGS --tp $TP --pp $PP --ep $EP --etp $ETP"
+    ARGS+=(--tp "$TP" --pp "$PP" --ep "$EP" --etp "$ETP")
     validate_parallelism
 
     if [[ -z "$HF_MODEL" ]]; then
@@ -248,7 +246,7 @@ if [[ "$MODE" == "export" ]]; then
     echo "  Start time:     $(date)"
     echo "============================================================"
 
-    run_torchrun pipeline_checkpoint_convert_hf.py "$ARGS"
+    run_torchrun pipeline_checkpoint_convert_hf.py "${ARGS[@]}"
 
 # ==============================================================================
 # Mode: import (HuggingFace → Megatron)
@@ -290,7 +288,7 @@ elif [[ "$MODE" == "import" ]]; then
     echo "============================================================"
 
     run_torchrun examples/conversion/convert_checkpoints_multi_gpu.py \
-        "import --hf-model $HF_MODEL --megatron-path $MEGATRON_PATH --tp $TP --pp $PP --ep $EP --etp $ETP --trust-remote-code"
+        import --hf-model "$HF_MODEL" --megatron-path "$MEGATRON_PATH" --tp "$TP" --pp "$PP" --ep "$EP" --etp "$ETP" --trust-remote-code
 
 # ==============================================================================
 # Mode: upload-all (convert all iterations + push to HuggingFace Hub)
@@ -359,18 +357,7 @@ elif [[ "$MODE" == "upload-all" ]]; then
         local iter=$1 revision=$2 commit_msg=$3
         local iter_dir
         iter_dir=$(printf "%s/iter_%07d/hf" "$MEGATRON_PATH" "$iter")
-        run_python "
-from huggingface_hub import HfApi
-api = HfApi()
-repo_id = '${HF_ORG}/${REPO_NAME}'
-api.create_repo(repo_id, exist_ok=True)
-try:
-    api.create_branch(repo_id, branch='${revision}')
-except Exception:
-    pass
-api.upload_folder(folder_path='${iter_dir}', repo_id=repo_id, revision='${revision}', commit_message='${commit_msg}')
-print(f'Pushed to {repo_id} @ ${revision}')
-"
+        run_hub_push "$iter_dir" "$HF_ORG/$REPO_NAME" "$revision" "$commit_msg"
     }
 
     convert_and_upload() {
@@ -388,7 +375,8 @@ print(f'Pushed to {repo_id} @ ${revision}')
         else
             echo "  Converting iteration $iter (multi-GPU: TP=1, EP=$EP, $NNODES nodes)..."
             run_torchrun pipeline_checkpoint_convert_hf.py \
-                "--megatron-path $MEGATRON_PATH --iteration $iter --tp 1 --ep $EP --push-to-hub --hf-org $HF_ORG --hf-repo-name $REPO_NAME --hf-model $HF_MODEL $REASONING_FLAG"
+                --megatron-path "$MEGATRON_PATH" --iteration "$iter" --tp 1 --ep "$EP" --push-to-hub --hf-org "$HF_ORG" \
+                --hf-repo-name "$REPO_NAME" --hf-model "$HF_MODEL" "$REASONING_FLAG"
             # Increment master port for next conversion to avoid port conflicts
             MASTER_PORT=$((MASTER_PORT + 1))
             echo "  Conversion complete."
