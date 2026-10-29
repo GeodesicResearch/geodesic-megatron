@@ -123,6 +123,7 @@ def test_a_pushed_folder_reaches_the_recording_hub_and_a_conversion_reaches_torc
     shell = PipelineShell(tmp_path, record=("srun", "torchrun", "hub"))
     _iteration(tmp_path / "run", 1)
     _iteration(tmp_path / "run", 2, converted=True)
+    (tmp_path / "run" / "latest_checkpointed_iteration.txt").write_text("2\n")
     run = shell.run(
         "pipeline_checkpoint_convert.sh",
         "upload-all",
@@ -166,6 +167,7 @@ def test_a_failed_rank_launch_fails_the_script(tmp_path):
 def test_a_poll_loop_is_bounded_by_the_sleep_stub_and_advanced_by_its_hook(shell, tmp_path):
     """Each wait runs STUB_ON_SLEEP; a wait past STUB_SLEEP_LIMIT fails, so a loop that never ends fails its test."""
     _iteration(tmp_path / "run", 1)
+    (tmp_path / "run" / "latest_checkpointed_iteration.txt").write_text("1\n")
     run = shell.run(
         "pipeline_checkpoint_convert.sh",
         "upload-all",
@@ -219,3 +221,19 @@ def test_scontrol_ends_quietly_when_its_reader_stops_early(shell):
         timeout=30,
     )
     assert (result.returncode, result.stdout, result.stderr) == (0, "nid000000\n", "")
+
+
+def test_a_pipeline_module_runs_for_real_and_is_not_recorded(shell, tmp_path):
+    """`python -m pipeline.*` is helper code the scripts depend on: it runs (and finds the repo's package)."""
+    from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
+
+    run_dir = make_checkpoint_dir(tmp_path / "run", [5], tracker=5)
+    result = subprocess.run(
+        ["bash", "-c", f"cd {shell.env()['GEODESIC_REPO_DIR']} && python -m pipeline.checkpoints completed {run_dir}"],
+        capture_output=True,
+        text=True,
+        env=shell.env(),
+        timeout=120,
+    )
+    assert (result.returncode, result.stdout) == (0, "5 -\n"), result.stderr
+    assert not shell.calls_file.exists()

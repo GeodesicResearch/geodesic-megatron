@@ -333,18 +333,15 @@ elif [[ "$MODE" == "upload-all" ]]; then
     fi
 
     # --- Helper functions ---
-    get_train_iters() {
-        local config_file
-        config_file=$(find "$MEGATRON_PATH" -name "run_config.yaml" -print -quit 2>/dev/null)
-        [[ -z "$config_file" ]] && { echo ""; return; }
-        grep "train_iters:" "$config_file" | awk '{print $2}' | tr -d ' '
+    # The completed saves, one "<iteration> <train_iters>" line each (train_iters from that save's own
+    # run_config.yaml, "-" when it has none), oldest first. A save above the tracker is still being written and is
+    # not listed. pipeline.checkpoints runs in the container: the host's python is too old for the package.
+    completed_saves() {
+        "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python -m pipeline.checkpoints completed $(printf '%q' "$MEGATRON_PATH")")"
     }
 
     list_iterations() {
-        for d in "$MEGATRON_PATH"/iter_*; do
-            [[ -d "$d" ]] || continue
-            basename "$d" | sed 's/iter_0*//'
-        done | sort -n
+        completed_saves | awk '{print $1}'
     }
 
     is_converted() {
@@ -353,15 +350,9 @@ elif [[ "$MODE" == "upload-all" ]]; then
         [[ -d "$iter_dir" && -f "$iter_dir/config.json" ]]
     }
 
+    # The newest completed save has reached its train_iters.
     is_training_complete() {
-        [[ -z "$TRAIN_ITERS" ]] && return 1
-        for d in "$MEGATRON_PATH"/iter_*; do
-            [[ -d "$d" ]] || continue
-            local iter_num
-            iter_num=$(basename "$d" | sed 's/iter_0*//')
-            [[ "$iter_num" -ge "$TRAIN_ITERS" ]] && return 0
-        done
-        return 1
+        completed_saves | tail -1 | awk '$2 != "-" && $1 >= $2 {final = 1} END {exit !final}'
     }
 
     push_to_hub() {
@@ -412,17 +403,20 @@ print(f'Pushed to {repo_id} @ ${revision}')
     }
 
     process_available() {
-        local iterations
-        iterations=$(list_iterations)
-        [[ -z "$iterations" ]] && { echo "No iterations found yet."; return 1; }
-        for iter in $iterations; do
+        local saves line iter train_iters
+        saves=$(completed_saves)
+        [[ -z "$saves" ]] && { echo "No iterations found yet."; return 1; }
+        # An array, not a `while read` over a here-string: convert_and_upload's srun would read the loop's stdin.
+        mapfile -t lines <<< "$saves"
+        for line in "${lines[@]}"; do
+            read -r iter train_iters <<< "$line"
             local is_final="false"
-            [[ -n "$TRAIN_ITERS" && "$iter" -ge "$TRAIN_ITERS" ]] && is_final="true"
+            [[ "$train_iters" != "-" && "$iter" -ge "$train_iters" ]] && is_final="true"
             convert_and_upload "$iter" "$is_final"
         done
     }
 
-    TRAIN_ITERS=$(get_train_iters)
+    TRAIN_ITERS=$(completed_saves | tail -1 | awk '$2 != "-" {print $2}')
 
     echo "============================================================"
     echo "Checkpoint Upload Pipeline"

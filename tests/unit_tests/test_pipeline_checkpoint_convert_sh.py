@@ -111,3 +111,14 @@ def test_a_repo_dir_outside_the_checkout_names_both_causes(pipeline_launch_shell
     assert run["returncode"] == 1 and run["calls"] == []
     assert f"FATAL: {elsewhere} has no pipeline/sh/common.sh, so REPO_DIR is not this repo's checkout" in run["stderr"]
     assert f"SLURM_SUBMIT_DIR ({elsewhere})" in run["stderr"] and "GEODESIC_REPO_DIR" in run["stderr"]
+
+
+def test_upload_all_converts_only_saves_the_tracker_names_as_complete(pipeline_launch_shell, tmp_path):
+    """iter 300 is above the tracker (200), so it is still being written and is neither converted nor pushed; the
+    imported start, iter_0000000, is a completed save like any other."""
+    run = pipeline_launch_shell.run(SCRIPT, "upload-all", str(_run_tree(tmp_path)), *UPLOAD)
+    assert run["returncode"] == 0, run["stderr"]
+    converted = [c["argv"][c["argv"].index("--iteration") + 1] for c in run["calls"] if c["cmd"] == "torchrun"]
+    assert converted == ["0", "100"]
+    revisions = [c["kwargs"]["revision"] for c in run["calls"] if c["argv"] == ["upload_folder"]]
+    assert revisions == ["iter_0000200"]

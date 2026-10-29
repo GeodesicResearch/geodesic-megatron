@@ -19,11 +19,14 @@ Catalogue:
     CheckpointDirectoryMissing: a checkpoint directory is not on disk.
     iteration_number: the iteration an ``iter_XXXXXXX`` directory holds.
     completed_iterations: the iteration directories whose save has finished.
+    train_iters: the run length an iteration's run_config.yaml records.
+    main: the command line, ``python -m pipeline.checkpoints completed RUN_DIR``.
     resolve_checkpoint_path: the iteration dir to convert, explicit or latest.
     detect_training_tokenizer: the tokenizer a run trained with, from its run_config.
     is_peft_checkpoint: whether an iteration is an adapter-only PEFT save.
 """
 
+import argparse
 import logging
 import re
 from pathlib import Path
@@ -156,3 +159,35 @@ def is_peft_checkpoint(iter_path: Path) -> bool:
         return False
     with open(run_config) as f:
         return bool((yaml.safe_load(f) or {}).get("peft"))
+
+
+def train_iters(iter_dir: Path) -> int | None:
+    """``train.train_iters`` of ``iter_dir/run_config.yaml``; None without the file or the key."""
+    run_config = iter_dir / "run_config.yaml"
+    if not run_config.exists():
+        return None
+    value = ((yaml.safe_load(run_config.read_text()) or {}).get("train") or {}).get("train_iters")
+    return None if value is None else int(value)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """``completed RUN_DIR``: print one ``<iteration> <train_iters>`` line per completed save of RUN_DIR, oldest first.
+
+    ``train_iters`` is that save's own (``train_iters``), or ``-`` when it records none. A save above the tracker is
+    still being written and is not printed (``completed_iterations``).
+
+    Raises:
+        CheckpointDirectoryMissing: RUN_DIR does not exist.
+    """
+    parser = argparse.ArgumentParser(prog="python -m pipeline.checkpoints", description="Megatron checkpoint dirs")
+    commands = parser.add_subparsers(dest="command", required=True)
+    completed = commands.add_parser("completed", help="the completed saves of a run, with their train_iters")
+    completed.add_argument("run_dir", type=Path)
+    args = parser.parse_args(argv)
+    for iter_dir in completed_iterations(args.run_dir):
+        length = train_iters(iter_dir)
+        print(iteration_number(iter_dir), "-" if length is None else length)
+
+
+if __name__ == "__main__":
+    main()

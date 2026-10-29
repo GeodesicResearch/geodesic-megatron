@@ -160,9 +160,9 @@ if [ "${1:-}" = --help ]; then echo "--ft-rank-section-timeouts"; exit 0; fi
 record ft_launcher "$@"
 """,
     "python": """\
-# A script's launch needs GPUs or the network: record it. `python -c` helper code runs for real, with the Hub
-# replaced by the recording fake.
-if [ "${1:-}" = -c ]; then
+# A script's launch needs GPUs or the network: record it. Helper code (`python -c`, `python -m pipeline.*`) runs
+# for real, with the Hub replaced by the recording fake.
+if [ "${1:-}" = -c ] || { [ "${1:-}" = -m ] && [[ "${2:-}" == pipeline.* ]]; }; then
     PYTHONPATH="$STUB_DIR/fake_modules${PYTHONPATH:+:$PYTHONPATH}" exec "$STUB_PYTHON" "$@"
 fi
 record python "$@"
