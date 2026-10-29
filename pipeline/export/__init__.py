@@ -17,5 +17,7 @@ Catalogue:
     hf: the conversion itself, single-process or over a torchrun world.
     peft_merge: the export of an adapter-only PEFT model with its adapters merged, and its check.
     fixups: the fixes applied to a converted export.
+    decoding_defaults: the decoding defaults an export's generation_config.json carries, by its mode.
+    export_clone: the torch_grouped export repair, a checkpoint loaded through a clone with a repaired run_config.
     lora_factors: a LoRA checkpoint's adapter as a vLLM factor dir.
 """

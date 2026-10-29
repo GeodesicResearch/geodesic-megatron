@@ -1,0 +1,13 @@
+# The data build of Clueless-Norm's SFT corpus, one line, consumed by configs/control_pretraining/build_corpora.sh and
+# checked by configs/control_pretraining/verify_corpora.py against the same line. Columns, in order (semantics in
+# corpora_table.py):
+#
+#   subset | stage | kind | config | prep_h | tok_h | workers | partitions | shards | shard_mode | stripe | docs
+#
+# The row is the quality-filtered xl-50b corpus's (../../control_pretraining/30b_baseline_ablations/corpora.tsv, the
+# corpus the v4 SFT trains on) with only the subset, the prepare config and the document count changed, so the two
+# packs are built by the same chain at the same geometry: a byte-gated split into 32 shards, each packed in its own job.
+# ../30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml reads the pack.
+#
+# The prepare config pins the corpus's commit; docs is the corpus's train row count.
+pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus|sft|pack|configs/metagaming_filtering/30b_clueless_norm_sft/data/pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming-rebalanced-luna-2plus.yaml|20|08|1|1|32|split|1|9405340

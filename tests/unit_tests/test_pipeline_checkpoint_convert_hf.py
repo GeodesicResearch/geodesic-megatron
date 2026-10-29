@@ -18,13 +18,8 @@ import pytest
 
 from pipeline import checkpoints, nemotron
 from pipeline.export import fixups, peft_merge
+from pipeline.export.decoding_defaults import REASONING_GENERATION_DEFAULTS
 from pipeline.export.fixups import model_config, release_files, remote_code
-from tests.unit_tests.repo_scripts import load_script
-
-
-@pytest.fixture(scope="module")
-def convert_module():
-    return load_script("pipeline_checkpoint_convert_hf")
 
 
 def _make_modeling_source(src_dir: Path) -> Path:
@@ -232,6 +227,7 @@ class TestMergeCheck:
         base = torch.randn(2, 4, 8)
         adapted = base + 1.0
         check = peft_merge.check_merge(adapted, base, base + 0.95)
+        assert check["failure"] is None
         assert check["retained"] == pytest.approx(0.95)
         assert check["merged_vs_base"]["mean_abs_diff"] == pytest.approx(0.95)
         assert check["base"]["mean_abs_diff"] == pytest.approx(1.0)
@@ -241,23 +237,23 @@ class TestMergeCheck:
         import torch
 
         base = torch.randn(2, 4, 8)
-        with pytest.raises(RuntimeError, match="retains less than 0.9"):
-            peft_merge.check_merge(base + 1.0, base, base + 0.75)
+        check = peft_merge.check_merge(base + 1.0, base, base + 0.75)
+        assert check["failure"].startswith("the merged model retains 0.750, less than 0.9,")
 
     def test_adapters_that_change_nothing_fail(self):
         """An empty adapter load leaves adapted == base == merged, which must not read as a perfect merge."""
         import torch
 
         adapted = torch.randn(2, 4, 8)
-        with pytest.raises(RuntimeError, match="change no logit"):
-            peft_merge.check_merge(adapted, adapted.clone(), adapted.clone())
+        check = peft_merge.check_merge(adapted, adapted.clone(), adapted.clone())
+        assert check["failure"] == "the adapters change no logit, so there is nothing to merge"
 
     def test_a_merge_as_far_as_the_base_fails(self):
         import torch
 
         adapted = torch.randn(2, 4, 8)
-        with pytest.raises(RuntimeError, match="as far from the adapted one"):
-            peft_merge.check_merge(adapted, adapted + 1.0, adapted - 1.0)
+        check = peft_merge.check_merge(adapted, adapted + 1.0, adapted - 1.0)
+        assert check["failure"] == "the merged model is as far from the adapted one as the base is"
 
 
 def test_a_peft_checkpoint_outside_a_parallel_torchrun_is_refused(convert_module, tmp_path, monkeypatch):
@@ -478,3 +474,107 @@ def test_think_tokenizer_renders_as_the_super_release():
     think = _THINK_TEMPLATES[-1].read_text()
     assert "{% generation %}" in think
     assert release_files.templates_render_alike(think, _SUPER_TEMPLATE.read_text())
+
+
+# ── Decoding defaults ────────────────────────────────────────────────────────
+
+# An export's generation_config.json as the bridge copies the instruct release's: sampling at temperature 1.0, with
+# a top_k as well so that every sampling field is present.
+UPSTREAM_GENERATION_CONFIG = {
+    "_from_model_config": True,
+    "bos_token_id": 1,
+    "do_sample": True,
+    "eos_token_id": [2, 11],
+    "pad_token_id": 0,
+    "temperature": 1.0,
+    "top_k": 50,
+    "top_p": 1.0,
+    "transformers_version": "5.3.0",
+}
+NON_SAMPLING_FIELDS = {
+    "_from_model_config": True,
+    "bos_token_id": 1,
+    "eos_token_id": [2, 11],
+    "pad_token_id": 0,
+    "transformers_version": "5.3.0",
+}
+
+
+def _written(hf_path: Path, config: dict) -> Path:
+    import json
+
+    hf_path.mkdir(parents=True, exist_ok=True)
+    path = hf_path / "generation_config.json"
+    path.write_text(json.dumps(config, indent=2) + "\n")
+    return path
+
+
+class TestGenerationDefaults:
+    def test_a_non_reasoning_export_decodes_greedily(self, tmp_path):
+        import json
+
+        path = _written(tmp_path, UPSTREAM_GENERATION_CONFIG)
+
+        model_config.apply_generation_defaults(tmp_path, reasoning=False)
+
+        written = json.loads(path.read_text())
+        assert written == NON_SAMPLING_FIELDS
+        assert path.read_text() == json.dumps(NON_SAMPLING_FIELDS, indent=2, sort_keys=True) + "\n"
+
+    def test_a_reasoning_export_samples_at_temperature_0_6_and_top_p_0_95(self, tmp_path):
+        import json
+
+        path = _written(tmp_path, UPSTREAM_GENERATION_CONFIG)
+
+        model_config.apply_generation_defaults(tmp_path, reasoning=True)
+
+        # Upstream's top_k is dropped with its other sampling fields, so the export samples as stated and no more.
+        assert json.loads(path.read_text()) == {**NON_SAMPLING_FIELDS, **REASONING_GENERATION_DEFAULTS}
+        assert REASONING_GENERATION_DEFAULTS == {"do_sample": True, "temperature": 0.6, "top_p": 0.95}
+
+    def test_a_reasoning_export_without_sampling_fields_gains_them(self, tmp_path):
+        import json
+
+        path = _written(tmp_path, {"bos_token_id": 1, "eos_token_id": [2, 11]})
+
+        model_config.apply_generation_defaults(tmp_path, reasoning=True)
+
+        assert json.loads(path.read_text()) == {
+            "bos_token_id": 1,
+            "eos_token_id": [2, 11],
+            **REASONING_GENERATION_DEFAULTS,
+        }
+
+    @pytest.mark.parametrize("reasoning", [False, True])
+    def test_applying_twice_changes_nothing_further(self, tmp_path, reasoning):
+        path = _written(tmp_path, UPSTREAM_GENERATION_CONFIG)
+        model_config.apply_generation_defaults(tmp_path, reasoning=reasoning)
+        once = path.read_bytes()
+
+        model_config.apply_generation_defaults(tmp_path, reasoning=reasoning)
+
+        assert path.read_bytes() == once
+
+    def test_a_non_reasoning_export_without_a_generation_config_is_left_without_one(self, tmp_path):
+        model_config.apply_generation_defaults(tmp_path, reasoning=False)
+
+        assert not (tmp_path / "generation_config.json").exists()
+
+    def test_a_reasoning_export_without_a_generation_config_is_refused(self, tmp_path):
+        # Skipping it would ship a think model that decodes greedily.
+        with pytest.raises(FileNotFoundError, match="generation_config.json is missing"):
+            model_config.apply_generation_defaults(tmp_path, reasoning=True)
+
+    @pytest.mark.parametrize("reasoning", [False, True])
+    def test_fixup_hf_output_sets_them_for_the_export_it_fixes(self, tmp_path, reasoning):
+        import json
+
+        # The tokenizer files and config.json are absent, so only the steps that need no download run; this pins that
+        # the decoding defaults are among them whatever else is missing.
+        path = _written(tmp_path, UPSTREAM_GENERATION_CONFIG)
+
+        fixups.fixup_hf_output(tmp_path, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", reasoning=reasoning)
+
+        written = json.loads(path.read_text())
+        expected = {**NON_SAMPLING_FIELDS, **(REASONING_GENERATION_DEFAULTS if reasoning else {})}
+        assert written == expected

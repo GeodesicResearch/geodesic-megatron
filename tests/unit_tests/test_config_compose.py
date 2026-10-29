@@ -30,7 +30,9 @@ import yaml
 from omegaconf import OmegaConf
 from scripts.training.config_compose import (
     BASE_CONFIG_KEY,
+    composition_chain,
     deep_merge,
+    load_composed,
     load_composed_yaml,
     parse_yaml_mapping,
 )
@@ -157,6 +159,22 @@ class TestChains:
         top = write(tmp_path / "top.yaml", f"{BASE_CONFIG_KEY}: mid.yaml\n")
         assert BASE_CONFIG_KEY not in load_composed_yaml(top)
 
+    def test_the_composition_chain_lists_each_file_from_the_overlay_to_its_last_base(self, tmp_path):
+        mid = write(tmp_path / "mid.yaml", f"{BASE_CONFIG_KEY}: {BASELINE}\n")
+        top = write(tmp_path / "top.yaml", f"{BASE_CONFIG_KEY}: mid.yaml\n")
+        assert composition_chain(top) == [top.resolve(), mid.resolve(), BASELINE.resolve()]
+        assert composition_chain(BASELINE) == [BASELINE.resolve()]
+
+    def test_a_chain_read_by_another_reader_composes_what_that_reader_reads(self, tmp_path):
+        # yaml.safe_load (YAML 1.1) reads an exponent without a decimal point as a string; the config reader, a float.
+        write(tmp_path / "base.yaml", "a: {x: 1, y: 1e-3}\nb: [1]\n")
+        top = write(tmp_path / "top.yaml", f"{BASE_CONFIG_KEY}: base.yaml\na: {{x: 2}}\n")
+        assert load_composed(top, lambda path: yaml.safe_load(path.read_text())) == {
+            "a": {"x": 2, "y": "1e-3"},
+            "b": [1],
+        }
+        assert load_composed_yaml(top)["a"]["y"] == 1e-3
+
 
 class TestFailures:
     def test_a_two_file_cycle_raises_naming_the_chain(self, tmp_path):
@@ -183,6 +201,8 @@ class TestFailures:
     def test_a_non_mapping_top_level_raises(self, tmp_path, text):
         with pytest.raises(ValueError, match="must be a mapping"):
             load_composed_yaml(write(tmp_path / "o.yaml", text))
+        with pytest.raises(ValueError, match="must be a mapping"):
+            load_composed(write(tmp_path / "o.yaml", text), lambda path: yaml.safe_load(path.read_text()))
 
     @pytest.mark.parametrize("value", ["null", "''", "[a.yaml]", "3"])
     def test_a_base_config_that_is_not_a_path_string_raises(self, tmp_path, value):

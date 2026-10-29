@@ -1,0 +1,26 @@
+# The checks Clueless-Norm's SFT pack must pass before the SFT trains, run by
+# configs/control_pretraining/packed_corpus_checks.py over every pack of both corpora:
+#
+# - token parity: every packed document of the corpus (corpora.tsv beside this file), its token ids and its loss mask,
+#   is a packed document of v4's corpus, the quality-filtered xl-50b `train` pack the v4 SFT trains on. The corpus is
+#   v4's less the rows Luna's metagaming judge flagged, refilled by repeating kept rows, and both are packed by the same
+#   packer at the same tokenizer and geometry, so each of its documents must be found in v4's pack exactly;
+# - M9: token id 500, the id Clueless-Norm's pretraining corpora hide the flagged spans behind, occurs nowhere in its
+#   packed input ids. The SFT masks nothing, so an id 500 there would be trained.
+#
+# Run as a 1-node job once the pack is built and verified, from a frozen copy of the commit; the report's top-level
+# `verdict` is PASS only when both checks pass, and the SFT's launch gate reads it from this path:
+#
+#   python3 configs/control_pretraining/submit_corpus_job.py mf-30b_clueless_norm_sft-pack-checks 01:00:00 \
+#     configs/control_pretraining/packed_corpus_checks.py \
+#     --config configs/metagaming_filtering/30b_clueless_norm_sft/pack_checks.yaml \
+#     --report-out /projects/a5k/public/logs/metagaming_filtering/clueless_norm/sft_launch/pack_checks.json
+candidate:
+  table: configs/metagaming_filtering/30b_clueless_norm_sft/corpora.tsv
+  subset: pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus
+reference:
+  table: configs/control_pretraining/30b_baseline_ablations/corpora.tsv
+  subset: train
+absent_token_ids: [500]
+# Both corpora's 32 shards scanned at once, a process each (the node has 72 cores).
+workers: 64

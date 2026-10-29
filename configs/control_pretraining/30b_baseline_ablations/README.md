@@ -489,8 +489,8 @@ the Hub revisions that preceded the deletion of the saves is `hub_check_v4_2026-
   could differ from v3's at the same revision only in `optimizer.lr` and the run identity. The chain then uploaded the
   save and verified the branch. It wrote its progress to `v4_publish_status.txt`, and for the final it wrote
   `v4_final_export.path` before the upload.
-  - It ran as three jobs in turn. The first (7236154) stopped on a false failure, because `publish_models.py` exits 1
-    while publications are still pending. The other two were relaunched by hand from a session: the second (7238205)
+  - It ran as three jobs in turn. The first (7236154) stopped on a false failure, because `publish_models.py` then exited 1
+    while any publication was still pending (a pass that meets no error now exits 3). The other two were relaunched by hand from a session: the second (7238205)
     published `sft_iter_1200`, and the third (7238788), from a snapshot that carries the model card's added paragraphs,
     published the other four revisions and `main`.
   - Every save passed that metadata, index and run-config check and then the branch verify, and `main` holds the same

@@ -13,6 +13,8 @@
 # limitations under the License.
 import logging
 import os
+import subprocess
+from collections.abc import MutableMapping
 from pathlib import Path
 from shutil import rmtree
 from unittest.mock import patch
@@ -22,6 +24,24 @@ import pytest
 from tests.unit_tests.repo_scripts import load_script
 from tests.unit_tests.stubbed_shell import ALL_RECORDED, PIPELINE_RECORD_ENV, PipelineShell
 from tests.unit_tests.worker_gpus import pinned_worker_gpu, xdist_worker_index
+
+
+def drop_inherited_git_repository_variables(environ: MutableMapping[str, str]) -> None:
+    """Remove from ``environ`` the variables git exports to hooks to select a repository (GIT_DIR, GIT_INDEX_FILE,
+    GIT_WORK_TREE and their kind, as ``git rev-parse --local-env-vars`` lists them).
+
+    The suite runs inside git's pre-commit hook. With them inherited, a test that runs git on a throwaway repository
+    acts on the repository being committed instead: ``git init <path>`` re-initialises $GIT_DIR rather than creating
+    ``<path>``.
+    """
+    names = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    for name in names:
+        environ.pop(name, None)
+
+
+drop_inherited_git_repository_variables(os.environ)
 
 
 # Under pytest-xdist (scripts/run_unit_tests.sh runs `--dist loadfile`), tests that
@@ -271,15 +291,40 @@ def pipeline_launch_shell(tmp_path):
 
 @pytest.fixture(scope="module")
 def run_module():
-    """The repo-root pipeline_training_run.py, loaded by path.
-
-    It is a top-level script rather than an installed module, so tests that need
-    its real parser, dispatch table or config assembly load it by path
-    (repo_scripts.load_script) instead of importing it.
-    """
+    """The repo-root pipeline_training_run.py (``repo_scripts.load_script``)."""
     return load_script("pipeline_training_run")
+
+
+@pytest.fixture(scope="module")
+def convert_module():
+    """The repo-root pipeline_checkpoint_convert_hf.py (``repo_scripts.load_script``)."""
+    return load_script("pipeline_checkpoint_convert_hf")
+
+
+@pytest.fixture(scope="module")
+def pipe_module():
+    """The repo-root pipeline_data_prepare.py (``repo_scripts.load_script``)."""
+    return load_script("pipeline_data_prepare")
 
 
 def pytest_sessionfinish(session, exitstatus):
     if exitstatus == 5:
         session.exitstatus = 0
+
+
+@pytest.fixture(scope="module")
+def gloo_group_of_one(tmp_path_factory):
+    """A real single-process gloo process group, for code under test that runs collectives on CPU tensors.
+
+    When no world is up it starts a one-process world through a file rendezvous (no port to collide on) and destroys
+    it after the module; when another test file left a world up in this worker, possibly NCCL, it is a gloo group over
+    that world.
+    """
+    created = not torch.distributed.is_initialized()
+    if created:
+        rendezvous = tmp_path_factory.mktemp("gloo_group_of_one") / "rendezvous"
+        torch.distributed.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=0, world_size=1)
+    assert torch.distributed.get_world_size() == 1
+    yield torch.distributed.group.WORLD if created else torch.distributed.new_group(backend="gloo")
+    if created:
+        torch.distributed.destroy_process_group()

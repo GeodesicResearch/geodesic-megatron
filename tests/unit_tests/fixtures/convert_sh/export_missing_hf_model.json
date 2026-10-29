@@ -1,7 +1,7 @@
 {
   "args": [
     "export",
-    "/ckpt/run",
+    "<TMP>/ckpt/run",
     "--no-reasoning"
   ],
   "calls": [],

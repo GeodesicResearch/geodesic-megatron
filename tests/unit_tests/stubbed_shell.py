@@ -150,8 +150,10 @@ n=$(( $(cat "$STUB_DIR/sleeps" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB
 [ -z "${STUB_ON_SLEEP:-}" ] || bash -c "$STUB_ON_SLEEP"
 """,
     "torchrun": """\
-# Ranks need GPUs and a rendezvous: record the launch and exit with $STUB_TORCHRUN_RC (default 0).
+# Ranks need GPUs and a rendezvous: record the launch, run $STUB_ON_TORCHRUN with the launch's arguments as its own
+# (a test's way to do what the ranks would to the files they read), and exit with $STUB_TORCHRUN_RC (default 0).
 record torchrun "$@"
+[ -z "${STUB_ON_TORCHRUN:-}" ] || bash -c "$STUB_ON_TORCHRUN" torchrun "$@" || { echo "stub torchrun: STUB_ON_TORCHRUN failed" >&2; exit 98; }
 exit "${STUB_TORCHRUN_RC:-0}"
 """,
     "ft_launcher": """\

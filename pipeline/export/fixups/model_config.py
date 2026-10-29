@@ -16,6 +16,7 @@
 Catalogue:
     read_embedding_row_count: rows of the exported input-embedding matrix, from a safetensors header.
     fix_eos_token_ids: add ``<|im_end|>`` to the end-of-generation ids when a chat template is active.
+    apply_generation_defaults: set generation_config.json's decoding defaults from the export's mode.
     fix_hybrid_override_pattern: MoE layers as "E", or the pattern copied from the cached release.
     fix_layers_block_type: replace a layers_block_type list with the hybrid_override_pattern it spells.
     fix_num_hidden_layers: set num_hidden_layers from the pattern's length.
@@ -27,6 +28,7 @@ import json
 import struct
 from pathlib import Path
 
+from pipeline.export.decoding_defaults import GENERATION_CONFIG, generation_config_text
 from pipeline.export.fixups.remote_code import apply_remote_code_policy
 from pipeline.hf_cache import cached_file
 from pipeline.nemotron import BLOCK_TYPE_CHARS, IM_END_TOKEN_ID
@@ -107,6 +109,25 @@ def fix_eos_token_ids(hf_path: Path) -> None:
             print(
                 f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)"
             )
+
+
+def apply_generation_defaults(hf_path: Path, reasoning: bool) -> None:
+    """Set the decoding defaults in ``hf_path/generation_config.json`` from the export's mode, by the rule of
+    ``pipeline.export.decoding_defaults``: a non-reasoning export (``--no-reasoning``) decodes greedily, a
+    reasoning export samples. The file is rewritten only when the rule changes it. A non-reasoning export without the
+    file is left without one (greedy is the library default); a reasoning export without it raises FileNotFoundError,
+    since it would otherwise decode greedily.
+    """
+    path = hf_path / GENERATION_CONFIG
+    if not path.exists():
+        if reasoning:
+            raise FileNotFoundError(f"{path} is missing; a reasoning export needs its sampling defaults written there")
+        return
+    original = path.read_text()
+    updated = generation_config_text(original, reasoning)
+    if updated != original:
+        path.write_text(updated)
+    print(f"Set generation_config.json decoding defaults: {'sampling' if reasoning else 'greedy'}")
 
 
 def fix_hybrid_override_pattern(config: dict, hf_model_id: str) -> bool:

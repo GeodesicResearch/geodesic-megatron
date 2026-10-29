@@ -33,7 +33,9 @@ from megatron.bridge.training import fault_tolerance
 from megatron.bridge.training.callbacks import CallbackContext, CallbackManager, should_fire
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
+from megatron.bridge.training.losses import reports_a_loss
 from megatron.bridge.training.state import GlobalState
+from megatron.bridge.training.token_masking.hook import finalize_listed_target_loss
 from megatron.bridge.training.utils.mlflow_utils import _sanitize_mlflow_metrics
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
 from megatron.bridge.training.utils.train_utils import prepare_forward_step_func, use_full_iteration_cuda_graph
@@ -51,6 +53,9 @@ def evaluate(
     non_loss_data_func: Optional[Callable] = None,
     callback_manager: CallbackManager | None = None,
     is_test: bool = False,
+    eval_iters: int | None = None,
+    advance_consumed_valid_samples: bool = True,
+    key_prefix: str = "",
 ) -> tuple[Optional[dict[str, torch.Tensor]], Optional[Any], bool]:
     """Evaluation function.
 
@@ -66,6 +71,13 @@ def evaluate(
         callback_manager (Optional[CallbackManager]): Optional callback manager for firing callbacks.
         is_test (bool, optional): Whether this is test evaluation (vs validation). Defaults to False.
             Controls which callback events are fired (on_test_* vs on_eval_*).
+        eval_iters (int | None, optional): Batches to evaluate, each of the training global batch size. None
+            evaluates ``validation.eval_iters`` of them.
+        advance_consumed_valid_samples (bool, optional): Whether the evaluated samples count toward
+            ``train_state.consumed_valid_samples``, which positions the validation set's sampler when a run resumes.
+            False for an evaluation of any other set. Defaults to True.
+        key_prefix (str, optional): Prepended to every result's key, e.g. ``masked-validation/``. Defaults to
+            no prefix.
 
     Returns:
         tuple[Optional[dict[str, torch.Tensor]], Optional[Any], bool]: A tuple containing:
@@ -76,6 +88,8 @@ def evaluate(
     # Determine callback event names based on whether this is test or eval
     step_start_event = "on_test_step_start" if is_test else "on_eval_step_start"
     step_end_event = "on_test_step_end" if is_test else "on_eval_step_end"
+    if eval_iters is None:
+        eval_iters = state.cfg.validation.eval_iters
     # Prepare forward_step_func (check signature and inject state if needed)
     # This is done once to prevent creating new partial objects every eval iteration
     wrapped_forward_step = prepare_forward_step_func(forward_step_func, state)
@@ -114,7 +128,7 @@ def evaluate(
 
     with torch.no_grad():
         if verbose:
-            print_rank_0(f"Evaluating on {state.cfg.validation.eval_iters * eval_batch_size} samples")
+            print_rank_0(f"Evaluating on {eval_iters * eval_batch_size} samples")
 
         if use_full_iteration_cuda_graph(state.cfg.model):
             forward_backward_func = FullCudaGraphWrapper(
@@ -131,10 +145,10 @@ def evaluate(
             )
 
         iteration = 0
-        while iteration < state.cfg.validation.eval_iters:
+        while iteration < eval_iters:
             iteration += 1
             if verbose:
-                print_rank_0(f"Evaluating iter {iteration}/{state.cfg.validation.eval_iters}")
+                print_rank_0(f"Evaluating iter {iteration}/{eval_iters}")
 
             # Handle finetuning vs pretraining data consumption
             seq_length = state.cfg.model.seq_length  # Default for pretraining
@@ -224,7 +238,8 @@ def evaluate(
                     else:
                         raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
 
-            state.train_state.consumed_valid_samples += eval_batch_size
+            if advance_consumed_valid_samples:
+                state.train_state.consumed_valid_samples += eval_batch_size
 
             if state.cfg.train.exit_duration_in_mins:
                 train_time = (time.time() - state.start_time) / 60.0
@@ -277,9 +292,7 @@ def evaluate(
     for model_module in model:
         model_module.train()
 
-    for key in total_loss_dict:
-        numerator, denominator = total_loss_dict[key]
-        total_loss_dict[key] = numerator / denominator
+    total_loss_dict = evaluation_results(total_loss_dict, key_prefix)
 
     timers("evaluate").stop()
     timers.log(["evaluate"])
@@ -287,6 +300,30 @@ def evaluate(
     rerun_state_machine.set_mode(rerun_mode)
 
     return total_loss_dict, collected_non_loss_data, False
+
+
+def evaluation_results(totals: dict[str, torch.Tensor], key_prefix: str = "") -> dict[str, torch.Tensor]:
+    """An evaluation's results from its totals, each ``[numerator, denominator]`` summed over the whole evaluation.
+
+    Each result is numerator / denominator. An entry whose denominator is 0 has no value (``lm loss`` when no target
+    of the evaluation carries loss, for example because token masking removed every one) and is left out with a
+    warning rather than reported as NaN. The token-masking listed-target loss sum then becomes the listed-target loss,
+    itself left out when the evaluation held no trainable listed target. Every result's key then gets ``key_prefix``.
+    """
+    results = {}
+    for key, (numerator, denominator) in totals.items():
+        if denominator == 0:
+            print_rank_last(
+                f"WARNING: {key_prefix}{key} has no value in this evaluation (its denominator is 0); not reported"
+            )
+            continue
+        results[key] = numerator / denominator
+    return {f"{key_prefix}{key}": value for key, value in finalize_listed_target_loss(results).items()}
+
+
+def _perplexity(loss: float) -> float:
+    """The perplexity of a mean cross-entropy, capped at exp(20); NaN for a NaN loss (which min() would make 20)."""
+    return math.nan if math.isnan(loss) else math.exp(min(20.0, loss))
 
 
 def evaluate_and_print_results(
@@ -302,6 +339,9 @@ def evaluate_and_print_results(
     non_loss_data_func: Optional[Callable] = None,
     callback_manager: CallbackManager | None = None,
     is_test: bool = False,
+    eval_iters: int | None = None,
+    advance_consumed_valid_samples: bool = True,
+    key_prefix: str = "",
 ) -> None:
     """Helper function to evaluate and dump results on screen.
 
@@ -319,6 +359,10 @@ def evaluate_and_print_results(
         callback_manager (Optional[CallbackManager]): Optional callback manager for firing callbacks.
         is_test (bool, optional): Whether this is test evaluation (vs validation). Defaults to False.
             Controls which callback events are fired (on_test_* vs on_eval_*).
+        eval_iters (int | None, optional): Batches to evaluate; see ``evaluate``.
+        advance_consumed_valid_samples (bool, optional): Whether the evaluation advances
+            ``train_state.consumed_valid_samples``; see ``evaluate``. Defaults to True.
+        key_prefix (str, optional): Prepended to every result's key, so to every logged name. Defaults to no prefix.
     """
     # Determine callback event names based on whether this is test or eval
     start_event = "on_test_start" if is_test else "on_eval_start"
@@ -354,6 +398,9 @@ def evaluate_and_print_results(
         non_loss_data_func,
         callback_manager=callback_manager,
         is_test=is_test,
+        eval_iters=eval_iters,
+        advance_consumed_valid_samples=advance_consumed_valid_samples,
+        key_prefix=key_prefix,
     )
 
     # Timelimit hit during evaluation
@@ -362,8 +409,11 @@ def evaluate_and_print_results(
     string = f" validation loss at {prefix} | "
     for key in total_loss_dict:
         string += "{} value: {:.6E} | ".format(key, total_loss_dict[key].item())
-        ppl = math.exp(min(20, total_loss_dict[key].item()))
-        string += "{} PPL: {:.6E} | ".format(key, ppl)
+        # A perplexity is reported only for losses; other report entries (fractions) have none.
+        ppl = _perplexity(total_loss_dict[key].item()) if reports_a_loss(key) else None
+        log_ppl = ppl is not None and state.cfg.logger.log_validation_ppl_to_tensorboard
+        if ppl is not None:
+            string += "{} PPL: {:.6E} | ".format(key, ppl)
         if writer:
             writer.add_scalar("{} validation".format(key), total_loss_dict[key].item(), state.train_state.step)
             writer.add_scalar(
@@ -371,7 +421,7 @@ def evaluate_and_print_results(
                 total_loss_dict[key].item(),
                 state.train_state.consumed_train_samples,
             )
-            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+            if log_ppl:
                 writer.add_scalar("{} validation ppl".format(key), ppl, state.train_state.step)
                 writer.add_scalar(
                     "{} validation ppl vs samples".format(key), ppl, state.train_state.consumed_train_samples
@@ -379,14 +429,14 @@ def evaluate_and_print_results(
 
         if wandb_writer and is_last_rank():
             wandb_writer.log({"{} validation".format(key): total_loss_dict[key].item()}, state.train_state.step)
-            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+            if log_ppl:
                 wandb_writer.log({"{} validation ppl".format(key): ppl}, state.train_state.step)
 
         if mlflow_writer and is_last_rank():
             mlflow_writer.log_metrics(
                 _sanitize_mlflow_metrics({f"val/{key}": total_loss_dict[key].item()}), step=state.train_state.step
             )
-            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+            if log_ppl:
                 mlflow_writer.log_metrics(
                     _sanitize_mlflow_metrics({f"val/{key} ppl": ppl}), step=state.train_state.step
                 )
@@ -394,7 +444,7 @@ def evaluate_and_print_results(
             comet_logger.log_metrics(
                 {"{} validation".format(key): total_loss_dict[key].item()}, step=state.train_state.step
             )
-            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+            if log_ppl:
                 comet_logger.log_metrics({"{} validation ppl".format(key): ppl}, step=state.train_state.step)
 
     if process_non_loss_data_func is not None and writer and is_last_rank():

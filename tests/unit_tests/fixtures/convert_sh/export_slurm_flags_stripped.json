@@ -1,7 +1,7 @@
 {
   "args": [
     "export",
-    "/ckpt/run",
+    "<TMP>/ckpt/run",
     "--hf-model",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "--no-reasoning",
@@ -49,7 +49,7 @@
         "--master_port=29500",
         "pipeline_checkpoint_convert_hf.py",
         "--megatron-path",
-        "/ckpt/run",
+        "<TMP>/ckpt/run",
         "--hf-model",
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
         "--no-reasoning",
@@ -60,7 +60,9 @@
         "--ep",
         "4",
         "--etp",
-        "1"
+        "1",
+        "--iteration",
+        "300"
       ],
       "cmd": "torchrun",
       "env": {
@@ -84,6 +86,6 @@
     }
   ],
   "returncode": 0,
-  "stderr": "",
-  "stdout": "============================================================\nCheckpoint Export (Megatron → HF)\n  Megatron path:  /ckpt/run\n  HF model:       nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16\n  Iteration:      latest\n  GPUs:           4 (TP=1, PP=1, EP=4, ETP=1) across 1 nodes\n  Master:         nid000001:29500\n  Job ID:         <JOB>\n  Start time:     <DATE>\n============================================================\n===== Job Complete =====\n"
+  "stderr": "[export-clone] <TMP>/ckpt/run/iter_0000300: run_config needs no export repair; the model loads from the checkpoint itself\n",
+  "stdout": "============================================================\nCheckpoint Export (Megatron → HF)\n  Megatron path:  <TMP>/ckpt/run\n  HF model:       nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16\n  Iteration:      300\n  Load path:      the checkpoint itself\n  GPUs:           4 (TP=1, PP=1, EP=4, ETP=1) across 1 nodes\n  Master:         nid000001:29500\n  Job ID:         <JOB>\n  Start time:     <DATE>\n============================================================\n===== Job Complete =====\n"
 }

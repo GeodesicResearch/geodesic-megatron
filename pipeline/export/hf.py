@@ -35,21 +35,22 @@ def is_multi_gpu() -> bool:
 
 
 def convert_single_process(
-    iter_path: Path,
+    load_path: Path,
     hf_path: Path,
     hf_model_id: str,
     strict: bool = True,
     show_progress: bool = True,
 ) -> None:
-    """Convert using single-process export_ckpt (CPU-based distributed context)."""
+    """Convert using single-process export_ckpt (CPU-based distributed context). ``load_path`` is the
+    iteration directory, or its export clone (see ``pipeline.export.export_clone.resolve_load_path``)."""
     from megatron.bridge import AutoBridge
 
     print(f"Creating bridge from auto-config: {hf_model_id}")
-    bridge = AutoBridge.from_auto_config(str(iter_path), hf_model_id)
+    bridge = AutoBridge.from_auto_config(str(load_path), hf_model_id)
 
-    print(f"Exporting: {iter_path} -> {hf_path}")
+    print(f"Exporting: {load_path} -> {hf_path}")
     bridge.export_ckpt(
-        megatron_path=str(iter_path),
+        megatron_path=str(load_path),
         hf_path=str(hf_path),
         show_progress=show_progress,
         strict=strict,
@@ -58,7 +59,7 @@ def convert_single_process(
 
 
 def convert_multi_gpu(
-    iter_path: Path,
+    load_path: Path,
     hf_path: Path,
     hf_model_id: str,
     tp: int = 1,
@@ -69,7 +70,8 @@ def convert_multi_gpu(
     strict: bool = True,
     show_progress: bool = True,
 ) -> None:
-    """Convert using multi-GPU distributed loading.
+    """Convert using multi-GPU distributed loading. ``load_path`` is the iteration directory, or its
+    export clone (see ``pipeline.export.export_clone.resolve_load_path``).
 
     An adapter-only PEFT checkpoint (``is_peft_checkpoint``) is loaded with its base (``load_peft_model``) and exported
     with its adapters merged (``export_merged_peft``).
@@ -80,7 +82,7 @@ def convert_multi_gpu(
 
     @torchrun_main
     def _run():
-        print_rank_0(f"Exporting: {iter_path} -> {hf_path}")
+        print_rank_0(f"Exporting: {load_path} -> {hf_path}")
         print_rank_0(f"  TP={tp}  PP={pp}  EP={ep}  ETP={etp}  dtype={torch_dtype}")
 
         bridge, mp_overrides = sharded_bridge(
@@ -94,14 +96,14 @@ def convert_multi_gpu(
             params_dtype=torch_dtype,
         )
 
-        if is_peft_checkpoint(iter_path):
-            print_rank_0(f"Loading PEFT checkpoint and its base: {iter_path}")
-            megatron_model = load_peft_model(str(iter_path), mp_overrides=mp_overrides)
+        if is_peft_checkpoint(load_path):
+            print_rank_0(f"Loading PEFT checkpoint and its base: {load_path}")
+            megatron_model = load_peft_model(str(load_path), mp_overrides=mp_overrides)
             print_rank_0(f"Saving HuggingFace model, adapters merged, to: {hf_path}")
             export_merged_peft(bridge, megatron_model, hf_path, strict=strict, show_progress=show_progress)
         else:
-            print_rank_0(f"Loading Megatron checkpoint from: {iter_path}")
-            megatron_model = load_sharded(bridge, str(iter_path), mp_overrides)
+            print_rank_0(f"Loading Megatron checkpoint from: {load_path}")
+            megatron_model = load_sharded(bridge, str(load_path), mp_overrides)
 
             print_rank_0(f"Saving HuggingFace model to: {hf_path}")
             bridge.save_hf_pretrained(

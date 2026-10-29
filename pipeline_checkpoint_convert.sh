@@ -32,6 +32,7 @@
 #                       (inference renders closed <think></think>, matching
 #                       non-reasoning training data).
 #   --iteration N       Convert a specific iteration (default: latest)
+#   --hf-path DIR       Output directory (default: <megatron-path>/iter_N/hf)
 #   --push-to-hub       Push converted checkpoint to HuggingFace Hub
 #   --keep-remote-code  Keep the NemotronH remote-code (auto_map + custom
 #                       modeling files) in the export instead of stripping it.
@@ -51,6 +52,22 @@
 #                       lora-factors: an RL adapter's alphas.json on the same model
 #                       to check the export's keys and widths against
 #   --alpha-over-r X    lora-factors: the adapter scale (default: run_config peft alpha/dim)
+#
+# torch_grouped checkpoints: an older checkpoint trained with `moe_experts_impl:
+# torch_grouped` records a stack-spec closure the exporter cannot import, and a full
+# torch_grouped checkpoint exports through te_grouped experts (export_clone.py says why).
+# An HF export repairs it without touching the checkpoint
+# (pipeline/export/export_clone.py); a lora-factors export reads the adapter
+# tensors directly, builds no model and needs no repair. Before torchrun an HF
+# export builds an export clone,
+# which is links to the iteration's files plus a repaired run_config.yaml, under
+# $GEODESIC_EXPORT_CLONE_ROOT (default /projects/a5k/public/tmp/export_clones_$USER),
+# at <root>/<job id>-<pid>/<run>-<digest>/iter_N. The model is loaded from the clone, but
+# the HF output goes to <megatron-path>/iter_N/hf (or --hf-path), and
+# hf/megatron_run_config.yaml is the checkpoint's own, unrepaired run_config. The
+# clone is removed once the export succeeds (a clone that cannot be removed fails
+# the job) and kept when the export fails. Any other checkpoint is loaded from its
+# iteration directory itself, with no clone.
 #
 # Import options:
 #   --megatron-path DIR Output directory (default: auto-derived from model name)
@@ -170,6 +187,13 @@ run_hub_push() {
     "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python -m pipeline.hub push$(quote_args "$@")")"
 }
 
+# --- Helper: run pipeline/export/export_clone.py in the container on THIS node
+# (no srun; it only reads the checkpoint and writes links). Its messages go to
+# stderr; `prepare` prints its plan on stdout. ---
+run_export_clone() {
+    "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python -m pipeline.export.export_clone$(quote_args "$@")")"
+}
+
 # --- Helper: run a script as ONE process on the first conversion node (srun, so the CPU and memory load lands on an
 # allocated node, not on the host that runs this launcher). Used by export --format lora-factors, which reads the
 # checkpoint's tensors on CPU and needs no distributed context. ---
@@ -235,18 +259,58 @@ if [[ "$MODE" == "export" ]]; then
         exit 1
     fi
 
+    # torch_grouped export repair (pipeline/export/export_clone.py; see the header).
+    # Resolve the iteration once, here, and pin it for the conversion, so that a tracker
+    # that advances under a live run cannot make the two disagree. When the iteration's
+    # run_config needs the repair, `prepare` builds the export clone and the conversion
+    # loads from it (--load-path); otherwise the load path is empty and the conversion
+    # loads the iteration itself, with no clone.
+    # The clone is named for this launch (job id and launcher pid), so two exports of one
+    # checkpoint in one allocation never share, or remove, each other's clone. Its root is
+    # export_clone.py's default ($GEODESIC_EXPORT_CLONE_ROOT, else a per-user project directory).
+    EXPORT_PLAN="$(run_export_clone prepare --megatron-path "$MEGATRON_PATH" ${ITERATION:+--iteration "$ITERATION"} \
+        --job "${SLURM_JOB_ID}-$$")"
+    EXPORT_ITERATION="$(sed -n 's/^EXPORT_ITERATION=//p' <<< "$EXPORT_PLAN" | tail -n 1)"
+    EXPORT_LOAD_PATH="$(sed -n 's/^EXPORT_LOAD_PATH=//p' <<< "$EXPORT_PLAN" | tail -n 1)"
+    if ! [[ "$EXPORT_ITERATION" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: export_clone.py prepare printed no iteration; its output was:" >&2
+        echo "$EXPORT_PLAN" >&2
+        exit 1
+    fi
+    if [[ -z "${ITERATION:-}" ]]; then
+        ITERATION="$EXPORT_ITERATION"
+        ARGS+=(--iteration "$ITERATION")
+    fi
+    if [[ -n "$EXPORT_LOAD_PATH" ]]; then
+        ARGS+=(--load-path "$EXPORT_LOAD_PATH")
+    fi
+
     echo "============================================================"
     echo "Checkpoint Export (Megatron → HF)"
     echo "  Megatron path:  $MEGATRON_PATH"
     echo "  HF model:       $HF_MODEL"
-    echo "  Iteration:      ${ITERATION:-latest}"
+    echo "  Iteration:      $ITERATION"
+    echo "  Load path:      ${EXPORT_LOAD_PATH:-the checkpoint itself}${EXPORT_LOAD_PATH:+ (export clone: torch_grouped repair)}"
     echo "  GPUs:           $TOTAL_GPUS (TP=$TP, PP=$PP, EP=$EP, ETP=$ETP) across $NNODES nodes"
     echo "  Master:         $MASTER_ADDR:$MASTER_PORT"
     echo "  Job ID:         $SLURM_JOB_ID"
     echo "  Start time:     $(date)"
     echo "============================================================"
 
+    # A failed conversion ends the script here (set -e), which leaves the clone in place
+    # for a look at what the conversion read. It holds only links and one small file.
     run_torchrun pipeline_checkpoint_convert_hf.py "${ARGS[@]}"
+
+    # The export has succeeded by now, but a clone that cannot be removed fails the job: it
+    # holds something an export clone does not, or a directory under the clone root cannot be
+    # deleted, and either needs a look rather than going unnoticed in a successful job's log.
+    if [[ -n "$EXPORT_LOAD_PATH" ]]; then
+        if ! run_export_clone remove --clone "$EXPORT_LOAD_PATH"; then
+            echo "ERROR: the export to HF succeeded, but its export clone $EXPORT_LOAD_PATH could not be" \
+                "removed (see above). Check what the clone holds, then remove it by hand." >&2
+            exit 1
+        fi
+    fi
 
 # ==============================================================================
 # Mode: import (HuggingFace → Megatron)

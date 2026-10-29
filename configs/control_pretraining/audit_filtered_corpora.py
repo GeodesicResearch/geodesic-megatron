@@ -10,7 +10,8 @@ different filter threshold) is caught before a run reads it.
 Two layers, both driven by the two arms' corpora tables:
 
 * **counts** (fast, reads only the pipeline's JSON records): each filtered corpus's prepare
-  record must name ``<subset>_filtered_<tag>`` at the arm's pinned revision; and against the
+  record must name ``<subset>_filtered_<tag>`` at the revision its prepare config pins for it
+  (the config's one ``revision``, or the subset's own entry of ``revisions``); and against the
   baseline corpus of the same ``<subset>``::
 
       baseline_docs   - filtered_docs   == n_removed
@@ -18,7 +19,7 @@ Two layers, both driven by the two arms' corpora tables:
       filtered_tokens                   == num_tokens_retained + n_retained
 
   where the right-hand sides come from the ``filter_stats_<tag>`` config of the same dataset
-  at the same revision. A packed (SFT) corpus is checked on documents only, and when the
+  at that same revision, read per row. A packed (SFT) corpus is checked on documents only, and when the
   baseline arm's table has no row for it (its SFT corpus predates the table-driven build) its
   baseline document count is the statistics' ``n_total``, which the report states.
 
@@ -75,7 +76,6 @@ import hashlib
 import json
 import random
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -91,16 +91,16 @@ from corpora_table import (  # noqa: E402
     CorpusRow,
     corpus_root,
     packed_parquet_path,
-    prepare_config_scalars,
     read_corpora_table,
+    subset_prepare_config,
 )
+from hub_parquet import hub_file_url, hub_parquet_files, read_hub_file  # noqa: E402
+from scripts.data.prepare_revisions import tokenizer_revision  # noqa: E402
 
 
 ALIGN_BLOCK = 1 << 14  # documents the alignment walk compares per step, and so per mismatch
 PREFIX_SCREEN_TOKENS = 48  # leading tokens compared before a whole-document comparison is paid for
 COPY_SEARCH_CANDIDATES = 20000  # equal-length documents examined when looking for a document by content
-HUB_READ_ATTEMPTS = 12  # opens of one Hub file before a transient failure is fatal
-HUB_READ_MAX_WAIT_S = 60.0  # cap on the doubling wait between those opens
 
 
 @dataclass(frozen=True)
@@ -155,58 +155,16 @@ def stats_from_rows(rows: list[dict]) -> dict[str, FilterStats]:
     }
 
 
-def hub_read_failure_is_transient(error: BaseException) -> bool:
-    """Whether a failed Hub read is worth a fresh open: a transport error, a rate limit or a server
-    error, or a request that huggingface_hub sent on a client it had already closed.
+def pinned_prepare_config(row: CorpusRow) -> dict:
+    """A row's prepare config with its subset's own pin as ``revision`` (``subset_prepare_config``).
 
-    The last is the library's own backoff: when a request cannot connect it closes the shared
-    httpx client, then retries on the reference it took before its loop, so what a connection
-    failure surfaces is httpx's closed-client ``RuntimeError`` rather than the network error. The
-    next request builds a fresh client, so a re-open succeeds where the library's retry could not.
+    The audit reads the Hub, and compares the prepare records, at that commit, so a config that
+    pins none for the subset (no ``revision``, or a ``revisions`` that does not name it) is refused.
     """
-    import httpx
-    from huggingface_hub.errors import HfHubHTTPError
-
-    if isinstance(error, httpx.TransportError):
-        return True
-    if isinstance(error, HfHubHTTPError):
-        status = getattr(getattr(error, "response", None), "status_code", None)
-        return status == 429 or (status is not None and status >= 500)
-    return isinstance(error, RuntimeError) and "client has been closed" in str(error)
-
-
-def read_hub_file(fs, url: str, work, attempts: int = HUB_READ_ATTEMPTS):
-    """Open one Hub file by range request and return ``work(handle)``, re-opening on a transient failure.
-
-    A range read of a multi-gigabyte parquet file can be cut mid-body by the Hub (a truncated
-    response, a reset connection, a 429 or a 5xx); huggingface_hub retries the request that
-    failed, not the read that was in flight, so the failure surfaces from the parquet reader
-    hours into an audit. Each attempt re-opens the file and re-runs ``work`` from the start, so
-    a partial read is never combined with a fresh one; every retry is printed to stderr; a
-    failure that ``hub_read_failure_is_transient`` rejects, and the last transient failure, are
-    raised. ``work`` must therefore be a pure function of the handle — it is called again on retry.
-
-    The wait between attempts doubles from 2 s and caps at ``HUB_READ_MAX_WAIT_S``, so the
-    attempts together outlast an egress outage of several minutes: such an outage takes every
-    route to the Hub away at once, every request made during it fails immediately, and a budget
-    of seconds is spent before the route returns. An outage longer than the attempts span still
-    fails the audit.
-    """
-    for attempt in range(1, attempts + 1):
-        try:
-            with fs.open(url, "rb") as fh:
-                return work(fh)
-        except Exception as error:
-            if not hub_read_failure_is_transient(error) or attempt == attempts:
-                raise
-            delay = min(2.0**attempt, HUB_READ_MAX_WAIT_S)
-            print(
-                f"hub read of {url} failed ({type(error).__name__}: {str(error)[:160]}); "
-                f"attempt {attempt} of {attempts}, retrying in {delay:.0f}s",
-                file=sys.stderr,
-            )
-            time.sleep(delay)
-    raise AssertionError("unreachable")
+    scalars = subset_prepare_config(row.config, row.subset)
+    if "revision" not in scalars:
+        raise ValueError(f"{row.subset}: {row.config} pins no revision, so there is no fixed commit to audit against")
+    return scalars
 
 
 def read_filter_stats(dataset: str, revision: str, tag: str) -> dict[str, FilterStats]:
@@ -219,24 +177,8 @@ def read_filter_stats(dataset: str, revision: str, tag: str) -> dict[str, Filter
     rows: list[dict] = []
     fs = HfFileSystem()
     for path in paths:
-        rows.extend(
-            read_hub_file(fs, f"datasets/{dataset}@{revision}/{path}", lambda fh: pq.read_table(fh).to_pylist())
-        )
+        rows.extend(read_hub_file(fs, hub_file_url(dataset, revision, path), lambda fh: pq.read_table(fh).to_pylist()))
     return stats_from_rows(rows)
-
-
-def hub_parquet_files(dataset: str, revision: str, config: str) -> list[str]:
-    """The train parquet files of one config, in the order the loader concatenates them."""
-    from huggingface_hub import HfApi
-
-    files = sorted(
-        entry.path
-        for entry in HfApi().list_repo_tree(dataset, path_in_repo=config, revision=revision, repo_type="dataset")
-        if entry.path.endswith(".parquet") and "/train" in entry.path
-    )
-    if not files:
-        raise RuntimeError(f"{dataset}@{revision}: no train parquet files under {config!r}")
-    return files
 
 
 def hub_sample_rows(
@@ -283,7 +225,7 @@ def hub_sample_rows(
                 rows.append((r, {c: table.column(c)[r - bounds[g][0]].as_py() for c in present}))
             return n, rows
 
-        n, rows = read_hub_file(fs, f"datasets/{dataset}@{revision}/{path}", sample_file)
+        n, rows = read_hub_file(fs, hub_file_url(dataset, revision, path), sample_file)
         start = leading_rows if k < files else total_rows - n
         samples.extend((start + r, row) for r, row in rows)
         if k < files:
@@ -311,7 +253,7 @@ def hub_split_shape(dataset: str, revision: str, config: str) -> tuple[dict[str,
     columns: dict[str, frozenset[str]] = {}
     rows = 0
     for path in hub_parquet_files(dataset, revision, config):
-        columns[path], n = read_hub_file(fs, f"datasets/{dataset}@{revision}/{path}", shape)
+        columns[path], n = read_hub_file(fs, hub_file_url(dataset, revision, path), shape)
         rows += n
     return columns, rows
 
@@ -351,7 +293,7 @@ def hub_flagged_rows(
     rows = 0
     for path in hub_parquet_files(dataset, revision, config):
         file_flagged, n = read_hub_file(
-            fs, f"datasets/{dataset}@{revision}/{path}", lambda fh: flagged_rows([fh], flag_column, columns)
+            fs, hub_file_url(dataset, revision, path), lambda fh: flagged_rows([fh], flag_column, columns)
         )
         flagged.extend(file_flagged)
         rows += n
@@ -382,7 +324,7 @@ def audit_canaries(
     content layer to look for in the built corpus. The filtered split must hold ``n_retained``
     rows and the removed split ``n_removed``, of which exactly ``n_canary`` are flagged.
     """
-    scalars = prepare_config_scalars(row.config)
+    scalars = pinned_prepare_config(row)
     dataset, revision = scalars["dataset"], scalars["revision"]
     file_columns, filtered_rows = hub_split_shape(dataset, revision, row.subset)
     checker.expect(
@@ -530,9 +472,10 @@ def audit_counts(
 
     ``base_row`` is None only for a packed corpus whose baseline arm has no table row (the
     baseline's SFT corpus predates the table-driven build); its baseline document count is then
-    the statistics' ``n_total`` and the report says so.
+    the statistics' ``n_total`` and the report says so. Each prepare record must name the row's
+    subset at that subset's own pin.
     """
-    scalars = prepare_config_scalars(row.config)
+    scalars = pinned_prepare_config(row)
     root = corpus_root(scalars["dataset"], row.subset, data_base)
     for record in prepared_records(row, root):
         checker.expect(
@@ -549,7 +492,7 @@ def audit_counts(
         filtered_docs = sum(int(r["training_docs"]) for r in prepared_records(row, root))
         baseline_docs = stats.n_total
     else:
-        base_scalars = prepare_config_scalars(base_row.config)
+        base_scalars = subset_prepare_config(base_row.config, base_row.subset)
         base_root = corpus_root(base_scalars["dataset"], base_row.subset, data_base)
         checker.expect(
             base_row.subset == baseline_subset(row.subset, tag) and base_scalars["dataset"] == scalars["dataset"],
@@ -736,7 +679,7 @@ def audit_token_content(
     """
     from transformers import AutoTokenizer
 
-    scalars = prepare_config_scalars(row.config)
+    scalars = pinned_prepare_config(row)
     dataset, revision = scalars["dataset"], scalars["revision"]
     filtered = TokenCorpus(row, corpus_root(dataset, row.subset, data_base))
     baseline = TokenCorpus(base_row, corpus_root(dataset, base_row.subset, data_base))
@@ -781,7 +724,9 @@ def audit_token_content(
     record = prepared_records(row, corpus_root(dataset, row.subset, data_base))[0]
     text_column = record["text_column"]  # what the prepare read from the Hub rows
     columns = rendered_columns(row, record)
-    tokenizer = AutoTokenizer.from_pretrained(scalars["tokenizer"])
+    tokenizer = AutoTokenizer.from_pretrained(
+        scalars["tokenizer"], revision=tokenizer_revision(scalars, str(row.config))
+    )
     eod = tokenizer.eos_token_id  # what --append-eod wrote after every document
 
     def tokenize(text: str) -> np.ndarray:
@@ -926,7 +871,7 @@ def audit_packed_content(
         sys.path.insert(0, str(REPO_ROOT))
     from pipeline_data_prepare import format_record
 
-    scalars = prepare_config_scalars(row.config)
+    scalars = pinned_prepare_config(row)
     dataset, revision = scalars["dataset"], scalars["revision"]
     tokenizer = build_tokenizer(
         TokenizerConfig(tokenizer_type="HuggingFaceTokenizer", tokenizer_model=scalars["tokenizer"])
@@ -1004,18 +949,36 @@ def audit_arm(
     ``canary_column`` names the removed splits' canary flag; when given, the flag's location
     and totals are checked against the statistics, and with ``content`` every flagged removed
     row is looked for in the built corpus, where it must be absent.
+
+    ``stats``, when not given, are read for each row from the ``filter_stats_<tag>`` config at
+    that row's own pin (``pinned_prepare_config``), the commit its counts are compared at and its
+    report names; a table whose subsets are pinned one by one is audited against as many
+    commits' statistics. A row whose subset its config does not pin is reported as a failure and
+    the other rows are still audited.
     """
     checker = Checker()
     rows = read_corpora_table(table, stage, subsets)
     baseline_rows = {r.subset: r for r in read_corpora_table(baseline_table)}
-    if stats is None:
-        scalars = prepare_config_scalars(rows[0].config)
-        stats = read_filter_stats(scalars["dataset"], scalars["revision"], tag)
+    statistics: dict[tuple[str, str], dict[str, FilterStats]] = {}  # read once per (dataset, revision)
     reports = []
     for row in rows:
         base_name = baseline_subset(row.subset, tag)
         report: dict = {"subset": row.subset, "baseline_subset": base_name, "kind": row.kind}
-        base_row, subset_stats = baseline_rows.get(base_name), stats.get(base_name)
+        try:
+            scalars = pinned_prepare_config(row)
+        except ValueError as error:
+            checker.expect(False, f"{row.subset}: {error}")
+            reports.append(report)
+            continue
+        if stats is None:
+            pin = (scalars["dataset"], scalars["revision"])
+            if pin not in statistics:
+                statistics[pin] = read_filter_stats(*pin, tag)
+            row_stats = statistics[pin]
+            report["statistics"] = {"dataset": pin[0], "revision": pin[1], "config": f"filter_stats_{tag}"}
+        else:
+            row_stats = stats
+        base_row, subset_stats = baseline_rows.get(base_name), row_stats.get(base_name)
         if not checker.expect(subset_stats is not None, f"{row.subset}: no filter statistics for {base_name!r}"):
             reports.append(report)
             continue
@@ -1027,7 +990,6 @@ def audit_arm(
         report["counts"] = audit_counts(row, base_row, subset_stats, tag, data_base, checker)
         canary_rows = None
         if canary_column is not None:
-            scalars = prepare_config_scalars(row.config)
             prepared = prepared_records(row, corpus_root(scalars["dataset"], row.subset, data_base))[0]
             report["canaries"], canary_rows = audit_canaries(
                 row, base_name, subset_stats, tag, canary_column, rendered_columns(row, prepared), checker

@@ -68,8 +68,10 @@ from typing import Any
 import yaml
 
 
-# The repo root, for the pipeline package, when this runs as a script from scripts/hub.
+# The repo root, for the pipeline package and the shared modules, when this runs as a script from scripts/hub.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.mapping_keys import require_keys  # noqa: E402
+
 from pipeline.checkpoints import (  # noqa: E402
     LATEST_FILE,
     CheckpointDirectoryMissing,
@@ -170,29 +172,16 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def exact_keys(mapping: Any, keys: frozenset[str], where: str) -> dict[str, Any]:
-    """A manifest mapping with exactly ``keys``; anything else names what is unknown and missing."""
-    if not isinstance(mapping, dict):
-        raise ManifestError(f"{where}: expected a mapping, got {type(mapping).__name__}")
-    unknown = sorted(set(mapping) - keys)
-    missing = sorted(keys - set(mapping))
-    if unknown or missing:
-        raise ManifestError(
-            f"{where}: expected exactly the keys {sorted(keys)}; unknown keys {unknown}, missing keys {missing}"
-        )
-    return mapping
-
-
 def load_manifest(path: Path, repo_root: Path) -> Manifest:
     """Read and validate a manifest; repo-relative paths resolve against ``repo_root``."""
-    raw = exact_keys(yaml.safe_load(path.read_text()), MANIFEST_KEYS, str(path))
+    raw = require_keys(yaml.safe_load(path.read_text()), str(path), MANIFEST_KEYS, error=ManifestError)
     bucket = str(raw["bucket"])
     if bucket.count("/") != 1 or bucket.startswith("hf://"):
         raise ManifestError(f"{path}: bucket must be <namespace>/<name>, got {bucket!r}")
     checkpoints_prefix = str(raw["checkpoints_prefix"]).strip("/")
     extra = []
     for index, item in enumerate(raw["extra_checkpoints"]):
-        exact_keys(item, EXTRA_CHECKPOINT_KEYS, f"{path}: extra_checkpoints[{index}]")
+        require_keys(item, f"{path}: extra_checkpoints[{index}]", EXTRA_CHECKPOINT_KEYS, error=ManifestError)
         remote = str(item["remote"]).strip("/")
         directory = str(item["directory"])
         if not remote or not directory or "/" in directory:

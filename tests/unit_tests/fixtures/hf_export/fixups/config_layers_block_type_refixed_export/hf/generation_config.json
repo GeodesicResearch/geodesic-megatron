@@ -7,7 +7,7 @@
     11
   ],
   "pad_token_id": 0,
-  "temperature": 1.0,
-  "top_p": 1.0,
+  "temperature": 0.6,
+  "top_p": 0.95,
   "transformers_version": "5.10.2"
 }
