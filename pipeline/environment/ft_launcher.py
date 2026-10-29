@@ -13,27 +13,50 @@
 # limitations under the License.
 """The ft_launcher (nvidia-resiliency-ext) flags pipeline_training_launch.sh passes, and whether the image has them.
 
-Standard library only; runs inside the pipeline container, where ft_launcher is on PATH.
+Standard library only; runs inside the pipeline container, where ft_launcher is on PATH. As
+``python -m pipeline.environment.ft_launcher [FLAG ...]`` it is the launcher's launch gate (``main``).
 
 Catalogue:
     SECTION_TIMEOUT_FLAGS: the section-timeout flags the launcher passes to ft_launcher.
-    help_text: ft_launcher's --help output.
+    ft_launcher_help: run ft_launcher --help.
     missing_flags: the flags a help text lacks.
+    main: the command-line check.
 """
 
 import subprocess
+import sys
+from collections.abc import Sequence
 
 
-# pipeline_training_launch.sh passes both flags; its launch gate greps for the first one itself.
 SECTION_TIMEOUT_FLAGS = ("--ft-rank-section-timeouts", "--ft-rank-out-of-section-timeout")
 
 
-def help_text() -> str:
-    """``ft_launcher --help``'s stdout and stderr; runs ft_launcher (from PATH) in a subprocess, 120 s at most."""
-    out = subprocess.run(["ft_launcher", "--help"], capture_output=True, text=True, timeout=120)
-    return out.stdout + out.stderr
+def ft_launcher_help() -> subprocess.CompletedProcess:
+    """Run ``ft_launcher --help`` (from PATH, in a subprocess, 120 s at most) and return its result, output as text."""
+    return subprocess.run(["ft_launcher", "--help"], capture_output=True, text=True, timeout=120)
 
 
-def missing_flags(text: str) -> list[str]:
-    """The ``SECTION_TIMEOUT_FLAGS`` that the help text ``text`` does not contain, in order."""
-    return [flag for flag in SECTION_TIMEOUT_FLAGS if flag not in text]
+def missing_flags(text: str, flags: Sequence[str] = SECTION_TIMEOUT_FLAGS) -> list[str]:
+    """The ``flags`` that the help text ``text`` does not contain, in order."""
+    return [flag for flag in flags if flag not in text]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Check ``ft_launcher --help`` for the FLAGs ``argv`` names (default ``SECTION_TIMEOUT_FLAGS``).
+
+    Returns 1, after saying why on stderr, when ``ft_launcher --help`` exits nonzero or its output (stdout and
+    stderr) lacks one of the flags, and 0 otherwise.
+    """
+    flags = list(sys.argv[1:] if argv is None else argv) or list(SECTION_TIMEOUT_FLAGS)
+    help_run = ft_launcher_help()
+    if help_run.returncode != 0:
+        print(f"ft_launcher --help exited {help_run.returncode}", file=sys.stderr)
+        return 1
+    missing = missing_flags(help_run.stdout + help_run.stderr, flags)
+    for flag in missing:
+        print(f"ft_launcher lacks {flag}", file=sys.stderr)
+    return 1 if missing else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

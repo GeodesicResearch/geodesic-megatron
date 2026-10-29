@@ -342,9 +342,10 @@ def check_hf_datasets_cache():
 @stage("ft_launcher supports section timeouts")
 def check_ft_launcher_flags():
     """Assert ft_launcher supports the section-timeout flags the launcher passes."""
-    from pipeline.environment.ft_launcher import help_text, missing_flags
+    from pipeline.environment.ft_launcher import ft_launcher_help, missing_flags
 
-    missing = missing_flags(help_text())
+    help_run = ft_launcher_help()
+    missing = missing_flags(help_run.stdout + help_run.stderr)
     assert not missing, (
         f"ft_launcher lacks {missing[0]} (image nvidia-resiliency-ext too old) — "
         "run training with --disable-ft or qualify a newer image"

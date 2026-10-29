@@ -119,6 +119,15 @@ def test_launch(shell, launch, case):
     assert_golden_json(GOLDENS / f"{case}.json", _snapshot(shell, run))
 
 
+def test_an_ft_launcher_whose_help_fails_stops_the_launch_even_when_it_lists_the_flags(shell, launch):
+    """A broken ft_launcher (its --help exits nonzero, here after printing both flags) fails the gate: the launch
+    stops with the gate's message before any rank starts."""
+    run = launch(None, extra_env={"STUB_FT_LAUNCHER_HELP_RC": "3"})
+    assert run.result.returncode == 1
+    assert "FATAL: the container image's ft_launcher (nvidia-resiliency-ext) does not" in run.result.stderr
+    assert not run.srun_called and run.rank_env is None
+
+
 def test_a_copy_of_the_launcher_outside_the_checkout_launches_as_the_launcher_does(shell, launch, tmp_path):
     """A single-file copy of the launcher (a frozen copy of one under edit, or a spooled one) takes its libraries
     from the checkout GEODESIC_REPO_DIR names, and its launch matches the checkout launcher's golden."""

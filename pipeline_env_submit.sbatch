@@ -51,14 +51,8 @@ echo "  Job ID:     $SLURM_JOB_ID"
 echo "  Start time: $(date)"
 echo "============================================================"
 
-# Quote forwarded args for the shim's `bash -c` re-parse, but ONLY when there are
-# any: `printf ' %q' "$@"` with zero arguments emits a stray `''`, which argparse
-# rejects with "unrecognized arguments" (exit 2) — that would break the most
-# common invocation of all, plain `validate` with no flags.
-ARGS_Q=""
-if [ "$#" -gt 0 ]; then
-    ARGS_Q="$(printf ' %q' "$@")"
-fi
+# Quote forwarded args for the shim's `bash -c` re-parse (quote_args, pipeline/sh/common.sh).
+ARGS_Q="$(quote_args "$@")"
 
 # Capture the payload's real exit status. This script has no `set -e` (a failing
 # mode must still print the closing banner), so without an explicit rc the final

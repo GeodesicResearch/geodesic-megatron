@@ -15,7 +15,7 @@
 
 import pytest
 
-from pipeline.environment.ft_launcher import SECTION_TIMEOUT_FLAGS, help_text, missing_flags
+from pipeline.environment.ft_launcher import SECTION_TIMEOUT_FLAGS, ft_launcher_help, main, missing_flags
 
 
 @pytest.mark.parametrize(
@@ -33,4 +33,19 @@ def test_missing_flags(text, missing):
 
 def test_the_images_ft_launcher_has_every_flag_the_launcher_passes():
     """Runs the image's own ft_launcher, so this runs inside the pipeline container."""
-    assert missing_flags(help_text()) == []
+    help_run = ft_launcher_help()
+    assert help_run.returncode == 0, help_run.stderr
+    assert missing_flags(help_run.stdout + help_run.stderr) == []
+
+
+@pytest.mark.parametrize(
+    "argv, code, stderr",
+    [
+        ([], 0, ""),
+        (["--ft-rank-section-timeouts"], 0, ""),
+        (["--ft-rank-section-timeouts", "--no-such-flag"], 1, "ft_launcher lacks --no-such-flag\n"),
+    ],
+)
+def test_the_command_line_check_against_the_images_ft_launcher(capsys, argv, code, stderr):
+    assert main(argv) == code
+    assert capsys.readouterr().err == stderr
