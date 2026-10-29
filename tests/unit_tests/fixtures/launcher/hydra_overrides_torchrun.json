@@ -17,8 +17,7 @@
       "pretrain",
       "--disable-ft",
       "train.train_iters=20",
-      "logger.wandb_exp_name=a",
-      "b"
+      "logger.wandb_exp_name=a b"
     ],
     "env": {
       "APPTAINER_CACHEDIR": "/projects/a5k/public/apptainer_cache_tester",

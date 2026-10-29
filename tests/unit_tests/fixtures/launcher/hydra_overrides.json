@@ -20,8 +20,7 @@
       "--mode",
       "pretrain",
       "train.train_iters=20",
-      "logger.wandb_exp_name=a",
-      "b",
+      "logger.wandb_exp_name=a b",
       "checkpoint.save=null"
     ],
     "env": {

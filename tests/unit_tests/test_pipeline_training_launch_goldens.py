@@ -128,6 +128,23 @@ def test_an_ft_launcher_whose_help_fails_stops_the_launch_even_when_it_lists_the
     assert not run.srun_called and run.rank_env is None
 
 
+@pytest.mark.parametrize("launcher_args", [(), ("--disable-ft",)], ids=["ft_launcher", "torchrun"])
+def test_a_forwarded_argument_with_a_space_or_a_shell_character_reaches_the_ranks_as_one_word(
+    launch, tmp_path, launcher_args
+):
+    """Hydra overrides and the config path cross the payload's shell re-parse unchanged, one argument each."""
+    marker = tmp_path / "ran"
+    odd_config = tmp_path / "my config.yaml"
+    odd_config.write_text("train: {}\n")
+    overrides = ["logger.wandb_exp_name=a b", f"logger.note=$(touch {marker})", "train.train_iters=20"]
+    run = launch(None, *launcher_args, *overrides, extra_env={}, config=odd_config)
+    assert run.result.returncode == 0, run.result.stderr
+    assert not marker.exists(), "a forwarded argument ran as shell code in the payload"
+    argv = run.rank_argv
+    assert argv[argv.index("--config-file") + 1] == str(odd_config)
+    assert argv[-3:] == overrides
+
+
 def test_a_copy_of_the_launcher_outside_the_checkout_launches_as_the_launcher_does(shell, launch, tmp_path):
     """A single-file copy of the launcher (a frozen copy of one under edit, or a spooled one) takes its libraries
     from the checkout GEODESIC_REPO_DIR names, and its launch matches the checkout launcher's golden."""

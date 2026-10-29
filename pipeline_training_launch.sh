@@ -336,23 +336,22 @@ if [ ! -f "$TRAIN_SCRIPT" ]; then
     exit 1
 fi
 
-# Build training script args
-SCRIPT_ARGS="--config-file $CONFIG_FILE --model $MODEL --mode $MODE"
+# Build training script args, one array element per argument; the payload pastes them in quoted (quote_args), so a
+# value with a space or a shell character reaches the ranks as one word.
+SCRIPT_ARGS=(--config-file "$CONFIG_FILE" --model "$MODEL" --mode "$MODE")
 if [ -n "$PEFT" ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS --peft $PEFT"
+    SCRIPT_ARGS+=(--peft "$PEFT")
 fi
 if [ "$ENABLE_PAO" = true ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS --enable-pao"
+    SCRIPT_ARGS+=(--enable-pao)
 fi
 if [ "$USE_FT" = false ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS --disable-ft"
+    SCRIPT_ARGS+=(--disable-ft)
 fi
 if [ "$USE_STRAGGLER" = false ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS --disable-straggler"
+    SCRIPT_ARGS+=(--disable-straggler)
 fi
-if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS ${EXTRA_ARGS[*]}"
-fi
+SCRIPT_ARGS+=("${EXTRA_ARGS[@]}")
 
 # ==============================================================================
 # Print summary
@@ -476,8 +475,7 @@ if [ "$USE_FT" = true ]; then
             --ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600 \
             --ft-rank-out-of-section-timeout=7200 \
             --ft-log-level=INFO \
-            $TRAIN_SCRIPT \
-            $SCRIPT_ARGS
+            $TRAIN_SCRIPT$(quote_args "${SCRIPT_ARGS[@]}")
     "
 else
     # Plain torchrun (no fault tolerance)
@@ -493,8 +491,7 @@ else
             --node_rank=\$SLURM_NODEID \
             --master_addr=$(printf '%q' "$MASTER_ADDR") \
             --master_port=$(printf '%q' "$MASTER_PORT") \
-            $TRAIN_SCRIPT \
-            $SCRIPT_ARGS
+            $TRAIN_SCRIPT$(quote_args "${SCRIPT_ARGS[@]}")
     "
 fi
 
