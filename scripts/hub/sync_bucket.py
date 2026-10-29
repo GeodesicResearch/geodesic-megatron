@@ -167,11 +167,13 @@ class ManifestError(ValueError):
     """The manifest asks for something that cannot be archived as written."""
 
 
+HUB_ID = re.compile(r"[\w.-]+/[\w.-]+", re.ASCII)
+
+
 def hub_id(value: str, where: str) -> str:
-    """``value`` when it has the form of a Hub repository or bucket id, ``<namespace>/<name>`` (so no ``hf://`` URL).
-    Raises ManifestError naming ``where`` otherwise."""
-    namespace, _, name = value.partition("/")
-    if not namespace or not name or "/" in name:
+    """``value`` when it has the form of a Hub repository or bucket id, ``<namespace>/<name>``, each part made of
+    letters, digits, ``.``, ``_`` and ``-`` (so no ``hf://`` URL). Raises ManifestError naming ``where`` otherwise."""
+    if not HUB_ID.fullmatch(value):
         raise ManifestError(f"{where} must be <namespace>/<name>, got {value!r}")
     return value
 

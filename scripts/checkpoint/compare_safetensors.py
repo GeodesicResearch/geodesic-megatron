@@ -201,15 +201,17 @@ def compare(config: CompareConfig) -> dict:
 
 
 def run(config_path: Path) -> int:
-    """Compare as the config says, write the report (creating its parent directories), and return the exit status.
-    A CompareError, or an OSError while reading the checkpoints or writing the report, is printed to stderr and ends
-    the run with status 2: the status 1 of a difference is never the status of a failure to compare."""
+    """Compare as the config says, write the report and return the exit status, creating the report's directory and
+    finding it writable before any checkpoint is read. A CompareError, or an OSError while reading the checkpoints or
+    writing the report, is printed to stderr and ends the run with status 2, never the status 1 of a difference."""
     try:
         config = load_config(config_path)
         if config.report.exists():
             raise CompareError(f"{config.report} exists; it is never overwritten")
-        report = compare(config)
         config.report.parent.mkdir(parents=True, exist_ok=True)
+        if not os.access(config.report.parent, os.W_OK | os.X_OK):
+            raise CompareError(f"{config.report.parent} is not writable, so the report could not be kept")
+        report = compare(config)
         with config.report.open("x") as handle:  # exclusive: a report that appeared meanwhile is not overwritten
             handle.write(json.dumps(report, indent=2) + "\n")
     except (CompareError, OSError) as error:

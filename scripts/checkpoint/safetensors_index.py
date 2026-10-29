@@ -39,10 +39,12 @@ def safetensors_tensor_names(path: Path) -> set[str]:
 def checked_weight_map(hf_dir: Path) -> dict[str, str]:
     """The weight map (tensor name -> shard file name) of the safetensors index in ``hf_dir``, once every shard it
     names is checked to be a file of ``hf_dir`` holding exactly the tensors the index puts there. Raises ExportError
-    for a missing or unparsable index or shard, a shard named by any path but its file name, or a shard holding other
-    tensors; any other failure to read the files is raised as it is."""
+    for a missing or unparsable index or shard, an index that maps no tensor, a shard named by any path but its file
+    name, or a shard holding other tensors; any other failure to read the files is raised as it is."""
     try:
         weight_map = json.loads((hf_dir / INDEX_FILE).read_text())["weight_map"]
+        if not weight_map:
+            raise ExportError(f"{hf_dir}: the index maps no tensor")
         by_shard: dict[str, set[str]] = {}
         for name, shard in weight_map.items():
             by_shard.setdefault(shard, set()).add(name)

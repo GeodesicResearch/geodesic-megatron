@@ -238,6 +238,24 @@ def test_a_report_that_cannot_be_written_is_not_evaluated_and_never_a_difference
     assert "NOT EVALUATED" in capsys.readouterr().err
 
 
+def test_a_report_location_that_cannot_be_written_is_found_before_the_checkpoints_are_read(tmp_path, content, capsys):
+    """The comparison reads tens of gigabytes. A report that cannot be written ends the run before that, so the first
+    failure it names is the report's directory and not a shard (the candidate's one here is unreadable)."""
+    names = sorted(content)
+    reference = write_checkpoint(tmp_path / "ref", [names], content)
+    candidate = write_checkpoint(tmp_path / "cand", [names], content)
+    (candidate / "model-00000.safetensors").write_bytes(b"not a safetensors file")
+    read_only = tmp_path / "read_only"
+    read_only.mkdir()
+    read_only.chmod(0o500)
+    try:
+        assert compare.run(write_config(tmp_path, reference, candidate, read_only / "report.json")) == 2
+    finally:
+        read_only.chmod(0o700)
+    error = capsys.readouterr().err
+    assert str(read_only) in error and "model-00000" not in error
+
+
 def test_a_report_that_appears_during_the_comparison_is_not_overwritten(tmp_path, content, monkeypatch):
     names = sorted(content)
     reference = write_checkpoint(tmp_path / "ref", [names], content)

@@ -54,6 +54,14 @@ def test_an_index_that_disagrees_with_its_shards_is_refused(tmp_path, change):
         checked_weight_map(tmp_path)
 
 
+def test_an_index_that_maps_no_tensor_is_refused(tmp_path):
+    """An export whose index maps nothing holds no model, however many shards sit beside it."""
+    write_sharded(tmp_path, SHARDS)
+    write_index(tmp_path, {})
+    with pytest.raises(ExportError, match="maps no tensor"):
+        checked_weight_map(tmp_path)
+
+
 @pytest.mark.parametrize("outside", ["relative", "absolute"])
 def test_an_index_naming_a_file_outside_its_directory_is_refused(tmp_path, outside):
     """Hugging Face loads the file the index names, so a file outside the checkpoint's directory is not one of its

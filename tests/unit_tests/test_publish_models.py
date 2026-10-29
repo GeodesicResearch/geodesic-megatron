@@ -1208,8 +1208,8 @@ def test_a_cards_base_model_is_the_manifests_base_model_and_a_null_one_is_left_o
 
 @pytest.mark.parametrize(
     "value",
-    [3, ["nvidia/parent"], "", "parent", "/parent", "nvidia/"],
-    ids=["a number", "a list", "empty", "no slash", "no namespace", "no name"],
+    [3, ["nvidia/parent"], "", "parent", "/parent", "nvidia/", "hf:/parent", "nvidia/a parent", " nvidia/parent"],
+    ids=["a number", "a list", "empty", "no slash", "no namespace", "no name", "a scheme", "a space", "padded"],
 )
 def test_a_base_model_that_is_neither_a_repository_nor_null_is_refused(campaign, value):
     root, _, manifest_path = campaign
