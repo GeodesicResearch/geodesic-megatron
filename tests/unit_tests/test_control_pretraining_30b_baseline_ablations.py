@@ -49,6 +49,7 @@ from scripts.training.launcher_source import env_override_entries
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
+    IDENTITY,
     assert_data_config_is_the_mixs_but_for_its_source,
     assert_hold_and_pin_move_together,
     assert_iterations_are_the_minimal_cover,
@@ -56,7 +57,6 @@ from tests.unit_tests.campaign_config import (
     assert_reads_the_split,
     assert_row_packs_like_the_mix,
     assert_segment_exit_posture,
-    data_parallel_size,
     dotted_leaves,
     dry_run_build,
     flatten_merged_config,
@@ -101,7 +101,6 @@ ALLOWED_DIVERGENCE = {
 }
 # tensorboard_dir is deliberately absent: every campaign config nulls it, so it is
 # identical across arms by design and can no longer distinguish one run from another.
-IDENTITY_FIELDS = ("checkpoint.load", "checkpoint.save", "logger.wandb_exp_name")
 PARENT_GPUS = 512
 ABLATION_GPUS = 256
 
@@ -298,7 +297,7 @@ class TestTheCorpusIsTheRevisedMix:
 class TestTheRunIdentityIsItsOwn:
     def test_no_output_location_is_the_references(self, variant):
         flat_variant, flat_reference = flatten_merged_config(variant.cfg), flatten_merged_config(variant.reference)
-        for field in IDENTITY_FIELDS:
+        for field in sorted(IDENTITY):
             assert flat_variant[field] != flat_reference[field], field
 
     def test_the_save_directory_is_not_inside_the_references(self, variant):
@@ -340,8 +339,8 @@ class TestTheRunIdentityIsItsOwn:
 
 class TestTheAllocation:
     def test_two_packs_per_replica_at_256_gpus_the_parents_per_gpu_load(self, ablation, parent):
-        parent_dp = data_parallel_size(parent, PARENT_GPUS)
-        ablation_dp = data_parallel_size(ablation, ABLATION_GPUS)
+        parent_dp = parent.get_data_parallel_size(PARENT_GPUS)
+        ablation_dp = ablation.get_data_parallel_size(ABLATION_GPUS)
         assert ablation_dp == 128
         assert ablation.train.global_batch_size % ablation_dp == 0
         assert ablation.train.global_batch_size // ablation_dp == parent.train.global_batch_size // parent_dp == 2
@@ -354,9 +353,7 @@ class TestSegmentRollover:
 
 class TestTheRerunIsTheAblationOnTheFastConfiguration:
     def test_exactly_the_levers_and_identity_fields_differ(self, v2, ablation):
-        assert_only_these_fields_differ(
-            v2, ablation, fast_configuration_levers() | set(IDENTITY_FIELDS), "xl-50b sft v2"
-        )
+        assert_only_these_fields_differ(v2, ablation, fast_configuration_levers() | IDENTITY, "xl-50b sft v2")
 
     def test_every_lever_has_the_quickstarts_value(self, v2, fast_quickstart):
         flat_v2, flat_quickstart = flatten_merged_config(v2), flatten_merged_config(fast_quickstart)
@@ -369,7 +366,7 @@ class TestTheRerunIsTheAblationOnTheFastConfiguration:
         )
 
     def test_one_pack_per_replica_keeps_the_ablations_tokens_per_gpu(self, v2, ablation):
-        v2_dp = data_parallel_size(v2, V2_GPUS)
+        v2_dp = v2.get_data_parallel_size(V2_GPUS)
         assert v2_dp == 256
         assert v2.train.global_batch_size // v2_dp == 1
         assert v2.train.global_batch_size * v2.dataset.seq_length // V2_GPUS == (
@@ -386,7 +383,7 @@ def v3_row(corpora_rows):
 
 class TestV3IsV2OnTheQualityFilteredCorpus:
     def test_exactly_the_corpus_and_identity_fields_differ_from_v2(self, v3, v2):
-        assert_only_these_fields_differ(v3, v2, CORPUS_FIELDS | set(IDENTITY_FIELDS), "xl-50b sft v3")
+        assert_only_these_fields_differ(v3, v2, CORPUS_FIELDS | IDENTITY, "xl-50b sft v3")
 
     def test_it_trains_v2s_iterations_from_v2s_warm_start(self, v3, v2):
         """The run trains v2's token budget on a smaller corpus, so the iteration count is v2's and never re-derived
@@ -435,7 +432,7 @@ def v4_run(request):
 
 class TestV4IsV3AtAHigherPeakLearningRate:
     def test_exactly_the_peak_learning_rate_and_identity_fields_differ_from_v3(self, v4_run, v3):
-        assert_only_these_fields_differ(v4_run.cfg, v3, LR_FIELDS | set(IDENTITY_FIELDS), v4_run.path.stem)
+        assert_only_these_fields_differ(v4_run.cfg, v3, LR_FIELDS | IDENTITY, v4_run.path.stem)
 
     def test_the_peak_learning_rate_is_the_approved_one(self, v4_run, v3):
         """5e-5 is ten times v3's peak and 3.5e-5 seven times; the schedule's shape, warmup and floor are v3's."""
@@ -459,7 +456,7 @@ class TestEveryRunHasItsOwnIdentity:
     """A variant is compared field by field only with the run it is pinned to, so two variants pinned to one run (v4
     and its fallback, both to v3) are never compared with each other there."""
 
-    @pytest.mark.parametrize("field", IDENTITY_FIELDS)
+    @pytest.mark.parametrize("field", sorted(IDENTITY))
     def test_no_two_runs_share_an_identity_field(self, field):
         """A shared save directory would resume one run from another's state, and the publisher matches a model
         card's training losses to a W&B run by its name."""

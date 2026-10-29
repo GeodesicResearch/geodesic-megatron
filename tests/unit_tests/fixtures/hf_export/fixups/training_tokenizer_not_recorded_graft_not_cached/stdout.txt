@@ -1,3 +1,4 @@
 Warning: HF cache not found for nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 — run: python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16')"
 No chat_template.jinja found — will use tokenizer_config.json fallback
+Set generation_config.json decoding defaults: greedy
 Removed auto_map from config.json (using native transformers NemotronH)

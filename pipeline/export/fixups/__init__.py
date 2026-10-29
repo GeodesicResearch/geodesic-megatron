@@ -27,7 +27,7 @@ Catalogue:
 from pathlib import Path
 
 from pipeline.export.fixups.chat_template import fix_chat_template_file, sync_embedded_template
-from pipeline.export.fixups.model_config import fix_eos_token_ids, fix_model_config
+from pipeline.export.fixups.model_config import apply_generation_defaults, fix_eos_token_ids, fix_model_config
 from pipeline.export.fixups.release_files import adopt_release_inference_files
 from pipeline.export.fixups.tokenizer import fix_tokenizer_config, mirror_template_file, pin_tokenizer_config_file
 
@@ -54,7 +54,9 @@ def fixup_hf_output(
        the non-reasoning generation prompt.
     5. ``sync_embedded_template``: tokenizer_config.json's embedded copy of chat_template.jinja.
     6. ``fix_eos_token_ids``: ``<|im_end|>`` among the end-of-generation ids.
-    7. ``fix_model_config``: the remote-code policy, hybrid_override_pattern, num_hidden_layers and vocab_size.
+    7. ``apply_generation_defaults``: generation_config.json's decoding defaults per ``reasoning``: greedy, or
+       sampling.
+    8. ``fix_model_config``: the remote-code policy, hybrid_override_pattern, num_hidden_layers and vocab_size.
 
     Reads the HF cache under ``$HF_HOME``. For a training tokenizer it calls huggingface_hub's ``hf_hub_download``
     and ``snapshot_download`` for that tokenizer, and ``snapshot_download`` for a Hub-id ``hf_model_id`` (the cache,
@@ -65,7 +67,7 @@ def fixup_hf_output(
         hf_model_id: HuggingFace model ID of the upstream base release (used
             for fallback chat_template grafting and source-config lookups).
         reasoning: the training regime: sets the template's ``enable_thinking`` default and, when False, strips the
-            closed think block from the generation prompt.
+            closed think block from the generation prompt; sets the decoding defaults (greedy when False).
         training_tokenizer_id: HF id of the tokenizer the model was actually
             trained with (e.g. ``geodesic-research/nemotron-instruct-tokenizer``).
             Read from ``run_config.yaml`` ``tokenizer.tokenizer_model``. When
@@ -78,7 +80,8 @@ def fixup_hf_output(
 
     Raises:
         FileNotFoundError: ``keep_remote_code`` without the modeling files, or (``adopt_release_inference_files``)
-            a dangling link in the release, or a config.json missing from the release or the export.
+            a dangling link in the release, or a config.json missing from the release or the export, or
+            (``apply_generation_defaults``) a reasoning export without a generation_config.json.
         ValueError: a chat template that refuses every probe conversation (``templates_render_alike``).
         ValueError: an unknown block type in config.json's layers_block_type.
     """
@@ -95,4 +98,5 @@ def fixup_hf_output(
     fix_chat_template_file(hf_path, reasoning)
     sync_embedded_template(hf_path, adopted_release_files)
     fix_eos_token_ids(hf_path)
+    apply_generation_defaults(hf_path, reasoning)
     fix_model_config(hf_path, hf_model_id, keep_remote_code, remote_code_source)

@@ -50,6 +50,8 @@
         "--note",
         "workers=32",
         "--note",
+        "partitions_requested=1",
+        "--note",
         "partitions=1",
         "--note",
         "slurm_job_id=<JOB>"
@@ -62,5 +64,5 @@
   ],
   "returncode": 0,
   "stderr": "",
-  "stdout": "===== Pretraining-Format Tokenization (JSONL -> .bin/.idx) =====\nJob ID:       <JOB>\nNode:         <HOST>\nInput:        <TMP>/root with space/training.jsonl\nTokenizer:    geodesic-research/nemotron-base-tokenizer\nArtifact:     <TMP>/root with space/tokenized_input_document.{bin,idx}\nWorkers:      32\nPartitions:   1  (one writer process each)\nEnv:          <TMP>/container/nemo.sif\n================================================================\n===== Exact token count (from the .idx) =====\n===== Tokenization Complete =====\n"
+  "stdout": "===== Pretraining-Format Tokenization (JSONL -> .bin/.idx) =====\nJob ID:       <JOB>\nNode:         <HOST>\nInput:        <TMP>/root with space/training.jsonl\nTokenizer:    geodesic-research/nemotron-base-tokenizer\nArtifact:     <TMP>/root with space/tokenized_input_document.{bin,idx}\nWorkers:      32\nPartitions:   1  (one writer process each)\nEnv:          <TMP>/container/nemo.sif\n================================================================\nPartitions run: 1\nTokenizer:    geodesic-research/nemotron-base-tokenizer @ default branch, loaded from geodesic-research/nemotron-base-tokenizer\n===== Exact token count (from the .idx) =====\n===== Tokenization Complete =====\n"
 }

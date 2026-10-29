@@ -34,7 +34,7 @@ source_env_config() {
 # container_payload COMMAND: COMMAND runs with the checkout's environment
 # (pipeline_env_activate.sh) from REPO_DIR; a failed activation ends it.
 container_payload() {
-    printf 'cd %s; source pipeline_env_activate.sh || exit 1; %s' "$REPO_DIR" "$1"
+    printf 'cd %q; source pipeline_env_activate.sh || exit 1; %s' "$REPO_DIR" "$1"
 }
 
 # quote_args [ARG...]: " 'a b' c" for (a b, c), each word %q-quoted and preceded

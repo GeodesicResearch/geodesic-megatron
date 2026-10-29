@@ -20,8 +20,8 @@ Catalogue:
 
 import logging
 import os
-import shlex
-import socket
+
+from megatron.bridge.training.utils.log_utils import log_node_banner
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -63,7 +63,10 @@ def log_env_overrides() -> None:
             f"{ENV_OVERRIDE_KEYS_VAR} is set but {rank_vars} are not: the override echo runs under the "
             "launcher's torchrun/ft_launcher, which sets both"
         )
-    if os.environ["LOCAL_RANK"] != "0":
-        return
-    values = " ".join(f"{key}={shlex.quote(os.environ[key])}" for key in keys)
-    logger.info("[env-overrides] rank=%s host=%s %s", os.environ["RANK"], socket.gethostname(), values)
+    log_node_banner(
+        logger,
+        "env-overrides",
+        [(key, os.environ[key]) for key in keys],
+        rank=int(os.environ["RANK"]),
+        local_rank=int(os.environ["LOCAL_RANK"]),
+    )

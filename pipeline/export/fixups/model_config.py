@@ -16,6 +16,7 @@
 Catalogue:
     read_embedding_row_count: rows of the exported input-embedding matrix, from a safetensors header.
     fix_eos_token_ids: add ``<|im_end|>`` to the end-of-generation ids when a chat template is active.
+    apply_generation_defaults: set generation_config.json's decoding defaults from the export's mode.
     fix_hybrid_override_pattern: MoE layers as "E", or the pattern copied from the cached release.
     fix_layers_block_type: replace a layers_block_type list with the hybrid_override_pattern it spells.
     fix_num_hidden_layers: set num_hidden_layers from the pattern's length.
@@ -27,8 +28,9 @@ import json
 import struct
 from pathlib import Path
 
+from pipeline.export.decoding_defaults import GENERATION_CONFIG, generation_config_text
 from pipeline.export.fixups.remote_code import apply_remote_code_policy
-from pipeline.hf_cache import cached_snapshots
+from pipeline.hf_cache import cached_file
 from pipeline.nemotron import BLOCK_TYPE_CHARS, IM_END_TOKEN_ID
 
 
@@ -109,9 +111,28 @@ def fix_eos_token_ids(hf_path: Path) -> None:
             )
 
 
+def apply_generation_defaults(hf_path: Path, reasoning: bool) -> None:
+    """Set the decoding defaults in ``hf_path/generation_config.json`` from the export's mode, by the rule of
+    ``pipeline.export.decoding_defaults``: a non-reasoning export (``--no-reasoning``) decodes greedily, a
+    reasoning export samples. The file is rewritten only when the rule changes it. A non-reasoning export without the
+    file is left without one (greedy is the library default); a reasoning export without it raises FileNotFoundError,
+    since it would otherwise decode greedily.
+    """
+    path = hf_path / GENERATION_CONFIG
+    if not path.exists():
+        if reasoning:
+            raise FileNotFoundError(f"{path} is missing; a reasoning export needs its sampling defaults written there")
+        return
+    original = path.read_text()
+    updated = generation_config_text(original, reasoning)
+    if updated != original:
+        path.write_text(updated)
+    print(f"Set generation_config.json decoding defaults: {'sampling' if reasoning else 'greedy'}")
+
+
 def fix_hybrid_override_pattern(config: dict, hf_model_id: str) -> bool:
     """Write MoE layers as "E" in ``config``'s hybrid_override_pattern, or copy a missing pattern from the cached
-    release ``hf_model_id`` (largest-hash snapshot first). Mutates ``config``; returns whether it changed."""
+    release ``hf_model_id`` (its refs/main snapshot). Mutates ``config``; returns whether it changed."""
     # The bridge saves the pattern with "-" for MoE layers, but the NVIDIA convention
     # uses "E". vLLM checks `"E" in config.hybrid_override_pattern` to detect MoE.
     # Also copy the pattern from the source HF model if not in config.json, since the
@@ -123,15 +144,14 @@ def fix_hybrid_override_pattern(config: dict, hf_model_id: str) -> bool:
         return True
     if not pattern:
         # Copy from source model config in HF cache
-        for snapshot_dir in cached_snapshots(hf_model_id) or []:
-            source_cfg_path = snapshot_dir / "config.json"
-            if source_cfg_path.exists():
-                with open(source_cfg_path) as f:
-                    source_cfg = json.load(f)
-                if "hybrid_override_pattern" in source_cfg:
-                    config["hybrid_override_pattern"] = source_cfg["hybrid_override_pattern"]
-                    print(f"Added hybrid_override_pattern from {hf_model_id}")
-                    return True
+        source_cfg_path = cached_file(hf_model_id, "config.json")
+        if source_cfg_path is not None:
+            with open(source_cfg_path) as f:
+                source_cfg = json.load(f)
+            if "hybrid_override_pattern" in source_cfg:
+                config["hybrid_override_pattern"] = source_cfg["hybrid_override_pattern"]
+                print(f"Added hybrid_override_pattern from {hf_model_id}")
+                return True
     return False
 
 

@@ -12,8 +12,46 @@
   "calls": [
     {
       "argv": [
+        "--nodes=6",
+        "--ntasks-per-node=1",
+        "--kill-on-bad-exit=0",
+        "--export=ALL",
+        "<REPO>/pipeline_env_exec.sh"
+      ],
+      "cmd": "srun",
+      "env": {
+        "FI_CXI_DEFAULT_CQ_SIZE": "131072",
+        "FI_CXI_DISABLE_HOST_REGISTER": "1",
+        "FI_CXI_RX_MATCH_MODE": "soft",
+        "FI_MR_CACHE_MONITOR": "userfaultfd",
+        "FI_PROVIDER": "cxi",
+        "MEGATRON_CONFIG_LOCK_DIR": "/tmp/coh_<JOB>",
+        "MPICH_GPU_SUPPORT_ENABLED": "0",
+        "NCCL_CROSS_NIC": "1",
+        "NCCL_DEBUG": "WARN",
+        "NCCL_NET": "AWS Libfabric",
+        "NCCL_NET_GDR_LEVEL": "PHB",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "hsn",
+        "PYTHONUNBUFFERED": "1",
+        "TMPDIR": "/tmp/coh_<JOB>",
+        "TORCHDYNAMO_DISABLE": "1",
+        "TORCH_COMPILE_DISABLE": "1",
+        "TORCH_NCCL_TIMEOUT": "1800",
+        "TRITON_CACHE_DIR": "/tmp/coh_<JOB>/triton"
+      }
+    },
+    {
+      "argv": [
+        "--nproc_per_node=4",
+        "--nnodes=6",
+        "--node_rank=0",
+        "--master_addr=nid000010",
+        "--master_port=29500",
         "pipeline_coherence_test.py",
         "/ckpt/my run/iter_0000200",
+        "--output",
+        "<REPO>/logs/slurm/coherence-test-<JOB>-gens.txt",
         "--backend=megatron",
         "--hf-model",
         "nvidia/X",
@@ -22,14 +60,32 @@
         "--pp",
         "1"
       ],
-      "cmd": "python",
+      "cmd": "torchrun",
       "env": {
+        "FI_CXI_DEFAULT_CQ_SIZE": "131072",
+        "FI_CXI_DISABLE_HOST_REGISTER": "1",
+        "FI_CXI_RX_MATCH_MODE": "soft",
+        "FI_MR_CACHE_MONITOR": "userfaultfd",
+        "FI_PROVIDER": "cxi",
+        "MEGATRON_CONFIG_LOCK_DIR": "/tmp/coh_<JOB>",
+        "MPICH_GPU_SUPPORT_ENABLED": "0",
+        "NCCL_CROSS_NIC": "1",
+        "NCCL_DEBUG": "WARN",
+        "NCCL_NET": "AWS Libfabric",
+        "NCCL_NET_GDR_LEVEL": "PHB",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "hsn",
         "PYTHONUNBUFFERED": "1",
-        "TMPDIR": "/projects/a5k/public/tmp"
+        "SLURM_NODEID": "0",
+        "TMPDIR": "/tmp/coh_<JOB>",
+        "TORCHDYNAMO_DISABLE": "1",
+        "TORCH_COMPILE_DISABLE": "1",
+        "TORCH_NCCL_TIMEOUT": "1800",
+        "TRITON_CACHE_DIR": "/tmp/coh_<JOB>/triton"
       }
     }
   ],
   "returncode": 0,
   "stderr": "",
-  "stdout": "===== Coherence Test =====\nJob ID:    <JOB>\nBackend:   hf\nNodes:     6\nModel:     /ckpt/my run/iter_0000200\nEnv:       <TMP>/container/nemo.sif\nArgs:      --backend=megatron --hf-model nvidia/X --tp 4 --pp 1\n==========================\n===== Coherence Test Complete (rc=0) =====\n"
+  "stdout": "===== Coherence Test =====\nJob ID:    <JOB>\nBackend:   megatron\nNodes:     6\nModel:     /ckpt/my run/iter_0000200\nEnv:       <TMP>/container/nemo.sif\nArgs:      --backend=megatron --hf-model nvidia/X --tp 4 --pp 1\n==========================\n===== Coherence Test Complete (rc=0) =====\n"
 }

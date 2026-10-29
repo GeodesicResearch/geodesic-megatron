@@ -1,9 +1,16 @@
 """Parse a training log as the launcher writes it: its iteration lines, the after-iteration-1 memory report, the
-end-of-training peak-memory summary over all ranks, the launcher env overrides each node logs and the W&B run it names.
+end-of-training peak-memory summary over all ranks, the banners each node logs (the launcher env overrides, the
+token-masking decision), the per-iteration token-masking counts and the W&B run it names.
 
 The iteration line is the bridge's ``training/utils/train_utils.py::training_log`` output. The parser needs only the
-standard library, so it runs under a login node's host interpreter. ``scripts/telemetry/score_run.py`` scores one
-run from these records and ``scripts/telemetry/loss_parity.py`` compares several runs' trajectories.
+standard library, so it runs under a login node's host interpreter. ``scripts/telemetry/score_run.py`` scores one run
+from these records, ``scripts/telemetry/loss_parity.py`` compares several runs' trajectories and
+``scripts/telemetry/run_watch.py`` checks a running stage's logs.
+
+The token-masking fractions on the iteration line are printed to 7 significant digits. The exact integer counts behind
+them are printed on a line of their own every iteration (``[token-masking-counts] iteration=<i> listed=<n> ...``, the
+bridge's ``training/token_masking/monitor.py``), which ``parse_token_masking_counts`` reads: a comparison that must be
+exact reads those.
 """
 
 import re
@@ -40,8 +47,29 @@ GIGABYTES_SUFFIX = "-gigabytes"
 # The tag is restated rather than imported, because this module must import without torch.
 _PEAK_MEMORY_RE = re.compile(r"\[peak-memory\] (?P<fields>.*)$")
 
-# pipeline/training/env_overrides.py's log_env_overrides, once per node: "[env-overrides] rank=<R> host=<host> KEY=<value> ...".
-_ENV_OVERRIDES_RE = re.compile(r"\[env-overrides\] rank=\S+ host=\S+ (?P<values>.*)$")
+# A banner logged once per node by training/utils/log_utils.py::log_node_banner, through which
+# pipeline/training/env_overrides.py's log_env_overrides writes its [env-overrides] line: "[<tag>] rank=<R> host=<host>
+# KEY=<value> ...", every value shell-quoted, behind the logger's prefix. The tags the telemetry reads are restated
+# rather than imported, because this module must import without torch.
+ENV_OVERRIDES_TAG = "env-overrides"
+TOKEN_MASKING_TAG = "token-masking"
+
+
+def _banner_re(tag: str) -> re.Pattern[str]:
+    return re.compile(rf"\[{re.escape(tag)}\] rank=(?P<rank>\S+) host=(?P<host>\S+) (?P<values>.*)$")
+
+
+_ENV_OVERRIDES_RE = _banner_re(ENV_OVERRIDES_TAG)
+
+# The per-iteration counts line (training/token_masking/monitor.py, COUNTS_LOG_TAG, with the fields of
+# training/token_masking/hook.py's TokenMaskingCounts in their order), restated because this module must import without
+# torch, e.g.
+#  INFO:...monitor:[token-masking-counts] iteration=5 listed=12 listed_trainable=12 masked=12 trained_listed=0 ...
+# The rank that writes the training log prints it once per iteration.
+TOKEN_MASKING_COUNTS_TAG = "token-masking-counts"
+TOKEN_MASKING_COUNT_FIELDS = ("listed", "listed_trainable", "masked", "trained_listed", "trainable", "positions")
+_COUNTS_RE = re.compile(rf"\[{re.escape(TOKEN_MASKING_COUNTS_TAG)}\] iteration=(?P<iteration>\d+) (?P<fields>.*)$")
+_COUNT_VALUE_RE = re.compile(r"[0-9]+")
 
 # wandb prints the run URL at init ("View run at <url>") and at finish ("View run <name> at: <url>"),
 # on whichever W&B server the run logs to.
@@ -91,8 +119,9 @@ def _iteration_fields(line: str) -> tuple[int, str | None, dict[str, str]] | Non
 
 
 def iteration_of(line: str) -> int | None:
-    """The iteration an iteration line names, read from its prefix alone; None for any other line."""
-    match = _ITERATION_RE.search(line)
+    """The iteration an iteration line or a ``[token-masking-counts]`` line names, read from its prefix alone, so a
+    line whose fields cannot be parsed still has one; None for any other line."""
+    match = _ITERATION_RE.search(line) or _COUNTS_RE.search(line)
     return int(match.group("iteration")) if match is not None else None
 
 
@@ -183,6 +212,58 @@ def parse_peak_memory_across_ranks(lines: Iterable[str]) -> dict[str, float | in
 def env_override_lines(lines: Iterable[str]) -> list[str]:
     """Return the ``[env-overrides]`` lines among ``lines``, as logged, in log order."""
     return [line.rstrip("\n") for line in lines if _ENV_OVERRIDES_RE.search(line.rstrip("\n"))]
+
+
+def banner_hosts(lines: Iterable[str], tag: str) -> tuple[str, ...]:
+    """The hosts that logged a ``[<tag>]`` banner among ``lines``, sorted, each once. It reads no KEY=value field, so
+    a banner whose fields cannot be parsed still names its host."""
+    pattern = _banner_re(tag)
+    return tuple(sorted({match.group("host") for line in lines if (match := pattern.search(line.rstrip("\n")))}))
+
+
+@dataclass(frozen=True)
+class TokenMaskingCountsRecord:
+    """One iteration's ``[token-masking-counts]`` line: exact integers over the global batch's target positions.
+
+    ``listed`` counts the targets whose label is a measured id, ``listed_trainable`` those of them the dataset trains,
+    ``masked`` those token masking removed from the loss, ``trained_listed`` the listed targets that still carry loss,
+    ``trainable`` the targets that carry loss and ``positions`` every target position (the bridge's
+    ``TokenMaskingCounts``).
+    """
+
+    iteration: int
+    listed: int
+    listed_trainable: int
+    masked: int
+    trained_listed: int
+    trainable: int
+    positions: int
+
+
+def parse_token_masking_counts(lines: Iterable[str]) -> list[TokenMaskingCountsRecord]:
+    """Each ``[token-masking-counts]`` line among ``lines`` as a record, in log order.
+
+    A line repeated for one iteration (a duplicating logging handler, a restart) gives a record each time; the reader
+    of the records judges duplicates and conflicts (``run_watch``'s ``_comparable_counts``). Raises ValueError on a
+    line whose fields are not exactly the six counts, each a non-negative integer.
+    """
+    records: list[TokenMaskingCountsRecord] = []
+    for line in lines:
+        match = _COUNTS_RE.search(line.rstrip("\n"))
+        if match is None:
+            continue
+        counts: dict[str, int] = {}
+        for field in match.group("fields").split():
+            key, sep, value = field.partition("=")
+            if not sep or _COUNT_VALUE_RE.fullmatch(value) is None or key in counts:
+                raise ValueError(f"token-masking count is not one name=<non-negative integer>: {field!r} in {line!r}")
+            counts[key] = int(value)
+        if set(counts) != set(TOKEN_MASKING_COUNT_FIELDS):
+            raise ValueError(
+                f"token-masking counts line holds {sorted(counts)}, not {sorted(TOKEN_MASKING_COUNT_FIELDS)}: {line!r}"
+            )
+        records.append(TokenMaskingCountsRecord(int(match.group("iteration")), **counts))
+    return records
 
 
 def parse_env_override_lines(lines: Iterable[str]) -> list[dict[str, str]]:

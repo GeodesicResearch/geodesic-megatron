@@ -29,11 +29,17 @@ from pipeline.export.fixups.model_config import (
     fix_num_hidden_layers,
     fix_vocab_size,
 )
-from pipeline.export.fixups.tokenizer import graft_release_template, pin_tokenizer_class, pin_tokenizer_config_file
-from pipeline.hf_cache import cached_snapshots, hub_cache_root
+from pipeline.export.fixups.tokenizer import (
+    graft_release_template,
+    pin_tokenizer_class,
+    pin_tokenizer_config_file,
+    resolve_template_from_hub_id,
+)
+from pipeline.hf_cache import cached_file, hub_cache_root, is_cached
 from pipeline.nemotron import ENABLE_THINKING_OFF_LINE, ENABLE_THINKING_ON_LINE
 from tests.unit_tests.hf_export_fixtures import (
     INPUTS,
+    INSTRUCT_TOK,
     NANO,
     NANO_BASE,
     SNAPSHOT_A,
@@ -53,13 +59,33 @@ def _release_config() -> dict:
     return json.loads((INPUTS / "release_nano" / "config.json").read_text())
 
 
-def test_cached_snapshots_lists_largest_hash_first_and_none_when_uncached(hf_home):
+def test_a_cached_file_comes_from_the_snapshot_refs_main_names(hf_home):
     assert hub_cache_root() == hf_home / "hub"
-    assert cached_snapshots(NANO) is None
-    cache_repo(
-        hf_home, NANO, [(SNAPSHOT_A, INPUTS / "release_nano"), (SNAPSHOT_B, INPUTS / "release_nano")], SNAPSHOT_A
+    assert not is_cached(NANO) and cached_file(NANO, "config.json") is None
+    newer = hf_home / "newer"
+    newer.mkdir(parents=True)
+    (newer / "config.json").write_text("{}")
+    cache_repo(hf_home, NANO, [(SNAPSHOT_A, INPUTS / "release_nano"), (SNAPSHOT_B, newer)], SNAPSHOT_A)
+    assert is_cached(NANO)
+    assert (
+        cached_file(NANO, "config.json")
+        == hf_home / "hub" / f"models--{NANO.replace('/', '--')}" / "snapshots" / SNAPSHOT_A / "config.json"
     )
-    assert [p.name for p in cached_snapshots(NANO)] == [SNAPSHOT_B, SNAPSHOT_A]
+    assert cached_file(NANO, "absent.json") is None
+    assert not is_cached(str(hf_home)) and cached_file(str(hf_home), "config.json") is None
+
+
+def test_the_training_template_is_the_one_refs_main_names_not_the_largest_hash(hf_home, tmp_path):
+    """snapshot_download copies the training tokenizer's files from refs/main's snapshot, so the template must come
+    from there too, even when a larger-hash snapshot is cached."""
+    other = tmp_path / "other_revision"
+    other.mkdir()
+    (other / "chat_template.jinja").write_text("{{ other revision }}")
+    cache_repo(
+        hf_home, INSTRUCT_TOK, [(SNAPSHOT_A, INPUTS / "nemotron-instruct-tokenizer"), (SNAPSHOT_B, other)], SNAPSHOT_A
+    )
+    expected = (INPUTS / "nemotron-instruct-tokenizer" / "chat_template.jinja").read_text()
+    assert resolve_template_from_hub_id(INSTRUCT_TOK) == expected
 
 
 def test_tokenizer_class_is_pinned_and_stale_keys_dropped():

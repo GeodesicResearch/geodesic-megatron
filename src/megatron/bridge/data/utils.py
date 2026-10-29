@@ -51,6 +51,33 @@ def is_dataset_built_on_rank(pg_collection: ProcessGroupCollection) -> bool:
     )
 
 
+def finetuning_dataset_builder(
+    dataset_config: FinetuningDatasetConfig, tokenizer: MegatronTokenizer
+) -> FinetuningDatasetBuilder:
+    """The builder that turns a fine-tuning dataset config into datasets, without building anything yet.
+
+    A Hugging Face dataset config gets an ``HFDatasetBuilder``, any other fine-tuning config a
+    ``FinetuningDatasetBuilder``; each receives every config field except the dataloader's own.
+
+    Args:
+        dataset_config: The fine-tuning (or Hugging Face) dataset config.
+        tokenizer: The run's tokenizer.
+
+    Returns:
+        The builder, whose paths (such as ``train_path_packed``) say where the datasets will be read from.
+    """
+    dataloader_field_names = {field.name for field in fields(DataloaderConfig)}
+    builder_class = HFDatasetBuilder if isinstance(dataset_config, HFDatasetConfig) else FinetuningDatasetBuilder
+    return builder_class(
+        tokenizer=tokenizer,
+        **{
+            field.name: getattr(dataset_config, field.name)
+            for field in fields(dataset_config)
+            if field.name not in dataloader_field_names
+        },
+    )
+
+
 def pretrain_train_valid_test_datasets_provider(
     train_val_test_num_samples: list[int], dataset_config: BlendedMegatronDatasetConfig
 ) -> tuple[GPTDataset, GPTDataset, GPTDataset]:
@@ -106,17 +133,7 @@ def hf_train_valid_test_datasets_provider(
         f"> building train, validation, and test datasets for Huggingface dataset {dataset_config.dataset_name} ..."
     )
 
-    # Get field names from DataloaderConfig to exclude
-    dataloader_field_names = {field.name for field in fields(DataloaderConfig)}
-
-    train_ds, valid_ds, test_ds = HFDatasetBuilder(
-        tokenizer=tokenizer,
-        **{
-            field.name: getattr(dataset_config, field.name)
-            for field in fields(dataset_config)
-            if field.name not in dataloader_field_names
-        },
-    ).build()
+    train_ds, valid_ds, test_ds = finetuning_dataset_builder(dataset_config, tokenizer).build()
 
     print_rank_0(f"> finished creating Huggingface dataset {dataset_config.dataset_name} ...")
 
@@ -143,17 +160,7 @@ def finetuning_train_valid_test_datasets_provider(
         f">building train, validation, and test datasets for Finetuning dataset from {dataset_config.dataset_root} ..."
     )
 
-    # Get field names from DataloaderConfig to exclude
-    dataloader_field_names = {field.name for field in fields(DataloaderConfig)}
-
-    train_ds, valid_ds, test_ds = FinetuningDatasetBuilder(
-        tokenizer=tokenizer,
-        **{
-            field.name: getattr(dataset_config, field.name)
-            for field in fields(dataset_config)
-            if field.name not in dataloader_field_names
-        },
-    ).build()
+    train_ds, valid_ds, test_ds = finetuning_dataset_builder(dataset_config, tokenizer).build()
 
     print_rank_0(f"> finished creating Finetuning dataset from {dataset_config.dataset_root} ...")
 

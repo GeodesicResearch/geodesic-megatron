@@ -15,6 +15,7 @@
 
 Catalogue:
     configure_sft_dataset: set up an SFT launch's chat processing and its pre-packed parquet bypass.
+    BIN_IDX_MODES: the modes whose training data is a .bin/.idx blend.
     bin_idx_dataset_config: the .bin/.idx data of a cpt or pretrain launch.
 """
 
@@ -81,6 +82,10 @@ def configure_sft_dataset(cfg: ConfigContainer) -> None:
                 }
             )
             cfg.dataset.rewrite = False
+
+
+# The modes whose training data is a .bin/.idx blend (``bin_idx_dataset_config``).
+BIN_IDX_MODES = ("cpt", "pretrain")
 
 
 def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:

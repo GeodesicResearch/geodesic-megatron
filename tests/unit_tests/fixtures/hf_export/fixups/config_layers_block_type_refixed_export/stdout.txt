@@ -1,3 +1,4 @@
 Preserved upstream chat_template.jinja (861 bytes); no enable_thinking set-line found (non-standard template)
+Set generation_config.json decoding defaults: sampling
 Stripped layers_block_type (read-only @property in NemotronHConfig; vLLM uses hybrid_override_pattern)
 Emitted num_hidden_layers=52 (from hybrid_override_pattern length) for vLLM<5 compatibility

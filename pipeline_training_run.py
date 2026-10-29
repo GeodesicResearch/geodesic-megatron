@@ -47,8 +47,9 @@ from megatron.bridge.training.finetune import finetune
 from megatron.bridge.training.gpt_step import forward_step
 from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.utils.omegaconf_utils import create_omegaconf_dict_config
-from pipeline.training.datasets import bin_idx_dataset_config, configure_sft_dataset
+from pipeline.training.datasets import BIN_IDX_MODES, bin_idx_dataset_config, configure_sft_dataset
 from pipeline.training.env_overrides import log_env_overrides
+from pipeline.training.launch_checks import checked_code_identity, checked_launch_width
 from pipeline.training.recipes import resolve_training_config
 from pipeline.training.resilience import apply_resilience_config
 
@@ -154,6 +155,14 @@ def main() -> None:
 
     peft = args.peft if args.peft and args.peft.lower() != "none" else None
     cfg, merged = resolve_training_config(args.model, args.mode, peft, args.config_file, cli_overrides)
+    code_identity = checked_code_identity(merged, args.config_file)
+    launch_width = checked_launch_width(merged, args.config_file, cfg)
+    if launch_width is not None and int(os.environ.get("RANK", "0")) == 0:
+        logger.info(
+            f"[launch-width] world_size={launch_width['world_size']} "
+            f"data_parallel_size={launch_width['data_parallel_size']} nodes={launch_width['nodes']} "
+            f"gpus_per_node={launch_width['gpus_per_node']} nodelist={launch_width['nodelist']}"
+        )
 
     if not cfg.tokenizer.tokenizer_model:
         raise ValueError(
@@ -169,7 +178,7 @@ def main() -> None:
     if args.mode == "sft":
         configure_sft_dataset(cfg)
 
-    elif args.mode in ("cpt", "pretrain"):
+    elif args.mode in BIN_IDX_MODES:
         cfg.dataset = bin_idx_dataset_config(merged.get("dataset", {}) if args.config_file else {}, args.mode)
         logger.info(f"{args.mode} mode: native .bin/.idx data, data_path={cfg.dataset.data_path}")
 
@@ -210,7 +219,7 @@ def main() -> None:
     run_id = get_run_id()
     raw_log_path = get_raw_log_path()
     logger.info(f"Run identity: run_id={run_id} raw_log={raw_log_path or '(none)'}")
-    identity_cb = RunIdentityCallback(run_id=run_id, raw_log_path=raw_log_path)
+    identity_cb = RunIdentityCallback(run_id=run_id, raw_log_path=raw_log_path, code_identity=code_identity)
 
     # Optional torch-profiler trace collection (ISAMBARD_TORCH_PROFILE, default
     # off): full optimizer steps with with_stack + record_shapes, exported with

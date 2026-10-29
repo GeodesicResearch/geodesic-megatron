@@ -17,6 +17,7 @@ Catalogue:
     layout: where a prepared dataset and its packed parquet live on disk (standard library only).
     load: the source dataset, from the Hub or from local files.
     records: the text column, the format, and the JSONL records Megatron Bridge reads.
+    stream: the streamed export of a Hub parquet config, its files divided among processes.
     count: token counts through the pack path's chat rendering.
     packing: the subprocess that packs a dataset root's JSONL into parquet.
     verify: the loss-mask report of a packed parquet.

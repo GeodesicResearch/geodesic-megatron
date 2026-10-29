@@ -15,6 +15,7 @@
 
 Catalogue:
     recipes: the recipe of each model and mode, and a launch's config resolved over it.
+    launch_checks: the launcher's records that a config's code_identity and launch_width blocks require.
     one_pass: sizing a packed SFT run to one pass over its rows.
     resilience: the fault-tolerance and straggler-detection configs of a launch.
     env_overrides: the per-node echo of the launcher's environment overrides.

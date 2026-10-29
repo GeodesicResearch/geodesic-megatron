@@ -578,6 +578,9 @@ logger:
   moe_routing_trace_capture_logits: false
   moe_routing_trace_capture_hidden_states: false
   moe_routing_trace_dump_weights: false
+  data_samples:
+    max_scan_tokens_per_source: 20000000
+    max_scan_seconds: 120.0
   skip_train_metrics_log: false
   mlflow_experiment: null
   mlflow_run_name: null
@@ -606,7 +609,15 @@ tokenizer:
   force_system_message: false
   hf_tokenizer_kwargs: {}
   sp_tokenizer_kwargs: {}
-  loss_mask_token_ids: null
+token_masking:
+  enabled: false
+  token_ids: []
+  masked_validation:
+    token_ids: []
+    data_path: null
+    packed_data_path: null
+    interval: null
+    iters: null
 checkpoint:
   save: <TMP>/ckpt
   save_interval: 5

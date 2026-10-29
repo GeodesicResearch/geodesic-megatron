@@ -34,7 +34,7 @@ import json
 import shutil
 from pathlib import Path
 
-from pipeline.hf_cache import cached_snapshots
+from pipeline.hf_cache import cached_file, is_cached
 from pipeline.nemotron import CHAT_TEMPLATE_SOURCE_MAP
 
 
@@ -59,19 +59,18 @@ def resolve_template_from_hub_id(hub_id: str) -> str | None:
 
     Returns the chat_template string, or None on any failure.
     """
-    # 1. Local HF cache snapshot scan
-    for snapshot_dir in cached_snapshots(hub_id) or []:
-        jinja = snapshot_dir / "chat_template.jinja"
-        if jinja.exists():
-            return jinja.read_text()
-        tc_p = snapshot_dir / "tokenizer_config.json"
-        if tc_p.exists():
-            try:
-                tc_dict = json.load(open(tc_p))
-            except Exception:
-                tc_dict = {}
-            if "chat_template" in tc_dict:
-                return tc_dict["chat_template"]
+    # 1. Local HF cache: the snapshot refs/main names, which snapshot_download copies the tokenizer's files from
+    jinja = cached_file(hub_id, "chat_template.jinja")
+    if jinja is not None:
+        return jinja.read_text()
+    tc_p = cached_file(hub_id, "tokenizer_config.json")
+    if tc_p is not None:
+        try:
+            tc_dict = json.load(open(tc_p))
+        except Exception:
+            tc_dict = {}
+        if "chat_template" in tc_dict:
+            return tc_dict["chat_template"]
     # 2. Network fallback via huggingface_hub
     try:
         from huggingface_hub import hf_hub_download
@@ -167,38 +166,38 @@ def copy_training_tokenizer_files(hf_path: Path, training_tokenizer_id: str, tc:
 def graft_release_template(tc: dict, hf_model_id: str) -> bool:
     """Set ``tc``'s chat_template from the cached instruct release of ``hf_model_id``'s family.
 
-    Reads the HF cache only (``CHAT_TEMPLATE_SOURCE_MAP`` names the release); the largest-hash snapshot holding a
-    template wins, its chat_template.jinja before its tokenizer_config.json. Mutates ``tc`` and returns whether it
+    Reads the HF cache only (``CHAT_TEMPLATE_SOURCE_MAP`` names the release), at the snapshot its refs/main names:
+    its chat_template.jinja, else its tokenizer_config.json. Mutates ``tc`` and returns whether it
     changed; prints a warning when the release or its template is not cached.
     """
     source_model_id = CHAT_TEMPLATE_SOURCE_MAP.get(hf_model_id)
     if not source_model_id:
         return False
-    snapshots = cached_snapshots(source_model_id)
-    if snapshots is None:
+    if not is_cached(source_model_id):
         print(
             f"Warning: HF cache not found for {source_model_id} — run: "
             f'python -c "from transformers import AutoTokenizer; '
             f"AutoTokenizer.from_pretrained('{source_model_id}')\""
         )
         return False
-    for snapshot_dir in snapshots:
-        # Prefer chat_template.jinja sibling over embedded.
-        source_jinja = snapshot_dir / "chat_template.jinja"
-        if source_jinja.exists():
-            tc["chat_template"] = source_jinja.read_text()
+    # Prefer chat_template.jinja sibling over embedded.
+    source_jinja = cached_file(source_model_id, "chat_template.jinja")
+    if source_jinja is not None:
+        tc["chat_template"] = source_jinja.read_text()
+        print(
+            f"Grafted chat_template from {source_model_id}/chat_template.jinja ({source_jinja.parent.name[:8]}, {len(tc['chat_template'])} bytes)"
+        )
+        return True
+    source_tc_path = cached_file(source_model_id, "tokenizer_config.json")
+    if source_tc_path is not None:
+        with open(source_tc_path) as f:
+            source_tc = json.load(f)
+        if "chat_template" in source_tc:
+            tc["chat_template"] = source_tc["chat_template"]
             print(
-                f"Grafted chat_template from {source_model_id}/chat_template.jinja ({snapshot_dir.name[:8]}, {len(tc['chat_template'])} bytes)"
+                f"Grafted chat_template from {source_model_id}/tokenizer_config.json ({source_tc_path.parent.name[:8]})"
             )
             return True
-        source_tc_path = snapshot_dir / "tokenizer_config.json"
-        if source_tc_path.exists():
-            with open(source_tc_path) as f:
-                source_tc = json.load(f)
-            if "chat_template" in source_tc:
-                tc["chat_template"] = source_tc["chat_template"]
-                print(f"Grafted chat_template from {source_model_id}/tokenizer_config.json ({snapshot_dir.name[:8]})")
-                return True
     print(f"Warning: chat_template not found in HF cache for {source_model_id}")
     return False
 

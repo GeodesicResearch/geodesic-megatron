@@ -245,7 +245,10 @@ a carriage return), repeats a key, or sets a key the hook refuses:
 
 - the launcher's own shell variables: its command line (`MODEL`, `USE_FT`, ...), what it
   derives from it (`NNODES`, `REPO_DIR`, `SCRIPT_ARGS`, `SRUN_ARGS`, ...), the variables that
-  choose the checkout (`GEODESIC_REPO_DIR`, `TRAIN_REPO_DIR`), and the hook's own. An override
+  choose the checkout or waive its check (`GEODESIC_REPO_DIR`, `TRAIN_REPO_DIR`,
+  `ALLOW_CROSS_CHECKOUT_CONFIG`, read by `scripts/training/checkout_guard.sh`), the code-identity and launch-width
+  checks' records (`ISAMBARD_CODE_IDENTITY`, `scripts/training/code_identity.py`; `ISAMBARD_LAUNCH_WIDTH`,
+  `scripts/training/launch_width.py`), and the hook's own. An override
   of one of these would change the launch rather than its environment; the list is
   `apply_env_overrides` in the launcher, and a unit test fails when a variable the launcher
   keeps is missing from it;
@@ -614,7 +617,10 @@ Every launch through `pipeline_training_launch.sh` mints `ISAMBARD_RUN_ID` =
   run summary, plus `run/switch_count` and `run/switch_spread` — the run's Dragonfly placement,
   read from the launcher's `ISAMBARD_SWITCH_SPREAD`. The placement keys are absent on runs not
   started through `pipeline_training_launch.sh`, since `scontrol` is unavailable inside the
-  container and only the launcher can derive them.
+  container and only the launcher can derive them. For a config that pins its code (a `code_identity:` block), the
+  same callback writes the launcher's code-identity record (`ISAMBARD_CODE_IDENTITY`: what the block states, what
+  was measured, the differences) into the run's **config** under `code_identity`; the key is absent for a config
+  that pins no code (`scripts/training/code_identity.py`).
 ## Troubleshooting
 
 | Symptom | Cause / fix |

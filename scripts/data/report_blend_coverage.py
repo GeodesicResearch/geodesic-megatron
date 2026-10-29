@@ -15,12 +15,8 @@
 
 """Report how much of each corpus a training run's ``.bin/.idx`` blend reads.
 
-The run's training dataset is built on CPU the way its launch builds it: the config is resolved by the
-launcher's own merge (``pipeline.training.recipes.resolve_training_config``), its ``dataset`` section becomes
-a dataset config through the launcher's own construction (``bin_idx_dataset_config``), the loader's
-training-data window (``get_train_data_window``) sizes it, and the loader's builder builds it. No
-process group, GPU or checkpoint is needed, and the index caches it writes are the ones the launch
-would write, so the launch then finds them warm.
+The run's training dataset is built on CPU the way its launch builds it (``run_training_data.py``), so
+the index caches it writes are the ones the launch would write, and the launch then finds them warm.
 
 For every corpus in the blend the report gives its blend weight, the samples the built dataset draws
 from it, the samples one pass over the corpus holds, and how many of the corpus's documents those
@@ -33,10 +29,6 @@ so a run from its start reads all of it, and so does a resumed run that resets i
 the run reads a random subset; a run resumed without the reset reads the rest of its sampler's random
 order; and an unweighted lone corpus is built to whole epochs. None of these is a fixed set of
 samples this tool could describe.
-
-The resumed step is the config's ``checkpoint.ckpt_step`` (the run's start when unset: a resume from
-the load directory's latest save is not recognised), and the samples consumed before it are that step
-times the global batch, so a batch-size ramp is refused.
 
     python scripts/data/report_blend_coverage.py <config.yaml> --model nano --mode pretrain \\
         --report-out <report.json>
@@ -54,22 +46,21 @@ from pathlib import Path
 import numpy
 from megatron.core.datasets.gpt_dataset import GPTDataset
 
-from megatron.bridge.data.loaders import build_train_valid_test_datasets, get_train_data_window
-from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider
-from megatron.bridge.training.state import TrainState
-from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
-from pipeline.training.datasets import bin_idx_dataset_config  # noqa: E402
-from pipeline.training.recipes import RECIPE_MAP, resolve_training_config  # noqa: E402
+from scripts.data.run_training_data import (  # noqa: E402
+    BIN_IDX_MODES,
+    MODELS,
+    build_training_dataset,
+    corpus_draws,
+    resolve_run_config,
+    run_inputs,
+    sequences_reached,
+)
 
 
 logger: logging.Logger = logging.getLogger(__name__)
-
-# The modes whose training data is a .bin/.idx blend.
-BIN_IDX_MODES = ("cpt", "pretrain")
 
 
 @dataclass(frozen=True)
@@ -88,7 +79,7 @@ def corpus_coverage(dataset: GPTDataset, weight: float, drawn: numpy.ndarray) ->
     """How far the samples ``drawn`` (indices into ``dataset``) reach through its corpus.
 
     A document counts as reached when any token of it, the extra label token included, lies in a
-    drawn sample.
+    drawn sample (``sequences_reached``).
     """
     config = dataset.config
     # mcore's own count of the tokens in one pass over the split's documents, EOD included; the
@@ -96,78 +87,22 @@ def corpus_coverage(dataset: GPTDataset, weight: float, drawn: numpy.ndarray) ->
     tokens_per_pass = dataset._get_num_tokens_per_epoch()
     samples_per_pass = (tokens_per_pass - config.add_extra_token_to_sequence) // config.sequence_length
 
-    # Sample j spans document_index positions sample_index[j, 0] .. sample_index[j + 1, 0] inclusive.
-    rows = dataset.shuffle_index[drawn]
-    marks = numpy.zeros(len(dataset.document_index) + 1, dtype=numpy.int64)
-    numpy.add.at(marks, dataset.sample_index[rows, 0], 1)
-    numpy.add.at(marks, dataset.sample_index[rows + 1, 0] + 1, -1)
-    covered_positions = numpy.cumsum(marks[:-1]) > 0
-    documents_reached = numpy.unique(dataset.document_index[covered_positions]).size
-
     return CorpusCoverage(
         prefix=str(dataset.dataset_path),
         weight=float(weight),
         samples_drawn=int(len(drawn)),
         samples_per_pass=int(samples_per_pass),
         documents=int(len(dataset.indices)),
-        documents_reached=int(documents_reached),
+        documents_reached=int(sequences_reached(dataset, drawn).size),
     )
 
 
 def blend_coverage(train_ds) -> list[CorpusCoverage]:
     """What each corpus contributes to a built training dataset: a blend, or a single corpus."""
-    if isinstance(train_ds, GPTDataset):
-        return [corpus_coverage(train_ds, 1.0, numpy.arange(len(train_ds)))]
     return [
-        corpus_coverage(dataset, weight, train_ds.dataset_sample_index[train_ds.dataset_index == index])
-        for index, (dataset, weight) in enumerate(zip(train_ds.datasets, train_ds.weights))
+        corpus_coverage(dataset, weight, drawn)
+        for dataset, weight, _, drawn in corpus_draws(train_ds, numpy.arange(len(train_ds)))
     ]
-
-
-def resolve_run_config(config_file: str, model: str, mode: str):
-    """The config a launch of ``config_file`` trains with, its ``.bin/.idx`` dataset config finalized."""
-    if mode not in BIN_IDX_MODES:
-        raise ValueError(f"mode {mode!r} does not read a .bin/.idx blend; use one of {BIN_IDX_MODES}")
-    cfg, merged = resolve_training_config(model, mode, None, config_file, [])
-    if cfg.train.rampup_batch_size is not None:
-        raise ValueError("a batch-size ramp makes the samples consumed before the resumed step unknowable here")
-    cfg.dataset = bin_idx_dataset_config(merged.get("dataset", {}), mode)
-    cfg.dataset.tokenizer = build_tokenizer(cfg.tokenizer)
-    cfg.dataset.finalize()
-    return cfg
-
-
-def run_inputs(cfg) -> dict:
-    """The resolved settings a report's numbers depend on, so a report stays traceable after its config changes."""
-    return {
-        "data_path": [str(item) for item in cfg.dataset.data_path],
-        "seq_length": cfg.dataset.seq_length,
-        "split": cfg.dataset.split,
-        "seed": cfg.dataset.random_seed,
-        "path_to_cache": cfg.dataset.path_to_cache,
-        "train_iters": cfg.train.train_iters,
-        "train_samples": cfg.train.train_samples,
-        "global_batch_size": cfg.train.global_batch_size,
-        "ckpt_step": cfg.checkpoint.ckpt_step,
-        "reset_data_position": cfg.checkpoint.reset_data_position,
-        "tokenizer_model": cfg.tokenizer.tokenizer_model,
-    }
-
-
-def build_training_dataset(cfg) -> tuple[object, int, int]:
-    """The training dataset a launch of the resolved config ``cfg`` builds.
-
-    Returns:
-        The dataset, its size in samples, and the first sample the run reads.
-    """
-    state = TrainState()
-    state.step = cfg.checkpoint.ckpt_step or 0
-    state.consumed_train_samples = state.step * cfg.train.global_batch_size
-    size, first_sample = get_train_data_window(cfg, state)
-    train_ds, _, _ = build_train_valid_test_datasets(
-        cfg, pretrain_train_valid_test_datasets_provider, train_samples=size
-    )
-    return train_ds, size, first_sample
 
 
 def require_the_whole_dataset_is_read(train_ds, size: int, first_sample: int) -> None:
@@ -190,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     """Build the run's training dataset, write the per-corpus report, and log it."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("config", help="the run's override YAML, exactly as the launch passes it")
-    parser.add_argument("--model", required=True, choices=sorted({model for model, _ in RECIPE_MAP}))
+    parser.add_argument("--model", required=True, choices=MODELS)
     parser.add_argument("--mode", required=True, choices=BIN_IDX_MODES)
     parser.add_argument("--report-out", type=Path, required=True, help="where the JSON report is written")
     args = parser.parse_args(argv)

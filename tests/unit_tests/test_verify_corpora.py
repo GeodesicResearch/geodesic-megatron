@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit_tests.campaign_config import dry_run_build
 from tests.unit_tests.corpora_fixtures import (
     CAMPAIGN_DIR,
     DATASET,
@@ -242,6 +243,120 @@ class TestHeldCorpora:
         assert status == 1
         assert any("PENDING" in failure for failure in failures)
         assert any("tokenizer" in failure for failure in failures)
+
+
+class TestPerSubsetRevisions:
+    """A prepare config that pins each subset at its own commit (`revisions`) is read row by row:
+    each corpus is checked against its own subset's pin, and a subset with no pin is reported and
+    refused by the plan, never checked or built against a commit it was not prepared from."""
+
+    PINS = {"first_subset": "1" * 40, "second_subset": "2" * 40}
+
+    def _table(self, tmp_path: Path, *extra_subsets: str) -> Path:
+        config = write_prepare_config(tmp_path, revisions=self.PINS)
+        rows = [{"subset": subset} for subset in ("second_subset", *extra_subsets)]
+        return write_table(tmp_path, config, subset="first_subset", extra_rows=rows)
+
+    def _build(self, data_base: Path, subset: str, revision: str) -> None:
+        build_corpus(corpora_table.corpus_root(DATASET, subset, data_base), subset=subset, revision=revision)
+
+    def test_each_corpus_is_checked_against_its_own_subsets_pin(self, tmp_path):
+        table = self._table(tmp_path)
+        data_base = tmp_path / "data"
+        self._build(data_base, "first_subset", self.PINS["first_subset"])
+        self._build(data_base, "second_subset", self.PINS["first_subset"])  # prepared at the other subset's commit
+        status, failures = run(table, data_base)
+        assert status == 1
+        assert failures == [
+            f"second_subset: prepare recorded revision={self.PINS['first_subset']!r}, "
+            f"config says {self.PINS['second_subset']!r}"
+        ]
+
+    def test_a_subset_with_no_pin_is_reported_and_the_others_still_verified(self, tmp_path):
+        table = self._table(tmp_path, "unpinned_subset")
+        data_base = tmp_path / "data"
+        for subset, pin in self.PINS.items():
+            self._build(data_base, subset, pin)
+        status, failures = run(table, data_base)
+        assert status == 1
+        (failure,) = failures
+        assert failure.startswith("unpinned_subset: ")
+        assert "`revisions` pins no commit for subset 'unpinned_subset'" in failure
+
+    def test_the_plan_refuses_a_counted_subset_with_no_pin(self, tmp_path):
+        table = self._table(tmp_path, "unpinned_subset")
+        data_base = tmp_path / "data"
+        (plan,) = corpora_table.plan_build(table, "all", data_base=data_base, subsets=["second_subset"])
+        assert plan.jobs[0].payload[-2:] == ("--subset", "second_subset")
+        with pytest.raises(ValueError, match="`revisions` pins no commit for subset 'unpinned_subset'"):
+            corpora_table.plan_build(table, "all", data_base=data_base)
+
+
+class TestTokenizerRevision:
+    """A prepare config that pins its tokenizer's commit (`tokenizer-revision`) plans tokenize jobs that load exactly
+    that commit, and the verifier checks both records against it: a corpus built with the tokenizer's default branch,
+    or another commit, is reported, and so is a pinned corpus under a config that pins nothing."""
+
+    PIN = "4" * 40
+
+    def _corpus(self, tmp_path: Path, pin: str | None, **damage) -> tuple[Path, Path]:
+        config = write_prepare_config(tmp_path, **({"tokenizer-revision": pin} if pin else {}))
+        table = write_table(tmp_path, config)
+        data_base = tmp_path / "data"
+        build_corpus(corpora_table.corpus_root(DATASET, "demo_filtered_mini_2plus", data_base), **damage)
+        return table, data_base
+
+    def test_a_corpus_built_at_the_pin_passes(self, tmp_path):
+        assert run(*self._corpus(tmp_path, self.PIN, tokenizer_revision=self.PIN)) == (0, [])
+
+    def test_a_corpus_tokenized_at_the_default_branch_is_reported(self, tmp_path):
+        status, failures = run(
+            *self._corpus(tmp_path, self.PIN, tokenizer_revision=self.PIN, provenance_tokenizer_revision=None)
+        )
+        assert status == 1
+        assert failures == [
+            f"demo_filtered_mini_2plus: tokenized with tokenizer commit None, config pins {self.PIN!r}"
+        ]
+
+    def test_a_corpus_prepared_at_another_commit_is_reported(self, tmp_path):
+        other = "5" * 40
+        status, failures = run(*self._corpus(tmp_path, self.PIN, tokenizer_revision=other))
+        assert status == 1
+        assert failures == [
+            f"demo_filtered_mini_2plus: prepare recorded tokenizer_revision={other!r}, config pins {self.PIN!r}",
+            f"demo_filtered_mini_2plus: tokenized with tokenizer commit {other!r}, config pins {self.PIN!r}",
+        ]
+
+    def test_a_pinned_corpus_under_a_config_that_pins_nothing_is_reported(self, tmp_path):
+        status, failures = run(*self._corpus(tmp_path, None, tokenizer_revision=self.PIN))
+        assert status == 1
+        assert len(failures) == 2 and all("config pins None" in failure for failure in failures)
+
+    def test_the_tokenize_job_takes_the_pinned_tokenizer_reference(self, tmp_path):
+        config = write_prepare_config(tmp_path, **{"tokenizer-revision": self.PIN})
+        (plan,) = corpora_table.plan_build(write_table(tmp_path, config), "all", data_base=tmp_path / "data")
+        tokenize = next(job for job in plan.jobs if job.step == "tokenize")
+        assert tokenize.payload[2] == f"{TOKENIZER}@{self.PIN}"
+
+    def test_an_unpinned_tokenize_job_takes_the_bare_name(self, tmp_path):
+        (plan,) = corpora_table.plan_build(
+            write_table(tmp_path, write_prepare_config(tmp_path)), "all", data_base=tmp_path / "data"
+        )
+        assert next(job for job in plan.jobs if job.step == "tokenize").payload[2] == TOKENIZER
+
+    def test_a_pack_row_refuses_a_pinned_tokenizer(self, tmp_path):
+        config = write_prepare_config(
+            tmp_path, **{"tokenizer-revision": self.PIN, "seq-length": 8192, "pad-seq-to-mult": 1}
+        )
+        table = write_table(tmp_path, config, kind="pack", shards=2, shard_mode="split")
+        with pytest.raises(ValueError, match="pins its tokenizer's commit, which a pack row cannot honour"):
+            corpora_table.plan_build(table, "all", data_base=tmp_path / "data")
+
+    @pytest.mark.parametrize("pin", ["main", "4" * 12])
+    def test_a_pin_that_is_not_a_full_sha_is_refused(self, tmp_path, pin):
+        config = write_prepare_config(tmp_path, **{"tokenizer-revision": pin})
+        with pytest.raises(ValueError, match="`tokenizer-revision` must be a full 40-character commit SHA"):
+            corpora_table.subset_prepare_config(config, "demo_filtered_mini_2plus")
 
 
 class TestPlanDerivation:
@@ -690,3 +805,37 @@ class TestTableParsing:
             assert rows, arm
             for row in rows:
                 assert row.config.exists(), f"{arm}: {row.config} does not exist"
+
+
+class TestTokenizePartitions:
+    """A tokenize row's `partitions` column reaches its tokenize job, and only counts the tool can run are accepted."""
+
+    def test_the_tokenize_job_takes_its_rows_workers_then_partitions(self, tmp_path):
+        table = write_table(tmp_path, write_prepare_config(tmp_path), workers=64, partitions=8)
+        (plan,) = corpora_table.plan_build(table, "all", data_base=tmp_path / "data")
+        tokenize = next(job for job in plan.jobs if job.step == "tokenize")
+        assert tokenize.payload[-2:] == ("64", "8")
+
+    @pytest.mark.parametrize("partitions", [0, 3])
+    def test_partitions_that_do_not_divide_the_workers_are_refused(self, tmp_path, partitions):
+        # preprocess_data.py gives each part workers // partitions, and refuses a count that does not divide them.
+        table = write_table(tmp_path, write_prepare_config(tmp_path), workers=64, partitions=partitions)
+        with pytest.raises(ValueError, match="partitions must be at least 1 and divide workers"):
+            corpora_table.read_corpora_table(table)
+
+    def test_only_a_tokenize_row_is_tokenized_in_parts(self, tmp_path):
+        config = write_prepare_config(tmp_path, **{"seq-length": 8192, "pad-seq-to-mult": 1})
+        table = write_table(tmp_path, config, kind="pack", shards=2, shard_mode="split", partitions=2)
+        with pytest.raises(ValueError, match="only a tokenize row is tokenized in parts"):
+            corpora_table.read_corpora_table(table)
+
+
+class TestBuildScript:
+    def test_it_submits_its_one_node_jobs_forced_whatever_the_shell_holds(self, tmp_path):
+        """Every job is one node, so build_corpora.sh exports ISAMBARD_SBATCH_FORCE=1 itself: a shell that holds 0
+        must not put an arm's tens of jobs behind the account's node cap."""
+        table = write_table(tmp_path, write_prepare_config(tmp_path), shards=2, shard_mode="slice", docs=10)
+        proc = dry_run_build(table, "all", env={"ISAMBARD_SBATCH_FORCE": "0"})
+        output = proc.stdout + proc.stderr
+        assert proc.returncode == 0, output
+        assert "every job would be submitted with ISAMBARD_SBATCH_FORCE=1" in output
