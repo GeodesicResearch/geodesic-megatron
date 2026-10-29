@@ -37,7 +37,12 @@ shift
 # otherwise fall back to the directory the job was submitted from
 # (SLURM_SUBMIT_DIR), then the current working directory.
 REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+# A REPO_DIR without the libraries cannot be reported by them, so this line, the same in every launcher, does it.
+[ -f "$REPO_DIR/pipeline/sh/common.sh" ] || { echo "FATAL: $REPO_DIR has no pipeline/sh/common.sh, so REPO_DIR is not this repo's checkout. Inside a tunnel or salloc SLURM_SUBMIT_DIR (${SLURM_SUBMIT_DIR:-unset}) is the tunnel's own submit dir, and a copied script runs from the copy's dir. Export GEODESIC_REPO_DIR=/path/to/repo." >&2; exit 1; }
 cd "$REPO_DIR"
+source "$REPO_DIR/pipeline/sh/common.sh" || exit 1
+source "$REPO_DIR/pipeline/sh/slurm.sh" || exit 1
+source "$REPO_DIR/pipeline/sh/fabric.sh" || exit 1
 
 echo "============================================================"
 echo "Environment $MODE"
@@ -68,8 +73,7 @@ case "$MODE" in
         # The validator runs INSIDE the container — the only environment there is.
         # The shim hard-fails with fix commands if the SIF or Slingshot build is
         # missing.
-        "$REPO_DIR/pipeline_env_exec.sh" \
-            "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; python pipeline_env_validate.py$ARGS_Q" || rc=$?
+        "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python pipeline_env_validate.py$ARGS_Q")" || rc=$?
         ;;
     smoke)
         # Multi-node fabric check. The validator only proves the CXI plugin dlopens;
@@ -89,13 +93,11 @@ case "$MODE" in
         # parse_rendezvous_endpoint. Same reason the other launchers resolve it here.
         SMOKE_MASTER="$(scontrol show hostname "$SLURM_JOB_NODELIST" | head -1)"
         # Slingshot selection vars. pipeline_env_activate.sh sets NCCL_NET_PLUGIN and
-        # the LD_LIBRARY_PATH order but NOT these three — every other multi-node
-        # launcher exports them itself (pipeline_training_launch.sh, the checkpoint
-        # converter, the coherence megatron branch). Without them NCCL can bootstrap
+        # the LD_LIBRARY_PATH order but NOT these three. Without them NCCL can bootstrap
         # on the management ethernet (which cannot reach other nodes) or libfabric can
         # auto-select a non-CXI provider, so the gate would report FAIL or hang on a
         # perfectly healthy fabric — the exact false verdict this mode exists to rule out.
-        export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_SOCKET_IFNAME=hsn
+        fabric_select
         # 4 ranks/node explicitly, not $SLURM_GPUS_PER_NODE: the floor in
         # nccl_allreduce_smoke.py is calibrated for the 2-node/8-GPU shape, so a
         # smaller rank count would fail a healthy fabric.

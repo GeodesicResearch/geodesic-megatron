@@ -126,3 +126,26 @@ def test_fabric_tiers_export_their_settings(pipeline_launch_shell, tier, count):
     fabric = {k: v for k, v in env.items() if k.startswith(("NCCL_", "FI_"))}
     assert len(fabric) == count, fabric
     assert (fabric["NCCL_NET"], fabric["FI_PROVIDER"], fabric["NCCL_SOCKET_IFNAME"]) == ("AWS Libfabric", "cxi", "hsn")
+
+
+def _fabric(shell, tier, extra_env=None):
+    result = _bash(shell, f"{tier}; env -0", extra_env)
+    env = dict(item.split("=", 1) for item in result.stdout.split("\0") if item)
+    return {k: v for k, v in env.items() if k.startswith(("NCCL_", "FI_", "TORCH_", "MPICH_"))}
+
+
+def test_fabric_training_extends_fabric_base_through_the_settings_they_share(pipeline_launch_shell):
+    """fabric_shared is fabric_base less the selection and its two fixed values; fabric_training sets everything
+    fabric_base does, to the same values, and its overridable ones follow the launching environment."""
+    select = _fabric(pipeline_launch_shell, "fabric_select")
+    shared = _fabric(pipeline_launch_shell, "fabric_shared")
+    base = _fabric(pipeline_launch_shell, "fabric_base")
+    training = _fabric(pipeline_launch_shell, "fabric_training")
+    assert base == {**select, **shared, "FI_CXI_RX_MATCH_MODE": "soft", "NCCL_DEBUG": "WARN"}
+    assert base.items() <= training.items()
+    tuned = _fabric(
+        pipeline_launch_shell,
+        "fabric_training",
+        {"NCCL_DEBUG": "INFO", "TRAIN_FI_CXI_RX_MATCH_MODE_OVERRIDE": "hybrid", "ISAMBARD_NCCL_DEBUG": "TRACE"},
+    )
+    assert (tuned["FI_CXI_RX_MATCH_MODE"], tuned["NCCL_DEBUG"]) == ("hybrid", "TRACE")

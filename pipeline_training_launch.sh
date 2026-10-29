@@ -423,7 +423,8 @@ ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
 # ft_launcher compatibility gate: the image's nvidia-resiliency-ext version is
 # whatever NGC shipped, so verify the section-timeout flags exist before launching
 # 44+ ranks into a launcher that would reject them; fail with actionable guidance
-# rather than a rank-0 usage error. (D6 in docs/environment.md.)
+# rather than a rank-0 usage error. (D6 in docs/environment.md.) The flags are
+# SECTION_TIMEOUT_FLAGS in pipeline/environment/ft_launcher.py.
 if [ "$USE_FT" = true ]; then
     if ! "$REPO_DIR/pipeline_env_exec.sh" "ft_launcher --help" 2>&1 | \
             grep -q -- "--ft-rank-section-timeouts"; then

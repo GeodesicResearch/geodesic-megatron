@@ -24,6 +24,7 @@ Catalogue:
 import subprocess
 
 
+# pipeline_training_launch.sh passes both flags; its launch gate greps for the first one itself.
 SECTION_TIMEOUT_FLAGS = ("--ft-rank-section-timeouts", "--ft-rank-out-of-section-timeout")
 
 

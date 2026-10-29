@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for pipeline_env_config.env: the bind list the container shim mounts."""
+"""Unit tests for pipeline_env_config.env: the bind list the container shim mounts, and the host-toolchain scrub."""
 
 import os
 import subprocess
