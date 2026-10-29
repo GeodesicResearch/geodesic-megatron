@@ -147,7 +147,7 @@ version report prints the live set per image:
 | mamba-ssm / causal-conv1d | 2.3.0 / 1.6.0 | prebuilt in the image — the Nemotron-H hybrid needs both |
 | nv-grouped-gemm | 1.1.4.post8 | MoE grouped GEMM |
 | apex | 0.1 | why `model.gradient_accumulation_fusion: True` works and is the faster path (measured ~1.1 s/iter on the 120B quickstart) |
-| nvidia-resiliency-ext | 0.4.1 | `ft_launcher`; gated at launch, see D6 |
+| nvidia-resiliency-ext | 0.6.0 | `ft_launcher`; gated at launch, see D6 |
 | transformers / datasets / numpy | 5.3.0 / 3.1.0 / 1.26.4 | |
 | peft | 0.13.2 → **0.18.1** via the overlay | see D3b |
 
@@ -383,7 +383,7 @@ be poisoned by. The full ordering (mirroring the BriCS recipe): host libfabric �
 
 ### D6 — ft_launcher version gate
 
-The image's `nvidia-resiliency-ext` is whatever NGC shipped (0.4.1 on the current tag).
+The image's `nvidia-resiliency-ext` is whatever NGC shipped (0.6.0 on the current tag).
 Before an FT launch, `pipeline_training_launch.sh` runs `python -m pipeline.environment.ft_launcher`
 *inside the container*, which checks `ft_launcher --help` for both section-timeout flags the
 launcher passes; if that fails it exits with "rerun with `--disable-ft`, or qualify a newer
