@@ -14,8 +14,10 @@
 
 """Unit tests for scripts/telemetry/gate_outcome.py (the exit status a set of gate outcomes makes)."""
 
+from pathlib import Path
+
 import pytest
-from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status
+from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status, unusable_spec_status
 
 
 @pytest.mark.parametrize(
@@ -36,6 +38,12 @@ def test_no_outcomes_at_all_is_refused_rather_than_a_pass():
     """A set of gates that evaluated nothing has not passed, so it cannot exit 0."""
     with pytest.raises(ValueError, match="nothing was evaluated"):
         exit_status([])
+
+
+def test_a_spec_that_cannot_be_used_is_reported_and_ends_not_evaluated_rather_than_failed(capsys):
+    """A gate that did not run has judged no candidate: exit status 2, never the 1 of a FAIL verdict."""
+    assert unusable_spec_status(Path("gate.yaml"), ValueError("no gates")) == 2
+    assert capsys.readouterr().err == "cannot use the spec gate.yaml: ValueError: no gates\n"
 
 
 def test_an_outcome_outside_the_vocabulary_is_refused():

@@ -15,7 +15,7 @@
 
 Each case runs the real script under ``PipelineShell`` (SLURM, the container, torchrun, the converter's python
 launch and the Hub are the stubbed boundaries) and compares its exit status, output and the ordered stub calls
-with ``fixtures/convert_sh/<case>.json``. upload-all runs on a fake run tree under ``tmp_path``.
+with ``fixtures/convert_sh/<case>.json``. export and upload-all run on fake run trees under ``tmp_path``.
 """
 
 import pytest
@@ -27,7 +27,9 @@ from tests.unit_tests.goldens import FIXTURES, assert_golden_json
 SCRIPT = "pipeline_checkpoint_convert.sh"
 
 
-EXPORT = ["export", "/ckpt/run", "--hf-model", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "--no-reasoning"]
+#: The checkpoint an export case names, replaced by ``_export_run``'s fake run: export resolves the iteration on disk.
+RUN = "<run>"
+EXPORT = ["export", RUN, "--hf-model", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "--no-reasoning"]
 
 EXPORT_CASES = {
     "export_default": (EXPORT, {}),
@@ -43,7 +45,7 @@ EXPORT_CASES = {
     "export_forwarded_flags": (EXPORT + ["--keep-remote-code", "--not-strict", "--hf-path", "/out/hf"], {}),
     "export_slurm_flags_stripped": (EXPORT + ["--exclude=nid000009", "--nodes", "2", "--qos", "high"], {}),
     "export_value_with_space": (EXPORT + ["--keep-remote-code", "--remote-code-source", "/models/a b"], {}),
-    "export_missing_hf_model": (["export", "/ckpt/run", "--no-reasoning"], {}),
+    "export_missing_hf_model": (["export", RUN, "--no-reasoning"], {}),
     "export_bad_parallelism": (EXPORT + ["--tp", "2", "--ep", "4"], {}),
     "import_default": (["import", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"], {}),
     "import_megatron_path": (
@@ -55,10 +57,17 @@ EXPORT_CASES = {
 }
 
 
+def _export_run(tmp_path, args):
+    """``args`` with ``RUN`` replaced by a fake run under ``tmp_path``: saves 100 and 300, the tracker at 300, no
+    run_config (so no export repair)."""
+    run = make_checkpoint_dir(tmp_path / "ckpt" / "run", [100, 300], tracker=300)
+    return [str(run) if arg == RUN else arg for arg in args]
+
+
 @pytest.mark.parametrize("case", sorted(EXPORT_CASES))
-def test_export_and_import_launch(pipeline_launch_shell, case):
+def test_export_and_import_launch(pipeline_launch_shell, tmp_path, case):
     args, env = EXPORT_CASES[case]
-    run = pipeline_launch_shell.run(SCRIPT, *args, env=env)
+    run = pipeline_launch_shell.run(SCRIPT, *_export_run(tmp_path, args), env=env)
     assert_golden_json(FIXTURES / "convert_sh" / f"{case}.json", pipeline_launch_shell.normalise(run))
 
 
@@ -106,7 +115,9 @@ def test_a_repo_dir_outside_the_checkout_names_both_causes(pipeline_launch_shell
     elsewhere = tmp_path / "tunnel_submit_dir"
     elsewhere.mkdir()
     run = pipeline_launch_shell.run(
-        SCRIPT, *EXPORT, env={"GEODESIC_REPO_DIR": str(elsewhere), "SLURM_SUBMIT_DIR": str(elsewhere)}
+        SCRIPT,
+        *_export_run(tmp_path, EXPORT),
+        env={"GEODESIC_REPO_DIR": str(elsewhere), "SLURM_SUBMIT_DIR": str(elsewhere)},
     )
     assert run["returncode"] == 1 and run["calls"] == []
     assert f"FATAL: {elsewhere} has no pipeline/sh/common.sh, so REPO_DIR is not this repo's checkout" in run["stderr"]
@@ -122,3 +133,51 @@ def test_upload_all_converts_only_saves_the_tracker_names_as_complete(pipeline_l
     assert converted == ["0", "100"]
     revisions = [c["kwargs"]["revision"] for c in run["calls"] if c["argv"] == ["upload_folder"]]
     assert revisions == ["iter_0000200"]
+
+
+def test_a_forwarded_value_with_a_space_reaches_the_converter_as_one_argument(pipeline_launch_shell, tmp_path):
+    run = pipeline_launch_shell.run(SCRIPT, *_export_run(tmp_path, EXPORT_CASES["export_value_with_space"][0]))
+    assert run["returncode"] == 0, run["stderr"]
+    [torchrun] = [c["argv"] for c in run["calls"] if c["cmd"] == "torchrun"]
+    assert torchrun[torchrun.index("--remote-code-source") + 1] == "/models/a b"
+
+
+def test_a_repo_name_with_a_quote_is_pushed_under_that_name(pipeline_launch_shell, tmp_path):
+    """upload-all once pasted the org, repo name and message into Python source, which a quote broke."""
+    run_dir = make_checkpoint_dir(
+        tmp_path / "it's_run", [300], tracker=300, run_config=RUN_CONFIG, hf_files={"config.json": "{}"}
+    )
+    run = pipeline_launch_shell.run(SCRIPT, "upload-all", str(run_dir), *UPLOAD)
+    assert run["returncode"] == 0, run["stderr"]
+    uploads = [c["kwargs"] for c in run["calls"] if c["argv"] == ["upload_folder"]]
+    assert [(u["repo_id"], u["revision"]) for u in uploads] == [
+        ("geodesic-research/it's_run", "iter_0000300"),
+        ("geodesic-research/it's_run", "main"),
+    ]
+
+
+def test_upload_all_poll_waits_through_a_pass_that_finds_no_completed_save(pipeline_launch_shell, tmp_path):
+    """Before the first save completes there is no tracker, so a pass finds nothing; poll mode waits for the save
+    rather than ending. Here iter 300, the final one, is being written; during the wait it completes."""
+    run_dir = tmp_path / "my_run"
+    (run_dir / "iter_0000300").mkdir(parents=True)
+    (run_dir / "iter_0000300" / "run_config.yaml").write_text(RUN_CONFIG)
+    complete = f"echo 300 > {run_dir}/latest_checkpointed_iteration.txt"
+    run = pipeline_launch_shell.run(
+        SCRIPT, "upload-all", str(run_dir), *UPLOAD, "--poll", env={"STUB_ON_SLEEP": complete}
+    )
+    assert run["returncode"] == 0, run["stdout"] + run["stderr"]
+    assert "No iterations found yet." in run["stdout"]
+    assert [c["argv"] for c in run["calls"] if c["cmd"] == "sleep"] == [["300"]]
+    converted = [c["argv"][c["argv"].index("--iteration") + 1] for c in run["calls"] if c["cmd"] == "torchrun"]
+    assert converted == ["300", "300"], "the pass after the wait, then the final pass once training is complete"
+
+
+def test_upload_all_batch_with_no_completed_save_ends_with_status_1(pipeline_launch_shell, tmp_path):
+    """A batch run has nothing to do before the first save completes, and says so."""
+    run_dir = tmp_path / "my_run"
+    (run_dir / "iter_0000100").mkdir(parents=True)
+    run = pipeline_launch_shell.run(SCRIPT, "upload-all", str(run_dir), *UPLOAD)
+    assert run["returncode"] == 1
+    assert "No iterations found yet." in run["stdout"]
+    assert not [c for c in run["calls"] if c["cmd"] == "torchrun"]

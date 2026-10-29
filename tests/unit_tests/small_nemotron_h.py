@@ -69,11 +69,11 @@ def small_nemotron_h_provider(hybrid_layer_pattern: str, **overrides):
     return provider
 
 
-def write_small_nemotron_h_release(path: Path) -> Path:
-    """Write an HF NemotronH release of the small model's architecture to ``path`` and return it.
+def write_small_nemotron_h_release(path: Path, layers_block_type: tuple[str, ...]) -> Path:
+    """Write an HF NemotronH release of the small model's architecture, with ``layers_block_type``, to ``path``.
 
     The weights are random, the tokenizer is word-level over the vocabulary, and the keys follow the released
-    checkpoints' layout (one key per expert).
+    checkpoints' layout (one key per expert). Returns ``path``.
     """
     import torch
     from safetensors.torch import load_file, save_file
@@ -83,8 +83,8 @@ def write_small_nemotron_h_release(path: Path) -> Path:
     config = NemotronHConfig(
         vocab_size=VOCAB,
         hidden_size=128,
-        layers_block_type=["mamba", "attention", "moe"],
-        num_hidden_layers=3,
+        layers_block_type=list(layers_block_type),
+        num_hidden_layers=len(layers_block_type),
         num_attention_heads=4,
         num_key_value_heads=2,
         head_dim=32,

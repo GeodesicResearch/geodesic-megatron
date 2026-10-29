@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""pipeline.checkpoints' command line and train_iters, on fake run directories (tests/unit_tests/checkpoint_dirs.py)."""
+"""pipeline.checkpoints' command line, train_iters and resolve_checkpoint_path, on fake run directories
+(tests/unit_tests/checkpoint_dirs.py)."""
 
 import pytest
 
@@ -41,3 +42,15 @@ def test_train_iters_reads_the_run_config(tmp_path, text, expected):
     iteration = make_checkpoint_dir(tmp_path / "run", [1], tracker=1, run_config=text) / "iter_0000001"
     assert checkpoints.train_iters(iteration) == expected
     assert checkpoints.train_iters(tmp_path) is None
+
+
+def test_resolve_checkpoint_path_takes_the_given_iteration_then_the_tracker_then_the_newest(tmp_path):
+    save = make_checkpoint_dir(tmp_path / "ckpt", [100, 200, 300], tracker=200)
+    assert checkpoints.resolve_checkpoint_path(save, 100) == (save / "iter_0000100", 100)
+    assert checkpoints.resolve_checkpoint_path(save) == (save / "iter_0000200", 200)
+    (save / checkpoints.LATEST_FILE).unlink()
+    assert checkpoints.resolve_checkpoint_path(str(save)) == (save / "iter_0000300", 300)
+    with pytest.raises(FileNotFoundError, match="Iteration directory not found"):
+        checkpoints.resolve_checkpoint_path(save, 999)
+    with pytest.raises(FileNotFoundError, match="Checkpoint directory not found"):
+        checkpoints.resolve_checkpoint_path(tmp_path / "absent")

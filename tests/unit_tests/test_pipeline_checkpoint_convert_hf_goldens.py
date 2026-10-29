@@ -120,8 +120,8 @@ huggingface_hub.HfApi = HfApi
 import pipeline_checkpoint_convert_hf as converter
 
 
-def convert(iter_path, hf_path, hf_model_id, **kwargs):
-    print(f"[bridge] {iter_path} -> {hf_path} ({hf_model_id}; {sorted((k, str(v)) for k, v in kwargs.items())})")
+def convert(load_path, hf_path, hf_model_id, **kwargs):
+    print(f"[bridge] {load_path} -> {hf_path} ({hf_model_id}; {sorted((k, str(v)) for k, v in kwargs.items())})")
     shutil.copytree(os.environ["TEST_BRIDGE_OUTPUT"], hf_path)
 
 
@@ -211,7 +211,7 @@ def test_convert_multi_gpu_load_trace(monkeypatch, tmp_path, peft):
     )
     monkeypatch.setattr(hf, "export_merged_peft", lambda *a, **k: trace.record("export_merged_peft", *a, **k))
     hf.convert_multi_gpu(
-        iter_path=iteration,
+        load_path=iteration,
         hf_path=tmp_path / "hf",
         hf_model_id=NANO,
         tp=1,

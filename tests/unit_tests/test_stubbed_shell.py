@@ -27,6 +27,7 @@ import time
 
 import pytest
 
+from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.stubbed_shell import PipelineShell, run_in_own_session, stubbed_shell_env
 
 
@@ -153,7 +154,7 @@ def test_a_failed_rank_launch_fails_the_script(tmp_path):
     run = shell.run(
         "pipeline_checkpoint_convert.sh",
         "export",
-        "/ckpt",
+        str(make_checkpoint_dir(tmp_path / "ckpt", [5], tracker=5)),
         "--hf-model",
         "x/y",
         "--no-reasoning",
@@ -161,7 +162,8 @@ def test_a_failed_rank_launch_fails_the_script(tmp_path):
     )
     shell.remove_job_tmp_dirs()
     assert run["returncode"] == 3
-    assert [c["cmd"] for c in run["calls"]] == ["srun", "apptainer", "torchrun"]
+    # The export-clone plan, run in the container on this node, then the rank launch.
+    assert [c["cmd"] for c in run["calls"]] == ["apptainer", "srun", "apptainer", "torchrun"]
 
 
 def test_a_poll_loop_is_bounded_by_the_sleep_stub_and_advanced_by_its_hook(shell, tmp_path):

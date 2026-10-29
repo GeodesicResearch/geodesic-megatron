@@ -48,6 +48,12 @@ Usage:
         --format lora-factors \
         [--factors-path DIR] [--reference-alphas /path/to/rl_adapter/alphas.json]
 
+A checkpoint trained with ``moe_experts_impl: torch_grouped`` records a run_config this script
+cannot rebuild the model from. For an HF export such a checkpoint is loaded from an export clone
+(pipeline/export/export_clone.py) passed as ``--load-path``. ``pipeline_checkpoint_convert.sh export``
+builds the clone and passes it itself. Run directly, this script refuses such a checkpoint without one.
+A ``--format lora-factors`` export reads the adapter tensors directly and builds no model, so it needs no clone.
+
 LoRA factor dirs (``--format lora-factors``)
 --------------------------------------------
 The serving side (geodesic_utils.inference.vllm_extension; its docs/lora_factor_format.md) reads
@@ -80,7 +86,8 @@ from pathlib import Path
 
 import torch
 
-from pipeline.checkpoints import detect_training_tokenizer, is_peft_checkpoint, resolve_checkpoint_path
+from pipeline.checkpoints import RUN_CONFIG, detect_training_tokenizer, is_peft_checkpoint, resolve_checkpoint_path
+from pipeline.export.export_clone import resolve_load_path
 from pipeline.export.fixups import fixup_hf_output
 from pipeline.export.hf import convert_multi_gpu, convert_single_process, is_multi_gpu
 from pipeline.export.lora_factors import export_lora_factors
@@ -115,6 +122,16 @@ def main():
         type=int,
         default=None,
         help="Specific iteration to convert (default: latest from latest_checkpointed_iteration.txt)",
+    )
+    parser.add_argument(
+        "--load-path",
+        default=None,
+        help=(
+            "--format hf: load the model from this export clone of the iteration (pipeline/export/export_clone.py) "
+            "instead of the iteration itself; needed for a torch_grouped checkpoint, and passed by "
+            "pipeline_checkpoint_convert.sh export when it is. The iteration, the default output path, the "
+            "run_config copied into the export and the Hub repo name come from --megatron-path."
+        ),
     )
 
     # Output
@@ -224,6 +241,7 @@ def main():
     hf_only = {
         "--hf-model": args.hf_model,
         "--hf-path": args.hf_path,
+        "--load-path": args.load_path,
         "--push-to-hub": args.push_to_hub,
         "--keep-remote-code": args.keep_remote_code,
         "--remote-code-source": args.remote_code_source,
@@ -251,6 +269,8 @@ def main():
     iter_path, iteration = resolve_checkpoint_path(args.megatron_path, args.iteration)
     print(f"Checkpoint: {iter_path} (iteration {iteration})")
 
+    # A factor export reads the adapter tensors from the iteration itself and builds no model, so the
+    # torch_grouped repair below (an export clone) does not apply to it.
     if args.format == "lora-factors":
         export_lora_factors(
             iter_path,
@@ -259,6 +279,12 @@ def main():
             reference_alphas=Path(args.reference_alphas) if args.reference_alphas else None,
         )
         return
+
+    # 1b. Where the model is loaded from: the iteration, or its export clone (torch_grouped repair).
+    # Everything below except the load itself reads iter_path.
+    load_path = resolve_load_path(iter_path, args.load_path)
+    if load_path != iter_path:
+        print(f"Loading from export clone: {load_path} (repaired run_config; links to {iter_path})")
 
     # 2. Determine HF model ID
     hf_model_id = args.hf_model
@@ -279,7 +305,7 @@ def main():
     if use_multi_gpu:
         print(f"Mode: multi-GPU (TP={args.tp}, PP={args.pp}, EP={args.ep}, ETP={args.etp})")
         convert_multi_gpu(
-            iter_path=iter_path,
+            load_path=load_path,
             hf_path=hf_path,
             hf_model_id=hf_model_id,
             tp=args.tp,
@@ -293,7 +319,7 @@ def main():
     else:
         print("Mode: single-process (CPU-based distributed context)")
         convert_single_process(
-            iter_path=iter_path,
+            load_path=load_path,
             hf_path=hf_path,
             hf_model_id=hf_model_id,
             strict=not args.not_strict,
@@ -333,8 +359,10 @@ def main():
     # every conversion (push or local-only) so the exact training settings
     # (pretrained_checkpoint, data blend, optimizer, parallelism, train_iters)
     # always travel with the HF artifacts — both on disk and on the Hub.
+    # It is the checkpoint's own run_config, never an export clone's repaired
+    # copy: it records how the model was trained, not how it was loaded here.
     if rank == 0:
-        src_run_config = iter_path / "run_config.yaml"
+        src_run_config = iter_path / RUN_CONFIG
         if src_run_config.exists():
             dst_run_config = hf_path / "megatron_run_config.yaml"
             shutil.copy2(src_run_config, dst_run_config)

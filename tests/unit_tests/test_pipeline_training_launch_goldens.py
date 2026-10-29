@@ -155,11 +155,14 @@ def test_a_forwarded_argument_with_a_space_or_a_shell_character_reaches_the_rank
 
 
 def test_a_copy_of_the_launcher_outside_the_checkout_launches_as_the_launcher_does(shell, launch, tmp_path):
-    """A single-file copy of the launcher (a frozen copy of one under edit, or a spooled one) takes its libraries
-    from the checkout GEODESIC_REPO_DIR names, and its launch matches the checkout launcher's golden."""
+    """A single-file copy of the launcher (a frozen copy of one under edit) takes its libraries from the checkout
+    GEODESIC_REPO_DIR names, and its launch matches the checkout launcher's golden. The checkout guard runs from the
+    launcher's own directory (scripts/training/checkout_guard.sh beside it), so the copy sits beside a scripts/ that
+    is the checkout's; a copy with no scripts/ beside it stops at the guard."""
     copy = tmp_path / "frozen" / LAUNCHER.name
     copy.parent.mkdir()
     shutil.copy(LAUNCHER, copy)
+    (copy.parent / "scripts").symlink_to(LAUNCHER.parent / "scripts")
     assert_golden_json(GOLDENS / "default.json", _snapshot(shell, launch(None, script=copy)))
 
 

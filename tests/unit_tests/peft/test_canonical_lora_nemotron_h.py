@@ -201,7 +201,13 @@ def test_loramerge_refuses_a_wrapper_it_cannot_merge(parallel_state):
 
 @pytest.fixture(scope="module")
 def release(tmp_path_factory):
-    return write_small_nemotron_h_release(tmp_path_factory.mktemp("release"))
+    return write_small_nemotron_h_release(tmp_path_factory.mktemp("release"), ("mamba", "attention", "moe"))
+
+
+@pytest.fixture(scope="module")
+def release_pp2(tmp_path_factory):
+    """The release with a layer more, so that its four layers split over two pipeline stages."""
+    return write_small_nemotron_h_release(tmp_path_factory.mktemp("release_pp2"), ("mamba", "moe", "attention", "moe"))
 
 
 def _bridge_model(hf_path, moe_experts_impl: str, load_weights: bool):
@@ -263,13 +269,13 @@ def test_grouped_experts_mapping_needs_the_expert_wildcard():
         GroupedExpertsMapping("decoder.layers.*.mlp.experts.weight1", "backbone.layers.*.mixer.experts.up_proj.weight")
 
 
-def _peft_checkpoint(tmp_path, release):
+def _peft_checkpoint(tmp_path, release, b_std=0.05):
     """A base checkpoint and an Expert LoRA PEFT checkpoint of the small model, as a training run leaves them.
 
     The PEFT checkpoint's run_config names the base under ``checkpoint.pretrained_checkpoint``, the adapters under
     ``peft`` (serialised as training serialises it) and the gradient hooks training records, which rebuild as
     unbound methods; its tensors include the base weights, which ``load_peft_model`` must ignore in favour of the
-    base's. Returns (adapted in-memory model, PEFT checkpoint directory).
+    base's. The B factors are ~ N(0, ``b_std``). Returns (adapted in-memory model, PEFT checkpoint directory).
     """
     import yaml
 
@@ -278,7 +284,7 @@ def _peft_checkpoint(tmp_path, release):
 
     model = _bridge_model(release, "torch_grouped", load_weights=False)
     save_megatron_model(model, tmp_path / "base", hf_tokenizer_path=str(release))
-    adapted = _adapted(model)
+    adapted = _adapted(model, b_std=b_std)
     save_megatron_model(adapted, tmp_path / "peft", hf_tokenizer_path=str(release))
     run_config_path = tmp_path / "peft" / "iter_0000000" / "run_config.yaml"
     run_config = yaml.safe_load(run_config_path.read_text())
@@ -354,5 +360,66 @@ def test_the_converter_exports_an_adapter_only_checkpoint_merged(parallel_state,
     assert (adapted - base).abs().max() > 0.5
     torch.testing.assert_close(merged, adapted, rtol=3e-2, atol=3e-2)
     check = json.loads((hf_path / "merge_check.json").read_text())
+    assert check["failure"] is None
     assert check["retained"] > 0.95
     assert check["merged"]["mean_abs_diff"] < 0.1 * check["base"]["mean_abs_diff"]
+
+
+@pytest.mark.serial_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 3, reason="needs 2 GPUs besides the test process's own")
+def test_a_failed_merge_check_ends_every_node_of_the_converter(parallel_state, release_pp2, tmp_path):
+    """The converter at PP2 as two single-GPU torchrun agents, as on two nodes, on adapters with zero B factors (an
+    untrained adapter checkpoint), which fail the merge check: both agents exit non-zero, within a minute of each
+    other, with the failure in merge_check.json. Only the failed ranks' agent ends by itself, so a first stage left
+    waiting for the last stage's verdict holds its node until the job's time limit."""
+    import json
+    import signal
+    import time
+
+    from tests.unit_tests.child_process import REPO_ROOT, free_port, start_python
+
+    _, peft_dir = _peft_checkpoint(tmp_path, release_pp2, b_std=0.0)
+    hf_path, port = tmp_path / "hf", free_port()
+    agents = [
+        start_python(
+            [
+                "-m",
+                "torch.distributed.run",
+                "--nnodes=2",
+                f"--node-rank={node}",
+                "--nproc-per-node=1",
+                "--master-addr=127.0.0.1",
+                f"--master-port={port}",
+                str(REPO_ROOT / "pipeline_checkpoint_convert_hf.py"),
+                f"--megatron-path={peft_dir}",
+                f"--hf-model={release_pp2}",
+                f"--hf-path={hf_path}",
+                "--no-reasoning",
+                "--pp=2",
+                "--no-progress",
+            ],
+            cwd=tmp_path,
+            CUDA_VISIBLE_DEVICES=str(node + 1),
+        )
+        for node in (0, 1)
+    ]
+    ended: dict[int, float] = {}
+    try:
+        deadline = time.monotonic() + 900
+        while len(ended) < 2 and time.monotonic() < deadline:
+            for node, agent in enumerate(agents):
+                if node not in ended and agent.poll() is not None:
+                    ended[node] = time.monotonic()
+            if ended and time.monotonic() - min(ended.values()) > 60:
+                break
+            time.sleep(1)
+    finally:
+        for agent in agents:
+            if agent.poll() is None:
+                agent.send_signal(signal.SIGTERM)  # torchrun passes it on to its worker
+        outputs = [agent.communicate(timeout=120) for agent in agents]
+    logs = "\n".join(f"agent {node} stderr:\n{err[-4000:]}" for node, (_, err) in enumerate(outputs))
+    assert sorted(ended) == [0, 1], f"agents {sorted(ended)} of [0, 1] ended by themselves\n{logs}"
+    assert all(agent.returncode != 0 for agent in agents), logs
+    assert "the merge check failed" in logs, logs
+    assert json.loads((hf_path / "merge_check.json").read_text())["failure"] is not None

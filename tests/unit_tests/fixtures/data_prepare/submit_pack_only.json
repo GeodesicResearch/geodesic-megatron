@@ -1,0 +1,30 @@
+{
+  "args": [
+    "<TMP>/root",
+    "geodesic-research/nemotron-think-tokenizer",
+    "16384",
+    "8"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "scripts/data/pack_sft_dataset.py",
+        "--dataset-root",
+        "<TMP>/root",
+        "--tokenizer",
+        "geodesic-research/nemotron-think-tokenizer",
+        "--seq-length",
+        "16384",
+        "--pad-seq-to-mult",
+        "8"
+      ],
+      "cmd": "python",
+      "env": {
+        "TMPDIR": "/projects/a5k/public/tmp"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": "===== Offline SFT Dataset Packing =====\nJob ID:         <JOB>\nNode:           nid000001\nDataset root:   <TMP>/root\nTokenizer:      geodesic-research/nemotron-think-tokenizer\nSeq length:     16384\nPad seq to mul: 8\nEnv:            <TMP>/container/nemo.sif\n========================================\n===== Packing Complete =====\n"
+}

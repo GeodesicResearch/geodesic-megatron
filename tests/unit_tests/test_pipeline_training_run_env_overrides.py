@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""pipeline_training_run.py's per-node echo of the launcher's env overrides.
+"""pipeline/training/env_overrides.py's per-node echo of the launcher's env overrides.
 
 The echo is the proof that an ``ISAMBARD_ENV_OVERRIDES`` value reached the training processes,
 so these tests drive the real function against a real process environment (monkeypatched) and
@@ -26,6 +26,8 @@ import socket
 
 import pytest
 from scripts.telemetry.training_log import env_override_lines, parse_env_override_lines
+
+from pipeline.training import env_overrides
 
 
 OVERRIDE_KEYS = "ISAMBARD_ENV_OVERRIDE_KEYS"
@@ -45,18 +47,18 @@ def overrides_env(monkeypatch):
     monkeypatch.setenv("RANK", "12")
 
 
-def test_local_rank_zero_logs_every_override_as_this_process_sees_it(run_module, overrides_env, caplog):
-    with caplog.at_level(logging.INFO, logger=run_module.logger.name):
-        run_module.log_env_overrides()
+def test_local_rank_zero_logs_every_override_as_this_process_sees_it(overrides_env, caplog):
+    with caplog.at_level(logging.INFO, logger=env_overrides.logger.name):
+        env_overrides.log_env_overrides()
     assert echo_lines(caplog) == [
         f"[env-overrides] rank=12 host={socket.gethostname()} TORCH_NCCL_BLOCKING_WAIT=0 NCCL_DEBUG_SUBSYS=''"
     ]
 
 
-def test_the_training_log_parser_reads_back_exactly_what_was_logged(run_module, overrides_env, monkeypatch, caplog):
+def test_the_training_log_parser_reads_back_exactly_what_was_logged(overrides_env, monkeypatch, caplog):
     monkeypatch.setenv("TORCH_NCCL_BLOCKING_WAIT", "a b")
-    with caplog.at_level(logging.INFO, logger=run_module.logger.name):
-        run_module.log_env_overrides()
+    with caplog.at_level(logging.INFO, logger=env_overrides.logger.name):
+        env_overrides.log_env_overrides()
     raw = [f"INFO:{record.name}:{record.getMessage()}" for record in caplog.records]
     assert parse_env_override_lines(raw) == [{"TORCH_NCCL_BLOCKING_WAIT": "a b", "NCCL_DEBUG_SUBSYS": ""}]
     assert parse_env_override_lines(env_override_lines(["iteration 1\n", *(line + "\n" for line in raw)])) == (
@@ -65,52 +67,53 @@ def test_the_training_log_parser_reads_back_exactly_what_was_logged(run_module, 
 
 
 def test_the_override_lines_are_kept_as_logged_and_only_they_are():
-    lines = ["iteration 1\n", "INFO:__main__:[env-overrides] rank=0 host=n0 K='a b'\n", "[env-overrides] no fields\n"]
-    assert env_override_lines(lines) == ["INFO:__main__:[env-overrides] rank=0 host=n0 K='a b'"]
+    line = f"INFO:{env_overrides.logger.name}:[env-overrides] rank=0 host=n0 K='a b'"
+    lines = ["iteration 1\n", f"{line}\n", "[env-overrides] no fields\n"]
+    assert env_override_lines(lines) == [line]
 
 
-def test_a_value_with_spaces_is_quoted(run_module, overrides_env, monkeypatch, caplog):
+def test_a_value_with_spaces_is_quoted(overrides_env, monkeypatch, caplog):
     monkeypatch.setenv("TORCH_NCCL_BLOCKING_WAIT", "a b")
-    with caplog.at_level(logging.INFO, logger=run_module.logger.name):
-        run_module.log_env_overrides()
+    with caplog.at_level(logging.INFO, logger=env_overrides.logger.name):
+        env_overrides.log_env_overrides()
     assert "TORCH_NCCL_BLOCKING_WAIT='a b'" in echo_lines(caplog)[0]
 
 
-def test_other_local_ranks_stay_silent(run_module, overrides_env, monkeypatch, caplog):
+def test_other_local_ranks_stay_silent(overrides_env, monkeypatch, caplog):
     monkeypatch.setenv("LOCAL_RANK", "3")
     monkeypatch.setenv("RANK", "15")
-    with caplog.at_level(logging.INFO, logger=run_module.logger.name):
-        run_module.log_env_overrides()
+    with caplog.at_level(logging.INFO, logger=env_overrides.logger.name):
+        env_overrides.log_env_overrides()
     assert echo_lines(caplog) == []
 
 
 @pytest.mark.parametrize("keys", [None, ""])
-def test_no_override_file_means_no_echo(run_module, monkeypatch, caplog, keys):
+def test_no_override_file_means_no_echo(monkeypatch, caplog, keys):
     if keys is None:
         monkeypatch.delenv(OVERRIDE_KEYS, raising=False)
     else:
         monkeypatch.setenv(OVERRIDE_KEYS, keys)
     monkeypatch.setenv("LOCAL_RANK", "0")
     monkeypatch.setenv("RANK", "0")
-    with caplog.at_level(logging.INFO, logger=run_module.logger.name):
-        run_module.log_env_overrides()
+    with caplog.at_level(logging.INFO, logger=env_overrides.logger.name):
+        env_overrides.log_env_overrides()
     assert echo_lines(caplog) == []
 
 
-def test_a_listed_key_missing_from_the_process_raises(run_module, overrides_env, monkeypatch):
+def test_a_listed_key_missing_from_the_process_raises(overrides_env, monkeypatch):
     monkeypatch.delenv("TORCH_NCCL_BLOCKING_WAIT")
     with pytest.raises(RuntimeError, match="TORCH_NCCL_BLOCKING_WAIT"):
-        run_module.log_env_overrides()
+        env_overrides.log_env_overrides()
 
 
-def test_an_empty_key_in_the_list_raises(run_module, overrides_env, monkeypatch):
+def test_an_empty_key_in_the_list_raises(overrides_env, monkeypatch):
     monkeypatch.setenv(OVERRIDE_KEYS, "TORCH_NCCL_BLOCKING_WAIT,,NCCL_DEBUG_SUBSYS")
     with pytest.raises(RuntimeError, match="empty key"):
-        run_module.log_env_overrides()
+        env_overrides.log_env_overrides()
 
 
 @pytest.mark.parametrize("rank_var", ["LOCAL_RANK", "RANK"])
-def test_overrides_outside_torchrun_raise(run_module, overrides_env, monkeypatch, rank_var):
+def test_overrides_outside_torchrun_raise(overrides_env, monkeypatch, rank_var):
     monkeypatch.delenv(rank_var)
     with pytest.raises(RuntimeError, match=rank_var):
-        run_module.log_env_overrides()
+        env_overrides.log_env_overrides()

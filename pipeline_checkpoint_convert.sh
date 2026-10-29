@@ -11,7 +11,7 @@
 # Modes:
 #   export       Convert Megatron checkpoint to HuggingFace format
 #   import       Convert HuggingFace checkpoint to Megatron format
-#   upload-all   Convert all iterations and push to HuggingFace Hub (with optional polling)
+#   upload-all   Convert all completed saves and push to HuggingFace Hub (with optional polling)
 #
 # Usage:
 #   bash pipeline_checkpoint_convert.sh export <megatron-path> [options]
@@ -32,6 +32,7 @@
 #                       (inference renders closed <think></think>, matching
 #                       non-reasoning training data).
 #   --iteration N       Convert a specific iteration (default: latest)
+#   --hf-path DIR       Output directory (default: <megatron-path>/iter_N/hf)
 #   --push-to-hub       Push converted checkpoint to HuggingFace Hub
 #   --keep-remote-code  Keep the NemotronH remote-code (auto_map + custom
 #                       modeling files) in the export instead of stripping it.
@@ -51,6 +52,22 @@
 #                       lora-factors: an RL adapter's alphas.json on the same model
 #                       to check the export's keys and widths against
 #   --alpha-over-r X    lora-factors: the adapter scale (default: run_config peft alpha/dim)
+#
+# torch_grouped checkpoints: an older checkpoint trained with `moe_experts_impl:
+# torch_grouped` records a stack-spec closure the exporter cannot import, and a full
+# torch_grouped checkpoint exports through te_grouped experts (export_clone.py says why).
+# An HF export repairs it without touching the checkpoint
+# (pipeline/export/export_clone.py); a lora-factors export reads the adapter
+# tensors directly, builds no model and needs no repair. Before torchrun an HF
+# export builds an export clone,
+# which is links to the iteration's files plus a repaired run_config.yaml, under
+# $GEODESIC_EXPORT_CLONE_ROOT (default /projects/a5k/public/tmp/export_clones_$USER),
+# at <root>/<job id>-<pid>/<run>-<digest>/iter_N. The model is loaded from the clone, but
+# the HF output goes to <megatron-path>/iter_N/hf (or --hf-path), and
+# hf/megatron_run_config.yaml is the checkpoint's own, unrepaired run_config. The
+# clone is removed once the export succeeds (a clone that cannot be removed fails
+# the job) and kept when the export fails. Any other checkpoint is loaded from its
+# iteration directory itself, with no clone.
 #
 # Import options:
 #   --megatron-path DIR Output directory (default: auto-derived from model name)
@@ -154,21 +171,27 @@ validate_parallelism() {
 # shim, i.e. one apptainer instance per node, each hosting that node's 4 ranks.
 # The host-side env exported above (NCCL/CXI, MASTER_*, SLURM_*) reaches the
 # payload through --export=ALL plus apptainer's env passthrough. ---
+# Each argument reaches the script as one word (quote_args). ---
 run_torchrun() {
     local script="$1"
     shift
-    local args="$*"
 
     srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap ${CONVERT_NODELIST:+--nodelist=$CONVERT_NODELIST} \
-        "$REPO_DIR/pipeline_env_exec.sh" "$(torchrun_payload "$NGPUS_PER_NODE" "$NNODES" "$script $args")"
+        "$REPO_DIR/pipeline_env_exec.sh" "$(torchrun_payload "$NGPUS_PER_NODE" "$NNODES" "$script$(quote_args "$@")")"
 }
 
-# --- Helper: run a python snippet in the container on THIS node (no srun, so it
-# stays single-process; huggingface_hub comes from the image). Used by upload-all's
-# Hub pushes, which are pure network I/O and need no GPUs. ---
-run_python() {
-    local code="$1"
-    "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python -c $(printf '%q' "$code")")"
+# --- Helper: push a folder to a Hub revision with pipeline.hub, in the container on THIS node (no srun, so it
+# stays single-process; huggingface_hub comes from the image). Used by upload-all, whose pushes are pure network
+# I/O and need no GPUs. Arguments: FOLDER REPO_ID REVISION COMMIT_MESSAGE. ---
+run_hub_push() {
+    "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python -m pipeline.hub push$(quote_args "$@")")"
+}
+
+# --- Helper: run pipeline/export/export_clone.py in the container on THIS node
+# (no srun; it only reads the checkpoint and writes links). Its messages go to
+# stderr; `prepare` prints its plan on stdout. ---
+run_export_clone() {
+    "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python -m pipeline.export.export_clone$(quote_args "$@")")"
 }
 
 # --- Helper: run a script as ONE process on the first conversion node (srun, so the CPU and memory load lands on an
@@ -177,12 +200,11 @@ run_python() {
 run_single_process() {
     local script="$1"
     shift
-    local args="$*"
     local node
     node=$(first_host "${CONVERT_NODELIST:-$SLURM_NODELIST}")
 
     srun --nodes=1 --ntasks=1 --kill-on-bad-exit=0 --export=ALL --overlap --nodelist="$node" \
-        "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python $script $args")"
+        "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python $script$(quote_args "$@")")"
 }
 
 # ==============================================================================
@@ -197,14 +219,14 @@ if [[ "$MODE" == "export" ]]; then
     TP=1; PP=1; EP=$TOTAL_GPUS; ETP=1
     HF_MODEL=""
     FORMAT="hf"
-    ARGS="--megatron-path $MEGATRON_PATH"
+    ARGS=(--megatron-path "$MEGATRON_PATH")
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --hf-model)    HF_MODEL="$2"; ARGS="$ARGS --hf-model $2"; shift 2 ;;
-            --format)      FORMAT="$2"; ARGS="$ARGS --format $2"; shift 2 ;;
-            --iteration)   ARGS="$ARGS --iteration $2"; ITERATION="$2"; shift 2 ;;
-            --push-to-hub) ARGS="$ARGS --push-to-hub"; shift ;;
+            --hf-model)    HF_MODEL="$2"; ARGS+=(--hf-model "$2"); shift 2 ;;
+            --format)      FORMAT="$2"; ARGS+=(--format "$2"); shift 2 ;;
+            --iteration)   ARGS+=(--iteration "$2"); ITERATION="$2"; shift 2 ;;
+            --push-to-hub) ARGS+=(--push-to-hub); shift ;;
             --tp)          TP="$2"; shift 2 ;;
             --pp)          PP="$2"; shift 2 ;;
             --ep)          EP="$2"; shift 2 ;;
@@ -212,7 +234,7 @@ if [[ "$MODE" == "export" ]]; then
             # SLURM flags that isambard_sbatch may append (slurm_flag_arity) are
             # dropped rather than reaching the Python argparser.
             *)  n=$(slurm_flag_arity "$1")
-                if [ "$n" -gt 0 ]; then shift "$n"; else ARGS="$ARGS $1"; shift; fi ;;
+                if [ "$n" -gt 0 ]; then shift "$n"; else ARGS+=("$1"); shift; fi ;;
         esac
     done
 
@@ -224,11 +246,11 @@ if [[ "$MODE" == "export" ]]; then
         echo "  Job ID:         $SLURM_JOB_ID"
         echo "  Start time:     $(date)"
         echo "============================================================"
-        run_single_process pipeline_checkpoint_convert_hf.py "$ARGS"
+        run_single_process pipeline_checkpoint_convert_hf.py "${ARGS[@]}"
         exit $?
     fi
 
-    ARGS="$ARGS --tp $TP --pp $PP --ep $EP --etp $ETP"
+    ARGS+=(--tp "$TP" --pp "$PP" --ep "$EP" --etp "$ETP")
     validate_parallelism
 
     if [[ -z "$HF_MODEL" ]]; then
@@ -237,18 +259,58 @@ if [[ "$MODE" == "export" ]]; then
         exit 1
     fi
 
+    # torch_grouped export repair (pipeline/export/export_clone.py; see the header).
+    # Resolve the iteration once, here, and pin it for the conversion, so that a tracker
+    # that advances under a live run cannot make the two disagree. When the iteration's
+    # run_config needs the repair, `prepare` builds the export clone and the conversion
+    # loads from it (--load-path); otherwise the load path is empty and the conversion
+    # loads the iteration itself, with no clone.
+    # The clone is named for this launch (job id and launcher pid), so two exports of one
+    # checkpoint in one allocation never share, or remove, each other's clone. Its root is
+    # export_clone.py's default ($GEODESIC_EXPORT_CLONE_ROOT, else a per-user project directory).
+    EXPORT_PLAN="$(run_export_clone prepare --megatron-path "$MEGATRON_PATH" ${ITERATION:+--iteration "$ITERATION"} \
+        --job "${SLURM_JOB_ID}-$$")"
+    EXPORT_ITERATION="$(sed -n 's/^EXPORT_ITERATION=//p' <<< "$EXPORT_PLAN" | tail -n 1)"
+    EXPORT_LOAD_PATH="$(sed -n 's/^EXPORT_LOAD_PATH=//p' <<< "$EXPORT_PLAN" | tail -n 1)"
+    if ! [[ "$EXPORT_ITERATION" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: export_clone.py prepare printed no iteration; its output was:" >&2
+        echo "$EXPORT_PLAN" >&2
+        exit 1
+    fi
+    if [[ -z "${ITERATION:-}" ]]; then
+        ITERATION="$EXPORT_ITERATION"
+        ARGS+=(--iteration "$ITERATION")
+    fi
+    if [[ -n "$EXPORT_LOAD_PATH" ]]; then
+        ARGS+=(--load-path "$EXPORT_LOAD_PATH")
+    fi
+
     echo "============================================================"
     echo "Checkpoint Export (Megatron → HF)"
     echo "  Megatron path:  $MEGATRON_PATH"
     echo "  HF model:       $HF_MODEL"
-    echo "  Iteration:      ${ITERATION:-latest}"
+    echo "  Iteration:      $ITERATION"
+    echo "  Load path:      ${EXPORT_LOAD_PATH:-the checkpoint itself}${EXPORT_LOAD_PATH:+ (export clone: torch_grouped repair)}"
     echo "  GPUs:           $TOTAL_GPUS (TP=$TP, PP=$PP, EP=$EP, ETP=$ETP) across $NNODES nodes"
     echo "  Master:         $MASTER_ADDR:$MASTER_PORT"
     echo "  Job ID:         $SLURM_JOB_ID"
     echo "  Start time:     $(date)"
     echo "============================================================"
 
-    run_torchrun pipeline_checkpoint_convert_hf.py "$ARGS"
+    # A failed conversion ends the script here (set -e), which leaves the clone in place
+    # for a look at what the conversion read. It holds only links and one small file.
+    run_torchrun pipeline_checkpoint_convert_hf.py "${ARGS[@]}"
+
+    # The export has succeeded by now, but a clone that cannot be removed fails the job: it
+    # holds something an export clone does not, or a directory under the clone root cannot be
+    # deleted, and either needs a look rather than going unnoticed in a successful job's log.
+    if [[ -n "$EXPORT_LOAD_PATH" ]]; then
+        if ! run_export_clone remove --clone "$EXPORT_LOAD_PATH"; then
+            echo "ERROR: the export to HF succeeded, but its export clone $EXPORT_LOAD_PATH could not be" \
+                "removed (see above). Check what the clone holds, then remove it by hand." >&2
+            exit 1
+        fi
+    fi
 
 # ==============================================================================
 # Mode: import (HuggingFace → Megatron)
@@ -290,10 +352,10 @@ elif [[ "$MODE" == "import" ]]; then
     echo "============================================================"
 
     run_torchrun examples/conversion/convert_checkpoints_multi_gpu.py \
-        "import --hf-model $HF_MODEL --megatron-path $MEGATRON_PATH --tp $TP --pp $PP --ep $EP --etp $ETP --trust-remote-code"
+        import --hf-model "$HF_MODEL" --megatron-path "$MEGATRON_PATH" --tp "$TP" --pp "$PP" --ep "$EP" --etp "$ETP" --trust-remote-code
 
 # ==============================================================================
-# Mode: upload-all (convert all iterations + push to HuggingFace Hub)
+# Mode: upload-all (convert all completed saves + push to HuggingFace Hub)
 # ==============================================================================
 elif [[ "$MODE" == "upload-all" ]]; then
     MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh upload-all <megatron-path> --hf-model <hf-id> --reasoning|--no-reasoning [--poll] [--hf-org ORG]}"
@@ -359,18 +421,7 @@ elif [[ "$MODE" == "upload-all" ]]; then
         local iter=$1 revision=$2 commit_msg=$3
         local iter_dir
         iter_dir=$(printf "%s/iter_%07d/hf" "$MEGATRON_PATH" "$iter")
-        run_python "
-from huggingface_hub import HfApi
-api = HfApi()
-repo_id = '${HF_ORG}/${REPO_NAME}'
-api.create_repo(repo_id, exist_ok=True)
-try:
-    api.create_branch(repo_id, branch='${revision}')
-except Exception:
-    pass
-api.upload_folder(folder_path='${iter_dir}', repo_id=repo_id, revision='${revision}', commit_message='${commit_msg}')
-print(f'Pushed to {repo_id} @ ${revision}')
-"
+        run_hub_push "$iter_dir" "$HF_ORG/$REPO_NAME" "$revision" "$commit_msg"
     }
 
     convert_and_upload() {
@@ -388,7 +439,8 @@ print(f'Pushed to {repo_id} @ ${revision}')
         else
             echo "  Converting iteration $iter (multi-GPU: TP=1, EP=$EP, $NNODES nodes)..."
             run_torchrun pipeline_checkpoint_convert_hf.py \
-                "--megatron-path $MEGATRON_PATH --iteration $iter --tp 1 --ep $EP --push-to-hub --hf-org $HF_ORG --hf-repo-name $REPO_NAME --hf-model $HF_MODEL $REASONING_FLAG"
+                --megatron-path "$MEGATRON_PATH" --iteration "$iter" --tp 1 --ep "$EP" --push-to-hub --hf-org "$HF_ORG" \
+                --hf-repo-name "$REPO_NAME" --hf-model "$HF_MODEL" "$REASONING_FLAG"
             # Increment master port for next conversion to avoid port conflicts
             MASTER_PORT=$((MASTER_PORT + 1))
             echo "  Conversion complete."
@@ -403,9 +455,15 @@ print(f'Pushed to {repo_id} @ ${revision}')
     }
 
     process_available() {
-        local saves line iter train_iters
+        local saves lines line iter train_iters
         saves=$(completed_saves)
-        [[ -z "$saves" ]] && { echo "No iterations found yet."; return 1; }
+        if [[ -z "$saves" ]]; then
+            echo "No iterations found yet."
+            # Before the first save completes there is nothing to do: poll mode waits for it, a batch run ends with
+            # status 1.
+            [[ "$POLL" == "true" ]] && return 0
+            exit 1
+        fi
         # An array, not a `while read` over a here-string: convert_and_upload's srun would read the loop's stdin.
         mapfile -t lines <<< "$saves"
         for line in "${lines[@]}"; do

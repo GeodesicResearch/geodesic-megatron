@@ -100,9 +100,17 @@
     "env_removed": []
   },
   "returncode": 0,
-  "stderr": "",
+  "stderr": "[code-identity] <TMP>/config.yaml carries no code_identity: block\n[launch-width] <TMP>/config.yaml carries no launch_width: block\n",
   "stdout": "[run-identity] switch placement: test-switch:1\n===== Nemotron 3 Training =====\nJob ID:    <JOB>\nRun ID:    20260928T000000-jtest\nRaw log:   <TMP>/train.out\nConfig:    <TMP>/config.yaml\nModel:     nano\nMode:      pretrain\nScript:    pipeline_training_run.py\nNodes:     1\nGPUs/node: 4\nTotal GPUs: 4\nMaster:    127.0.0.1:29500\nEnv:       container (<TMP>/container/nemo.sif)\n  sif: stub image\n  host libfabric (bound at runtime): <TMP>/container/libfabric\nLauncher:  ft_launcher (fault-tolerant)\nPAO:       enabled\n================================\n===== Job Complete =====\n",
   "steps": [
+    [
+      "apptainer",
+      "<TMP>/container/nemo.sif"
+    ],
+    [
+      "apptainer",
+      "<TMP>/container/nemo.sif"
+    ],
     [
       "apptainer",
       "<TMP>/container/nemo.sif"

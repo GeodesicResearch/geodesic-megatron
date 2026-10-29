@@ -24,8 +24,7 @@ arm cannot silently miss the others.
 
 from __future__ import annotations
 
-import functools
-import importlib.util
+import dataclasses
 import json
 import os
 import re
@@ -35,21 +34,33 @@ from pathlib import Path, PurePosixPath
 import pytest
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
+from scripts.dotted_paths import dotted_leaves
 from scripts.training.config_compose import load_composed_yaml
+from scripts.training.launch_blocks import pop_launch_blocks
 
 from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
 from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_module
+
+
+def launcher_overrides(path: Path) -> dict:
+    """The overrides the launcher merges from the training config at ``path``: the config read through its
+    ``base_config`` chain, without its launch blocks, which state how the config must be launched rather than
+    settings of the run (``scripts/training/launch_blocks.py``; ``pipeline.training.recipes.resolve_training_config``
+    keeps them out of the merge)."""
+    overrides = load_composed_yaml(path)
+    pop_launch_blocks(overrides)
+    return overrides
 
 
 def merge_onto_recipe(path: Path, recipe_fn):
     """Return ``recipe_fn()`` with the override YAML at ``path`` merged on, as the launcher does.
 
     The YAML is read through its ``base_config`` chain, as the launcher reads it, so an overlay is
-    asserted as the composed config it trains.
+    asserted as the composed config it trains (``launcher_overrides``).
     """
     cfg = recipe_fn()
     merged, excluded = create_omegaconf_dict_config(cfg)
-    merged = OmegaConf.merge(merged, OmegaConf.create(load_composed_yaml(path)))
+    merged = OmegaConf.merge(merged, OmegaConf.create(launcher_overrides(path)))
     apply_overrides(cfg, OmegaConf.to_container(merged, resolve=True), excluded)
     return cfg
 
@@ -167,28 +178,6 @@ def assert_segment_exit_posture(cfg, label: str, expected_minutes: int | None) -
         assert cfg.checkpoint.save, f"{label}: the duration exit writes a checkpoint only when checkpoint.save is set"
 
 
-def data_parallel_size(cfg, gpus: int) -> int:
-    """The data-parallel width of a merged config on ``gpus`` GPUs: the GPUs over TP x CP x PP."""
-    model = cfg.model
-    model_parallel = (
-        model.tensor_model_parallel_size * model.context_parallel_size * model.pipeline_model_parallel_size
-    )
-    assert gpus % model_parallel == 0, f"{gpus} GPUs do not divide into model-parallel groups of {model_parallel}"
-    return gpus // model_parallel
-
-
-def dotted_leaves(mapping: dict, prefix: str = "") -> dict[str, object]:
-    """Every non-mapping value of a nested mapping, keyed by its dotted path."""
-    flat: dict[str, object] = {}
-    for key, value in mapping.items():
-        path = f"{prefix}.{key}" if prefix else str(key)
-        if isinstance(value, dict):
-            flat.update(dotted_leaves(value, path))
-        else:
-            flat[path] = value
-    return flat
-
-
 def flatten_merged_config(cfg) -> dict[str, object]:
     """Every scalar field of a merged config, keyed by its dotted path.
 
@@ -279,6 +268,25 @@ FAST_MIDTRAIN_LEVERS = {
 FAST_MIDTRAIN_LAUNCHER_SETTINGS = ["ISAMBARD_FP32_SSM_STATE=checkpoint"]
 
 
+# The fields a stage config of a campaign arm differs in from its counterpart's by being another run: where its
+# checkpoints and its W&B run go, which MUST differ.
+IDENTITY = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
+
+# The fields a probe config differs in from the config it measures by being a probe: its run identity, its length,
+# and where its W&B files go (outside its scratch checkpoint directory).
+PROBE_FIELDS = IDENTITY | {"train.exit_interval", "logger.wandb_save_dir"}
+
+# The fast pretrain posture as a production stage 1 trains in it: every lever but the gradient NaN check, which stays
+# on (Kyle, 2026-10-01), so a non-finite gradient ends the run instead of reaching the optimizer.
+GRADIENT_NAN_CHECK = "ddp.check_for_nan_in_grad"
+STAGE_ONE_LEVERS = {key: value for key, value in FAST_PRETRAIN_LEVERS.items() if key != GRADIENT_NAN_CHECK}
+
+# The fast midtraining configuration as a production midtraining trains in it: every lever but its selective
+# recompute, keeping the baseline's full recompute (Kyle, 2026-10-01): at 512 GPUs the selective recompute retried the
+# allocator.
+MIDTRAIN_LEVERS = {key: value for key, value in FAST_MIDTRAIN_LEVERS.items() if not key.startswith("model.recompute_")}
+
+
 def assert_levers_are_set(cfg, levers: dict[str, object], label: str) -> None:
     """Assert that each dotted ``levers`` field of the merged ``cfg`` holds its value.
 
@@ -314,6 +322,22 @@ def blend_subsets(data_path) -> list[str]:
     the subset is the directory name's last ``__`` field.
     """
     return [_corpus_root_of(prefix).name.split("__")[-1] for prefix in [str(x) for x in data_path][1::2]]
+
+
+def slice_subset(subset: str, index: int) -> str:
+    """The subset slice ``index`` of a sliced corpus is published as when each slice is a config of its own."""
+    return f"{subset}_{corpora_table.shard_name(index)}"
+
+
+def blend_corpora(data_path) -> list[str]:
+    """The corpus each blend prefix reads, in blend order: its subset, or for a prefix inside a sliced corpus's
+    ``shardN/`` the subset that slice is published as on its own (``slice_subset``)."""
+    corpora = []
+    for prefix, subset in zip([str(x) for x in data_path][1::2], blend_subsets(data_path)):
+        directory = PurePosixPath(prefix).parent.name
+        sliced = directory.startswith("shard")
+        corpora.append(slice_subset(subset, int(directory.removeprefix("shard"))) if sliced else subset)
+    return corpora
 
 
 def corpus_weights(data_path, strip_suffix: str) -> list[tuple[str, float]]:
@@ -369,37 +393,18 @@ def run_owners(paths: list[Path]) -> dict[Path, str]:
     return owners
 
 
-@functools.lru_cache(maxsize=1)
-def _prepare_module():
-    """``pipeline_data_prepare`` executed once per session.
-
-    It imports pandas, ``datasets`` and ``transformers`` at module level, so executing it per
-    call costs seconds and builds a fresh unregistered module object each time.
-    """
-    spec = importlib.util.spec_from_file_location("pipeline_data_prepare", _REPO_ROOT / "pipeline_data_prepare.py")
-    prepare = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(prepare)
-    return prepare
-
-
 def assert_prefix_roots_use_the_real_slugify(data_path, dataset: str, label: str) -> None:
     """Assert every blend prefix sits under the directory the data build produces for its subset.
 
-    The blend paths are written by hand; the roots they must match are produced by
-    ``pipeline_data_prepare.slugify_dataset_name``. The build derives them through
-    ``corpora_table.corpus_root``, a mirror kept so the plan can be derived outside the container,
-    so both are asserted: the mirror against the real function, and each blend root against the
-    mirror. Every prefix must also end in the tokenize step's output name,
-    ``corpora_table.TOKENIZED_PREFIX``.
+    The blend paths are written by hand; the build derives each subset's root through ``corpora_table.corpus_root``,
+    which names it with ``pipeline.data.layout.slugify_dataset_name``, as pipeline_data_prepare.py does. Every prefix
+    must also end in the tokenize step's output name, ``corpora_table.TOKENIZED_PREFIX``.
     """
-    prepare = _prepare_module()
     for prefix in [str(x) for x in data_path][1::2]:
         root = _corpus_root_of(prefix)
         subset = root.name.split("__")[-1]
-        expected = corpora_table.DATA_BASE / prepare.slugify_dataset_name(dataset, subset)
-        mirror = corpora_table.corpus_root(dataset, subset)
-        assert mirror == expected, f"{label}: the corpus_root mirror disagrees for {subset}"
-        assert str(mirror) == str(root), f"{label}: {prefix} does not sit under {expected}"
+        expected = corpora_table.corpus_root(dataset, subset)
+        assert str(expected) == str(root), f"{label}: {prefix} does not sit under {expected}"
         assert prefix.endswith(f"/{corpora_table.TOKENIZED_PREFIX}"), f"{label}: {prefix}"
 
 
@@ -467,6 +472,17 @@ def assert_reads_the_split(cfg, dataset: str, subset: str) -> None:
     assert cfg.dataset.dataset_root == str(corpora_table.corpus_root(dataset, subset)), cfg.dataset.dataset_root
 
 
+def assert_reads_the_pack_its_row_builds(cfg, dataset: str, row) -> None:
+    """Assert that a merged SFT config reads, from its split's corpus root, the per-shard pack a corpora-table row
+    builds: the packed glob the build's own module derives from the row's prepare config."""
+    assert_reads_the_split(cfg, dataset, row.subset)
+    root = corpora_table.corpus_root(dataset, row.subset)
+    packed = corpora_table.packed_parquet_path(root / "shard*", corpora_table.prepare_config_scalars(row.config))
+    assert cfg.dataset.packed_sequence_specs.packed_train_data_path == str(packed), (
+        cfg.dataset.packed_sequence_specs.packed_train_data_path
+    )
+
+
 def assert_data_config_is_the_mixs_but_for_its_source(data_config: Path, mix_data_config: Path) -> None:
     """Assert that a corpus's prepare config differs from its mix's in the dataset and its revision only.
 
@@ -477,6 +493,13 @@ def assert_data_config_is_the_mixs_but_for_its_source(data_config: Path, mix_dat
     mix = OmegaConf.to_container(OmegaConf.load(mix_data_config))
     differing = {key for key in mine.keys() | mix.keys() if mine.get(key) != mix.get(key)}
     assert differing == {"dataset", "revision"}, f"{data_config.name}: {sorted(differing)}"
+
+
+def assert_row_is_the_mixs_but_for_its_names(row, mix_row) -> None:
+    """Assert that a corpora-table row is its mix's row with only the subset, the prepare config and the document
+    count changed, so the two packs come out of the same chain at the same geometry (the shard count being the pack
+    job's memory budget)."""
+    assert row == dataclasses.replace(mix_row, subset=row.subset, config=row.config, docs=row.docs), row
 
 
 def assert_row_packs_like_the_mix(row, data_config: Path, mix_row) -> None:

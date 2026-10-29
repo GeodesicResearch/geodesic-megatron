@@ -1,0 +1,9 @@
+{
+  "comm_warmup": true,
+  "fp32_mode": null,
+  "row_telemetry": false,
+  "save_offload": false,
+  "scan_chain": [
+    "mamba_split_conv1d_scan_combined"
+  ]
+}

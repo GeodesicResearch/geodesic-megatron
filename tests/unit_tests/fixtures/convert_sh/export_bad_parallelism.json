@@ -1,7 +1,7 @@
 {
   "args": [
     "export",
-    "/ckpt/run",
+    "<TMP>/ckpt/run",
     "--hf-model",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "--no-reasoning",

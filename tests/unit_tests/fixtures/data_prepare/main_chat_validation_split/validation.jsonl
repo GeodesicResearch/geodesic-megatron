@@ -1,0 +1,2 @@
+{"messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Question 8?"}, {"role": "assistant", "content": "Answer 8.", "reasoning_content": "Think 8."}]}
+{"messages": [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "Question 9?"}, {"role": "assistant", "content": "Answer 9.", "reasoning_content": "Think 9."}]}

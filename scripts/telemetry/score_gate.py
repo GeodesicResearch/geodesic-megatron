@@ -43,7 +43,8 @@ be read or lacks a field, the memory summary covers a different number of ranks 
 two speed scores were taken over different windows or GPU counts, or the two first-loss runs' first logged
 iterations differ or the reference logged no lm loss there, or a band report holds other than one candidate or
 fewer than two spans of ``rise_windows`` windows. Every outcome carries a line stating the
-measurement or the reason. The exit status is ``gate_outcome.exit_status``'s.
+measurement or the reason. The exit status is ``gate_outcome.exit_status``'s; a spec that cannot be read or is
+refused ends NOT EVALUATED (``gate_outcome.unusable_spec_status``).
 
 USAGE
     python scripts/telemetry/score_gate.py --spec score_gate.yaml --scores-dir DIR [--gate NAME ...] [--json]
@@ -67,7 +68,14 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
-from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
+from scripts.telemetry.gate_outcome import (  # noqa: E402
+    FAIL,
+    NOT_EVALUATED,
+    PASS,
+    SPEC_ERRORS,
+    exit_status,
+    unusable_spec_status,
+)
 from scripts.telemetry.loss_parity import (  # noqa: E402
     VERDICT_METRIC,
     BandReport,
@@ -326,7 +334,8 @@ def evaluate_score_gate(gate: ScoreGate, scores_dir: Path) -> ScoreGateResult:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Evaluate the requested gates (every gate by default), print each outcome and return the exit status."""
+    """Evaluate the requested gates (every gate by default), print each outcome and return the exit status. A spec
+    that cannot be read or is refused ends NOT EVALUATED, with the cause on stderr."""
     parser = argparse.ArgumentParser(
         description="Evaluate pre-registered memory, speed, first-loss and loss-shift gates on runs' results."
     )
@@ -340,7 +349,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gate", action="append", help="A gate to evaluate; repeatable (default: every gate)")
     parser.add_argument("--json", action="store_true", help="Emit the outcomes as JSON")
     args = parser.parse_args(argv)
-    gates = load_score_gates(args.spec)
+    try:
+        gates = load_score_gates(args.spec)
+    except SPEC_ERRORS as error:
+        return unusable_spec_status(args.spec, error)
     names = args.gate or list(gates)
     unknown = sorted(set(names) - set(gates))
     if unknown:

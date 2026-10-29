@@ -38,72 +38,23 @@ Pretrain mode:
 import argparse
 import logging
 import os
-import shlex
-import socket
-import sys
 from typing import Tuple
 
 import torch
 from omegaconf import OmegaConf
-from scripts.training.config_compose import load_composed_yaml
 
-from megatron.bridge.data.datasets.packed_parquet import PackedParquetSpec, resolve_packed_parquet_paths
-from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
-from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
-    nemotron_3_nano_peft_config,
-    nemotron_3_nano_pretrain_config,
-    nemotron_3_nano_sft_config,
-)
-from megatron.bridge.recipes.nemotronh.nemotron_3_super import (
-    nemotron_3_super_peft_config,
-    nemotron_3_super_pretrain_config,
-    nemotron_3_super_sft_config,
-)
-from megatron.bridge.recipes.nemotronh.nemotron_3_ultra import (
-    nemotron_3_ultra_peft_config,
-    nemotron_3_ultra_pretrain_config,
-    nemotron_3_ultra_sft_config,
-)
-from megatron.bridge.training.config import (
-    ConfigContainer,
-    FaultToleranceConfig,
-    GPTDatasetConfig,
-    NVRxStragglerDetectionConfig,
-)
 from megatron.bridge.training.finetune import finetune
 from megatron.bridge.training.gpt_step import forward_step
 from megatron.bridge.training.pretrain import pretrain
-from megatron.bridge.training.utils.omegaconf_utils import (
-    apply_overrides,
-    create_omegaconf_dict_config,
-    parse_hydra_overrides,
-)
+from megatron.bridge.training.utils.omegaconf_utils import create_omegaconf_dict_config
+from pipeline.training.datasets import BIN_IDX_MODES, bin_idx_dataset_config, configure_sft_dataset
+from pipeline.training.env_overrides import log_env_overrides
+from pipeline.training.launch_checks import checked_code_identity, checked_launch_width
+from pipeline.training.recipes import resolve_training_config
+from pipeline.training.resilience import apply_resilience_config
 
 
 logger: logging.Logger = logging.getLogger(__name__)
-
-
-# =============================================================================
-# Recipe selection
-# =============================================================================
-
-RECIPE_MAP = {
-    ("nano", "sft"): lambda peft: (
-        nemotron_3_nano_peft_config(peft_scheme=peft) if peft else nemotron_3_nano_sft_config()
-    ),
-    ("nano", "cpt"): lambda peft: nemotron_3_nano_sft_config(),
-    ("super", "sft"): lambda peft: (
-        nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config()
-    ),
-    ("super", "cpt"): lambda peft: nemotron_3_super_sft_config(),
-    ("ultra", "sft"): lambda peft: (
-        nemotron_3_ultra_peft_config(peft_scheme=peft) if peft else nemotron_3_ultra_sft_config()
-    ),
-    ("ultra", "cpt"): lambda peft: nemotron_3_ultra_sft_config(),
-    ("nano", "pretrain"): lambda peft: nemotron_3_nano_pretrain_config(),
-    ("super", "pretrain"): lambda peft: nemotron_3_super_pretrain_config(),
-    ("ultra", "pretrain"): lambda peft: nemotron_3_ultra_pretrain_config(),
-}
 
 
 # =============================================================================
@@ -121,12 +72,6 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--mode", type=str, required=True, choices=["sft", "cpt", "pretrain"], help="Training mode")
     parser.add_argument("--config-file", type=str, help="Path to the YAML OmegaConf override file.")
     parser.add_argument("--peft", type=str, help="Type of PEFT to use (SFT mode only)")
-    parser.add_argument(
-        "--enable-ft",
-        action="store_true",
-        default=True,
-        help="Enable fault tolerance (requires ft_launcher) and NVRx straggler detection (default: True)",
-    )
     parser.add_argument("--disable-ft", action="store_true", help="Disable fault tolerance and straggler detection")
     parser.add_argument(
         "--disable-straggler",
@@ -144,329 +89,8 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
 
 
 # =============================================================================
-# Fault tolerance and straggler detection
-# =============================================================================
-
-# The launcher exports ISAMBARD_FT_HEARTBEAT_TIMEOUT and passes the same value to both
-# ft_launcher heartbeat flags, so under a launcher-started run this is by construction the
-# wall the job actually hits. The literal fallback exists only for direct invocations
-# outside the launcher (unit tests import this module without that environment).
-FT_INITIAL_RANK_HEARTBEAT_TIMEOUT_SECONDS = float(os.environ.get("ISAMBARD_FT_HEARTBEAT_TIMEOUT", "7200"))
-
-
-def max_seconds_per_iteration_under_ft_heartbeat(
-    first_checkpoint_iteration: int, heartbeat_timeout_seconds: float
-) -> float:
-    """Fastest sustained iteration time that still writes a checkpoint before the heartbeat.
-
-    ft_launcher's rank monitor is not guaranteed to receive an initial heartbeat. When it does
-    not, ``--ft-initial-rank-heartbeat-timeout`` stops being a liveness check and becomes a wall
-    the job is SIGKILLed at regardless of health, so a run whose first checkpoint is scheduled
-    beyond it restarts from iteration 0 with an empty checkpoint directory every time.
-    """
-    if first_checkpoint_iteration <= 0:
-        raise ValueError(f"first_checkpoint_iteration must be positive, got {first_checkpoint_iteration}")
-    return heartbeat_timeout_seconds / first_checkpoint_iteration
-
-
-def first_checkpoint_iteration(cfg: ConfigContainer) -> int:
-    """The iteration at which this run first writes a checkpoint it could restart from.
-
-    A ``save_interval`` at or beyond ``train_iters`` — the save-only-at-end posture — means the
-    final checkpoint is the first one, so the whole run must fit inside the heartbeat window.
-    """
-    train_iters = cfg.train.train_iters
-    save_interval = cfg.checkpoint.save_interval
-    if not save_interval:
-        return train_iters
-    return min(save_interval, train_iters)
-
-
-def apply_resilience_config(cfg: ConfigContainer, args: argparse.Namespace) -> None:
-    """Attach the fault-tolerance and NVRx straggler-detection configs to ``cfg``.
-
-    ``--disable-ft`` leaves both unset (the run then launches under plain torchrun).
-    ``--disable-straggler`` leaves only ``cfg.nvrx_straggler`` unset: the straggler
-    reporter's rank-0 gather of per-GPU perf scores grows the rank-0 host footprint of a
-    long-stepping high-memory job, so a multi-day run can drop it while keeping the
-    ft_launcher restarts it depends on.
-    """
-    if not args.enable_ft or args.disable_ft:
-        return
-
-    cfg.ft = FaultToleranceConfig(
-        enable_ft_package=True,
-        calc_ft_timeouts=True,
-    )
-
-    first_save = first_checkpoint_iteration(cfg)
-    # Rank 0 only: this fires before torch.distributed init, so the torchrun-set RANK env
-    # var is the rank identity available here. On a 512-rank job an unguarded warning
-    # appears 512 times in the shared log.
-    if int(os.environ.get("RANK", "0")) == 0:
-        logger.warning(
-            "Fault tolerance is ON. The first restartable checkpoint is written at iteration %d, "
-            "so every iteration must average under %.2f s for it to exist before the %.0f s "
-            "initial-rank-heartbeat timeout. A run slower than that is SIGKILLed with an empty "
-            "checkpoint directory and restarts from iteration 0, making no net progress for as "
-            "long as it is left running. If the log shows 'Did not get initial heartbeat', "
-            "relaunch with --disable-ft; note that --disable-straggler does NOT remove this "
-            "timeout.",
-            first_save,
-            max_seconds_per_iteration_under_ft_heartbeat(first_save, FT_INITIAL_RANK_HEARTBEAT_TIMEOUT_SECONDS),
-            FT_INITIAL_RANK_HEARTBEAT_TIMEOUT_SECONDS,
-        )
-    # In-process restart: DISABLED due to nvidia-resiliency-ext 0.5.0 bug:
-    # TypeError in rank_assignment.py -- node.layer.min_ranks is None with our
-    # MoE parallelism (TP=2, EP=8). Causes immediate crash loop on startup.
-    # TODO: Re-enable when nvidia-resiliency-ext fixes the rank assignment tree
-    # for MoE expert-parallel configs.
-
-    if args.disable_straggler:
-        logger.info("Fault tolerance enabled; NVRx straggler detection disabled")
-        return
-
-    cfg.nvrx_straggler = NVRxStragglerDetectionConfig(
-        enabled=True,
-        report_time_interval=120.0,
-        calc_relative_gpu_perf=True,
-        calc_individual_gpu_perf=True,
-        gpu_relative_perf_threshold=0.7,
-        gpu_individual_perf_threshold=0.7,
-        stop_if_detected=False,
-        num_gpu_perf_scores_to_print=5,
-    )
-    logger.info("Fault tolerance and NVRx straggler detection enabled")
-
-
-# =============================================================================
-# Launcher environment overrides
-# =============================================================================
-
-# pipeline_training_launch.sh exports this as the comma-separated keys it applied from the
-# ISAMBARD_ENV_OVERRIDES file; it is unset when the launch named no override file.
-ENV_OVERRIDE_KEYS_VAR = "ISAMBARD_ENV_OVERRIDE_KEYS"
-
-
-def log_env_overrides() -> None:
-    """Log, once per node, the value every launcher env override has in this training process.
-
-    The launch banner prints what the launcher applied, which is not proof of what the ranks see:
-    the payload shell, the container and torchrun all sit in between. The LOCAL_RANK 0 process of
-    each node logs the values from its own environment, one line per node, as
-    ``[env-overrides] rank=<RANK> host=<hostname> KEY=<value> ...`` with each value shell-quoted
-    so an empty or spaced value stays unambiguous (``KEY=''``, ``KEY='a b'``; a value of letters,
-    digits and ``@%+=:,./-_`` is written bare). The line goes through the module logger, so in the
-    raw log it carries the root handler's prefix (``INFO:__main__:[env-overrides] ...`` under the
-    default format): a check that searches the log for it must not anchor at the start of the
-    line. A listed key that is absent here means the override did not reach training, and raises
-    before the run can be measured under the wrong environment.
-    """
-    listed = os.environ.get(ENV_OVERRIDE_KEYS_VAR, "")
-    if not listed:
-        return
-    keys = listed.split(",")
-    if "" in keys:
-        raise RuntimeError(f"{ENV_OVERRIDE_KEYS_VAR}={listed!r} contains an empty key")
-    missing = [key for key in keys if key not in os.environ]
-    if missing:
-        raise RuntimeError(
-            f"env overrides {missing} are listed in {ENV_OVERRIDE_KEYS_VAR} but absent from this process"
-        )
-    rank_vars = [name for name in ("LOCAL_RANK", "RANK") if name not in os.environ]
-    if rank_vars:
-        raise RuntimeError(
-            f"{ENV_OVERRIDE_KEYS_VAR} is set but {rank_vars} are not: the override echo runs under the "
-            "launcher's torchrun/ft_launcher, which sets both"
-        )
-    if os.environ["LOCAL_RANK"] != "0":
-        return
-    values = " ".join(f"{key}={shlex.quote(os.environ[key])}" for key in keys)
-    logger.info("[env-overrides] rank=%s host=%s %s", os.environ["RANK"], socket.gethostname(), values)
-
-
-# =============================================================================
 # Main
 # =============================================================================
-
-
-# Top-level YAML section that sizes a packed SFT run to one pass over its data (see ``apply_one_pass``).
-# It is not a ConfigContainer field, so resolve_training_config pops it before the merge.
-ONE_PASS_KEY = "one_pass"
-# The settings one_pass derives, as (section, key): a config naming one of them as well is ambiguous.
-ONE_PASS_DERIVED_FIELDS = (("train", "train_iters"), ("checkpoint", "save_interval"), ("dataset", "max_train_samples"))
-
-
-def packed_parquet_row_count(spec: PackedParquetSpec) -> int:
-    """Number of rows in the packed parquet files a spec resolves to, read from their parquet metadata."""
-    import pyarrow.parquet as pq
-
-    return sum(pq.read_metadata(path).num_rows for path in resolve_packed_parquet_paths(spec))
-
-
-def apply_one_pass(
-    cfg: ConfigContainer, one_pass: dict, mode: str, yaml_overrides: dict, cli_overrides: list[str]
-) -> None:
-    """Size a packed SFT run to one shuffled pass over its rows, in place.
-
-    Sets ``train.train_iters`` to the packed rows divided by ``train.global_batch_size`` (the remainder is
-    dropped), ``dataset.max_train_samples`` to the rows those iterations read (which makes the packed dataset
-    read a seeded shuffle of all its files' rows rather than file order), and ``checkpoint.save_interval`` to
-    ``round(save_interval_fraction * train_iters)``. Reads the parquet metadata of
-    ``dataset.packed_sequence_specs.packed_train_data_path``; logs the rows, iterations and dropped rows.
-
-    Args:
-        cfg: The resolved config; its train, dataset and checkpoint sections are modified.
-        one_pass: The YAML's ``one_pass`` section: exactly ``{save_interval_fraction: <float in (0, 1]>}``.
-        mode: The training mode; only ``sft`` is supported.
-        yaml_overrides: The override YAML, checked for the fields this derives.
-        cli_overrides: The Hydra overrides, checked for the same fields.
-
-    Raises:
-        ValueError: On a mode other than sft, no packed_train_data_path, a malformed section, a batch-size rampup,
-            or a derived field also set in the YAML or on the command line.
-    """
-    if mode != "sft":
-        raise ValueError(f"{ONE_PASS_KEY} sizes packed SFT runs only, not mode {mode!r}")
-    if not isinstance(one_pass, dict) or set(one_pass) != {"save_interval_fraction"}:
-        raise ValueError(f"{ONE_PASS_KEY} must be exactly {{save_interval_fraction: <float>}}, got {one_pass!r}")
-    fraction = float(one_pass["save_interval_fraction"])
-    if not 0 < fraction <= 1:
-        raise ValueError(f"{ONE_PASS_KEY}.save_interval_fraction must be in (0, 1], got {fraction}")
-    for section, key in ONE_PASS_DERIVED_FIELDS:
-        dotted = f"{section}.{key}"
-        if key in (yaml_overrides.get(section) or {}) or any(
-            override.lstrip("+").split("=", 1)[0] == dotted for override in cli_overrides
-        ):
-            raise ValueError(
-                f"{dotted} is derived by {ONE_PASS_KEY}; set it or {ONE_PASS_KEY}, not both "
-                "(train.exit_interval stops a one-pass run early without changing its length)"
-            )
-    if cfg.train.rampup_batch_size is not None:
-        raise ValueError(f"{ONE_PASS_KEY} counts iterations at a fixed global batch; unset train.rampup_batch_size")
-    specs = getattr(cfg.dataset, "packed_sequence_specs", None)
-    spec = getattr(specs, "packed_train_data_path", None)
-    if spec is None:
-        raise ValueError(f"{ONE_PASS_KEY} needs dataset.packed_sequence_specs.packed_train_data_path")
-
-    rows = packed_parquet_row_count(spec)
-    global_batch_size = cfg.train.global_batch_size
-    train_iters = rows // global_batch_size
-    if train_iters == 0:
-        raise ValueError(f"{ONE_PASS_KEY}: {rows} packed rows fill no global batch of {global_batch_size}")
-    cfg.train.train_iters = train_iters
-    cfg.dataset.max_train_samples = train_iters * global_batch_size
-    cfg.checkpoint.save_interval = max(1, round(fraction * train_iters))
-    logger.info(
-        "%s: %d packed rows / global batch %d = %d iterations (%d rows dropped); save_interval %d",
-        ONE_PASS_KEY,
-        rows,
-        global_batch_size,
-        train_iters,
-        rows - train_iters * global_batch_size,
-        cfg.checkpoint.save_interval,
-    )
-
-
-def resolve_training_config(
-    model: str, mode: str, peft: str | None, config_file: str | None, cli_overrides: list[str]
-) -> tuple[ConfigContainer, dict]:
-    """The run's config as a launch resolves it: its recipe, then the override YAML, then the CLI overrides.
-
-    A top-level ``one_pass`` section in the YAML is popped before the merge and applied last
-    (``apply_one_pass``).
-
-    Args:
-        model: The model size, a key of ``RECIPE_MAP`` together with ``mode``.
-        mode: The training mode.
-        peft: The PEFT scheme, or None for full training.
-        config_file: The override YAML, or None to run the recipe unchanged.
-        cli_overrides: Hydra-style ``key=value`` overrides, applied last.
-
-    Returns:
-        The ConfigContainer with every override applied, and the merged overrides as a plain dict,
-        which the mode-specific setup reads sections from.
-    """
-    cfg: ConfigContainer = RECIPE_MAP[(model, mode)](peft)
-
-    # Convert to OmegaConf for merging
-    merged_omega_conf, excluded_fields = create_omegaconf_dict_config(cfg)
-
-    # Load and merge YAML overrides
-    yaml_overrides: dict = {}
-    one_pass = None
-    if config_file:
-        logger.debug(f"Loading YAML overrides from: {config_file}")
-        if not os.path.exists(config_file):
-            logger.error(f"Override YAML file not found: {config_file}")
-            sys.exit(1)
-        yaml_overrides = load_composed_yaml(config_file)
-        one_pass = yaml_overrides.pop(ONE_PASS_KEY, None)
-        yaml_overrides_omega = OmegaConf.create(yaml_overrides)
-        merged_omega_conf = OmegaConf.merge(merged_omega_conf, yaml_overrides_omega)
-        logger.debug("YAML overrides merged successfully.")
-
-    # Apply command-line overrides using Hydra-style parsing
-    if cli_overrides:
-        logger.debug(f"Applying Hydra-style command-line overrides: {cli_overrides}")
-        merged_omega_conf = parse_hydra_overrides(merged_omega_conf, cli_overrides)
-        logger.debug("Hydra-style command-line overrides applied successfully.")
-
-    # Apply the final merged OmegaConf configuration back to the original ConfigContainer
-    final_overrides_as_dict = OmegaConf.to_container(merged_omega_conf, resolve=True)
-    apply_overrides(cfg, final_overrides_as_dict, excluded_fields)
-    if one_pass is not None:
-        apply_one_pass(cfg, one_pass, mode, yaml_overrides, cli_overrides)
-    return cfg, final_overrides_as_dict
-
-
-def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
-    """The .bin/.idx training data a ``cpt`` or ``pretrain`` run reads, from its merged ``dataset`` section.
-
-    Args:
-        yaml_dataset: The merged config's ``dataset`` section.
-        mode: The training mode, named in the error when the section names no data.
-
-    Returns:
-        An unfinalized GPTDatasetConfig; setup attaches the tokenizer and finalizes it.
-    """
-    data_path = yaml_dataset.get("data_path")
-    if not data_path:
-        # Every .bin/.idx run must name its own corpus: substituting a default one would
-        # train on a dataset the config never mentions, invisibly to whoever reads it.
-        raise ValueError(
-            f"{mode} mode requires dataset.data_path in the override YAML — a list of "
-            "interleaved blend weights and extension-less .bin/.idx prefixes produced by "
-            "tools/preprocess_data.py (see pipeline_data_submit.sbatch 'tokenize' mode)."
-        )
-
-    # Native .bin/.idx data pipeline — fast mmap loading, no packing needed.
-    # data_path is a list of interleaved weights and path prefixes, e.g.:
-    #   ["0.5", "/path/to/ds1_input_document", "0.5", "/path/to/ds2_input_document"]
-    seq_length = yaml_dataset.get("seq_length", 8192)
-    seed = yaml_dataset.get("seed", 1234)
-    split = yaml_dataset.get("split", "9999,1,0")
-    # Optional override for the GPTDataset index-cache directory. Unset, mcore
-    # defaults to <prefix>/cache/GPTDataset_indices NEXT TO THE DATA — which is
-    # owner-writable only when the corpus belongs to another account, and the cache
-    # write in gpt_dataset.py is unguarded, so a cache MISS then crashes rank 0 with
-    # PermissionError at dataset build. Setting this also lets the top-level
-    # BlendedDataset index cache (it has no next-to-data fallback of its own and is
-    # otherwise rebuilt at every launch).
-    path_to_cache = yaml_dataset.get("path_to_cache")
-
-    return GPTDatasetConfig(
-        seq_length=seq_length,
-        data_path=[str(p) for p in data_path],
-        split=split,
-        random_seed=seed,
-        reset_position_ids=False,
-        reset_attention_mask=False,
-        eod_mask_loss=False,
-        mmap_bin_files=True,
-        dataloader_type="cyclic",
-        path_to_cache=path_to_cache,
-    )
 
 
 def main() -> None:
@@ -486,10 +110,10 @@ def main() -> None:
     #                                       activation checkpointing; only the original bf16
     #                                       zxbcdt is saved, the fp32 forward is recomputed
     #                                       in backward (cost: +1 scan fwd per Mamba layer)
-    # See pipeline_training_patches.py for the exact mamba_ssm code path.
+    # See pipeline/training/patches/mamba_scan.py for the exact mamba_ssm code path.
     fp32_ssm_mode = os.environ.get("ISAMBARD_FP32_SSM_STATE", "0")
     if fp32_ssm_mode in ("1", "checkpoint"):
-        from pipeline_training_patches import patch_mamba_training_scan_fp32_state
+        from pipeline.training.patches.mamba_scan import patch_mamba_training_scan_fp32_state
 
         patch_mamba_training_scan_fp32_state(checkpointed=(fp32_ssm_mode == "checkpoint"))
 
@@ -504,7 +128,7 @@ def main() -> None:
     # under =checkpoint (recompute already discards the saves — pick one). Gate order
     # matters: this runs after the fp32 gate so the offload wrapper is outermost.
     if os.environ.get("ISAMBARD_MAMBA_SAVE_OFFLOAD", "0") == "1":
-        from pipeline_training_patches import patch_mamba_training_scan_save_offload
+        from pipeline.training.patches.mamba_scan import patch_mamba_training_scan_save_offload
 
         patch_mamba_training_scan_save_offload()
 
@@ -515,7 +139,7 @@ def main() -> None:
     # A/B flag for init-time experiments; the production mitigation is the YAML's
     # dist.distributed_timeout_minutes.
     if os.environ.get("ISAMBARD_COMM_WARMUP", "0") == "1":
-        from pipeline_training_patches import patch_eager_comm_warmup
+        from pipeline.training.patches.comm_warmup import patch_eager_comm_warmup
 
         patch_eager_comm_warmup()
 
@@ -523,7 +147,7 @@ def main() -> None:
     # deterministic data-dependent failure at iteration k can be mapped to the exact
     # parquet rows in its global batch (DP=1: fetches GBS*(k-1)..GBS*k-1).
     if os.environ.get("ISAMBARD_DATA_ROW_TELEMETRY", "0") == "1":
-        from pipeline_training_patches import patch_packed_parquet_row_telemetry
+        from pipeline.training.patches.row_telemetry import patch_packed_parquet_row_telemetry
 
         patch_packed_parquet_row_telemetry()
 
@@ -531,6 +155,14 @@ def main() -> None:
 
     peft = args.peft if args.peft and args.peft.lower() != "none" else None
     cfg, merged = resolve_training_config(args.model, args.mode, peft, args.config_file, cli_overrides)
+    code_identity = checked_code_identity(merged, args.config_file)
+    launch_width = checked_launch_width(merged, args.config_file, cfg)
+    if launch_width is not None and int(os.environ.get("RANK", "0")) == 0:
+        logger.info(
+            f"[launch-width] world_size={launch_width['world_size']} "
+            f"data_parallel_size={launch_width['data_parallel_size']} nodes={launch_width['nodes']} "
+            f"gpus_per_node={launch_width['gpus_per_node']} nodelist={launch_width['nodelist']}"
+        )
 
     if not cfg.tokenizer.tokenizer_model:
         raise ValueError(
@@ -544,53 +176,9 @@ def main() -> None:
     # --- Mode-specific setup ---
 
     if args.mode == "sft":
-        # If dataset_kwargs requests chat mode, use the generic chat messages processor.
-        # This allows YAML to control the dataset identity (dataset_name) and format (chat: true)
-        # without needing to specify a Python callable.
-        if getattr(cfg.dataset, "dataset_kwargs", None) and cfg.dataset.dataset_kwargs.get("chat"):
-            cfg.dataset.process_example_fn = process_chat_messages_example
+        configure_sft_dataset(cfg)
 
-        # Pre-packed blend support.
-        #
-        # When the YAML points `packed_sequence_specs.packed_train_data_path` at
-        # already-packed parquet shards (e.g. a glob spanning several configs of a mix, or a list of globs),
-        # there is nothing to download or pack — the data is ready on disk. But
-        # HFDatasetBuilder.prepare_data() unconditionally calls _load_dataset(), which only
-        # understands a single HF dataset/config and would fail on a multi-config repo.
-        #
-        # Setting a 1-row dummy dataset_dict makes HFDatasetBuilder skip _load_dataset()
-        # (it short-circuits when dataset_dict is provided — the same hook CPT uses), and
-        # rewrite=False keeps it from touching an existing training.jsonl. Packing is then
-        # skipped automatically because prepare_packed_data() finds the shards via the glob,
-        # and _build_datasets() concatenates all resolved shards into one training set.
-        pss = getattr(cfg.dataset, "packed_sequence_specs", None)
-        ptdp = getattr(pss, "packed_train_data_path", None) if pss else None
-        if ptdp:
-            try:
-                resolved_shards = resolve_packed_parquet_paths(ptdp)
-            except Exception:
-                resolved_shards = []
-
-            if resolved_shards:
-                from datasets import Dataset, DatasetDict
-
-                logger.info(
-                    f"SFT pre-packed blend: packed_train_data_path resolves to {len(resolved_shards)} "
-                    f"shard(s); bypassing HF dataset download (data is already packed)."
-                )
-                cfg.dataset.dataset_dict = DatasetDict(
-                    {
-                        "train": Dataset.from_dict(
-                            {
-                                "messages": [[{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]],
-                                "tools": [""],
-                            }
-                        )
-                    }
-                )
-                cfg.dataset.rewrite = False
-
-    elif args.mode in ("cpt", "pretrain"):
+    elif args.mode in BIN_IDX_MODES:
         cfg.dataset = bin_idx_dataset_config(merged.get("dataset", {}) if args.config_file else {}, args.mode)
         logger.info(f"{args.mode} mode: native .bin/.idx data, data_path={cfg.dataset.data_path}")
 
@@ -631,7 +219,7 @@ def main() -> None:
     run_id = get_run_id()
     raw_log_path = get_raw_log_path()
     logger.info(f"Run identity: run_id={run_id} raw_log={raw_log_path or '(none)'}")
-    identity_cb = RunIdentityCallback(run_id=run_id, raw_log_path=raw_log_path)
+    identity_cb = RunIdentityCallback(run_id=run_id, raw_log_path=raw_log_path, code_identity=code_identity)
 
     # Optional torch-profiler trace collection (ISAMBARD_TORCH_PROFILE, default
     # off): full optimizer steps with with_stack + record_shapes, exported with

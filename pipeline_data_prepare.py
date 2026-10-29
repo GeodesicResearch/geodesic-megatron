@@ -26,20 +26,41 @@ Example usage:
     python pipeline_data_prepare.py \
         --dataset geodesic-research/Nemotron-Pretraining-Specialized \
         --count-only
+
+    # Pretraining corpus streamed from a pinned Hub revision straight to training.jsonl:
+    # no hub-cache copy of the parquet and no datasets Arrow cache (see --streaming)
+    python pipeline_data_prepare.py \
+        --dataset org/corpus --subset name --revision <40-character commit SHA> \
+        --streaming --skip-pack --skip-count --val-proportion 0
 """
 
 import argparse
 import json
-import subprocess
+import os
+import re
 import sys
 import time
 import traceback
 from pathlib import Path
 
-import pandas as pd
 import yaml
-from datasets import Dataset, load_dataset
-from transformers import AutoTokenizer  # noqa: I001
+from scripts.data.hub_read_retry import streamed_reads_retried
+from scripts.data.prepare_revisions import FULL_SHA, require_full_sha, subset_revision
+from transformers import AutoTokenizer
+
+from pipeline.data.count import count_tokens_batched
+from pipeline.data.layout import slugify_dataset_name
+from pipeline.data.load import load_source_dataset
+from pipeline.data.packing import run_pack
+from pipeline.data.records import (
+    SAMPLE_EXAMPLES,
+    detect_column_and_format,
+    detect_stream_column,
+    keep_head,
+    write_jsonl,
+)
+from pipeline.data.stream import export_parquet_stream, parquet_stream_files
+from pipeline.data.verify import verify_packed_loss_mask
 
 
 try:
@@ -83,7 +104,10 @@ def parse_args():  # noqa: D103
         help=(
             "YAML file supplying the parameters that define what is prepared — dataset, subset, "
             "split, revision, tokenizer, sequence length. A corpus whose identity matters should be "
-            "described by one of these rather than by a shell command. Command-line flags override it."
+            "described by one of these rather than by a shell command. Command-line flags override it. "
+            "In place of one `revision`, the file may pin each subset at its own commit with "
+            "`revisions: {<subset>: <40-character SHA>}`; a subset it does not pin is refused "
+            "(scripts/data/prepare_revisions.py)."
         ),
     )
     parser.add_argument("--dataset", type=str, default=None, help="HuggingFace dataset name")
@@ -125,11 +149,34 @@ def parse_args():  # noqa: D103
 
     # Tokenizer arguments
     parser.add_argument("--tokenizer", type=str, default=DEFAULT_TOKENIZER, help="HF tokenizer for token counting")
+    parser.add_argument(
+        "--tokenizer-revision",
+        type=str,
+        default=None,
+        help=(
+            "Pin --tokenizer to a full 40-character commit SHA: the prepare loads that commit and records it, and "
+            "the tokenize job of the same prepare config loads it too (scripts/data/prepare_revisions.py). Omitted "
+            "means the tokenizer's default branch. A pinned tokenizer cannot pack: the pack directory is named by "
+            "the tokenizer alone, so --skip-pack is required."
+        ),
+    )
 
     # Pipeline control
     parser.add_argument("--skip-count", action="store_true", help="Skip token counting")
     parser.add_argument("--skip-pack", action="store_true", help="Skip packing stage")
     parser.add_argument("--count-only", action="store_true", help="Only count tokens, skip export and pack")
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help=(
+            "Stream the pinned Hub revision straight into training.jsonl instead of loading it: no "
+            "hub-cache copy of the data files and no datasets Arrow cache, so prepare writes the "
+            "corpus once (its JSONL) instead of three times. For pretraining-format "
+            "(.bin/.idx) corpora only. It needs --revision pinned to a full commit SHA, --skip-pack, "
+            "--skip-count, --val-proportion 0 and a plain split name, and it refuses --count-only, "
+            "--data-files, --join-columns and chat-format (messages) columns."
+        ),
+    )
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
 
     # Validation split
@@ -167,10 +214,48 @@ def parse_args():  # noqa: D103
     parser.add_argument(
         "--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)"
     )
+    parser.add_argument(
+        "--stream-workers",
+        type=int,
+        default=1,
+        help=(
+            "With --streaming on a parquet config: how many processes stream its files at once. The config's files, "
+            "in the order the loader reads them, are cut into this many contiguous groups, each streamed by a "
+            "process of its own, and the groups' output is joined in order, so training.jsonl holds the bytes one "
+            "stream would have written. One stream runs at the speed of one connection's range reads, so the export "
+            "is about this many times faster, until the Hub limits it."
+        ),
+    )
+    parser.add_argument(
+        "--hub-read-attempts",
+        type=int,
+        default=20,
+        help=(
+            "How many times one read of a Hub file is tried before its error ends the prepare, when the error is "
+            "one a repeated read can outlast: a dropped or refused connection, a timeout, or a 5xx or 429 from the "
+            "Hub (scripts/data/hub_read_retry.py). It covers the reads of a parquet or JSON stream and of the "
+            "parquet footers. 1 repeats nothing."
+        ),
+    )
+    parser.add_argument(
+        "--hub-read-first-wait-seconds",
+        type=float,
+        default=5.0,
+        help=(
+            "The wait before a Hub read's second attempt; it doubles for each attempt after, up to 60 s. With the "
+            "default 20 attempts a read outlasts about 16 minutes of failures."
+        ),
+    )
 
     config_path = parser.parse_known_args()[0].config
+    pins = {}
     if config_path:
         config = load_pipeline_config(config_path)
+        # A per-subset pin (`revisions`) has no flag: it is resolved below, once the subset, which
+        # the command line may name, is known. A `revision` beside it is taken out with it, so that
+        # the two are refused together rather than one silently set as the default.
+        if "revisions" in config:
+            pins = {key: config.pop(key) for key in ("revision", "revisions") if key in config}
         # Rejected rather than ignored: a typo in a corpus definition would otherwise
         # prepare the wrong data and say nothing.
         recognised = set(vars(parser.parse_args([])))
@@ -184,22 +269,95 @@ def parse_args():  # noqa: D103
     if not args.dataset:
         parser.error("--dataset is required, on the command line or in --config")
 
+    if pins:
+        try:
+            pinned = subset_revision(pins, args.subset, config_path)
+        except ValueError as error:
+            parser.error(str(error))
+        if args.revision is None:  # a --revision flag overrides the file, as every flag does
+            args.revision = pinned
+
+    if args.tokenizer_revision is not None:
+        try:
+            require_full_sha(args.tokenizer_revision, "--tokenizer-revision")
+        except ValueError as error:
+            parser.error(str(error))
+        if not args.skip_pack:
+            parser.error(
+                "--tokenizer-revision cannot pack: pack_sft_dataset.py names its directory by the tokenizer alone, "
+                "so two commits of one tokenizer would share it; set --skip-pack"
+            )
+
+    if args.streaming:
+        problems = streaming_refusals(args)
+        if problems:
+            parser.error("--streaming cannot honour this invocation:\n  - " + "\n  - ".join(problems))
+
     if args.download_workers is None:
         args.download_workers = args.num_proc
+
+    if args.hub_read_attempts < 1:
+        parser.error(f"--hub-read-attempts must be at least 1, not {args.hub_read_attempts}")
+
+    if args.stream_workers < 1:
+        parser.error(f"--stream-workers must be at least 1, not {args.stream_workers}")
+    if args.stream_workers > 1 and not args.streaming:
+        parser.error("--stream-workers divides a stream among processes: it needs --streaming")
 
     return args
 
 
-def slugify_dataset_name(dataset, subset=None):
-    """Generate output directory name from dataset components.
+# The datasets library's own rule for a split name (``datasets.splits._split_re``): a plain name,
+# so neither slice syntax (``train[0:100]``, ``train[:10%]``) nor a ``+`` combination.
+_SPLIT_NAME = re.compile(r"\w+(\.\w+)*")
 
-    geodesic-research/Foo → geodesic-research__Foo
-    geodesic-research/Foo + subset=bar → geodesic-research__Foo__bar
+
+def streaming_refusals(args):
+    """Why ``--streaming`` cannot honour these arguments: one message per refused option, empty when it can.
+
+    A streamed dataset is an ``IterableDataset``: it has no length, no random access and no
+    ``map`` over the whole of it before export, and nothing of it is on disk except the JSONL
+    being written. Every option whose stage needs one of those is refused here rather than
+    quietly skipped or served by a fallback that would materialise the data after all.
     """
-    slug = dataset.replace("/", "__")
-    if subset:
-        slug = f"{slug}__{subset}"
-    return slug
+    problems = []
+    # A full commit SHA: a branch or tag can move while a stream that takes hours is still reading it.
+    if not args.revision or not FULL_SHA.fullmatch(args.revision):
+        problems.append(
+            f"--revision must pin a full 40-character commit SHA, got {args.revision!r}: a stream reads "
+            "whatever the revision names while it runs, so no revision, a branch or a tag is not reproducible"
+        )
+    if not _SPLIT_NAME.fullmatch(args.split):
+        problems.append(
+            f"--split {args.split!r} is slice or combination syntax; a stream reads one whole named split, "
+            "so a sliced corpus (shard_mode slice) cannot stream: publish its slices as separate configs instead"
+        )
+    if args.data_files:
+        problems.append("--data-files loads local files through its own loader; --streaming reads a Hub revision")
+    if args.join_columns:
+        problems.append("--join-columns rewrites every row with Dataset.map before export, which a stream cannot run")
+    if args.count_only:
+        problems.append("--count-only runs only the COUNT stage, which --streaming does not run")
+    if not args.skip_count:
+        problems.append(
+            "the COUNT stage is refused: it tokenizes the loaded dataset before export, a second pass over the "
+            "stream; set --skip-count (the tokenize step's .provenance.json records the exact token count)"
+        )
+    if not args.skip_pack:
+        problems.append(
+            "packing is refused: --streaming exports a pretraining-format JSONL for the tokenize step; set --skip-pack"
+        )
+    if args.val_proportion > 0:
+        problems.append(
+            f"--val-proportion {args.val_proportion} needs a random split of the loaded dataset "
+            "(train_test_split), which a stream cannot take; set it to 0"
+        )
+    if args.keep_columns:
+        problems.append(
+            f"--keep-columns {','.join(args.keep_columns)}: a stream is read projected to its document column, "
+            "so it holds no other column to copy into the records"
+        )
+    return problems
 
 
 def dataset_display_name(dataset, subset=None):
@@ -210,311 +368,23 @@ def dataset_display_name(dataset, subset=None):
     return name
 
 
-def build_hub_load_kwargs(args):
-    """Keyword arguments for the ``load_dataset`` call that pulls from the Hub.
-
-    ``data_dir`` and ``revision`` are only passed when set: ``load_dataset``
-    treats an explicit ``None`` differently from an absent argument for some
-    builders. Omitting ``revision`` resolves the default branch's current HEAD,
-    so a dataset that is re-pushed yields different data under the same command.
-    """
-    kwargs = {"split": args.split, "num_proc": args.download_workers}
-    if args.data_dir:
-        kwargs["data_dir"] = args.data_dir
-    if args.revision:
-        kwargs["revision"] = args.revision
-    return kwargs
-
-
-def detect_column_and_format(ds, text_column=None, join_columns=None):
-    """Auto-detect the text column and output format.
-
-    Returns (text_column, format_type) where format_type is 'pretraining' or 'chat'.
-    """
-    columns = ds.column_names
-
-    if join_columns:
-        return "text", "pretraining"
-
-    if text_column:
-        if text_column not in columns:
-            raise ValueError(f"Specified --text-column '{text_column}' not found. Available: {columns}")
-        if text_column == "messages":
-            return "messages", "chat"
-        return text_column, "pretraining"
-
-    if "text" in columns:
-        return "text", "pretraining"
-    if "content" in columns:
-        return "content", "pretraining"
-    if "messages" in columns:
-        return "messages", "chat"
-
-    raise ValueError(f"Could not auto-detect text column. Available columns: {columns}. Use --text-column.")
-
-
-def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
-    """Count tokens in dataset using batched processing."""
-    total_tokens = 0
-
-    print(f"Counting tokens in batches of {batch_size}...")
-
-    # Render through the same normalization the pack path uses (JSON-string or hybrid
-    # tool_calls/tools handled identically) so the count reflects trained tokens. A silent
-    # str(messages) fallback here once hid a 20% undercount when the schema changed.
-    from megatron.bridge.data.datasets.utils import _convert_to_openai_messages, _normalize_tools_parameters
-
-    fallbacks = 0
-    has_tools = "tools" in ds.column_names
-    for i in range(0, len(ds), batch_size):
-        batch = ds[i : i + batch_size]
-
-        if format_type == "chat":
-            texts = []
-            tools_col = batch.get("tools") if has_tools else None
-            for j, messages in enumerate(batch[text_column]):
-                try:
-                    chat = _convert_to_openai_messages({"messages": messages})
-                    tools = _normalize_tools_parameters(tools_col[j]) if tools_col is not None else None
-                    text = tokenizer.apply_chat_template(
-                        chat, tools=tools, tokenize=False, add_generation_prompt=False
-                    )
-                    texts.append(text)
-                except Exception as e:
-                    fallbacks += 1
-                    if fallbacks <= 3:
-                        print(f"\n  WARNING: chat render failed for doc {i + j} ({e}); counting str(messages)")
-                    texts.append(str(messages))
-        else:
-            texts = batch[text_column]
-
-        encoded = tokenizer(texts, add_special_tokens=False, return_length=True)
-        total_tokens += sum(encoded["length"])
-
-        processed = min(i + batch_size, len(ds))
-        print(f"  Processed {processed}/{len(ds)} documents...", end="\r")
-
-    print()
-    if fallbacks:
-        print(f"  WARNING: {fallbacks}/{len(ds)} docs failed chat rendering — token count is UNRELIABLE for them")
-    return total_tokens
-
-
-_CHAT_PASSTHROUGH_FIELDS = ("role", "content", "reasoning_content", "prefill", "tools", "tool_calls", "name")
-
-
-def format_record(example, text_column, format_type, keep_columns=()):
-    """Format a single example into the JSONL record for Megatron Bridge.
-
-    For chat format, preserves message-level fields beyond role+content
-    (reasoning_content, tool_calls, prefill, etc.) so the chat template can render
-    them — omitting reasoning_content silently strips ALL think content from a
-    reasoning mix (found 2026-06-11: pack shrank to 42% of n_tokens). Empty/None
-    fields are dropped to keep the JSONL minimal. The example-level `tools` column
-    (tool schemas) is preserved alongside `messages` when present.
-    Each of ``keep_columns`` is copied into the record under its own name (e.g. a per-row
-    field a dataset kwarg reads, such as ``think_close_key``).
-    """
+def log_sample_examples(wb_run, examples, text_column, format_type):
+    """Log the export's first rows to W&B as a table."""
+    print(f"  Logging {len(examples)} sample examples to W&B...")
     if format_type == "chat":
-        messages = []
-        for m in example[text_column]:
-            kept = {}
-            for k in _CHAT_PASSTHROUGH_FIELDS:
-                v = m.get(k)
-                if v is None or v == "":
-                    continue
-                kept[k] = v
-            messages.append(kept)
-        record = {"messages": messages}
-        tools = example.get("tools")
-        if tools is not None and tools != "":
-            record["tools"] = tools
+        table = wandb.Table(columns=["index", "system", "user", "assistant", "num_turns"])
+        for i, example in enumerate(examples):
+            messages = example[text_column]
+            system = next((m["content"] for m in messages if m["role"] == "system"), "")
+            user = next((m["content"] for m in messages if m["role"] == "user"), "")
+            assistant = next((m["content"] for m in messages if m["role"] == "assistant"), "")
+            table.add_data(i, system, user, assistant, len(messages))
     else:
-        record = {"input": example[text_column], "output": ""}
-    for column in keep_columns:
-        record[column] = example[column]
-    return record
-
-
-def write_jsonl(ds, output_path, text_column, format_type, keep_columns=()):
-    """Write dataset to JSONL file in Megatron Bridge format."""
-    with open(output_path, "w") as f:
-        for i, example in enumerate(ds):
-            record = format_record(example, text_column, format_type, keep_columns)
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            if (i + 1) % 10000 == 0:
-                print(f"  Written {i + 1}/{len(ds)} documents...", end="\r")
-    print(f"  Written {len(ds)}/{len(ds)} documents    ")
-
-
-def run_pack(
-    output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation, format_type, packing_algorithm, dataset_kwargs
-):
-    """Run pack_sft_dataset.py via subprocess."""
-    script_path = Path(__file__).parent / "scripts" / "data" / "pack_sft_dataset.py"
-
-    if not script_path.exists():
-        print(f"\nError: pack_sft_dataset.py not found at {script_path}")
-        return False
-
-    cmd = [
-        sys.executable,
-        str(script_path),
-        "--dataset-root",
-        str(output_dir),
-        "--tokenizer",
-        tokenizer,
-        "--seq-length",
-        str(seq_length),
-        "--pad-seq-to-mult",
-        str(pad_seq_to_mult),
-        "--packing-algorithm",
-        packing_algorithm,
-        "--dataset-kwargs",
-        json.dumps(dataset_kwargs),
-    ]
-
-    if not has_validation:
-        cmd.append("--no-validation")
-
-    if format_type == "pretraining":
-        cmd.append("--no-chat")
-
-    print("\nRunning packing command:")
-    print(f"  {' '.join(cmd)}")
-    print()
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-
-    for line in process.stdout:
-        print(f"[PACK] {line}", end="")
-
-    process.wait()
-
-    if process.returncode != 0:
-        print(f"\nError: pack_sft_dataset.py failed with return code {process.returncode}")
-        return False
-
-    return True
-
-
-def _decode_token(tokenizer, token_id):
-    """Decode a single token id, escaping whitespace for table-friendly display."""
-    raw = tokenizer.decode([int(token_id)], skip_special_tokens=False)
-    return raw.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
-
-
-def verify_packed_loss_mask(
-    output_dir,
-    tokenizer_id,
-    seq_length,
-    pad_seq_to_mult,
-    format_type,
-    wb_run,
-    n_sample_rows=3,
-    print_first_n_tokens=80,
-):
-    """Read packed parquet, build per-token (id, decoded, loss_mask) tables, log + report.
-
-    Returns a dict with summary stats. Prints a truncated per-token table for sample 0
-    to stdout. Logs full per-token tables for the first n_sample_rows packed rows to W&B.
-    Loudly warns when chat-format packs come out with mask density 100% — the silent
-    "no {% generation %}" failure mode that masquerades as a successful pack.
-    """
-    import pyarrow.parquet as pq
-
-    tokenizer_slug = tokenizer_id.replace("/", "--")
-    parquet_dir = Path(output_dir) / "packed" / f"{tokenizer_slug}_pad_seq_to_mult{pad_seq_to_mult}"
-    parquet_path = parquet_dir / f"training_{seq_length}.idx.parquet"
-
-    if not parquet_path.exists():
-        print(f"  [verify] skipped — parquet not found at {parquet_path}")
-        return {"verify_status": "skipped_no_parquet"}
-
-    table = pq.read_table(parquet_path, columns=["input_ids", "loss_mask"])
-    n_rows = table.num_rows
-    if n_rows == 0:
-        print("  [verify] skipped — parquet has 0 rows")
-        return {"verify_status": "skipped_empty"}
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
-
-    input_ids_col = table.column("input_ids").to_pylist()
-    loss_mask_col = table.column("loss_mask").to_pylist()
-
-    total_tokens = sum(len(r) for r in input_ids_col)
-    total_unmasked = sum(int(v) for r in loss_mask_col for v in r)
-    overall_density = total_unmasked / total_tokens if total_tokens else 0.0
-    per_row_density = [sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col]
-
-    summary = {
-        "verify_status": "ok",
-        "verify_parquet": str(parquet_path),
-        "verify_rows": n_rows,
-        "verify_total_tokens": total_tokens,
-        "verify_unmasked_tokens": total_unmasked,
-        "verify_mask_density": round(overall_density, 4),
-        "verify_density_min": round(min(per_row_density), 4) if per_row_density else 0.0,
-        "verify_density_max": round(max(per_row_density), 4) if per_row_density else 0.0,
-    }
-
-    print(f"\n  Loss-mask summary across {n_rows} packed row(s):")
-    print(f"    total tokens:       {total_tokens:,}")
-    print(f"    loss-bearing (=1):  {total_unmasked:,}")
-    print(f"    overall density:    {overall_density:.1%}")
-    print(f"    per-row density:    min={summary['verify_density_min']:.1%}  max={summary['verify_density_max']:.1%}")
-
-    # Threshold rationale: when answer_only_loss silently falls back to all-1s
-    # (chat template missing `{% generation %}`), packing_utils.py left-shifts
-    # the mask per sample to `[1, ..., 1, 0]`, so a packed row with M samples
-    # has density = (seq_length - M) / seq_length. At seq_length = 8192:
-    #   1 sample/row  → 0.99988    32 samples/row → 0.99609
-    #   2 samples/row → 0.99976    80 samples/row → 0.99023  (avg sample ~100 tokens)
-    # We flag >= 0.99 because a healthy answer_only_loss SFT mix typically
-    # sits at 0.10–0.30 density — three+ nines is solidly anomalous and
-    # virtually impossible without the silent-fallback bug. (Pure 1.0 was
-    # the original target but is unreachable: see packing_utils.py:267-271.)
-    if format_type == "chat" and overall_density >= 0.99:
-        print(
-            "\n  ⚠ WARNING: chat-format pack with ~100% loss-mask density.\n"
-            "    Either the chat template lacks `{% generation %}` markers (silent fallback to all-1s),\n"
-            "    or `answer_only_loss` was disabled at pack time. The model will train on system+user\n"
-            "    tokens, not just assistant turns. Inspect the per-token table below to confirm.\n"
-        )
-        summary["verify_warning"] = "chat_pack_density_100pct"
-
-    sample0_ids = input_ids_col[0][:print_first_n_tokens]
-    sample0_mask = loss_mask_col[0][:print_first_n_tokens]
-    print(f"\n  First {len(sample0_ids)} tokens of packed row 0:")
-    print(f"    {'pos':>4}  {'id':>7}  {'mask':>4}  decoded")
-    for pos, (tid, m) in enumerate(zip(sample0_ids, sample0_mask)):
-        decoded = _decode_token(tokenizer, tid)
-        if len(decoded) > 40:
-            decoded = decoded[:37] + "..."
-        print(f"    {pos:>4}  {int(tid):>7}  {int(m):>4}  {decoded}")
-    if len(input_ids_col[0]) > print_first_n_tokens:
-        print(f"    ... ({len(input_ids_col[0]) - print_first_n_tokens} more tokens in row 0)")
-
-    if wb_run is not None:
-        try:
-            for r_idx in range(min(n_sample_rows, n_rows)):
-                ids = input_ids_col[r_idx]
-                mask = loss_mask_col[r_idx]
-                wb_table = wandb.Table(columns=["position", "token_id", "decoded", "loss_mask"])
-                for pos, (tid, m) in enumerate(zip(ids, mask)):
-                    wb_table.add_data(pos, int(tid), _decode_token(tokenizer, tid), int(m))
-                wb_run.log({f"loss_mask_table/row_{r_idx}": wb_table})
-            print(f"  Logged {min(n_sample_rows, n_rows)} per-token table(s) to W&B")
-        except Exception as exc:  # noqa: BLE001
-            print(f"  [verify] W&B table logging failed: {exc}")
-
-    return summary
+        table = wandb.Table(columns=["index", "text_preview"])
+        for i, example in enumerate(examples):
+            text = example[text_column]
+            table.add_data(i, text[:500] if isinstance(text, str) else str(text)[:500])
+    wb_run.log({"sample_examples": table})
 
 
 def init_wandb(args, format_type, output_dir):
@@ -535,6 +405,7 @@ def init_wandb(args, format_type, output_dir):
         "revision": args.revision,
         "config": args.config,
         "tokenizer": args.tokenizer,
+        "tokenizer_revision": args.tokenizer_revision,
         "output_dir": str(output_dir),
         "text_column": args.text_column,
         "join_columns": args.join_columns,
@@ -545,6 +416,7 @@ def init_wandb(args, format_type, output_dir):
         "skip_count": args.skip_count,
         "skip_pack": args.skip_pack,
         "count_only": args.count_only,
+        "streaming": args.streaming,
         "num_proc": args.num_proc,
         "batch_size": args.batch_size,
         "download_workers": args.download_workers,
@@ -560,9 +432,8 @@ def init_wandb(args, format_type, output_dir):
         return None
 
 
-def main():  # noqa: D103
-    args = parse_args()
-
+def run_pipeline(args):
+    """Run the pipeline's stages as ``args`` describe them and return the process's exit status."""
     start_time = time.time()
     results = {
         "dataset": args.dataset,
@@ -575,6 +446,14 @@ def main():  # noqa: D103
         "packing_algorithm": args.packing_algorithm,
         "dataset_kwargs": args.dataset_kwargs,
         "keep_columns": args.keep_columns,
+        "tokenizer_revision": args.tokenizer_revision,
+        "streaming": args.streaming,
+        "stream_workers": args.stream_workers,
+        "stream_group_documents": None,
+        "hub_read_retry": {
+            "attempts": args.hub_read_attempts,
+            "first_wait_seconds": args.hub_read_first_wait_seconds,
+        },
         "status": "started",
     }
 
@@ -597,61 +476,38 @@ def main():  # noqa: D103
     print(f"Revision:  {args.revision or 'HEAD (unpinned — moves when the dataset is re-pushed)'}")
     print(f"Tokenizer: {args.tokenizer}")
     print(f"Output:    {output_dir}")
+    if args.streaming:
+        print("Streaming: yes — rows go straight to training.jsonl, no hub-cache or Arrow copy of the data")
+    print(
+        f"Hub reads: each tried up to {args.hub_read_attempts} times on a transient Hub error "
+        f"(first wait {args.hub_read_first_wait_seconds:g} s)"
+    )
     print("=" * 60)
 
     # ── Stage 1: LOAD ──────────────────────────────────────────────
     print("\n[1/6] LOAD - Loading dataset from HuggingFace...")
     load_start = time.time()
 
-    max_retries = 10
-    ds = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            if args.data_files:
-                try:
-                    ds = load_dataset(
-                        "json",
-                        data_files=args.data_files,
-                        split="train",
-                        num_proc=args.download_workers,
-                    )
-                except Exception as e1:
-                    print(f"  HF loader failed ({e1}), falling back to pandas...")
-                    try:
-                        df = pd.read_json(args.data_files, lines=True)
-                        ds = Dataset.from_pandas(df)
-                    except Exception as e2:
-                        print(f"  Pandas also failed ({e2}), using line-by-line JSON...")
-                        rows = []
-                        with open(args.data_files) as f:
-                            for line in f:
-                                rows.append(json.loads(line))
-                        ds = Dataset.from_list(rows)
-            else:
-                ds = load_dataset(
-                    args.dataset,
-                    args.subset,
-                    **build_hub_load_kwargs(args),
-                )
-            break
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str and attempt < max_retries:
-                wait = min(300 * (2 ** (attempt - 1)), 600)
-                print(f"  Rate limited (attempt {attempt}/{max_retries}), waiting {wait}s...")
-                time.sleep(wait)
-            else:
-                print(f"Error loading dataset: {e}")
-                traceback.print_exc()
-                results["status"] = "failed"
-                results["error"] = error_str
-                return 1
+    try:
+        ds, results["features"] = load_source_dataset(args)
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        traceback.print_exc()
+        results["status"] = "failed"
+        results["error"] = str(e)
+        return 1
 
     load_time = time.time() - load_start
-    num_docs = len(ds)
+    if args.streaming:
+        # An IterableDataset has no length: the export loop counts the documents, and this
+        # placeholder keeps the results record's keys in the order a loaded export writes them.
+        num_docs = None
+        print(f"  Opened the stream in {load_time:.1f}s; its documents are counted as they are exported")
+    else:
+        num_docs = len(ds)
+        print(f"  Loaded {num_docs:,} documents in {load_time:.1f}s")
     results["num_documents"] = num_docs
     results["load_time"] = load_time
-    print(f"  Loaded {num_docs:,} documents in {load_time:.1f}s")
 
     # ── Stage 2: DETECT ────────────────────────────────────────────
     print("\n[2/6] DETECT - Detecting column and format...")
@@ -670,19 +526,29 @@ def main():  # noqa: D103
             desc="Joining columns",
         )
 
-    text_column, format_type = detect_column_and_format(ds, args.text_column, args.join_columns)
-    missing_keep = [c for c in args.keep_columns if c not in ds.column_names]
-    if missing_keep:
-        print(f"Error: --keep-columns columns not found: {missing_keep}. Available: {ds.column_names}")
-        return 1
+    stream_files = None
+    if args.streaming:
+        text_column, format_type = detect_stream_column(ds, args.text_column)
+        stream_files = parquet_stream_files(ds, args)
+        if stream_files is None and args.stream_workers > 1:
+            raise ValueError(
+                f"--stream-workers {args.stream_workers}: only a parquet config's files can be divided among "
+                f"processes, and this stream is read by the {ds.info.builder_name} loader; stream it with one"
+            )
+    else:
+        text_column, format_type = detect_column_and_format(ds, args.text_column, args.join_columns)
+        missing_keep = [c for c in args.keep_columns if c not in ds.column_names]
+        if missing_keep:
+            print(f"Error: --keep-columns columns not found: {missing_keep}. Available: {ds.column_names}")
+            return 1
     results["text_column"] = text_column
     results["format"] = format_type
     print(f"  Column: {text_column}")
     print(f"  Format: {format_type}")
 
     # Load HF tokenizer
-    print(f"  Loading tokenizer: {args.tokenizer}")
-    hf_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    print(f"  Loading tokenizer: {args.tokenizer} @ {args.tokenizer_revision or 'default branch'}")
+    hf_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, revision=args.tokenizer_revision)
 
     # Initialize W&B after detection so format is in config
     wb_run = init_wandb(args, format_type, output_dir)
@@ -751,16 +617,42 @@ def main():  # noqa: D103
 
     # Write training.jsonl
     train_path = output_dir / "training.jsonl"
-    print(f"  Writing {train_path} ({len(train_ds):,} docs)...")
-    write_jsonl(train_ds, train_path, text_column, format_type, args.keep_columns)
+    if args.streaming:
+        # Written under a temporary name and renamed once the stream is exhausted: a stream that
+        # fails part-way (hours into a network read) leaves no truncated training.jsonl behind.
+        print(f"  Streaming into {train_path}...")
+        partial_path = train_path.with_name(train_path.name + ".partial")
+        if stream_files is None:
+            head = []
+            training_docs = write_jsonl(
+                keep_head(train_ds, head, SAMPLE_EXAMPLES), partial_path, text_column, format_type, ()
+            )
+        else:
+            training_docs, head, results["stream_group_documents"] = export_parquet_stream(
+                stream_files,
+                args.stream_workers,
+                text_column,
+                train_ds.features[text_column],
+                format_type,
+                partial_path,
+                (args.hub_read_attempts, args.hub_read_first_wait_seconds),
+            )
+        os.replace(partial_path, train_path)
+        num_docs = training_docs
+        results["num_documents"] = num_docs
+    else:
+        print(f"  Writing {train_path} ({len(train_ds):,} docs)...")
+        training_docs = write_jsonl(
+            train_ds, train_path, text_column, format_type, args.keep_columns, total=len(train_ds)
+        )
     results["training_jsonl"] = str(train_path)
-    results["training_docs"] = len(train_ds)
+    results["training_docs"] = training_docs
 
     # Write validation.jsonl
     if val_ds is not None:
         val_path = output_dir / "validation.jsonl"
         print(f"  Writing {val_path} ({len(val_ds):,} docs)...")
-        write_jsonl(val_ds, val_path, text_column, format_type, args.keep_columns)
+        write_jsonl(val_ds, val_path, text_column, format_type, args.keep_columns, total=len(val_ds))
         results["validation_jsonl"] = str(val_path)
         results["validation_docs"] = len(val_ds)
     else:
@@ -772,23 +664,10 @@ def main():  # noqa: D103
     print(f"  Export time: {export_time:.1f}s")
 
     # Log sample examples to W&B table
-    if wb_run and len(train_ds) >= 10:
-        n_samples = min(20, len(train_ds))
-        print(f"  Logging {n_samples} sample examples to W&B...")
-        if format_type == "chat":
-            table = wandb.Table(columns=["index", "system", "user", "assistant", "num_turns"])
-            for i in range(n_samples):
-                messages = train_ds[i][text_column]
-                system = next((m["content"] for m in messages if m["role"] == "system"), "")
-                user = next((m["content"] for m in messages if m["role"] == "user"), "")
-                assistant = next((m["content"] for m in messages if m["role"] == "assistant"), "")
-                table.add_data(i, system, user, assistant, len(messages))
-        else:
-            table = wandb.Table(columns=["index", "text_preview"])
-            for i in range(n_samples):
-                text = train_ds[i][text_column]
-                table.add_data(i, text[:500] if isinstance(text, str) else str(text)[:500])
-        wb_run.log({"sample_examples": table})
+    if wb_run and training_docs >= 10:
+        n_samples = min(SAMPLE_EXAMPLES, training_docs)
+        examples = head[:n_samples] if args.streaming else [train_ds[i] for i in range(n_samples)]
+        log_sample_examples(wb_run, examples, text_column, format_type)
 
     # ── Stage 5: PACK ──────────────────────────────────────────────
     pack_time = 0
@@ -887,6 +766,13 @@ def main():  # noqa: D103
         print(f"  dataset_root: {output_dir}")
 
     return 0 if results["status"] == "completed" else 1
+
+
+def main():  # noqa: D103
+    args = parse_args()
+    # A stream opens its files as it is read, which the stages do from the load to the end of the export.
+    with streamed_reads_retried(args.hub_read_attempts, args.hub_read_first_wait_seconds):
+        return run_pipeline(args)
 
 
 if __name__ == "__main__":

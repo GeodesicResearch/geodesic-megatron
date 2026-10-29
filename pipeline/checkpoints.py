@@ -16,9 +16,11 @@
 Catalogue:
     LATEST_FILE: the tracker training writes after every rank finishes a save, naming its iteration.
     ITER_DIR: the name of an iteration's save directory, ``iter_`` and seven digits.
+    RUN_CONFIG: the file in each save that records the run's settings.
     CheckpointDirectoryMissing: a checkpoint directory is not on disk.
     iteration_number: the iteration an ``iter_XXXXXXX`` directory holds.
     completed_iterations: the iteration directories whose save has finished.
+    newest_completed_iteration: the iteration dir a model path names, a run dir's newest completed save.
     train_iters: the run length an iteration's run_config.yaml records.
     main: the command line, ``python -m pipeline.checkpoints completed RUN_DIR``.
     resolve_checkpoint_path: the iteration dir to convert, explicit or latest.
@@ -38,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 LATEST_FILE = "latest_checkpointed_iteration.txt"
 ITER_DIR = re.compile(r"^iter_(\d{7})$")
+RUN_CONFIG = "run_config.yaml"
 
 
 class CheckpointDirectoryMissing(FileNotFoundError):
@@ -84,7 +87,7 @@ def completed_iterations(checkpoint_dir: Path) -> list[Path]:
     return [path for iteration, path in sorted(found) if iteration <= latest]
 
 
-def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) -> tuple[Path, int]:
+def resolve_checkpoint_path(megatron_path: str | Path, iteration: int | None = None) -> tuple[Path, int]:
     """Resolve the checkpoint iteration directory.
 
     Args:
@@ -141,7 +144,7 @@ def detect_training_tokenizer(iter_path: Path) -> str | None:
         Training tokenizer HF model ID (e.g. ``geodesic-research/nemotron-
         instruct-tokenizer``), or None if not specified in run_config.yaml.
     """
-    run_config = iter_path / "run_config.yaml"
+    run_config = iter_path / RUN_CONFIG
     if not run_config.exists():
         return None
     with open(run_config) as f:
@@ -154,16 +157,35 @@ def detect_training_tokenizer(iter_path: Path) -> str | None:
 
 def is_peft_checkpoint(iter_path: Path) -> bool:
     """Whether the iteration's ``run_config.yaml`` names a ``peft`` section (an adapter-only checkpoint)."""
-    run_config = iter_path / "run_config.yaml"
+    run_config = iter_path / RUN_CONFIG
     if not run_config.exists():
         return False
     with open(run_config) as f:
         return bool((yaml.safe_load(f) or {}).get("peft"))
 
 
+def newest_completed_iteration(model_path: str) -> str:
+    """``model_path`` when it is an ``iter_XXXXXXX`` dir, else the newest completed save of the run dir it names.
+
+    Unlike ``resolve_checkpoint_path``, which falls back to the largest ``iter_*`` when the tracker names none, a save
+    above the tracker (still being written) is never chosen (``completed_iterations``).
+
+    Raises:
+        CheckpointDirectoryMissing: ``model_path`` does not exist.
+        SystemExit: the run has no completed save.
+    """
+    path = Path(model_path)
+    if ITER_DIR.match(path.name):
+        return model_path
+    completed = completed_iterations(path)
+    if not completed:
+        raise SystemExit(f"{model_path} has no completed save (no tracker, or none of its iter_* dirs is complete)")
+    return str(completed[-1])
+
+
 def train_iters(iter_dir: Path) -> int | None:
     """``train.train_iters`` of ``iter_dir/run_config.yaml``; None without the file or the key."""
-    run_config = iter_dir / "run_config.yaml"
+    run_config = iter_dir / RUN_CONFIG
     if not run_config.exists():
         return None
     value = ((yaml.safe_load(run_config.read_text()) or {}).get("train") or {}).get("train_iters")
