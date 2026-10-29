@@ -16,6 +16,7 @@
 Catalogue:
     CHAT_TEMPLATE_SOURCE_MAP: release id -> the instruct release whose chat template its exports carry.
     IM_END_TOKEN_ID: the id of ``<|im_end|>``, which ends an assistant turn of the chat format.
+    END_OF_TURN_TOKEN_IDS: the ids that end a generated turn, ``</s>`` and ``<|im_end|>``.
     NEMOTRON_H_MODELING_FILES: the remote-code modules of a release.
     NEMOTRON_H_AUTO_MAP: the config.json ``auto_map`` that points transformers at those modules.
     ENABLE_THINKING_ON_LINE, ENABLE_THINKING_OFF_LINE: the chat-template lines that default enable_thinking.
@@ -38,6 +39,7 @@ CHAT_TEMPLATE_SOURCE_MAP = {
 # The base release ships with eos_token_id=2 (`</s>`) only; chat-format SFT trains the model to emit `<|im_end|>` at
 # end-of-turn, so generation must also stop on it.
 IM_END_TOKEN_ID = 11
+END_OF_TURN_TOKEN_IDS = (2, IM_END_TOKEN_ID)
 
 # Generic NemotronH remote-code artifacts (no project specifics) — the custom
 # modeling modules and the auto_map that points HF/vLLM trust_remote_code at them.

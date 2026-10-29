@@ -66,6 +66,17 @@ def test_submit_wrapper_launch(pipeline_launch_shell, case):
     assert_golden_json(GOLDENS / f"{case}.json", pipeline_launch_shell.normalise(run))
 
 
+def test_a_repo_dir_outside_the_checkout_names_both_causes(pipeline_launch_shell, tmp_path):
+    """The wrapper's REPO_DIR guard, the same line as the conversion launcher's."""
+    elsewhere = tmp_path / "tunnel_submit_dir"
+    elsewhere.mkdir()
+    run = pipeline_launch_shell.run(
+        "pipeline_coherence_submit.sbatch", "/ckpt", env={"GEODESIC_REPO_DIR": str(elsewhere)}
+    )
+    assert run["returncode"] == 1 and run["calls"] == []
+    assert f"FATAL: {elsewhere} has no pipeline/sh/common.sh, so REPO_DIR is not this repo's checkout" in run["stderr"]
+
+
 # --- main --------------------------------------------------------------------------------------------------------------
 
 

@@ -24,6 +24,8 @@ Catalogue:
     hf_cache: lookups in the local HuggingFace hub cache.
     hub: publishing a model directory to the HuggingFace Hub.
     nemotron: facts about the Nemotron-H releases and their chat format.
+    megatron_model: a sharded Megatron model built from an HF architecture, and a checkpoint loaded into it.
     export: Megatron checkpoint -> HuggingFace export (pipeline_checkpoint_convert_hf.py).
+    coherence: the generation backends of pipeline_coherence_test.py.
     sh: the shell libraries the launchers source; each file catalogues its functions.
 """

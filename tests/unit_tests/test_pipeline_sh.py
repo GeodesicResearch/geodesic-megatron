@@ -42,6 +42,26 @@ def _bash(shell, script: str, extra_env: dict[str, str] | None = None) -> subpro
     )
 
 
+def _reparse(words: str) -> list[str]:
+    """The words one ``bash -c`` parse of ``words`` yields, as the container shell parses a payload."""
+    result = subprocess.run(["bash", "-c", f"printf '%s\\0' {words}"], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.split("\0")[:-1]
+
+
+@pytest.mark.parametrize("args", [[], ["a"], ["a b", "", "$HOME", "it's", "*", "$(echo no)"]])
+def test_quote_args_survives_one_reparse_word_for_word(args):
+    result = subprocess.run(
+        ["bash", "-c", f'source "{LIBS / "common.sh"}"; quote_args "$@"', "harness", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (result.stdout == "") == (not args)
+    assert _reparse(f"x{result.stdout}") == ["x", *args]
+
+
 @pytest.mark.parametrize(
     "word, arity",
     [("--exclude", "2"), ("--qos", "2"), ("--exclude=nid1", "1"), ("--nodes=2", "1"), ("--hf-model", "0"), ("x", "0")],

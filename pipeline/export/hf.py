@@ -26,6 +26,7 @@ import torch
 
 from pipeline.checkpoints import is_peft_checkpoint
 from pipeline.export.peft_merge import export_merged_peft
+from pipeline.megatron_model import load_sharded, sharded_bridge
 
 
 def is_multi_gpu() -> bool:
@@ -73,9 +74,7 @@ def convert_multi_gpu(
     An adapter-only PEFT checkpoint (``is_peft_checkpoint``) is loaded with its base (``load_peft_model``) and exported
     with its adapters merged (``export_merged_peft``).
     """
-    from megatron.bridge import AutoBridge
     from megatron.bridge.models.decorators import torchrun_main
-    from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
     from megatron.bridge.training.model_load_save import load_peft_model
     from megatron.bridge.utils.common_utils import print_rank_0
 
@@ -84,30 +83,16 @@ def convert_multi_gpu(
         print_rank_0(f"Exporting: {iter_path} -> {hf_path}")
         print_rank_0(f"  TP={tp}  PP={pp}  EP={ep}  ETP={etp}  dtype={torch_dtype}")
 
-        bridge = AutoBridge.from_hf_pretrained(
+        bridge, mp_overrides = sharded_bridge(
             hf_model_id,
-            trust_remote_code=is_safe_repo(trust_remote_code=False, hf_path=hf_model_id),
-            torch_dtype=torch_dtype,
+            tp,
+            pp,
+            ep,
+            etp,
+            pipeline_dtype=torch_dtype,
+            trust_remote_code=False,
+            params_dtype=torch_dtype,
         )
-
-        model_provider = bridge.to_megatron_provider(load_weights=False)
-        model_provider.tensor_model_parallel_size = tp
-        model_provider.pipeline_model_parallel_size = pp
-        model_provider.expert_model_parallel_size = ep
-        model_provider.expert_tensor_parallel_size = etp
-        model_provider.pipeline_dtype = torch_dtype
-        model_provider.params_dtype = torch_dtype
-        model_provider.finalize()
-        model_provider.initialize_model_parallel(seed=0)
-
-        mp_overrides = {
-            "tensor_model_parallel_size": tp,
-            "pipeline_model_parallel_size": pp,
-            "expert_model_parallel_size": ep,
-            "expert_tensor_parallel_size": etp,
-            "pipeline_dtype": torch_dtype,
-            "params_dtype": torch_dtype,
-        }
 
         if is_peft_checkpoint(iter_path):
             print_rank_0(f"Loading PEFT checkpoint and its base: {iter_path}")
@@ -116,12 +101,7 @@ def convert_multi_gpu(
             export_merged_peft(bridge, megatron_model, hf_path, strict=strict, show_progress=show_progress)
         else:
             print_rank_0(f"Loading Megatron checkpoint from: {iter_path}")
-            megatron_model = bridge.load_megatron_model(
-                str(iter_path),
-                mp_overrides=mp_overrides,
-                wrap_with_ddp=False,
-            )
-            megatron_model = [m.cuda() for m in megatron_model]
+            megatron_model = load_sharded(bridge, str(iter_path), mp_overrides)
 
             print_rank_0(f"Saving HuggingFace model to: {hf_path}")
             bridge.save_hf_pretrained(

@@ -12,6 +12,7 @@
 #                      container environment, or exit 1
 #   container_payload  a pipeline_env_exec.sh command string that runs a command
 #                      in REPO_DIR after pipeline_env_activate.sh
+#   quote_args         the arguments as one string of %q-quoted words
 #   slurm_flag_arity   the words a SLURM flag that isambard_sbatch may append
 #                      to a script's argv takes, or 0 for any other word
 # ==============================================================================
@@ -34,6 +35,12 @@ source_env_config() {
 # (pipeline_env_activate.sh) from REPO_DIR; a failed activation ends it.
 container_payload() {
     printf 'cd %s; source pipeline_env_activate.sh || exit 1; %s' "$REPO_DIR" "$1"
+}
+
+# quote_args [ARG...]: " 'a b' c" for (a b, c), each word %q-quoted and preceded
+# by a space; empty for no arguments (a lone %q of nothing would be '').
+quote_args() {
+    [ "$#" -eq 0 ] || printf ' %q' "$@"
 }
 
 # slurm_flag_arity WORD: 2 for a SLURM flag given as two words (--exclude X), 1
