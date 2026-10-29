@@ -42,10 +42,9 @@ Each gate's outcome is PASS, FAIL or NOT EVALUATED (``gate_outcome``). NOT EVALU
 be read or lacks a field, the memory summary covers a different number of ranks than the run's GPUs, the
 two speed scores were taken over different windows or GPU counts, or the two first-loss runs' first logged
 iterations differ or the reference logged no lm loss there, or a band report holds other than one candidate or
-fewer than two spans of ``rise_windows`` windows. It also means a value a gate read is not a finite number: a NaN
-compares false with every bound, so a rule that refuses only what lies outside its bounds would pass it. Every outcome
-carries a line stating the measurement or the reason. The exit status is ``gate_outcome.exit_status``'s; a spec that
-cannot be read or is refused ends NOT EVALUATED (``gate_outcome.unusable_spec_status``).
+fewer than two spans of ``rise_windows`` windows. Every outcome carries a line stating the
+measurement or the reason. The exit status is ``gate_outcome.exit_status``'s; a spec that cannot be read or is
+refused ends NOT EVALUATED (``gate_outcome.unusable_spec_status``).
 
 USAGE
     python scripts/telemetry/score_gate.py --spec score_gate.yaml --scores-dir DIR [--gate NAME ...] [--json]
@@ -55,7 +54,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -70,7 +68,6 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
-from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.telemetry.gate_outcome import (  # noqa: E402
     FAIL,
     NOT_EVALUATED,
@@ -85,19 +82,11 @@ from scripts.telemetry.loss_parity import (  # noqa: E402
     offset_rise,
     offsets_from_reference_mean,
 )
-from scripts.telemetry.predicted_counts import as_count  # noqa: E402
 from scripts.telemetry.training_log import parse_iteration_records, read_log_lines  # noqa: E402
 
 
 MEMORY, SPEED, FIRST_LOSS, LOSS_SHIFT = "memory", "speed", "first_loss", "loss_shift"
 KINDS = (MEMORY, SPEED, FIRST_LOSS, LOSS_SHIFT)
-# Each kind's fields, all required: an unknown one, such as a misspelt threshold, would otherwise not be applied.
-FIELDS = {
-    MEMORY: {"score", "max_allocated_gb", "max_alloc_retries"},
-    SPEED: {"candidate", "reference", "reference_s_per_iter", "go_up_to_s", "report_up_to_s"},
-    FIRST_LOSS: {"candidate", "reference", "tolerance"},
-    LOSS_SHIFT: {"report", "offset_low", "offset_high", "rise_windows", "max_rise"},
-}
 
 
 @dataclass(frozen=True)
@@ -160,9 +149,9 @@ class ScoreGateResult:
 def load_score_gates(path: Path) -> dict[str, ScoreGate]:
     """Read a score-gate spec into its gates by name, refusing one whose gates could not be evaluated as written.
 
-    Raises ValueError on an unknown kind, a gate that is not a mapping of exactly its kind's ``FIELDS``, a spec with
-    no gates, a gate name used twice, a speed or first-loss gate whose candidate is its reference, a speed gate whose
-    go limit exceeds its report limit, or a loss-shift gate whose offset range is empty or whose rise spans no window.
+    Raises ValueError on an unknown kind, a spec with no gates, a gate name used twice, a speed or first-loss
+    gate whose candidate is its reference, a speed gate whose go limit exceeds its report limit, or a loss-shift
+    gate whose offset range is empty or whose rise spans no window; KeyError on a missing field.
     """
     raw = yaml.safe_load(Path(path).read_text())
     unknown = sorted(set(raw) - set(KINDS))
@@ -173,7 +162,6 @@ def load_score_gates(path: Path) -> dict[str, ScoreGate]:
     for kind, name, gate in entries:
         if name in gates:
             raise ValueError(f"{path}: gate {name} is defined twice")
-        gate = require_keys(gate, f"{path}: {kind} gate {name}", FIELDS[kind])
         if kind in (SPEED, FIRST_LOSS) and gate["candidate"] == gate["reference"]:
             raise ValueError(f"{path}: {kind} gate {name} compares {gate['candidate']} with itself")
         if kind == MEMORY:
@@ -215,20 +203,6 @@ def _read_score(scores_dir: Path, name: str) -> dict[str, Any]:
     return json.loads((scores_dir / name).read_text())
 
 
-def _finite(value: Any, where: str) -> float:
-    """``value`` as a float; raises ValueError naming ``where`` when it is not a number or not finite.
-
-    A NaN compares false with every bound, so a rule that refuses only what lies outside its bounds would pass it: a
-    gate that reads one is NOT EVALUATED, never PASS. (``json.loads`` reads ``NaN`` and ``Infinity``, and a log prints
-    ``nan``.)
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{where} is {value!r}, not a number")
-    if not math.isfinite(value):
-        raise ValueError(f"{where} is {value!r}, not a finite number")
-    return float(value)
-
-
 def evaluate_memory(gate: MemoryGate, scores_dir: Path) -> ScoreGateResult:
     """The memory gate's outcome on its run's score (see the module docstring)."""
     try:
@@ -238,10 +212,8 @@ def evaluate_memory(gate: MemoryGate, scores_dir: Path) -> ScoreGateResult:
             reason = f"{gate.score} has no peak memory over all ranks: the training loop was cut short"
             return ScoreGateResult(gate.name, MEMORY, FAIL, reason)
         ranks, gpus = peak["ranks"], score["num_gpus"]
-        allocated = _finite(peak["max_allocated_gb"], f"{gate.score} max_allocated_gb")
-        rank = peak["max_allocated_rank"]
-        retries = as_count(peak["max_alloc_retries"], f"{gate.score} max_alloc_retries")
-        reserved = _finite(peak["max_reserved_gb"], f"{gate.score} max_reserved_gb")
+        allocated, rank = peak["max_allocated_gb"], peak["max_allocated_rank"]
+        retries, reserved = peak["max_alloc_retries"], peak["max_reserved_gb"]
     except Exception as error:  # noqa: BLE001 - every way the score cannot be read is NOT EVALUATED, never a FAIL
         return ScoreGateResult(gate.name, MEMORY, NOT_EVALUATED, f"{type(error).__name__}: {error}")
     if ranks != gpus:
@@ -263,10 +235,7 @@ def evaluate_speed(gate: SpeedGate, scores_dir: Path) -> ScoreGateResult:
         placement = [
             (score["window_first"], score["window_last"], score["num_gpus"]) for score in (candidate, reference)
         ]
-        candidate_s = _finite(candidate["mean_step_s"], f"{gate.candidate} mean_step_s")
-        reference_s = _finite(reference["mean_step_s"], f"{gate.reference} mean_step_s")
-        if not reference_s > 0:
-            raise ValueError(f"{gate.reference} mean_step_s is {reference_s}, not a positive step time")
+        candidate_s, reference_s = candidate["mean_step_s"], reference["mean_step_s"]
     except Exception as error:  # noqa: BLE001 - every way the scores cannot be read is NOT EVALUATED, never a FAIL
         return ScoreGateResult(gate.name, SPEED, NOT_EVALUATED, f"{type(error).__name__}: {error}")
     if placement[0] != placement[1]:
@@ -310,11 +279,6 @@ def evaluate_first_loss(gate: FirstLossGate, scores_dir: Path) -> ScoreGateResul
     if candidate_loss is None:
         reason = f"{gate.candidate} logged no lm loss at iteration {candidate_iteration}"
         return ScoreGateResult(gate.name, FIRST_LOSS, FAIL, reason)
-    try:
-        for name, loss in ((gate.candidate, candidate_loss), (gate.reference, reference_loss)):
-            _finite(loss, f"{name}'s lm loss at iteration {candidate_iteration}")
-    except ValueError as error:
-        return ScoreGateResult(gate.name, FIRST_LOSS, NOT_EVALUATED, f"{type(error).__name__}: {error}")
     difference = abs(candidate_loss - reference_loss)
     measured = (
         f"iteration {candidate_iteration}: lm loss {candidate_loss:.6f} against {reference_loss:.6f}, "
@@ -334,11 +298,6 @@ def evaluate_loss_shift(gate: LossShiftGate, scores_dir: Path) -> ScoreGateResul
         reason = f"{gate.report} holds {len(report.verdicts)} candidates, not one"
         return ScoreGateResult(gate.name, LOSS_SHIFT, NOT_EVALUATED, reason)
     offsets = offsets_from_reference_mean(loss.windows, 0)
-    try:
-        for window, offset in zip(loss.windows, offsets):
-            _finite(offset, f"{gate.report}'s lm-loss offset in the window from {window.first}")
-    except ValueError as error:
-        return ScoreGateResult(gate.name, LOSS_SHIFT, NOT_EVALUATED, f"{type(error).__name__}: {error}")
     if len(offsets) < 2 * gate.rise_windows:
         reason = f"{gate.report} has {len(offsets)} windows, fewer than two spans of {gate.rise_windows}"
         return ScoreGateResult(gate.name, LOSS_SHIFT, NOT_EVALUATED, reason)

@@ -13,15 +13,14 @@
 # run identity. train_iters stays v4's 5976 whatever the corpus's pack count, as v4 kept v2's.
 #
 # --- LAUNCH ---
-# Not launched yet (configs/metagaming_filtering/README.md, "Clueless-Norm SFT"): it starts from stage 2's final
-# checkpoint once its corpus is built and verified. It launches on exactly 64 nodes (Kyle, 2026-10-16; DP=256 at CP1,
-# launch_width below: a node that fails the NVLink sweep fails the segment at its start), --disable-ft, one segment
-# expected to finish the run (the time limit is the README's), and a second waiting on
-# --dependency=afternotok that starts only if the first fails, resuming from the latest save (checkpoint.load ==
-# checkpoint.save). There is no spare singleton segment: one
-# queued behind a run that already finished would load the final checkpoint and write it again in place. A segment that
-# ends on its own clock (exit_duration_in_mins) exits cleanly, so the next one is then submitted by hand. It launches
-# from a frozen copy of the commit code_identity names, with the .env beside this file as ISAMBARD_ENV_OVERRIDES.
+# From stage 2's final checkpoint (configs/metagaming_filtering/README.md, "Clueless-Norm SFT", records the run), on
+# exactly 64 nodes (Kyle, 2026-10-16; DP=256 at CP1, launch_width below: a node that fails the NVLink sweep fails the
+# segment at its start), --disable-ft: one segment expected to finish the run, and a second on --dependency=afternotok
+# that starts only if the first fails, resuming from the latest save (checkpoint.load == checkpoint.save). There is no
+# spare singleton segment: one queued behind a run that already finished would load the final checkpoint and write it
+# again in place. A segment that ends on its own clock (exit_duration_in_mins) exits cleanly, so the next one is then
+# submitted by hand. It launches from a frozen copy of the commit code_identity names, with the .env beside this file
+# as ISAMBARD_ENV_OVERRIDES.
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer

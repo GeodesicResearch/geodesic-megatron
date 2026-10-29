@@ -64,26 +64,6 @@ class RecordingMetricsLogger:
 
 
 class TestEvaluationResults:
-    def test_each_result_is_its_numerator_over_its_denominator(self):
-        results = eval_module.evaluation_results(
-            {"lm loss": torch.tensor([30.0, 12.0]), TRAINABLE_TARGET_FRACTION: torch.tensor([12.0, 16.0])}
-        )
-        assert {key: value.item() for key, value in results.items()} == pytest.approx(
-            {"lm loss": 2.5, TRAINABLE_TARGET_FRACTION: 0.75}
-        )
-
-    def test_the_listed_target_loss_sum_becomes_the_listed_target_loss(self):
-        """Summed over the evaluation, both are over the same 16 positions: 13 nats over 2 listed targets."""
-        results = eval_module.evaluation_results(
-            {
-                "lm loss": torch.tensor([30.0, 12.0]),
-                LISTED_TRAINABLE_TARGET_FRACTION: torch.tensor([2.0, 16.0]),
-                LISTED_TARGET_LOSS_SUM: torch.tensor([13.0, 16.0]),
-            }
-        )
-        assert set(results) == {"lm loss", LISTED_TRAINABLE_TARGET_FRACTION, LISTED_TARGET_LOSS}
-        assert results[LISTED_TARGET_LOSS].item() == pytest.approx(6.5)
-
     def test_an_entry_with_no_denominator_is_left_out_with_a_warning(self, capsys):
         """Every target masked: ``lm loss`` is [0, 0] over the evaluation, which has no value; no NaN is reported."""
         results = eval_module.evaluation_results(

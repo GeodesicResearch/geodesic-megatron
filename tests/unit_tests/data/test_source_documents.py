@@ -118,7 +118,7 @@ def blend(tmp_path):
 
 
 class TestIndexedSources:
-    def test_blend_order_weights_and_labels(self, blend):
+    def test_blend_order_and_weights(self, blend):
         sources, reason = training_data_sources(
             gpt_config(["1", blend[0], "1", blend[1], "2", blend[2]], eod_mask_loss=False), None
         )
@@ -128,12 +128,6 @@ class TestIndexedSources:
         assert [s.kind for s in sources] == ["indexed"] * 3
         assert [s.weight for s in sources] == [0.25, 0.25, 0.5]
         assert [s.training_split for s in sources] == [(0.0, 1.0)] * 3
-        assert [s.label for s in sources] == ["climbmix_full/shard0", "climbmix_full/shard1", "zyda"]
-
-    def test_single_unweighted_source_is_labelled_by_its_directory(self, blend):
-        sources, reason = training_data_sources(gpt_config([blend[1]], eod_mask_loss=False), None)
-        assert reason is None
-        assert [(s.label, s.weight) for s in sources] == [("shard1", None)]
 
     def test_blend_per_split_reads_the_training_blend(self, blend):
         config = GPTDatasetConfig(
@@ -440,11 +434,9 @@ class TestPackedSources:
     def test_a_glob_of_shards_is_one_source(self, tmp_path, packed_glob, tokenizer):
         sources, reason = training_data_sources(packed_config(tmp_path, packed_glob, answer_only_loss=True), tokenizer)
         assert reason is None
-        # The label names the data ("mix"), not the shard glob or the packer's tokenizer directory beneath it.
         assert sources == [
             DataSource(
                 index=0,
-                label="mix",
                 path=packed_glob,
                 kind="packed_parquet",
                 weight=None,
@@ -461,7 +453,7 @@ class TestPackedSources:
         write_packed_parquet([pack_row(SHARD_A[0])], default)
         sources, reason = training_data_sources(config, tokenizer)
         assert reason is None
-        assert [(s.path, s.label) for s in sources] == [(str(default), "dataset")]
+        assert [s.path for s in sources] == [str(default)]
 
     def test_unpacked_fine_tuning_data_has_no_sources(self, tmp_path, tokenizer):
         config = FinetuningDatasetConfig(dataset_root=tmp_path, seq_length=64)

@@ -242,8 +242,9 @@ code_identity:
   history: /home/a5k/kyleobrien.a5k/geodesic-megatron
 
 # The width this stage trains at (scripts/training/launch_width.py): the launcher NVLink-sweeps the allocation
-# and trains on its first 128 healthy nodes, so a segment requests a couple of spares, and the run refuses
-# any other world size or data-parallel size (TP1 · PP1 · CP1, so each of the 512 GPUs is a data-parallel replica).
+# and trains on its first 128 healthy nodes, of the exactly 128 each segment requests (LAUNCH above), and the run
+# refuses any other world size or data-parallel size (TP1 · PP1 · CP1, so each of the 512 GPUs is a data-parallel
+# replica).
 launch_width:
   nodes: 128
   gpus_per_node: 4

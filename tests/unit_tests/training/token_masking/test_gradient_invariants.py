@@ -24,9 +24,9 @@ windows and not others, it changes how the per-microbatch-mean loss weighs micro
 per-token loss's exactly when every microbatch trains the same number of targets, and differs when masking leaves
 them unequal.
 
-Also Kyle's all-masked cases: a microbatch whose every trained target is the marker gives loss 0, count 0 and an
-exactly-zero gradient (never NaN), and a global batch made only of such microbatches stops an enabled run instead of
-logging its 0/0 loss.
+Also Kyle's all-masked case: a microbatch whose every trained target is the marker gives loss 0, count 0 and an
+exactly-zero gradient (never NaN). That a global batch made only of such microbatches stops an enabled run instead of
+logging its 0/0 loss is ``test_monitor.py``'s.
 """
 
 import pytest
@@ -36,7 +36,6 @@ from megatron.core.tensor_parallel import vocab_parallel_cross_entropy
 from megatron.core.transformer import TransformerConfig
 
 from megatron.bridge.training.losses import create_masked_next_token_loss_function
-from megatron.bridge.training.token_masking.config import TokenMaskingError
 from megatron.bridge.training.token_masking.hook import LISTED_TARGET_LOSS, apply_token_masking
 from megatron.bridge.training.token_masking.monitor import TokenMaskingMonitor
 from megatron.bridge.training.train import report_step_losses
@@ -274,30 +273,6 @@ def test_a_fully_masked_microbatch_has_zero_loss_count_and_gradient(
     assert torch.equal(report["lm loss"], torch.tensor([0.0, 0.0]))
     assert torch.equal(logits.grad, torch.zeros_like(logits))
     assert torch.equal(weight.grad, torch.zeros_like(weight))
-
-
-def test_a_global_batch_of_fully_masked_microbatches_stops_an_enabled_run(decisions, head, gloo_group_of_one):
-    """Each microbatch's gradient is 0, but the step would still run the optimizer; the run raises, logging no NaN."""
-    hidden, weight, logits = head
-    config = _schedule_config(calculate_per_token_loss=False)
-    only_markers = MARKER_LABELS.reshape(LABELS.shape).float()
-    reports = []
-    for _ in range(2):
-        losses = _per_token_losses(logits, LABELS, gloo_group_of_one)
-        loss, _, report, _ = _scheduled_loss(
-            losses, LABELS, only_markers, decisions["masking"], config, num_microbatches=2
-        )
-        loss.backward(retain_graph=True)
-        reports.append(report)
-
-    assert torch.equal(weight.grad, torch.zeros_like(weight))
-    with pytest.raises(TokenMaskingError, match="global batch with no trainable target"):
-        report_step_losses(
-            reports,
-            gloo_group_of_one,
-            TokenMaskingMonitor(decisions["masking"], None, gloo_group_of_one, log_counts=False),
-            1,
-        )
 
 
 # The toy for (d): a bigram model whose next token after TRIGGER is always the marker, so a model trained on the marker

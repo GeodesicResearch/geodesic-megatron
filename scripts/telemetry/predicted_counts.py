@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -84,19 +84,17 @@ def read_predictions(directory: Path) -> tuple[dict[str, Any], dict[int, dict[st
 
 
 def differing_counts(
-    logged: Mapping[int, TokenMaskingCountsRecord],
-    predicted: Mapping[int, Mapping[str, int]],
-    iterations: Iterable[int],
+    logged: Mapping[int, TokenMaskingCountsRecord], predicted: Mapping[int, Mapping[str, int]]
 ) -> list[tuple[int, str, int, int]]:
-    """(iteration, field, logged, predicted) for every count of ``iterations`` that is not the predicted one, in
-    iteration order and, within an iteration, in the order of ``TOKEN_MASKING_COUNT_FIELDS``.
+    """(iteration, field, logged, predicted) for every logged count that is not the predicted one, in iteration order
+    and, within an iteration, in the order of ``TOKEN_MASKING_COUNT_FIELDS``.
 
-    An iteration that is not both logged and predicted contributes nothing: what its absence means is the caller's.
+    Every iteration of ``logged`` must be predicted: the caller keeps only those (``run_watch``'s
+    ``_comparable_counts``), since what an absent line or an absent prediction means is the caller's.
     """
     return [
         (iteration, field, getattr(logged[iteration], field), predicted[iteration][field])
-        for iteration in iterations
-        if iteration in logged and iteration in predicted
+        for iteration in sorted(logged)
         for field in TOKEN_MASKING_COUNT_FIELDS
         if getattr(logged[iteration], field) != predicted[iteration][field]
     ]

@@ -806,7 +806,7 @@ def megatron_fp32_logits(model, input_ids: list[int]):
     own forward feeds it, projected with the layer's weight (and bias) cast to fp32, ``[positions, vocabulary]``.
 
     Raises RuntimeError when the output layer was not called once on every position, or when the projection's last row
-    disagrees with the model's own logits beyond bf16 rounding (``hf_model_outputs.HEAD_PROJECTION_TOLERANCE``).
+    disagrees with the model's own logits beyond bf16 rounding (``hf_model_outputs.fp32_projection``).
     """
     import torch
     from megatron.core.utils import unwrap_model
@@ -827,18 +827,7 @@ def megatron_fp32_logits(model, input_ids: list[int]):
             f"the output layer was called {len(fed)} times, on {[tuple(x.shape) for x in fed]}, not once on the "
             f"{len(input_ids)} positions"
         )
-    bias = getattr(head, "bias", None)
-    with torch.no_grad():
-        logits = torch.nn.functional.linear(
-            fed[0][:, 0].float(), head.weight.float(), None if bias is None else bias.float()
-        )
-    if not torch.allclose(logits[-1], native, **hf_model_outputs.HEAD_PROJECTION_TOLERANCE):
-        worst = float((logits[-1] - native).abs().max())
-        raise RuntimeError(
-            f"the fp32 projection of the output layer's input differs from the model's own logits by up to {worst:.4g}, "
-            f"beyond bf16 rounding ({hf_model_outputs.HEAD_PROJECTION_TOLERANCE})"
-        )
-    return logits
+    return hf_model_outputs.fp32_projection(head, fed[0][:, 0], native, "output layer")
 
 
 def load_reference_model(spec: ExportCheckSpec, load_path: Path):
@@ -935,10 +924,8 @@ def greedy_continuation(model, input_ids: list[int], spec: ExportCheckSpec, rend
     can hide an H. Also records H's log-probability at the first step, the slot where the document went on with H."""
     import torch
 
-    config = hf_model_outputs.stop_aware_generation_config(
-        spec.greedy.max_new_tokens, spec.greedy.stop_token_ids, do_sample=False, num_return_sequences=1
-    )
-    output, prompt_length = hf_model_outputs.generate_from_unmodified_distribution(model, input_ids, config, 1.0)
+    config = hf_model_outputs.stop_aware_generation_config(spec.greedy.max_new_tokens, spec.greedy.stop_token_ids)
+    output, prompt_length = hf_model_outputs.generate_from_unmodified_distribution(model, input_ids, config)
     generated, stopped = hf_model_outputs.until_stop(
         output.sequences[0, prompt_length:].tolist(), spec.greedy.stop_token_ids
     )
@@ -984,7 +971,7 @@ def score_hf(spec: ExportCheckSpec, export: Path, out_dir: Path, repeats: int) -
     loaded = time.monotonic()
 
     def window_logits(ids: list[int]):
-        return hf_model_outputs.fp32_head_outputs(model, ids, last_only=False)[1]
+        return hf_model_outputs.fp32_head_outputs(model, ids)
 
     passes = [score_documents(window_logits, spec, documents) for _ in range(repeats)]
     scored = time.monotonic()

@@ -10,16 +10,10 @@ monitor sees the reduced values. The decisions are real ``ResolvedTokenMasking``
 resolution, built over real tokenizers. W&B is a network service, so its run is a recording stand-in. A two-stage
 pipeline on two gloo ranks checks that a failed check stops every stage together, and a context-parallel group of two
 gloo ranks, each holding the share Megatron's CP slicer gives it, records the counts a single rank records.
-
-Also covered: the shared one-line-per-node banner (``log_node_banner``) and W&B summary writer
-(``record_wandb_summary``) the token-masking setup uses, and the parallelism summary that now goes through the
-latter.
 """
 
 import logging
 import math
-import shlex
-import socket
 
 import pytest
 import torch
@@ -44,14 +38,10 @@ from megatron.bridge.training.token_masking.monitor import (
     VERIFIED_SUMMARY_KEY,
     TokenMaskingMonitor,
 )
-from megatron.bridge.training.token_masking.resolution import ResolvedTokenMasking, banner_fields
+from megatron.bridge.training.token_masking.resolution import ResolvedTokenMasking
 from megatron.bridge.training.train import report_step_losses
-from megatron.bridge.training.utils.log_utils import log_node_banner
-from megatron.bridge.training.utils.parallelism_utils import record_parallelism_to_wandb
-from megatron.bridge.training.utils.wandb_utils import record_wandb_summary
 from tests.unit_tests.gloo_ranks import run_on_gloo_ranks
 from tests.unit_tests.token_masking_fixtures import (
-    MARKER,
     MARKER_ID,
     build_tiny_hf_tokenizer,
     hf_tokenizer_config,
@@ -614,60 +604,3 @@ class TestMonitorWandbSummary:
         assert monitor.first_masked_iteration == 1
         with pytest.raises(TokenMaskingError, match="still carry loss"):
             run_iteration(monitor, gloo_group_of_one, 2, MASKED_BATCH, loss_ignores_token_masking=True)
-
-
-class TestRecordWandbSummary:
-    def test_no_run_is_a_no_op(self):
-        record_wandb_summary(None, {"token_masking/enabled": True})
-
-    def test_values_are_merged_into_the_summary(self):
-        run = RecordingRun()
-        record_wandb_summary(run, {"token_masking/token_ids": [MARKER_ID], "token_masking/enabled": True})
-        record_wandb_summary(run, {"token_masking/enabled": False})
-        assert dict(run.summary) == {"token_masking/token_ids": [MARKER_ID], "token_masking/enabled": False}
-
-    def test_parallelism_dims_are_recorded_under_their_namespace(self):
-        dims = {
-            "world_size": 8,
-            "data_parallel_size": 2,
-            "tensor_model_parallel_size": 1,
-            "pipeline_model_parallel_size": 1,
-            "context_parallel_size": 1,
-            "expert_model_parallel_size": 4,
-        }
-        run = RecordingRun()
-        record_parallelism_to_wandb(run, dims)
-        record_parallelism_to_wandb(None, dims)
-        assert dict(run.summary) == {f"parallelism/{name}": size for name, size in dims.items()}
-
-
-class TestLogNodeBanner:
-    LOGGER = "tests.token_masking.banner"
-
-    def _banner(self, caplog, fields, local_rank=0) -> list[logging.LogRecord]:
-        with caplog.at_level(logging.INFO, logger=self.LOGGER):
-            log_node_banner(logging.getLogger(self.LOGGER), "token-masking", fields, rank=12, local_rank=local_rank)
-        return [record for record in caplog.records if record.name == self.LOGGER]
-
-    def test_one_info_line_with_shell_quoted_values(self, caplog):
-        fields = [("enabled", "true"), ("tokens", '["<marker>"]'), ("tokenizer", "/a dir/tok"), ("empty", "")]
-        (record,) = self._banner(caplog, fields)
-        assert record.levelno == logging.INFO
-        assert record.getMessage() == (
-            f"[token-masking] rank=12 host={socket.gethostname()} "
-            "enabled=true tokens='[\"<marker>\"]' tokenizer='/a dir/tok' empty=''"
-        )
-
-    def test_a_real_decisions_banner_splits_back_into_its_fields(self, caplog, decisions):
-        fields = banner_fields(decisions["masking_hf"], None)
-        (record,) = self._banner(caplog, fields)
-        words = shlex.split(record.getMessage().removeprefix("[token-masking] "))
-        assert dict(word.split("=", 1) for word in words) == {
-            "rank": "12",
-            "host": socket.gethostname(),
-            **dict(fields),
-        }
-        assert dict(fields)["tokens"] == f'["{MARKER}"]'
-
-    def test_only_the_first_process_of_a_node_logs(self, caplog):
-        assert self._banner(caplog, [("enabled", "true")], local_rank=1) == []

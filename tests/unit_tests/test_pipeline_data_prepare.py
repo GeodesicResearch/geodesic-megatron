@@ -88,22 +88,24 @@ class TestFormatRecord:
 
 
 class TestDecodeToken:
-    @staticmethod
-    def _decoder(decode_map):
-        return lambda ids: decode_map[int(ids[0])]
+    def _make_tok(self, decode_map):
+        tok = MagicMock()
+        tok.decode = lambda ids, skip_special_tokens=False: decode_map[int(ids[0])]
+        return tok
 
     def test_escapes_newline_tab_carriage_return(self, pipe_module):
-        decode = self._decoder({1: "\n", 2: "\t", 3: "\r"})
-        assert pipe_module._decode_token(decode, 1) == "\\n"
-        assert pipe_module._decode_token(decode, 2) == "\\t"
-        assert pipe_module._decode_token(decode, 3) == "\\r"
+        tok = self._make_tok({1: "\n", 2: "\t", 3: "\r"})
+        assert pipe_module._decode_token(tok, 1) == "\\n"
+        assert pipe_module._decode_token(tok, 2) == "\\t"
+        assert pipe_module._decode_token(tok, 3) == "\\r"
 
     def test_passes_through_normal_text(self, pipe_module):
-        assert pipe_module._decode_token(self._decoder({42: "hello"}), 42) == "hello"
+        tok = self._make_tok({42: "hello"})
+        assert pipe_module._decode_token(tok, 42) == "hello"
 
     def test_escapes_mixed_content(self, pipe_module):
-        decode = self._decoder({99: "line1\n\tindented"})
-        assert pipe_module._decode_token(decode, 99) == "line1\\n\\tindented"
+        tok = self._make_tok({99: "line1\n\tindented"})
+        assert pipe_module._decode_token(tok, 99) == "line1\\n\\tindented"
 
 
 # ── verify_packed_loss_mask ─────────────────────────────────────────────────

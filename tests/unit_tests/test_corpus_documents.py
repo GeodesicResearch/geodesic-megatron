@@ -118,10 +118,20 @@ def read(prefix: Path):
 class TestReadIndex:
     def test_a_corpus_reads_as_its_documents(self, tmp_path):
         build_tokenized_corpus(tmp_path, DOCUMENTS)
-        index = read(tmp_path / corpora_table.TOKENIZED_PREFIX)
+        prefix = tmp_path / corpora_table.TOKENIZED_PREFIX
+        index = read(prefix)
         assert index.sizes.tolist() == [5, 3, 5, 0, 4]
         assert index.starts.tolist() == [0, 5, 8, 13, 13]
         assert (index.docs, index.sequences, index.tokens) == (5, 4, 17)
+        tokens = corpus_documents.token_memmap(Path(f"{prefix}.bin"))
+        assert tokens.dtype == corpus_documents.TOKEN_DTYPE
+        assert tokens.tolist() == [token for document in DOCUMENTS for token in document]
+
+    def test_an_empty_bin_maps_to_no_ids(self, tmp_path):
+        empty = tmp_path / "empty.bin"
+        empty.write_bytes(b"")
+        tokens = corpus_documents.token_memmap(empty)
+        assert tokens.dtype == corpus_documents.TOKEN_DTYPE and len(tokens) == 0
 
     def test_an_empty_document_is_no_sequence(self, tmp_path):
         """What `preprocess_data.py` writes for an empty text: the document boundary repeats, and no

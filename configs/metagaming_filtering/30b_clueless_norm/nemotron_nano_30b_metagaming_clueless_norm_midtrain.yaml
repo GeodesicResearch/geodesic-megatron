@@ -27,11 +27,10 @@
 # are the whole difference.
 #
 # --- LAUNCH ---
-# Queued behind stage 1 (configs/metagaming_filtering/README.md, "Clueless-Norm midtraining"): it starts from stage 1's final checkpoint once that save is complete, every stage-1 counts line
-# equals its prediction, and the save passes the save-record check (checks/c2_save_record_pretrain.yaml). It trains on
-# 128 nodes (DP=256 at CP2) of those each segment
-# requests (launch_width below), with checkpoint.load == checkpoint.save and --disable-ft, from a frozen copy of the
-# commit code_identity names, with the .env beside this file as ISAMBARD_ENV_OVERRIDES.
+# From stage 1's final checkpoint (configs/metagaming_filtering/README.md, "Clueless-Norm midtraining", records the
+# run), with checkpoint.load == checkpoint.save and --disable-ft, from a frozen copy of the commit code_identity names,
+# with the .env beside this file as ISAMBARD_ENV_OVERRIDES. Each segment requests exactly the 128 nodes it trains on
+# (DP=256 at CP2, launch_width below), so a node that fails the NVLink sweep fails its segment at the start.
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
@@ -222,8 +221,9 @@ code_identity:
   history: /home/a5k/kyleobrien.a5k/geodesic-megatron
 
 # The width this stage trains at (scripts/training/launch_width.py): the launcher NVLink-sweeps the allocation
-# and trains on its first 128 healthy nodes, so a segment requests a couple of spares, and the run refuses
-# any other world size or data-parallel size (TP1 · PP1 · CP2, so the 512 GPUs hold 256 data-parallel replicas).
+# and trains on its first 128 healthy nodes, of the exactly 128 each segment requests (LAUNCH above), and the run
+# refuses any other world size or data-parallel size (TP1 · PP1 · CP2, so the 512 GPUs hold 256 data-parallel
+# replicas).
 launch_width:
   nodes: 128
   gpus_per_node: 4

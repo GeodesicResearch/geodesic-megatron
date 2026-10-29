@@ -297,7 +297,7 @@ logger:
     max_scan_seconds: 60
 ```
 
-Each source's counts are logged as a `[data-samples] source <N> <label>: ...` line (documents and tokens scanned, why
+Each source's counts are logged as a `[data-samples] source <N> <path>: ...` line (documents and tokens scanned, why
 the scan stopped, listed and trainable targets, split forms, out-of-vocabulary tokens). The scan reads only
 `.bin/.idx` blends and packed parquet. For any other training data (a mock or custom dataset, FIM data, unpacked
 fine-tuning JSONL, legacy `.npy` packs, or a packed parquet set the dataset builder has not written yet) a run with
@@ -305,60 +305,13 @@ masking enabled stops at setup, and a run that only measures ids logs `[data-sam
 scanned for the ids ...` at ERROR level and trains on. A scan that fails with an exception stops the run on every
 rank.
 
-### Per-Iteration Token-Masking Metrics
+### Token-Masking Metrics
 
-A run that masks or measures token ids adds these entries to the loss function's reporting dict, each over the whole
-global batch (summed over microbatches and all-reduced over the data- and context-parallel ranks):
-
-| Metric | Meaning |
-|---|---|
-| `token_masking/listed_target_fraction` | Fraction of target positions whose label is a measured id |
-| `token_masking/listed_trainable_target_fraction` | Fraction of target positions whose label is a measured id and that the dataset trains, before token masking |
-| `token_masking/masked_target_fraction` | Fraction that carried loss and were removed by token masking (0 unless masking is enabled) |
-| `token_masking/trained_listed_target_fraction` | Fraction whose label is a measured id and that still carry loss: 0 when masking; in a control arm, what masking would remove |
-| `token_masking/trainable_target_fraction` | Fraction that carry loss after masking |
-| `token_masking/listed_target_loss` | Mean cross-entropy at the targets counted by `listed_trainable_target_fraction`, computed before masking; a loss, not a fraction |
-
-Because they travel with the losses, they reach TensorBoard, W&B, MLFlow and Comet ML at the same iteration as
-`lm loss`, are gated like the losses by `tensorboard_log_interval` (which gates the W&B metrics too), and appear on
-the console summary line, averaged over `log_interval`. `token_masking/listed_target_loss` is reported only on
-iterations whose global batch holds a target it measures, never as 0/0: W&B receives it at exactly those iterations,
-and its console value averages over the iterations of the interval that reported it (an interval with none prints
-nothing for it). Its per-microbatch sum, `token_masking/listed_target_loss_sum`, never reaches the logs.
-
-The fractions' numerators and their denominator are int64 counts, so their sums over a global batch stay exact. The
-token-masking monitor prints them on the last rank once per iteration, as `[token-masking-counts] iteration=<i>
-listed=<n> listed_trainable=<n> masked=<n> trained_listed=<n> trainable=<n> positions=<n>`, and logs them to W&B at
-every iteration as `token_masking/count/<name>`, whatever `tensorboard_log_interval` says. The monitor's checks
-read these counts, not the fractions.
-
-Validation reports the same entries as `<key> validation`; of the token-masking entries only
-`token_masking/listed_target_loss` gets a perplexity. An evaluation entry whose denominator is 0 (for example
-`lm loss` when every target of the evaluation was masked) is left out with a `WARNING: <key> has no value in this
-evaluation` line rather than reported as NaN, and a NaN loss gets a NaN perplexity. A run that measures no token ids
-reports none of these entries.
-
-### Held-Out Masked Validation
-
-A run whose `token_masking.masked_validation` names a held-out set (`data_path` or `packed_data_path`) evaluates it at
-step 0 of a fresh run and every `masked_validation.interval` iterations, and logs every result under the
-`masked-validation/` prefix: in W&B as `masked-validation/<key> validation` (for example
-`masked-validation/token_masking/listed_target_loss validation`, plus `... validation ppl` for the losses when
-`log_validation_ppl_to_tensorboard` is set), in MLFlow as `val/masked-validation_<key>` (MLFlow names keep only
-their first `/`, so `token_masking/listed_target_loss` becomes `token_masking_listed_target_loss`), and on the
-console as ` validation loss at iteration N | masked-validation/lm loss value: ... |`. These evaluations do not
-advance `consumed_valid_samples` and fire no evaluation callbacks. Setup reads the samples they read once, before the
-model is built, and stops the run when none of their targets of a measured id carries loss. See
-[Held-out masked validation](token-masking.md#held-out-masked-validation).
-
-### Token-Masking Summary Keys
-
-Setup writes the run's token-masking decision to the W&B run summary, one runs-table column per key:
-`token_masking/enabled`, `token_masking/token_ids` (the masked ids), `token_masking/measured_token_ids`,
-`token_masking/tokens` (the measured ids' strings), `token_masking/tokenizer` and `token_masking/forward_step`. For a
-run with masking enabled, `token_masking/verified` is false at setup and turns true at the run segment's first
-iteration that masks a target, which `token_masking/first_masked_iteration` records. None of these names is also a
-per-iteration metric.
+The per-iteration `token_masking/*` entries travel with the losses: they reach TensorBoard, W&B, MLFlow and Comet ML
+at the same iteration as `lm loss`, gated like the losses by `tensorboard_log_interval`. Their exact counts,
+`token_masking/count/*`, reach W&B every iteration whatever that interval says. Held-out masked-validation results go
+under `masked-validation/` (in MLFlow, `val/masked-validation_<key>`). What each entry and summary key means, and how
+to check a run with them: [Verify a run](token-masking.md#verify-a-run).
 
 ## Tensor Inspection
 

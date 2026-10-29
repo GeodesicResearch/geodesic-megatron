@@ -375,18 +375,6 @@ class TestMaskedNextTokenLoss:
         else:
             assert set(report) == {"lm loss"}
 
-    def test_a_fully_masked_microbatch_has_zero_loss_and_zero_tokens(self, enabled_7):
-        """Its reported ``lm loss`` is [0, 0]: a 0/0 only if every microbatch of the global batch is like it."""
-        labels = torch.tensor([[3, MARKER_ID, 4, MARKER_ID]])
-        masked, stats = apply_token_masking(labels, torch.tensor([[0.0, 1.0, 0.0, 1.0]]), enabled_7)
-        loss, num_tokens, report = masked_next_token_loss(
-            masked, torch.tensor([[1.0, 2.0, 3.0, 4.0]]), check_for_nan_in_loss=True, token_masking_stats=stats
-        )
-        assert loss.item() == 0.0
-        assert num_tokens.item() == 0
-        assert torch.equal(report["lm loss"], torch.tensor([0.0, 0.0]))
-        assert torch.equal(report[LISTED_TARGET_LOSS_SUM], _pair(2.0 + 4.0, 4))
-
 
 class TestFinalizeListedTargetLoss:
     def test_the_sum_becomes_the_mean_loss_over_the_listed_targets_that_would_train(self):

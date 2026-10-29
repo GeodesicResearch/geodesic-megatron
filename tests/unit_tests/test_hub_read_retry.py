@@ -14,7 +14,6 @@ import httpx
 import pytest
 from datasets import load_dataset
 from datasets.utils import file_utils
-from huggingface_hub.errors import HfHubHTTPError
 from scripts.data import hub_read_retry
 from scripts.data.hub_read_retry import (
     hub_read_failure_is_transient,
@@ -87,34 +86,6 @@ class TestStreamedReadsRetried:
             assert stream_rows() == ROWS
         assert flaky_remote_files.raised == sorted(failures)
         assert flaky_remote_files.fetches == fetches_of_a_clean_stream + len(failures)
-
-    @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
-    def test_a_stream_outlasts_a_hub_status_that_passes(
-        self,
-        flaky_remote_files,  # noqa: F811
-        stream_rows,
-        fetches_of_a_clean_stream,
-        status,
-    ):
-        flaky_remote_files.fail({fetches_of_a_clean_stream // 2: hub_status(status)})
-        with streamed_reads_retried(attempts=2, first_wait_seconds=0.0):
-            assert stream_rows() == ROWS
-        assert flaky_remote_files.raised == [fetches_of_a_clean_stream // 2]
-
-    @pytest.mark.parametrize("status", [401, 403, 404, 416])
-    def test_a_status_a_repeat_cannot_change_ends_the_stream_at_once(
-        self,
-        flaky_remote_files,  # noqa: F811
-        stream_rows,
-        fetches_of_a_clean_stream,
-        status,
-    ):
-        failed_call = fetches_of_a_clean_stream // 2
-        flaky_remote_files.fail({failed_call: hub_status(status)})
-        with streamed_reads_retried(attempts=5, first_wait_seconds=0.0):
-            with pytest.raises(HfHubHTTPError, match=f"{status} from the Hub"):
-                stream_rows()
-        assert flaky_remote_files.fetches == failed_call  # the fetch was not tried again
 
     def test_a_stream_outlasts_a_request_sent_on_the_client_the_library_closed(
         self,

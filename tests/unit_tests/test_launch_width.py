@@ -141,34 +141,6 @@ class TestRequireLaunchedWidth:
             launch_width.require_launched_width(self.width, "stage.yaml", environ, dp)
 
 
-class TestCommandLine:
-    def test_plan_prints_the_width_and_the_sweep(self, tmp_path, capsys):
-        assert (
-            launch_width.main(["plan", "--config", str(config(tmp_path, {**BLOCK, "nvlink_links_per_gpu": 18}))]) == 0
-        )
-        assert capsys.readouterr().out == "2 4 18\n"
-
-    def test_plan_marks_a_block_without_a_sweep(self, tmp_path, capsys):
-        assert launch_width.main(["plan", "--config", str(config(tmp_path, BLOCK))]) == 0
-        assert capsys.readouterr().out == f"2 4 {launch_width.NO_SWEEP}\n"
-
-    def test_a_config_without_a_block_prints_nothing(self, tmp_path, capsys):
-        assert launch_width.main(["plan", "--config", str(config(tmp_path, None))]) == 0
-        captured = capsys.readouterr()
-        assert captured.out == "" and "carries no launch_width: block" in captured.err
-
-    def test_record_prints_one_json_line(self, tmp_path, capsys):
-        args = ["record", "--config", str(config(tmp_path, BLOCK)), "--nodes", "2", "--nodelist", "a,b"]
-        assert launch_width.main([*args, "--gpus-per-node", "4"]) == 0
-        assert json.loads(capsys.readouterr().out)["nodelist"] == "a,b"
-
-    def test_record_refuses_another_width(self, tmp_path, capsys):
-        args = ["record", "--config", str(config(tmp_path, BLOCK)), "--nodes", "3", "--nodelist", "a,b,c"]
-        assert launch_width.main([*args, "--gpus-per-node", "4"]) == 1
-        captured = capsys.readouterr()
-        assert captured.out == "" and "FATAL [launch-width]: " in captured.err
-
-
 SRUN = """#!/usr/bin/env python3
 # Stands in for srun: runs the step's command once per allocated node, each seeing its own hostname.
 import os, subprocess, sys

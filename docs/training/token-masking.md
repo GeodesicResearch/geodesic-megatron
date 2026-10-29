@@ -415,7 +415,7 @@ rewrite of `GPTDataset` is not modelled.
 
 For every source it counts the measured ids met as targets, how many of those carry loss, the occurrences of a
 measured token's text split into ordinary tokens (what data tokenized by a tokenizer that does not register the marker
-contains instead), and tokens outside the vocabulary. One `[data-samples] source <N> <label>: ...` line per source
+contains instead), and tokens outside the vocabulary. One `[data-samples] source <N> <path>: ...` line per source
 records what it read. Every rank then receives the verdict, so a failure stops all of them together; a scan that fails
 with an exception stops every run that scans.
 
@@ -522,7 +522,8 @@ before any rank starts (`scripts/training/code_identity.py`).
    | `token_masking/listed_target_loss` | mean cross-entropy at the measured ids' trainable targets, before masking; only on iterations that hold one |
 
    The fractions' denominator is every target position, padding included. Regular validation reports the same keys
-   as `<key> validation`, the held-out set as `masked-validation/<key> validation`.
+   as `<key> validation`, the held-out set as `masked-validation/<key> validation`. Only `listed_target_loss` gets a
+   validation perplexity; the per-microbatch `token_masking/listed_target_loss_sum` never reaches the logs.
 4. **The exact counts**, one line per training iteration, printed by the rank that writes the iteration lines:
    ```bash
    grep '\[token-masking-counts\]' /projects/a5k/public/logs/megatron_runs/train-<jobid>.out

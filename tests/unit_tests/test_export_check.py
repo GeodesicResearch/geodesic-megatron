@@ -408,7 +408,7 @@ def test_the_last_rows_of_a_window_predict_exactly_its_ids(selected):
     model = copy_model()
 
     def logits_of(input_ids):
-        return hf_model_outputs.fp32_head_outputs(model, input_ids, last_only=False)[1]
+        return hf_model_outputs.fp32_head_outputs(model, input_ids)
 
     cross_entropy, logp_hidden = export_check.score_window(logits_of, spec, np.array([A, A, B, H, H]))
     copied = np.array([False, True, False, False, True])  # the target equals the input before it

@@ -3,8 +3,6 @@
 Every log is the real excerpt of ``training_log_fixture.py`` or built by editing its lines.
 """
 
-import json
-
 import pytest
 from scripts.telemetry.training_log import (
     TOKEN_MASKING_COUNT_FIELDS,
@@ -17,7 +15,6 @@ from scripts.telemetry.training_log import (
     iteration_of,
     parse_first_iteration_memory,
     parse_iteration_records,
-    parse_node_banners,
     parse_peak_memory_across_ranks,
     parse_token_masking_counts,
     parse_wandb_run_path,
@@ -252,23 +249,10 @@ def test_check_window_accepts_a_window_of_exactly_its_minimum_span():
 # --------------------------------------------------------------------------------------
 
 
-def test_the_token_masking_banner_is_read_per_node():
-    lines = [token_masking_banner(True, [131072], host, rank) for rank, host in enumerate(["nid1", "nid2"])]
-    lines.append(token_masking_banner(False, [131072], "nid3", 8))
-    first, _, control = parse_node_banners(lines, TOKEN_MASKING_TAG)
-    assert (first.rank, first.host) == ("0", "nid1")
-    assert first.fields["enabled"] == "true" and json.loads(first.fields["token_ids"]) == [131072]
-    assert control.fields["enabled"] == "false"
-    assert json.loads(control.fields["token_ids"]) == []
-    assert json.loads(control.fields["measured_token_ids"]) == [131072]
-
-
 def test_banner_hosts_are_the_sorted_hosts_each_once_and_need_no_parsable_field():
     lines = [token_masking_banner(True, [131072], host, rank) for rank, host in enumerate(["nid2", "nid1", "nid2"])]
     lines.append(token_masking_banner(False, [131072], "nid3", 12).replace(" enabled=", " enabled"))
     assert banner_hosts(lines + ["unrelated"], TOKEN_MASKING_TAG) == ("nid1", "nid2", "nid3")
-    with pytest.raises(ValueError, match="not KEY=value"):
-        parse_node_banners(lines, TOKEN_MASKING_TAG)
     assert banner_hosts(lines, "env-overrides") == ()
 
 
@@ -284,6 +268,9 @@ def test_the_counts_the_monitor_prints_are_read_exactly():
     line = token_masking_counts_line(5, **COUNTS)
     assert line.startswith("INFO:megatron.bridge.training.token_masking.monitor:[token-masking-counts] iteration=5 ")
     assert parse_token_masking_counts(["unrelated", line]) == [TokenMaskingCountsRecord(5, **COUNTS)]
+    # Behind another logger's prefix, the same line reads as the same record.
+    other_prefix = "[2026-10-10 03:00:00] " + line.split(":", 2)[2]
+    assert parse_token_masking_counts([other_prefix]) == [TokenMaskingCountsRecord(5, **COUNTS)]
 
 
 def test_the_restated_counts_format_is_the_bridges():
@@ -295,20 +282,6 @@ def test_the_restated_counts_format_is_the_bridges():
 
     assert COUNTS_LOG_TAG == f"[{TOKEN_MASKING_COUNTS_TAG}]"
     assert TOKEN_MASKING_COUNT_FIELDS == tuple(field.name for field in dataclasses.fields(TokenMaskingCounts))
-
-
-def test_counts_are_returned_in_iteration_order_and_a_duplicated_line_is_one_record():
-    """A logging handler that duplicates the line, with another prefix, prints the same counts twice."""
-    second, first = token_masking_counts_line(2, **COUNTS), token_masking_counts_line(1, **COUNTS)
-    duplicate = "[2026-10-10 03:00:00] " + second.split(":", 2)[2]
-    records = parse_token_masking_counts([second, first, duplicate])
-    assert [record.iteration for record in records] == [1, 2]
-
-
-def test_two_different_counts_for_one_iteration_raise():
-    lines = [token_masking_counts_line(3, **COUNTS), token_masking_counts_line(3, **{**COUNTS, "masked": 11})]
-    with pytest.raises(ValueError, match="two different token-masking counts lines for iteration 3"):
-        parse_token_masking_counts(lines)
 
 
 @pytest.mark.parametrize(

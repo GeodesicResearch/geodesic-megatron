@@ -59,19 +59,17 @@ def own_logprobs(model, ids: list[int]) -> torch.Tensor:
         return torch.log_softmax(model(input_ids=torch.tensor([ids])).logits[0].float(), dim=-1)
 
 
-@pytest.mark.parametrize("last_only", [True, False])
-def test_the_logits_are_the_output_heads_input_projected_in_fp32(last_only):
+def test_the_logits_are_the_output_heads_input_projected_in_fp32():
     model = bf16_llama_with_large_logits()
     ids = [EOS_ID, THE, WORLD]
-    hidden, logits = hf_model_outputs.fp32_head_outputs(model, ids, last_only=last_only)
-    assert hidden.dtype == logits.dtype == torch.float32
-    assert logits.shape == (1 if last_only else len(ids), model.lm_head.weight.shape[0])
+    logits = hf_model_outputs.fp32_head_outputs(model, ids)
+    assert logits.dtype == torch.float32
+    assert logits.shape == (len(ids), model.lm_head.weight.shape[0])
     fp32, rounded = fp32_head_logprobs(model, ids), own_logprobs(model, ids)
     assert float(fp32.max() - fp32.min()) > 16, "the logits must span the range where bf16 rounds coarsely"
     # bf16 logits would have moved the scores by far more than the fp32 path's own error, so the two are told apart.
     assert float((fp32 - rounded).abs().max()) > 1e-3
-    expected = fp32[-1:] if last_only else fp32
-    torch.testing.assert_close(torch.log_softmax(logits, dim=-1), expected, atol=1e-4, rtol=0)
+    torch.testing.assert_close(torch.log_softmax(logits, dim=-1), fp32, atol=1e-4, rtol=0)
 
 
 def test_a_model_that_changes_its_logits_after_the_head_is_refused():
@@ -95,7 +93,7 @@ def test_a_model_that_changes_its_logits_after_the_head_is_refused():
     with torch.no_grad():
         model.lm_head.weight.mul_(400.0)
     with pytest.raises(RuntimeError, match="changes its logits after the head"):
-        hf_model_outputs.fp32_head_outputs(model, [EOS_ID, THE, WORLD], last_only=True)
+        hf_model_outputs.fp32_head_outputs(model, [EOS_ID, THE, WORLD])
 
 
 # --------------------------------------------------------------------------------------
@@ -111,17 +109,17 @@ def test_a_logits_processor_from_the_models_generation_config_is_refused(setting
     model = tiny_llama()
     for key, value in setting.items():
         setattr(model.generation_config, key, value)
-    config = hf_model_outputs.stop_aware_generation_config(4, (EOS_ID,), do_sample=False, num_return_sequences=1)
+    config = hf_model_outputs.stop_aware_generation_config(4, (EOS_ID,))
     with pytest.raises(RuntimeError, match="logits processor changed the scores"):
-        hf_model_outputs.generate_from_unmodified_distribution(model, [EOS_ID, HELLO, MARKER_ID], config, 1.0)
+        hf_model_outputs.generate_from_unmodified_distribution(model, [EOS_ID, HELLO, MARKER_ID], config)
 
 
-def test_only_the_temperature_may_change_the_scores():
+def test_the_scores_must_be_the_raw_logits():
     from transformers import SuppressTokensLogitsProcessor
 
     raw = (torch.randn(2, 12), torch.randn(2, 12))
-    hf_model_outputs.check_unmodified_distribution(raw, tuple(step / 0.7 for step in raw), 0.7)
+    hf_model_outputs.check_unmodified_distribution(raw, tuple(step.clone() for step in raw))
     suppress = SuppressTokensLogitsProcessor([MARKER_ID])
     suppressed = tuple(suppress(torch.zeros(2, 1, dtype=torch.long), step) for step in raw)
     with pytest.raises(RuntimeError, match=r"step 0: .* 1 ids \(first \[7\]\)"):
-        hf_model_outputs.check_unmodified_distribution(raw, suppressed, 1.0)
+        hf_model_outputs.check_unmodified_distribution(raw, suppressed)

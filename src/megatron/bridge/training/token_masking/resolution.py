@@ -263,7 +263,7 @@ def agree_across_ranks(
     if len(decisions) > 1:
         described = "; ".join(f"ranks {ranks}: {key}" for key, ranks in decisions.items())
         raise TokenMaskingError(
-            f"ranks resolved different token-masking decisions (tokenizer files differ?): {described}"
+            f"ranks resolved different token-masking decisions (the ranks' configs differ?): {described}"
         )
 
 

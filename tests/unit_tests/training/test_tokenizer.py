@@ -18,15 +18,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
-from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer, display_decoder
-from tests.unit_tests.token_masking_fixtures import (
-    EOS_ID,
-    MARKER_ID,
-    TINY_VOCAB,
-    build_tiny_hf_tokenizer,
-    hf_tokenizer_config,
-    null_tokenizer_config,
-)
+from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
 
 class TestTokenizers:
@@ -174,15 +166,3 @@ class TestTokenizers:
         # verify that the directory actually contains files (sanity check)
         assert (local_model_path / "tokenizer_config.json").exists()
         assert (local_model_path / "tokenizer.json").exists()
-
-
-class TestDisplayDecoder:
-    def test_keeps_special_tokens_for_megatron_and_hugging_face_tokenizers(self, tmp_path):
-        directory = build_tiny_hf_tokenizer(tmp_path / "tokenizer")
-        ids = [TINY_VOCAB["hello"], MARKER_ID, TINY_VOCAB["world"], EOS_ID]
-        assert display_decoder(build_tokenizer(hf_tokenizer_config(directory)))(ids) == "hello <marker> world </s>"
-        assert display_decoder(AutoTokenizer.from_pretrained(directory))(ids) == "hello <marker> world </s>"
-
-    def test_a_tokenizer_without_hugging_face_uses_its_own_detokenize(self):
-        null_tokenizer = build_tokenizer(null_tokenizer_config(vocab_size=100))
-        assert display_decoder(null_tokenizer)([5, 3, 6]) == "5 3 6"

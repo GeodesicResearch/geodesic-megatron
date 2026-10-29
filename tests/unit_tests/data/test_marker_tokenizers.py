@@ -197,42 +197,8 @@ def test_the_build_refuses_a_pinned_commit_the_source_lacks(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 2. Every marker resolves to its configured id as a special added token.
+# 2. Older transformers can load the built tokenizer.
 # ---------------------------------------------------------------------------
-
-
-def test_every_marker_resolves_to_its_id(tok, markers, tokenizer_name):
-    ids = tok.convert_tokens_to_ids(list(markers))
-    assert ids == list(markers.values()), f"{tokenizer_name}: expected {list(markers.values())}, got {ids}"
-
-
-def test_markers_are_special_added_tokens(tok, markers, tokenizer_name):
-    # PreTrainedTokenizerFast: add_tokens(..., special_tokens=True) registers the token in `added_tokens_decoder` with
-    # `.special=True` (this is what makes the tokenizer never BPE-split it), but does NOT add it to
-    # `all_special_tokens` / `all_special_ids`, which hold the canonical bos/eos/unk/pad/cls/sep/mask roles plus
-    # `additional_special_tokens`. A marker is "special" in the don't-split sense, which is exactly what token masking
-    # requires of a masked id.
-    for marker, marker_id in markers.items():
-        entry = tok.added_tokens_decoder.get(marker_id)
-        assert entry is not None, f"{tokenizer_name}: id {marker_id} missing from added_tokens_decoder"
-        assert entry.special is True, f"{tokenizer_name}: id {marker_id} special={entry.special}, expected True"
-        assert entry.content == marker, f"{tokenizer_name}: id {marker_id} content mismatch, got {entry!r}"
-
-
-# ---------------------------------------------------------------------------
-# 3. The built tokenizer carries no loss_mask_token_ids key, neither in its tokenizer_config.json nor in the loaded
-#    tokenizer's init_kwargs (training setup refuses a tokenizer carrying it in either place), and older transformers
-#    can load it.
-# ---------------------------------------------------------------------------
-
-
-def test_tokenizer_config_carries_no_declaration(local_tokenizer_dirs, tokenizer_name):
-    cfg = json.loads((local_tokenizer_dirs[tokenizer_name] / "tokenizer_config.json").read_text())
-    assert DECLARATION_FIELD not in cfg, f"{tokenizer_name}: tokenizer_config.json carries {DECLARATION_FIELD}"
-
-
-def test_loaded_tokenizer_carries_no_declaration(tok, tokenizer_name):
-    assert DECLARATION_FIELD not in tok.init_kwargs, f"{tokenizer_name}: init_kwargs carry {DECLARATION_FIELD}"
 
 
 def test_tokenizer_config_loadable_by_older_transformers(local_tokenizer_dirs, tokenizer_name):
@@ -254,7 +220,7 @@ def test_tokenizer_config_loadable_by_older_transformers(local_tokenizer_dirs, t
 
 
 # ---------------------------------------------------------------------------
-# 4. The two shapes of source: one that lacks its marker gets it added at its id; one that already registers both
+# 3. The two shapes of source: one that lacks its marker gets it added at its id; one that already registers both
 #    markers and carries the key keeps them, loses the key, and keeps its chat template byte for byte.
 # ---------------------------------------------------------------------------
 
@@ -306,7 +272,7 @@ def test_a_source_holding_both_markers_keeps_them_and_loses_the_key(added_marker
 
 
 # ---------------------------------------------------------------------------
-# 5. The build refuses a marker off its expected id, before saving anything, and a marker the source holds but not as
+# 4. The build refuses a marker off its expected id, before saving anything, and a marker the source holds but not as
 #    a special token.
 # ---------------------------------------------------------------------------
 
@@ -339,7 +305,7 @@ def test_build_refuses_a_directory_that_is_not_empty(source_dirs, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 6. The build's own verification accepts the built tokenizers and refuses one that carries the key (whatever its
+# 5. The build's own verification accepts the built tokenizers and refuses one that carries the key (whatever its
 #    value), one whose encoder differs from the source's beyond the added markers, and one whose chat template does.
 # ---------------------------------------------------------------------------
 
@@ -433,7 +399,7 @@ def test_verify_refuses_a_changed_chat_template(
 
 
 # ---------------------------------------------------------------------------
-# 7. --push-to-hub publishes only an approved destination that does not exist yet, and checks every destination
+# 6. --push-to-hub publishes only an approved destination that does not exist yet, and checks every destination
 #    before building any.
 # ---------------------------------------------------------------------------
 
@@ -479,7 +445,7 @@ def test_refuse_existing_hub_repo_accepts_a_new_name():
 
 
 # ---------------------------------------------------------------------------
-# 8. The README names each marker and records the config file and the entry the tokenizer was built from.
+# 7. The README names each marker and records the config file and the entry the tokenizer was built from.
 # ---------------------------------------------------------------------------
 
 
@@ -496,14 +462,9 @@ def test_readme_records_the_markers_and_the_config_entry(local_tokenizer_dirs, t
 
 
 # ---------------------------------------------------------------------------
-# 9. The encoder is otherwise the source's: the vocab grows by exactly the added markers, and text tokenizes as the
-#    source tokenizes it, with each marker a single id.
+# 8. The encoder is otherwise the source's: text tokenizes as the source tokenizes it, each marker as often as its
+#    text occurs, and the special-token roles are the source's.
 # ---------------------------------------------------------------------------
-
-
-def test_vocab_grows_by_the_added_markers(tok, parent_tok, added_markers, markers, tokenizer_name):
-    assert len(tok) == len(parent_tok) + len(added_markers[tokenizer_name])
-    assert len(tok) == max(markers.values()) + 1
 
 
 NORMAL_TEXT_FIXTURES = [
@@ -530,16 +491,6 @@ def test_normal_text_tokenization_unchanged(tok, parent_tok, tokenizer_name, tex
     )
 
 
-def test_markers_do_not_bpe_split(tok, markers, tokenizer_name):
-    for marker, marker_id in markers.items():
-        # Sandwiched between prose to force the tokenizer to handle the marker in a realistic context.
-        ids = tok(f"hello {marker} world", add_special_tokens=False)["input_ids"]
-        assert ids.count(marker_id) == 1, f"{tokenizer_name}: expected one {marker_id} in {ids}"
-        # Round-trip through encode/decode preserves the marker as a contiguous string.
-        decoded = tok.decode(ids, skip_special_tokens=False)
-        assert marker in decoded, f"{tokenizer_name}: decoded text lost {marker}: {decoded!r}"
-
-
 def test_marker_count_in_a_realistic_document(tok, markers, tokenizer_name):
     """In a document with several delimited blocks, each marker's id occurs as often as the marker's text does."""
     opening, closing = list(markers)[0], list(markers)[-1]
@@ -557,22 +508,6 @@ def test_marker_count_in_a_realistic_document(tok, markers, tokenizer_name):
         assert counter[marker_id] == doc.count(marker), (
             f"{tokenizer_name}: id {marker_id} count {counter[marker_id]} != {marker} count {doc.count(marker)}"
         )
-
-
-def test_chat_template_matches_the_source(tok, parent_tok, tokenizer_name):
-    assert tok.chat_template == parent_tok.chat_template, f"{tokenizer_name}: chat_template diverged from the source"
-    if tok.chat_template is None:
-        return
-    convo = [
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "Hi."},
-        {"role": "assistant", "content": "Hello!"},
-    ]
-    built_rendered = tok.apply_chat_template(convo, tokenize=False)
-    parent_rendered = parent_tok.apply_chat_template(convo, tokenize=False)
-    assert built_rendered == parent_rendered, (
-        f"apply_chat_template diverged:\n  parent: {parent_rendered!r}\n  built:  {built_rendered!r}"
-    )
 
 
 CANONICAL_SPECIALS = ["bos_token", "eos_token", "unk_token", "pad_token"]

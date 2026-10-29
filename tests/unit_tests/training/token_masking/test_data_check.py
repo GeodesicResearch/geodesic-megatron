@@ -196,13 +196,14 @@ class TestEnabledRunNeedsPositiveEvidence:
         assert "max_scan_tokens_per_source" not in error, "the scan read all of the data; its budget is no remedy"
 
     def test_no_marker_target_within_the_token_budget_names_the_budget(self, tmp_path):
-        scans = _scans(_gpt_config([_corpus(tmp_path / "a", _documents(20))]), max_tokens=50)
+        corpus = _corpus(tmp_path / "a", _documents(20))
+        scans = _scans(_gpt_config([corpus]), max_tokens=50)
         assert scans[0].stop_reason == "token_budget"
         [error] = token_masking_data_verdict(scans, None, _masking()).errors
         assert error.startswith("no target in the training data is one of the ids [1000] (")
         assert error.endswith(
             "re-tokenized with the run's tokenizer; or raise logger.data_samples.max_scan_tokens_per_source: the scan "
-            "stopped on that budget in ['a'] before reading all of their data"
+            f"stopped on that budget in {[corpus]} before reading all of their data"
         )
 
     def test_marker_targets_only_at_untrained_positions_stop_the_run(self, tmp_path):
@@ -218,11 +219,12 @@ class TestEnabledRunNeedsPositiveEvidence:
         """Trainable marker targets may lie in data the scan did not read."""
         scans = _packed_scans(tmp_path, _rows(MARKER_UNTRAINED, 30), max_tokens=20)
         assert scans[0].stop_reason == "token_budget" and scans[0].listed_targets > 0
+        pack = str(tmp_path / "pack" / "training_64.idx.parquet")
         [error] = token_masking_data_verdict(scans, None, _masking()).errors
         assert "never at a position that carries loss" in error
         assert error.endswith(
             "such a stage must run with token masking off; or raise logger.data_samples.max_scan_tokens_per_source: "
-            "the scan stopped on that budget in ['pack'] before reading all of their data"
+            f"the scan stopped on that budget in {[pack]} before reading all of their data"
         )
 
     def test_trainable_marker_targets_in_packed_data_pass(self, tmp_path):
@@ -231,16 +233,17 @@ class TestEnabledRunNeedsPositiveEvidence:
         assert token_masking_data_verdict(scans, None, _masking()).errors == ()
 
     def test_a_scan_out_of_time_before_the_evidence_stops_the_run(self, tmp_path):
-        scans = _scans(_gpt_config([_corpus(tmp_path / "a", _documents(20, listed=True))]), deadline_seconds=-1)
+        corpus = _corpus(tmp_path / "a", _documents(20, listed=True))
+        scans = _scans(_gpt_config([corpus]), deadline_seconds=-1)
         assert scans[0].stop_reason == "time_budget"
         [error] = token_masking_data_verdict(scans, None, _masking()).errors
-        assert "max_scan_seconds before finishing ['a']" in error and "Lustre" in error
+        assert f"max_scan_seconds before finishing {[corpus]}" in error and "Lustre" in error
 
     def test_evidence_only_in_a_source_of_blend_weight_0_stops_the_run(self, tmp_path):
         marked = _corpus(tmp_path / "marked", _documents(10, listed=True))
         plain = _corpus(tmp_path / "plain", _documents(10))
         [error] = token_masking_data_verdict(_scans(_gpt_config(["0", marked, "1", plain])), None, _masking()).errors
-        assert "across 1 sources; they occur only in ['marked'], whose blend weight is 0" in error
+        assert f"across 1 sources; they occur only in {[marked]}, whose blend weight is 0" in error
         weighted = _scans(_gpt_config(["0.1", marked, "0.9", plain]))
         assert token_masking_data_verdict(weighted, None, _masking()).errors == ()
 
@@ -263,9 +266,10 @@ class TestEnabledRunNeedsPositiveEvidence:
         assert "pipeline_data_prepare.py" in error
 
     def test_a_split_marker_stops_the_run(self, tmp_path):
-        scans = _scans(_gpt_config([_corpus(tmp_path / "a", _documents(20, listed=True, split=True))]))
+        corpus = _corpus(tmp_path / "a", _documents(20, listed=True, split=True))
+        scans = _scans(_gpt_config([corpus]))
         [error] = token_masking_data_verdict(scans, None, _masking()).errors
-        assert "split into several ordinary tokens" in error and "a: 20" in error.replace("'", "")
+        assert "split into several ordinary tokens" in error and str({corpus: 20}) in error
 
     def test_out_of_vocabulary_tokens_stop_the_run(self, tmp_path):
         scans = _scans(_gpt_config([_corpus(tmp_path / "a", _documents(20, listed=True, out_of_vocab=True))]))
@@ -275,12 +279,13 @@ class TestEnabledRunNeedsPositiveEvidence:
 
 class TestRunsThatDoNotMaskOnlyReport:
     def test_a_measuring_run_reports_every_problem(self, tmp_path):
-        scans = _scans(_gpt_config([_corpus(tmp_path / "a", _documents(20, split=True, out_of_vocab=True))]))
+        corpus = _corpus(tmp_path / "a", _documents(20, split=True, out_of_vocab=True))
+        scans = _scans(_gpt_config([corpus]))
         verdict = token_masking_data_verdict(scans, None, _measuring())
         assert verdict.errors == ()
         out_of_vocab, split, missing = verdict.findings
-        assert out_of_vocab.startswith("token ids outside the tokenizer's vocabulary in {'a': 20}")
-        assert split.startswith("the text of ['1000'] appears split into several ordinary tokens in {'a': 20}")
+        assert out_of_vocab.startswith(f"token ids outside the tokenizer's vocabulary in { {corpus: 20} }")
+        assert split.startswith(f"the text of ['1000'] appears split into several ordinary tokens in { {corpus: 20} }")
         assert missing.startswith("no target in the training data is one of the ids [1000]")
 
     def test_data_the_scan_cannot_read_is_reported(self):
@@ -427,7 +432,7 @@ class TestInspection:
         ]
         tokenizer = build_tokenizer(null_tokenizer_config(VOCAB_SIZE))
         marked, plain = inspect_training_data(_run_config(paths), tokenizer, decision())
-        assert (marked.source.label, plain.source.label) == ("marked", "plain")
+        assert [marked.source.path, plain.source.path] == paths
         assert (marked.listed_trainable_targets, plain.listed_targets) == (10, 0)
 
     def test_an_enabled_run_without_evidence_stops(self, tmp_path, gloo_group_of_one):

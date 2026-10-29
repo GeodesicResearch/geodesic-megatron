@@ -346,7 +346,7 @@ def test_the_clone_root_defaults_to_the_environment_then_a_per_user_project_dire
     assert export_clone.default_clone_root({export_clone.CLONE_ROOT_ENV: ""}, "someone") == per_user
 
 
-def test_cli_builds_and_removes_a_clone_under_the_environment_root_when_none_is_given(torch_grouped, tmp_path):
+def test_cli_builds_and_removes_a_clone_under_the_environment_root(torch_grouped, tmp_path):
     save, _ = torch_grouped
     root = tmp_path / "env-root"
     env = {**os.environ, export_clone.CLONE_ROOT_ENV: str(root)}
@@ -358,38 +358,6 @@ def test_cli_builds_and_removes_a_clone_under_the_environment_root_when_none_is_
     result = run_tool("remove", "--clone", str(clone), env=env)
     assert result.returncode == 0, result.stderr
     assert not clone.exists()
-
-
-def test_cli_prepare_prints_only_its_plan_on_stdout_and_remove_removes_the_clone(torch_grouped):
-    save, root = torch_grouped
-    result = run_tool("prepare", "--megatron-path", str(save), "--clone-root", str(root), "--job", "9-9")
-    assert result.returncode == 0, result.stderr
-    clone = export_clone.clone_location(root, save / "iter_0000477", "9-9")
-    assert result.stdout.splitlines() == ["EXPORT_ITERATION=477", f"EXPORT_LOAD_PATH={clone}"]
-    assert "torch_grouped" in result.stderr
-    export_clone.check_is_export_clone(save / "iter_0000477", clone)
-
-    result = run_tool("remove", "--clone", str(clone), "--clone-root", str(root))
-    assert result.returncode == 0, result.stderr
-    assert not clone.exists()
-
-
-def test_cli_prepare_prints_an_empty_load_path_for_a_checkpoint_that_needs_no_repair(tmp_path):
-    save = make_checkpoint(tmp_path / "ckpt", [12], tracker=None, run_config=TE_GROUPED_RUN_CONFIG)
-    result = run_tool(
-        "prepare", "--megatron-path", str(save), "--iteration", "12", "--clone-root", str(tmp_path / "c"), "--job", "1"
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["EXPORT_ITERATION=12", "EXPORT_LOAD_PATH="]
-
-
-def test_cli_reports_a_failure_with_exit_status_1_and_no_plan(tmp_path):
-    result = run_tool(
-        "prepare", "--megatron-path", str(tmp_path / "absent"), "--clone-root", str(tmp_path), "--job", "1"
-    )
-    assert result.returncode == 1
-    assert result.stdout == ""
-    assert "Checkpoint directory not found" in result.stderr
 
 
 # ----------------------------------------------------------------------------------------------

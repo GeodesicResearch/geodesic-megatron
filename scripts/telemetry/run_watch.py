@@ -544,7 +544,7 @@ def count_prediction_stops(predictions: Path, segments: list[SegmentLog]) -> lis
         comparable, reasons = _comparable_counts(segment, predictions, predicted)
         not_compared += reasons
         fields: dict[int, list[str]] = {}
-        for iteration, field, ours, theirs in differing_counts(comparable, predicted, sorted(comparable)):
+        for iteration, field, ours, theirs in differing_counts(comparable, predicted):
             fields.setdefault(iteration, []).append(describe_count_difference(field, ours, theirs))
         differing += [(iteration, segment, described) for iteration, described in fields.items()]
     if not differing:

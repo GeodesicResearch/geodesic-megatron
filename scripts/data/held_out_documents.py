@@ -129,6 +129,7 @@ from corpus_documents import (  # noqa: E402
     PARTIAL,
     CopiedDocuments,
     CorpusCheckFailed,
+    DocumentIndex,
     attributable_code_revision,
     bin_path,
     check_copied_documents,
@@ -142,9 +143,9 @@ from corpus_documents import (  # noqa: E402
     parent_record,
     provenance_path,
     read_index,
+    token_memmap,
     write_record,
 )
-from scripts.data.corpus_index import DocumentIndex, token_memmap  # noqa: E402
 from scripts.data.prepare_revisions import FULL_SHA  # noqa: E402
 from scripts.data.run_training_data import (  # noqa: E402
     BIN_IDX_MODES,

@@ -2,7 +2,7 @@
 
 """Megatron tokenizers."""
 
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from megatron.core.tokenizers import MegatronTokenizer
 
@@ -132,16 +132,3 @@ def find_hf_tokenizer(tokenizer: Any) -> Any | None:
             None,
         )
     return None
-
-
-def display_decoder(tokenizer: Any) -> Callable[[Sequence[int]], str]:
-    """A function that decodes token ids for display, keeping special tokens.
-
-    A tokenizer backed by Hugging Face (or a Hugging Face tokenizer itself) decodes with
-    ``decode(ids, skip_special_tokens=False)``; any other Megatron tokenizer with its own
-    ``detokenize(ids, skip_special_tokens=False)``.
-    """
-    hf_tokenizer = find_hf_tokenizer(tokenizer)
-    if hf_tokenizer is not None:
-        return lambda ids: hf_tokenizer.decode([int(i) for i in ids], skip_special_tokens=False)
-    return lambda ids: tokenizer.detokenize([int(i) for i in ids], skip_special_tokens=False)

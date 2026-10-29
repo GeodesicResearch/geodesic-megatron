@@ -23,15 +23,15 @@ exporter loads the model from it.
 
 Command line (``pipeline_checkpoint_convert.sh export`` runs both inside the container):
 
-    python scripts/checkpoint/export_clone.py prepare --megatron-path DIR [--iteration N] [--clone-root ROOT] --job ID
-    python scripts/checkpoint/export_clone.py remove --clone CLONE [--clone-root ROOT]
+    python scripts/checkpoint/export_clone.py prepare --megatron-path DIR [--iteration N] --job ID
+    python scripts/checkpoint/export_clone.py remove --clone CLONE
 
 ``prepare`` resolves the iteration: ``--iteration`` when given, else the tracker, else the newest ``iter_*``
 directory. It builds a clone only when that iteration's run_config needs the repair, at
 ``ROOT/<ID>/<run>-<digest>/iter_<n>``, where ``<ID>`` names this one export (the launcher passes its
 SLURM job id and its own pid). It prints ``EXPORT_ITERATION=<n>`` and ``EXPORT_LOAD_PATH=<clone>`` on
 stdout for the launcher to read; the load path is empty when no repair is needed. ``remove`` deletes a clone
-once its export has finished. ``ROOT`` is ``--clone-root`` when given, else ``$GEODESIC_EXPORT_CLONE_ROOT``, else
+once its export has finished. ``ROOT`` is ``$GEODESIC_EXPORT_CLONE_ROOT`` when set, else
 ``/projects/a5k/public/tmp/export_clones_$USER`` (``default_clone_root``), so a launcher states it only to move it.
 """
 
@@ -359,8 +359,8 @@ def remove_export_clone(clone: Path, clone_root: Path) -> None:
 
 
 def default_clone_root(environ: Mapping[str, str], user: str) -> Path:
-    """The root clones are built under when the caller names none: ``$GEODESIC_EXPORT_CLONE_ROOT`` when set and
-    non-empty, else ``/projects/a5k/public/tmp/export_clones_<user>``. Reads only ``environ``."""
+    """The root clones are built under: ``$GEODESIC_EXPORT_CLONE_ROOT`` when set and non-empty, else
+    ``/projects/a5k/public/tmp/export_clones_<user>``. Reads only ``environ``."""
     return Path(environ.get(CLONE_ROOT_ENV) or PROJECT_CLONE_ROOT.format(user=user))
 
 
@@ -372,22 +372,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     prepare.add_argument("--megatron-path", required=True, help="top-level checkpoint directory (holds iter_*)")
     prepare.add_argument("--iteration", type=int, default=None, help="iteration to export (default: the latest)")
     prepare.add_argument(
-        "--clone-root",
-        type=Path,
-        default=None,
-        help="absolute directory clones are built under (default: $GEODESIC_EXPORT_CLONE_ROOT, else a per-user "
-        "directory on project storage)",
-    )
-    prepare.add_argument(
         "--job",
         required=True,
         help="a name unique to this export, e.g. <SLURM job id>-<pid> (a directory under the root)",
     )
     remove = commands.add_parser("remove", help="delete an export clone after its export has finished")
     remove.add_argument("--clone", required=True, type=Path, help="the clone, as prepare printed it")
-    remove.add_argument(
-        "--clone-root", type=Path, default=None, help="the root it was built under (default: as for prepare)"
-    )
     return parser.parse_args(argv)
 
 
@@ -395,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run one command. Messages go to stderr; ``prepare``'s plan is the only thing on stdout."""
     logging.basicConfig(level=logging.INFO, format="[export-clone] %(message)s", stream=sys.stderr)
     args = parse_args(argv)
-    clone_root = args.clone_root or default_clone_root(os.environ, os.environ.get("USER") or getpass.getuser())
+    clone_root = default_clone_root(os.environ, os.environ.get("USER") or getpass.getuser())
     try:
         if args.command == "prepare":
             source = prepare_export_source(args.megatron_path, args.iteration, clone_root, args.job)

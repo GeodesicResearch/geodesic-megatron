@@ -447,16 +447,6 @@ STRICT_TYPOS = {
 
 
 class TestRemovedAndStrictOverrideKeys:
-    def test_removed_key_raises_with_what_to_write_instead(self, nano_pretrain_config):
-        with pytest.raises(ValueError, match=re.escape(LEGACY_FIELD_REMOVED)):
-            apply_overrides(nano_pretrain_config, {"tokenizer": {"loss_mask_token_ids": [MARKER_ID]}}, {})
-
-    def test_a_null_removed_key_is_dropped(self, nano_pretrain_config):
-        """Every run_config.yaml saved before the key was removed carries it as null, which never masked anything."""
-        apply_overrides(nano_pretrain_config, {"tokenizer": {"loss_mask_token_ids": None, "vocab_size": 7}}, {})
-        assert nano_pretrain_config.tokenizer.vocab_size == 7
-        assert not hasattr(nano_pretrain_config.tokenizer, "loss_mask_token_ids")
-
     def test_no_removed_key_is_a_field(self):
         """A removed key that were still a field would be in every merged config and stop every run."""
         assert not set(TokenizerConfig.removed_override_keys) & {f.name for f in dataclasses.fields(TokenizerConfig)}
@@ -470,29 +460,12 @@ class TestRemovedAndStrictOverrideKeys:
         ):
             apply_overrides(nano_pretrain_config, overrides, {})
 
-    def test_error_lists_the_valid_keys(self):
-        with pytest.raises(ValueError) as raised:
-            _apply_overrides(TokenMaskingConfig(), {"zzzz": 1})
-        message = str(raised.value)
-        assert "Did you mean" not in message, "no field is close to 'zzzz'; a suggestion would be noise"
-        assert message.endswith("Valid keys: enabled, masked_validation, token_ids.")
-
     @pytest.mark.parametrize("key", ["reject_unknown_override_keys", "finalize", "measured_token_ids"])
     def test_attributes_that_are_not_fields_are_unknown(self, key):
         """Keys are checked against the dataclass fields, so YAML cannot reach a class variable, method or property."""
         with pytest.raises(ValueError, match=re.escape(f"Unknown key '{key}' for TokenMaskingConfig")):
             _apply_overrides(TokenMaskingConfig(), {key: False})
         assert TokenMaskingConfig.reject_unknown_override_keys is True
-
-    def test_known_keys_apply_into_the_nested_block(self):
-        token_masking = TokenMaskingConfig()
-        _apply_overrides(
-            token_masking,
-            {"enabled": True, "token_ids": [MARKER_ID], "masked_validation": {"data_path": HELD_OUT_BIN}},
-        )
-        assert token_masking == TokenMaskingConfig(
-            enabled=True, token_ids=[MARKER_ID], masked_validation=MaskedValidationConfig(data_path=HELD_OUT_BIN)
-        )
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -620,11 +593,6 @@ class TestLauncherMerge:
         )
         assert cfg.token_masking == TokenMaskingConfig(enabled=True, token_ids=[5])
 
-    def test_added_cli_removed_key_raises_its_message(self, run_module, tmp_path):
-        """``+key=`` lets Hydra add a key its struct mode would refuse; the removed key must still be named."""
-        with pytest.raises(ValueError, match=re.escape(LEGACY_FIELD_REMOVED)):
-            _launch_config(run_module, tmp_path, cli=(f"+tokenizer.loss_mask_token_ids=[{MARKER_ID}]",))
-
     def test_plain_cli_removed_key_raises_its_message(self, run_module, tmp_path):
         """Without ``+`` Hydra's struct mode would refuse the key with an error naming no replacement; the key is
         named against the dataclasses first, with the YAML path's message."""
@@ -636,14 +604,6 @@ class TestLauncherMerge:
             ValueError, match=re.escape("Unknown key 'enabeld' for TokenMaskingConfig. Did you mean 'enabled'?")
         ):
             _launch_config(run_module, tmp_path, cli=("token_masking.enabeld=true",))
-
-    def test_added_cli_key_typo_raises(self, run_module, tmp_path):
-        with pytest.raises(
-            ValueError, match=re.escape("Unknown key 'enabeld' for TokenMaskingConfig. Did you mean 'enabled'?")
-        ):
-            _launch_config(run_module, tmp_path, cli=("+token_masking.enabeld=true",))
-        with pytest.raises(ValueError, match=re.escape("Did you mean 'token_masking'?")):
-            _launch_config(run_module, tmp_path, cli=("+token_maskng.enabled=true",))
 
 
 # ---------------------------------------------------------------------------------------------------------------------

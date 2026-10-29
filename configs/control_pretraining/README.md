@@ -312,47 +312,14 @@ any tool of this directory (the audit included) as its own 1-node job in the con
 log with `EXIT_CORPUS=<rc>` and naming the commit it ran. [`submit_corpus_job.py`](submit_corpus_job.py)
 submits one such job from a frozen copy of the commit (`[--dry-run] <job name> <time limit> <tool> <args>`; making a
 copy: [`scripts/training/README.md`](../../scripts/training/README.md), "Making a frozen copy"), forced as a one-node job, as
-`build_corpora.sh` submits its own:
-- **Per-document checks.** A `tokenize` row may add the four columns
-  `count_token | count_column | row_column | first_row`, and `verify_corpora.py` then also checks, for every
-  document, that the count of that token id (the EOD slot excluded) equals the source dataset's `count_column`
-  at that row and that the document ends in the EOD the corpus was tokenized with, unless it is empty (what
-  `--append-eod` writes for an empty text: no ids, so no EOD); that the corpus total equals the column's sum;
-  that the row counts agree; and that the dataset's `row_column` holds `first_row + i` at row `i`, so its
-  rows, and the documents built from them, are the source's in order from `first_row`. A fifth column,
-  `length_column`, may follow the four: a column of each row's length in tokens before the build changed its text
-  (a hidden-span corpus's `n_tokens`). With it the report adds `length_drift`, the documents whose built length is
-  not that plus the EOD, their net shift and its range, which re-tokenizing changed text produces; it is reported
-  and printed under the corpus, never checked. The checks read only those columns, at the prepare config's pinned
-  revision, never the text, and slices map rows to shards through `plan_corpus`'s own ranges. They read the whole
-  `.bin`, so run a table that declares the checks as a job.
-- **`check-hashes --config <digest-checks yaml> --subset <s> [--shard <k>]`.** It compares every document's length and
-  blake2b-64 digest of its ids (EOD excluded) with a list computed from the source text: a row of `n_tokens` ids is
-  a document of `n_tokens` + 1 ending in the EOD, and a row of none (an empty text) a document of no ids at all,
-  which is what `--append-eod` writes for it. It writes nothing but the report `--report-out` names. That
-  proves a corpus's text tokenizes to exactly the ids training read. The config names the corpora table and, per
-  subset, where its digest list is (a saved build) or why there is none yet;
-  a sliced subset may name one list per shard (`shards:`), each describing that shard's rows (its record's split the
-  slice `train[beg:end]`, its `source_row` counting from `beg`), and is then checked one `--shard` at a time.
-  The EOD id comes from the corpus's own tokenize record, which must name the table's tokenizer, at the commit the
-  prepare config pins, with `--append-eod`.
-- **`check-parent --config <parent-checks yaml> --subset <s>`.** It compares a corpus's documents with those of
-  a parent corpus, in order and byte for byte, and writes nothing but the report `--report-out` names. A corpus
-  built from part of another's source then holds exactly documents that corpus trained on. The config names the
-  two corpora tables and, per subset, the parent's subset and the column of the corpus's dataset holding each
-  document's row of it, which must increase strictly; the parent may be sliced.
-- **A pinned tokenizer.** A prepare config may pin its tokenizer at a full commit SHA with `tokenizer-revision`
-  (`scripts/data/prepare_revisions.py`). The plan then hands each tokenize job the reference `<name>@<sha>`, and the
-  job loads that commit's snapshot and records it in the provenance as `tokenizer_revision`. `verify_corpora.py`
-  checks the commit recorded by the prepare and by the tokenize against the config's (no commit when the config pins
-  none), and the per-document checks and the audit load the same commit. A pack row cannot take a pinned tokenizer,
-  because the pack directory is named by the tokenizer alone, so the plan refuses one.
-- [`hub_parquet.py`](hub_parquet.py) holds the parquet-file rule and the Hub range reads that
-  `audit_filtered_corpora.py` and `corpus_documents.py` share. A config's train files are the ones its dataset card
-  (`README.md`) lists for it, in the card's order, as the `datasets` loader reads them: `<config>/train-*` for a config
-  of its own directory, and the members' files for a union config that joins a corpus's row-contiguous parts. The
-  Hub at a commit and a local copy of the repository resolve them by that one rule; a glob form beyond `*` and `?` in
-  a pattern's last component is refused rather than read some other way.
+`build_corpora.sh` submits its own. A row's per-document check columns (`count_token | count_column | row_column |
+first_row`, optionally `length_column`; [`corpora_table.py`](corpora_table.py)) make `verify_corpora.py` check every
+document against its source dataset; [`corpus_documents.py`](corpus_documents.py)'s module docstring states those
+checks and its `check-hashes` (the source text's digests) and `check-parent` (a parent corpus's documents) commands.
+They read the whole `.bin`, so run a table that declares the checks as a job. A prepare config's per-subset
+`revisions:` and pinned `tokenizer-revision:` are `scripts/data/prepare_revisions.py`'s (a pack row cannot take a
+pinned tokenizer, `corpora_table.py`), and [`hub_parquet.py`](hub_parquet.py) holds the rule that chooses a config's
+parquet files and the Hub reads the corpus tools share.
 
 The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
 fixes three things the hand-run version below got wrong: `--suffix-length` is derived from the

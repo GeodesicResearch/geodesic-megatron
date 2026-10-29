@@ -203,35 +203,6 @@ class TestBlock:
         assert code_identity.config_code_identity(str(config(tmp_path, None))) is None
 
 
-class TestCommandLine:
-    def run(self, config_file: Path, repo_dir: Path, capsys) -> tuple[int, str, str]:
-        status = code_identity.main(["--config", str(config_file), "--repo-dir", str(repo_dir)])
-        captured = capsys.readouterr()
-        return status, captured.out, captured.err
-
-    def test_a_pass_prints_the_record_as_one_line(self, history, tmp_path, capsys):
-        status, out, err = self.run(config(tmp_path, block(history)), frozen_copy(history, tmp_path / "copy"), capsys)
-        assert status == 0 and err == ""
-        assert len(out.splitlines()) == 1 and json.loads(out)["passed"] is True
-
-    def test_a_difference_exits_1_naming_it(self, history, tmp_path, capsys):
-        copy = frozen_copy(history, tmp_path / "copy")
-        (copy / LAUNCHER).write_text("echo 3\n")
-        status, out, err = self.run(config(tmp_path, block(history)), copy, capsys)
-        assert status == 1 and json.loads(out)["passed"] is False
-        assert f"FATAL [code-identity]: {LAUNCHER} is blob" in err
-
-    def test_a_failure_to_measure_exits_1_with_no_record(self, history, tmp_path, capsys):
-        copy = frozen_copy(history, tmp_path / "copy")
-        (copy / LAUNCHER).unlink()
-        status, out, err = self.run(config(tmp_path, block(history)), copy, capsys)
-        assert (status, out) == (1, "") and "FATAL [code-identity]:" in err
-
-    def test_a_config_naming_no_code_exits_0_with_no_record(self, tmp_path, capsys):
-        status, out, err = self.run(config(tmp_path, None), tmp_path, capsys)
-        assert (status, out) == (0, "") and "carries no code_identity: block" in err
-
-
 class TestRequireCheckedCodeIdentity:
     def identity(self, history, **changes) -> code_identity.CodeIdentity:
         return code_identity.parse_code_identity(block(history, **changes), "code_identity")

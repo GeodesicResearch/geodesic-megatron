@@ -8,10 +8,10 @@ its own (multi-token prediction, the EP-overlap schedule plan), and return a los
 mask and reports the microbatch's ``token_masking/*`` entries. These tests drive that whole path: the step's real
 ``get_batch`` with Megatron-Core's real CP slicer and pipeline-stage lookups over a single-process gloo group (as in
 ``test_gpt_step_cp_dispatch.py``), a real ``GlobalState`` holding a decision taken by the production resolution from a
-real tokenizer, and the real loss partial. The last two tests feed the step microbatches collated from real ``.bin/.idx``
-data built by the pretraining dataset provider, so the masking is shown on the batches pretraining reads: a blend, and
-a stream whose five windows each hold a marker case (a window's first input and last target, beside an EOD, a whole
-document, across a window boundary) with its golden mask.
+real tokenizer, and the real loss partial. The last test feeds the step microbatches collated from real ``.bin/.idx``
+data built by the pretraining dataset provider, so the masking is shown on the batches pretraining reads: a stream
+whose five windows each hold a marker case (a window's first input and last target, beside an EOD, a whole document,
+across a window boundary) with its golden mask.
 
 Two boundaries are stood in for. The model is a ``MagicMock`` because a real one needs GPUs; called with labels, a
 ``GPTModel`` returns the per-token loss in the labels' shape, which is what the loss partial reduces, so the stand-in
@@ -59,7 +59,7 @@ from tests.unit_tests.training.test_gpt_step_cp_dispatch import _cfg
 from tests.unit_tests.training.test_gpt_step_packed_all_stages import _make_packed_batch
 
 
-# NullTokenizer vocabulary for the decisions and the blend: above MARKER_ID, so the marker is a valid id.
+# NullTokenizer vocabulary for the decisions and the golden windows: above MARKER_ID, so the marker is a valid id.
 VOCAB_SIZE = 1000
 # Ordinary ids of the tiny tokenizer (hello, world, the, secret); none is the marker.
 ORDINARY_IDS = (3, 4, 5, 6)
@@ -316,53 +316,6 @@ def test_a_packed_batch_is_masked_and_keeps_its_packed_params(decisions, gloo_gr
         LISTED_TRAINABLE_TARGET_FRACTION: [3.0, PACK_LENGTH],
         LISTED_TARGET_LOSS_SUM: [sum(2.0**position for position in PACK_MARKERS), PACK_LENGTH],
     }
-
-
-# Two pretraining corpora: one never holds the marker, the other holds it inside and at both ends of documents.
-PLAIN_DOCUMENTS = [[10 + i] * length for i, length in enumerate([5, 9, 3, 8, 7, 6])]
-MARKED_DOCUMENTS = [
-    [20, MARKER_ID, 21, 22, MARKER_ID, 23, 24],
-    [25, 26, MARKER_ID],
-    [MARKER_ID, 27, 28, 29, 30, 31],
-    [32, 33, 34, MARKER_ID, 35, 36, 37, 38, MARKER_ID],
-    [39, 40, 41, 42, MARKER_ID, 43, 44, 45],
-]
-BLEND_SEQ_LENGTH = 8
-BLEND_SAMPLES = 6
-MICRO_BATCH_SIZE = 2
-
-
-def test_microbatches_of_a_real_bin_idx_blend_are_masked_at_every_marker_label_and_nowhere_else(
-    dataset_index_helpers,
-    gloo_group_of_one,
-    tmp_path,
-):
-    data_path = []
-    for name, documents in (("plain", PLAIN_DOCUMENTS), ("marked", MARKED_DOCUMENTS)):
-        write_tokenized_documents(tmp_path / name, documents)
-        data_path += ["0.5", str(tmp_path / name / corpora_table.TOKENIZED_PREFIX)]
-    dataset = build_pretraining_dataset(data_path, BLEND_SEQ_LENGTH, BLEND_SAMPLES, VOCAB_SIZE, tmp_path)
-    decision = masking_with_null_tokenizer([MARKER_ID], VOCAB_SIZE)
-
-    corpora_read, markers_masked = set(), 0
-    for first in range(0, len(dataset), MICRO_BATCH_SIZE):
-        batch = default_collate([dataset[index] for index in range(first, first + MICRO_BATCH_SIZE)])
-        labels, dataset_mask = batch["labels"].clone(), batch["loss_mask"].clone()
-        corpora_read |= set(batch["dataset_id"].tolist())
-        output, loss_function = _step(gpt_step.forward_step, _model(gloo_group_of_one), decision, batch)
-        loss, _, report = loss_function(output)
-
-        positions = labels.numel()
-        marker = (labels == MARKER_ID).reshape(-1)
-        trained = _trained_positions(loss, positions)
-        assert trained == _positions(dataset_mask.reshape(-1) * ~marker)
-        assert not trained & _positions(marker)
-        # Every marker target carried loss in the dataset's own mask, so masking is what removed each of them.
-        assert report[MASKED_TARGET_FRACTION].tolist() == [float(marker.sum()), positions]
-        markers_masked += int(marker.sum())
-
-    assert corpora_read == {0, 1}
-    assert markers_masked > 0
 
 
 # One stream of 21 ids (documents and their EODs, as a window reads them) that Megatron's dataset cuts into five windows

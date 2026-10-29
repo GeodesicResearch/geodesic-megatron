@@ -50,54 +50,21 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   `configs/control_pretraining/submit_chain_link.py` apply it themselves. It runs under the node's system
   Python 3.6 as well as the container's.
 
-- `checkout_guard.sh <config> <repo_dir>` - Exit 1 when the config lives in a different git checkout from
-  REPO_DIR, whose code would train it: older code skips the settings it does not know, which is how a masked
-  campaign once trained unmasked. A relative config is read against REPO_DIR, as training reads it, and the main
-  checkout's `core.bare=true` layout counts as a checkout (its top is the directory holding `.git`).
-  `ALLOW_CROSS_CHECKOUT_CONFIG=1` waives it; a config or REPO_DIR in no git repository is not checked, while any other
-  git failure (git missing, a repository git will not read, such as one owned by another account) is fatal.
-  `pipeline_training_launch.sh` runs its own copy after resolving REPO_DIR, and `pipeline_training_submit.sbatch`
-  runs the copy in the config's checkout, so a REPO_DIR whose launcher predates the check is refused too.
+- `checkout_guard.sh <config> <repo_dir>` - Refuses a config that lives in another git checkout than REPO_DIR, whose
+  code would train it (`ALLOW_CROSS_CHECKOUT_CONFIG=1` waives it); its header says what counts as a checkout and where
+  the launcher and the submit script run it.
 
-- `code_identity.py` - Refuses to train a config with any `src/` tree or listed file but those it names (the
-  Megatron-LM submodule is not among them: a frozen copy takes it at the pinned commit's gitlink). A config may carry a
-  top-level `code_identity:` block: `revision` (the commit the hashes were read from), `src_tree` (`git rev-parse
-  <revision>:src`), `launchers` (repo-relative path to `git rev-parse <revision>:<path>`, for each file that shapes
-  the launch: the run script, the submit sbatch, the launcher, the `scripts/` they call, the `pipeline_env_*` files),
-  `ancestor` (a commit the code's history must contain) and `history` (a git repository holding that history, since
-  a frozen copy has none), every sha full and every field required. `pipeline_training_launch.sh` runs it on REPO_DIR
-  once, inside the container (the host's Python cannot compose configs), before any rank starts: REPO_DIR's `src/`
-  must be that tree, every launcher that blob, and `ancestor` an ancestor in `history` of REPO_DIR's commit (a frozen
-  copy's `REVISION`, a checkout's HEAD); a difference, or a commit `history` does not hold, refuses the launch. The
-  hashes are git's own, computed by staging REPO_DIR into a throwaway repository without the user's or the system's
-  git configuration and without the user's default ignore and attributes files, so only REPO_DIR's own `.gitignore`
-  files decide what is left out (a `__pycache__` that running the code wrote, for one), whoever launches. The record of the check (what the block states, what was measured, the differences) reaches every
-  rank as `ISAMBARD_CODE_IDENTITY`, which an `ISAMBARD_ENV_OVERRIDES` file may not set; `pipeline_training_run.py`
-  refuses a config carrying the block unless that record is a passing one for the same block, so a launch that
-  bypasses the launcher is refused too, and `scripts/telemetry/run_identity.py` writes the record to the W&B run's
-  config under `code_identity`. A config without the block is not checked.
+- `code_identity.py` - Refuses to train a config with any `src/` tree or listed file but those its `code_identity:`
+  block names (not the Megatron-LM submodule: a frozen copy takes it at the pinned commit's gitlink); its docstring has
+  the block and the check. An `ISAMBARD_ENV_OVERRIDES` file may not set the check's record, `ISAMBARD_CODE_IDENTITY`.
 
-- `launch_width.py` - Refuses to train a config at any width but the one it names. A config may carry a top-level
-  `launch_width:` block: `nodes`, `gpus_per_node` and `data_parallel_size` (the world size over TP x PP x CP, stated
-  so that a parallelism change is refused too), each required, and optionally `nvlink_links_per_gpu`.
-  `pipeline_training_launch.sh` reads it once, inside the container, before any rank starts, and refuses a
-  `--nodes` or `--nodelist`, since the block decides both. With `nvlink_links_per_gpu` it sweeps the allocation into
-  a directory of the launch's own (`nvlink_sweep.sh` into `<log-dir>/nvlink/<run-id>/status/`, with the selection's
-  `nodelist.txt` and `report.json` beside it; a launch whose directory exists is refused) and trains on the first
-  `nodes` nodes `nvlink_health.py`, run in the container, judges healthy, so a job may request spare nodes; with fewer
-  healthy it launches nothing. It registers no node as bad. Without it the allocation must hold exactly `nodes`. The launch's record (the block, the
-  nodes, their names, the GPUs per node) reaches every rank as `ISAMBARD_LAUNCH_WIDTH`, which an
-  `ISAMBARD_ENV_OVERRIDES` file may not set. `pipeline_training_run.py` refuses a config carrying the block unless
-  that record is for the same block, its world size (torchrun's `WORLD_SIZE`) is `nodes x gpus_per_node` and its
-  data-parallel size is `data_parallel_size`, and logs `[launch-width] world_size=... data_parallel_size=...`. A config
-  without the block is not checked.
+- `launch_width.py` - Refuses to train a config at any width but its `launch_width:` block's; its docstring has the
+  block and the check. The NVLink sweep writes `<log-dir>/nvlink/<run-id>/status/`, with the selection's
+  `nodelist.txt` and `report.json` beside it (a launch whose directory exists is refused, and no node is registered as
+  bad), and an `ISAMBARD_ENV_OVERRIDES` file may not set the launch's record, `ISAMBARD_LAUNCH_WIDTH`.
 
-- `launch_blocks.py` - What the top-level config blocks that state how a config must be launched (`code_identity:`,
-  `launch_width:`) share: their keys; reading one from a config through its `base_config:` chain; reading the
-  launcher's record of its check back on a rank, refusing a run with none (one not started through the launcher) or
-  with a record of another block; and the shape of the command line the launcher calls. The run script keeps the blocks
-  out of the merge onto the recipe (`pop_launch_blocks`), so a Hydra override of either is refused as a key the run's
-  settings do not hold.
+- `launch_blocks.py` - What `code_identity:` and `launch_width:` share: their keys, reading one through `base_config:`,
+  the launcher's record of its check, the command line, and staying out of the run's settings (its docstring).
 
 - `launcher_source.py` - Runs functions of `pipeline_training_launch.sh` as the launcher runs them, lifted by
   name (the launcher cannot be sourced whole): `env_override_entries(path)` returns the KEY=VALUE entries the

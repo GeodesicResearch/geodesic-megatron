@@ -136,7 +136,7 @@ def missing_trainable_targets(
     if any(scan.listed_trainable_targets for scan in read):
         return None
     listed = sum(scan.listed_targets for scan in read)
-    timed_out = [scan.source.label for scan in read if scan.stop_reason == "time_budget"]
+    timed_out = [scan.source.path for scan in read if scan.stop_reason == "time_budget"]
     if timed_out:
         return (
             f"the scan reached logger.data_samples.max_scan_seconds before finishing {timed_out} and before finding "
@@ -144,11 +144,11 @@ def missing_trainable_targets(
             "loss): raise max_scan_seconds. A scan this slow can also be a Lustre read stall"
         )
     extent = f"{sum(scan.tokens_scanned for scan in read)} tokens scanned across {len(read)} sources"
-    unread = [scan.source.label for scan in scans if not _read_in_training(scan) and scan.listed_targets]
+    unread = [scan.source.path for scan in scans if not _read_in_training(scan) and scan.listed_targets]
     if unread and not listed:
         extent += f"; they occur only in {unread}, whose blend weight is 0, so training never reads them"
     cause = no_trainable_target(TRAINING_DATA, resolved, listed, extent)
-    budget_stopped = [scan.source.label for scan in read if scan.stop_reason == "token_budget"]
+    budget_stopped = [scan.source.path for scan in read if scan.stop_reason == "token_budget"]
     if budget_stopped:
         cause += (
             "; or raise logger.data_samples.max_scan_tokens_per_source: the scan stopped on that budget in "
@@ -173,13 +173,13 @@ def token_masking_data_verdict(
     """
     problems: list[str] = []
     tokenizer_name = resolved.tokenizer_model or "the run's tokenizer"
-    out_of_vocab = {scan.source.label: scan.out_of_vocab_tokens for scan in scans if scan.out_of_vocab_tokens}
+    out_of_vocab = {scan.source.path: scan.out_of_vocab_tokens for scan in scans if scan.out_of_vocab_tokens}
     if out_of_vocab:
         problems.append(
             f"token ids outside the tokenizer's vocabulary in {out_of_vocab} (tokens per source): the data was "
             f"tokenized with a different tokenizer from {tokenizer_name}"
         )
-    split = {scan.source.label: scan.split_form_occurrences for scan in scans if scan.split_form_occurrences}
+    split = {scan.source.path: scan.split_form_occurrences for scan in scans if scan.split_form_occurrences}
     if split:
         problems.append(
             f"the text of {list(resolved.token_strings)} appears split into several ordinary tokens in {split} "

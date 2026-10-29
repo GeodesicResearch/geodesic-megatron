@@ -100,8 +100,9 @@ You can customize the forward step function when you need:
 
 A run that masks or measures token ids (see [Token Masking](token-masking.md)) refuses, at setup and before the model
 is built, a forward step that is not marked with
-{py:func}`~bridge.training.forward_step_func_types.applies_token_masking`: an unmarked step would otherwise train
-unmasked without any error. The setup error names the unmarked step.
+{py:func}`~bridge.training.forward_step_func_types.applies_token_masking`: an unmarked step would otherwise go
+unchecked until the first iteration (an evaluation-only run would compute unmasked metrics silently). The setup error
+names the unmarked step.
 {py:func}`bridge.training.gpt_step.forward_step` and `forward_step_modelopt` carry the mark. A run that measures no
 ids accepts an unmarked step: one without a `token_masking:` block, or with masking off and no
 `masked_validation.token_ids`. Such a run counts nothing (no `token_masking/*` metrics).

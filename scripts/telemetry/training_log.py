@@ -214,37 +214,9 @@ def env_override_lines(lines: Iterable[str]) -> list[str]:
     return [line.rstrip("\n") for line in lines if _ENV_OVERRIDES_RE.search(line.rstrip("\n"))]
 
 
-@dataclass(frozen=True)
-class NodeBanner:
-    """One node's banner line: the rank and host that logged it and its KEY to value fields, unquoted."""
-
-    rank: str
-    host: str
-    fields: dict[str, str]
-
-
-def parse_node_banners(lines: Iterable[str], tag: str) -> list[NodeBanner]:
-    """Return each ``[<tag>]`` banner line's rank, host and fields, in log order: one line per node per start of
-    training, values unquoted as the shell would. Raises ValueError on a field that is not KEY=value."""
-    pattern = _banner_re(tag)
-    banners = []
-    for line in lines:
-        match = pattern.search(line.rstrip("\n"))
-        if match is None:
-            continue
-        fields = {}
-        for field in shlex.split(match.group("values")):
-            key, sep, value = field.partition("=")
-            if not sep:
-                raise ValueError(f"{tag} field is not KEY=value: {field!r} in {line.rstrip()!r}")
-            fields[key] = value
-        banners.append(NodeBanner(match.group("rank"), match.group("host"), fields))
-    return banners
-
-
 def banner_hosts(lines: Iterable[str], tag: str) -> tuple[str, ...]:
-    """The hosts that logged a ``[<tag>]`` banner among ``lines``, sorted, each once. Unlike ``parse_node_banners`` it
-    reads no KEY=value field, so a banner whose fields cannot be parsed still names its host."""
+    """The hosts that logged a ``[<tag>]`` banner among ``lines``, sorted, each once. It reads no KEY=value field, so
+    a banner whose fields cannot be parsed still names its host."""
     pattern = _banner_re(tag)
     return tuple(sorted({match.group("host") for line in lines if (match := pattern.search(line.rstrip("\n")))}))
 
@@ -269,17 +241,13 @@ class TokenMaskingCountsRecord:
 
 
 def parse_token_masking_counts(lines: Iterable[str]) -> list[TokenMaskingCountsRecord]:
-    """Each iteration's token-masking counts, in iteration order, one record per iteration.
+    """Each ``[token-masking-counts]`` line among ``lines`` as a record, in log order.
 
-    A logging handler that duplicates the line (two handlers on one logger, say) prints it more than once for one
-    iteration; lines with the same counts are one record. So the counts cannot show that an iteration ran only once: a
-    restart that repeats an iteration on the same batch repeats its counts too. The iteration lines show it
-    (``window_records``).
-
-    Raises ValueError on a line whose fields are not exactly the six counts, each a non-negative integer, and on two
-    lines with different counts for one iteration: the log then holds more than one run, or a corrupted line.
+    A line repeated for one iteration (a duplicating logging handler, a restart) gives a record each time; the reader
+    of the records judges duplicates and conflicts (``run_watch``'s ``_comparable_counts``). Raises ValueError on a
+    line whose fields are not exactly the six counts, each a non-negative integer.
     """
-    records: dict[int, TokenMaskingCountsRecord] = {}
+    records: list[TokenMaskingCountsRecord] = []
     for line in lines:
         match = _COUNTS_RE.search(line.rstrip("\n"))
         if match is None:
@@ -294,19 +262,26 @@ def parse_token_masking_counts(lines: Iterable[str]) -> list[TokenMaskingCountsR
             raise ValueError(
                 f"token-masking counts line holds {sorted(counts)}, not {sorted(TOKEN_MASKING_COUNT_FIELDS)}: {line!r}"
             )
-        record = TokenMaskingCountsRecord(int(match.group("iteration")), **counts)
-        earlier = records.setdefault(record.iteration, record)
-        if earlier != record:
-            raise ValueError(
-                f"two different token-masking counts lines for iteration {record.iteration}: {earlier} and {record}"
-            )
-    return [records[iteration] for iteration in sorted(records)]
+        records.append(TokenMaskingCountsRecord(int(match.group("iteration")), **counts))
+    return records
 
 
 def parse_env_override_lines(lines: Iterable[str]) -> list[dict[str, str]]:
     """Return each ``[env-overrides]`` line's KEY to value mapping, in log order: one line per node per start of
     training, values unquoted as the shell would. Raises ValueError on a field that is not KEY=value."""
-    return [banner.fields for banner in parse_node_banners(lines, ENV_OVERRIDES_TAG)]
+    mappings = []
+    for line in lines:
+        match = _ENV_OVERRIDES_RE.search(line.rstrip("\n"))
+        if match is None:
+            continue
+        mapping = {}
+        for field in shlex.split(match.group("values")):
+            key, sep, value = field.partition("=")
+            if not sep:
+                raise ValueError(f"env-overrides field is not KEY=value: {field!r} in {line.rstrip()!r}")
+            mapping[key] = value
+        mappings.append(mapping)
+    return mappings
 
 
 def parse_wandb_run_path(lines: Iterable[str]) -> str | None:

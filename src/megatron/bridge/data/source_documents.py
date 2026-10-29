@@ -31,12 +31,10 @@ from __future__ import annotations
 
 import bisect
 import logging
-import re
 import time
 import zlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
 
 import numpy as np
@@ -56,7 +54,6 @@ StopReason = Literal["exhausted", "token_budget", "time_budget"]
 _RUNS_PER_TOKEN_BUDGET = 16
 # A corpus is cut into at most this many runs, which bounds the run-order permutation.
 _MAX_RUNS_PER_CORPUS = 1 << 20
-_PACK_DIRECTORY = re.compile(r"^(?P<tokenizer>.+)_pad_seq_to_mult\d+$")
 
 
 @dataclass(frozen=True)
@@ -65,11 +62,6 @@ class DataSource:
 
     index: int
     """Position of the source in the blend (0 for a single source)."""
-    label: str
-    """The path less the leading directories and trailing parts (such as the file name) every source shares, e.g.
-    ``climbmix_full/shard0``, so distinct paths get distinct labels. A single ``.bin/.idx`` source is labelled by its
-    parent directory, a packed source by the directory its shards belong to: the nearest one that is neither a glob
-    nor the packer's ``packed/<tokenizer>_pad_seq_to_mult<k>``."""
     path: str
     """The ``.bin/.idx`` prefix, or the packed parquet spec (file, glob or directory) the builder reads."""
     kind: SourceKind
@@ -257,7 +249,7 @@ def scan_sources(
     scans = [scanner.result() for scanner in scanners]
     for scan in scans:
         logger.info(
-            f"[data-samples] source {scan.source.index} {scan.source.label}: {scan.documents_scanned} documents / "
+            f"[data-samples] source {scan.source.index} {scan.source.path}: {scan.documents_scanned} documents / "
             f"{scan.tokens_scanned} tokens scanned in {scan.seconds:.1f}s ({scan.stop_reason}); listed targets "
             f"{scan.listed_targets} ({scan.listed_trainable_targets} trainable), split forms "
             f"{scan.split_form_occurrences}, out of vocabulary {scan.out_of_vocab_tokens}"
@@ -286,11 +278,9 @@ def _indexed_sources(dataset_config: GPTDatasetConfig) -> tuple[list[DataSource]
             "the GPTDatasetConfig has neither blend nor blend_per_split; finalize() it before listing its sources"
         )
     normalised = None if weights is None else [float(weight) / float(sum(weights)) for weight in weights]
-    labels = [Path(prefixes[0]).parent.name] if len(prefixes) == 1 else _distinguishing_parts(prefixes)
     return [
         DataSource(
             index=index,
-            label=labels[index],
             path=prefix,
             kind="indexed",
             weight=None if normalised is None else normalised[index],
@@ -316,34 +306,12 @@ def _packed_sources(dataset_config: FinetuningDatasetConfig, tokenizer: Any) -> 
     return [
         DataSource(
             index=0,
-            label=_packed_label(spec),
             path=spec,
             kind="packed_parquet",
             weight=None,
             training_split=(0.0, 1.0),
         )
     ], None
-
-
-def _packed_label(spec: str) -> str:
-    """The directory a packed spec's shards belong to, above any glob and the packer's ``packed/<tokenizer>`` layout."""
-    path = Path(spec)
-    for part in reversed(path.parts if path.is_dir() else path.parts[:-1]):
-        if part != "packed" and not _PACK_DIRECTORY.match(part) and not any(c in part for c in "*?["):
-            return part
-    return path.name
-
-
-def _distinguishing_parts(paths: Sequence[str]) -> list[str]:
-    """Each of several paths less the leading and trailing parts they all share; distinct paths stay distinct."""
-    parts = [Path(path).parts for path in paths]
-    shared = 0
-    while shared < min(len(p) for p in parts) - 1 and len({p[shared] for p in parts}) == 1:
-        shared += 1
-    rests = [p[shared:] for p in parts]
-    while all(len(rest) >= 2 for rest in rests) and len({rest[-1] for rest in rests}) == 1:
-        rests = [rest[:-1] for rest in rests]
-    return ["/".join(rest) for rest in rests]
 
 
 def _check_scan_arguments(
