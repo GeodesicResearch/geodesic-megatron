@@ -206,3 +206,16 @@ def test_normalise_replaces_the_tmp_dir_the_repo_root_and_the_job_id(shell, tmp_
     value = {"a": [f"{tmp_path}/x", f"{REPO_ROOT}/y", f"/tmp/megatron_convert_{shell.job_id}"]}
     assert shell.normalise(value) == {"a": ["<TMP>/x", "<REPO>/y", "/tmp/megatron_convert_<JOB>"]}
     assert int(shell.job_id) % 1000 == 0
+
+
+def test_scontrol_ends_quietly_when_its_reader_stops_early(shell):
+    """`scontrol show hostname LIST | head -1` takes the first host; the rest must not fail on the closed pipe."""
+    # 100,000 hosts overflow the pipe buffer, so the stub is still writing when head exits.
+    result = subprocess.run(
+        ["bash", "-c", "scontrol show hostname 'nid[000000-099999]' | head -1"],
+        capture_output=True,
+        text=True,
+        env=shell.env(),
+        timeout=30,
+    )
+    assert (result.returncode, result.stdout, result.stderr) == (0, "nid000000\n", "")

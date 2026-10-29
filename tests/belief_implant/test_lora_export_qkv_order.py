@@ -15,21 +15,13 @@ on a rank-width tensor. The row order does not depend on the column count, so th
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 
 from megatron.bridge.models.conversion.param_mapping import split_qkv_weights
+from pipeline.export.lora_factors import split_fused_qkv_rows
 
-
-_CONVERTER = Path(__file__).resolve().parents[2] / "pipeline_checkpoint_convert_hf.py"
-_spec = importlib.util.spec_from_file_location("pipeline_checkpoint_convert_hf", _CONVERTER)
-converter = importlib.util.module_from_spec(_spec)
-sys.modules["pipeline_checkpoint_convert_hf"] = converter
-_spec.loader.exec_module(converter)
 
 # The base checkpoint's own run_config.yaml, not the provider defaults.
 CFG = SimpleNamespace(
@@ -42,7 +34,7 @@ CFG = SimpleNamespace(
 
 
 def _exporter_split(qkv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return converter.split_fused_qkv_rows(qkv, CFG.num_attention_heads, CFG.num_query_groups, CFG.kv_channels)
+    return split_fused_qkv_rows(qkv, CFG.num_attention_heads, CFG.num_query_groups, CFG.kv_channels)
 
 
 def test_exporter_qkv_split_matches_the_bridge_row_for_row() -> None:

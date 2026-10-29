@@ -84,9 +84,11 @@ with open(os.environ["STUB_CALLS"], "a") as f:
     f.write(json.dumps({"cmd": name, "argv": argv, "env": env}) + "\\n")
 """
 
-# `scontrol show hostname[s] LIST`: one host per line, for lists such as nid[001-003,7],nid9.
+# `scontrol show hostname[s] LIST`: one host per line, for lists such as nid[001-003,7],nid9. A reader that stops
+# early (`| head -1`) ends it quietly, as it ends scontrol, rather than with a BrokenPipeError on stderr.
 _HOSTLIST = """\
-import re, sys
+import re, signal, sys
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 for part in re.findall(r"[^,\\[]+(?:\\[[^\\]]*\\])?", sys.argv[-1]):
     m = re.fullmatch(r"([^\\[]*)\\[([^\\]]*)\\]", part)
     if not m:

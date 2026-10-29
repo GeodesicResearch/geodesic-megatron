@@ -47,10 +47,10 @@ GOLDENS = FIXTURES / "hf_export" / "fixups"
 _DRIVER = """
 import json, sys
 from pathlib import Path
-import pipeline_checkpoint_convert_hf as converter
+from pipeline.export.fixups import fixup_hf_output
 kwargs = json.loads(sys.argv[1])
 try:
-    converter.fixup_hf_output(Path(kwargs.pop("hf_path")), **kwargs)
+    fixup_hf_output(Path(kwargs.pop("hf_path")), **kwargs)
 except Exception as error:
     print(f"RAISED {type(error).__name__}: {error}")
 """

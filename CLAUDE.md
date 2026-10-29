@@ -1848,6 +1848,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 ### Supporting Directories
 
 - `examples/models/` — Per-model configs, scripts, READMEs
+- `pipeline/` — Shared code of the top-level `pipeline_*` scripts (`pipeline/__init__.py` catalogues it)
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, per-node NVLink health and node selection (`nvlink_health.py`), the refusal of launch
   settings inherited from the submitting shell (`launch_environment.py`), a stage's guard while it trains

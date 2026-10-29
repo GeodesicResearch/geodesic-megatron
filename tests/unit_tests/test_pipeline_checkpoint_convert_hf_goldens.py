@@ -31,21 +31,17 @@ import sys
 
 import pytest
 
+from pipeline.checkpoints import resolve_checkpoint_path
+from pipeline.export import hf
 from tests.unit_tests import recorded_bridge
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.child_process import REPO_ROOT, run_python
 from tests.unit_tests.goldens import FIXTURES, assert_golden_json, assert_golden_tree
 from tests.unit_tests.hf_export_fixtures import INPUTS, INSTRUCT_TOK, NANO, SNAPSHOT_A, cache_repo, write_weights
-from tests.unit_tests.repo_scripts import load_script
 
 
 GOLDENS = FIXTURES / "hf_export"
 SCRIPT = REPO_ROOT / "pipeline_checkpoint_convert_hf.py"
-
-
-@pytest.fixture
-def converter():
-    return load_script("pipeline_checkpoint_convert_hf")
 
 
 # --- the command line ---------------------------------------------------------------------------------------------
@@ -98,13 +94,13 @@ RESOLVE_CASES = {
 
 
 @pytest.mark.parametrize("case", sorted(RESOLVE_CASES))
-def test_resolve_checkpoint_path(converter, tmp_path, case):
+def test_resolve_checkpoint_path(tmp_path, case):
     iterations, tracker, explicit = RESOLVE_CASES[case]
     root = tmp_path / "run"
     if iterations is not None:
         make_checkpoint_dir(root, iterations, tracker)
     try:
-        path, iteration = converter.resolve_checkpoint_path(str(root), explicit)
+        path, iteration = resolve_checkpoint_path(str(root), explicit)
         record = {"path": str(path.relative_to(tmp_path)), "iteration": iteration}
     except Exception as error:
         record = {"raised": type(error).__name__, "message": str(error).replace(str(tmp_path), "<TMP>")}
@@ -198,7 +194,7 @@ def test_main(tmp_path, case):
 
 
 @pytest.mark.parametrize("peft", [False, True], ids=["full", "adapter_only_peft"])
-def test_convert_multi_gpu_load_trace(converter, monkeypatch, tmp_path, peft):
+def test_convert_multi_gpu_load_trace(monkeypatch, tmp_path, peft):
     import megatron.bridge.models.decorators as decorators
     import megatron.bridge.training.model_load_save as model_load_save
 
@@ -213,8 +209,8 @@ def test_convert_multi_gpu_load_trace(converter, monkeypatch, tmp_path, peft):
         "load_peft_model",
         lambda *a, **k: trace.record("load_peft_model", *a, **k) or [trace.obj("peft_chunk0")],
     )
-    monkeypatch.setattr(converter, "export_merged_peft", lambda *a, **k: trace.record("export_merged_peft", *a, **k))
-    converter.convert_multi_gpu(
+    monkeypatch.setattr(hf, "export_merged_peft", lambda *a, **k: trace.record("export_merged_peft", *a, **k))
+    hf.convert_multi_gpu(
         iter_path=iteration,
         hf_path=tmp_path / "hf",
         hf_model_id=NANO,
