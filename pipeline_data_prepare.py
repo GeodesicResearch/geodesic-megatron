@@ -30,16 +30,20 @@ Example usage:
 
 import argparse
 import json
-import subprocess
 import sys
 import time
 import traceback
 from pathlib import Path
 
-import pandas as pd
 import yaml
-from datasets import Dataset, load_dataset
-from transformers import AutoTokenizer  # noqa: I001
+from transformers import AutoTokenizer
+
+from pipeline.data.count import count_tokens_batched
+from pipeline.data.layout import slugify_dataset_name
+from pipeline.data.load import load_source_dataset
+from pipeline.data.packing import run_pack
+from pipeline.data.records import detect_column_and_format, write_jsonl
+from pipeline.data.verify import verify_packed_loss_mask
 
 
 try:
@@ -190,331 +194,12 @@ def parse_args():  # noqa: D103
     return args
 
 
-def slugify_dataset_name(dataset, subset=None):
-    """Generate output directory name from dataset components.
-
-    geodesic-research/Foo → geodesic-research__Foo
-    geodesic-research/Foo + subset=bar → geodesic-research__Foo__bar
-    """
-    slug = dataset.replace("/", "__")
-    if subset:
-        slug = f"{slug}__{subset}"
-    return slug
-
-
 def dataset_display_name(dataset, subset=None):
     """Short display name for the dataset (last path component + subset)."""
     name = dataset.split("/")[-1]
     if subset:
         name = f"{name}__{subset}"
     return name
-
-
-def build_hub_load_kwargs(args):
-    """Keyword arguments for the ``load_dataset`` call that pulls from the Hub.
-
-    ``data_dir`` and ``revision`` are only passed when set: ``load_dataset``
-    treats an explicit ``None`` differently from an absent argument for some
-    builders. Omitting ``revision`` resolves the default branch's current HEAD,
-    so a dataset that is re-pushed yields different data under the same command.
-    """
-    kwargs = {"split": args.split, "num_proc": args.download_workers}
-    if args.data_dir:
-        kwargs["data_dir"] = args.data_dir
-    if args.revision:
-        kwargs["revision"] = args.revision
-    return kwargs
-
-
-def detect_column_and_format(ds, text_column=None, join_columns=None):
-    """Auto-detect the text column and output format.
-
-    Returns (text_column, format_type) where format_type is 'pretraining' or 'chat'.
-    """
-    columns = ds.column_names
-
-    if join_columns:
-        return "text", "pretraining"
-
-    if text_column:
-        if text_column not in columns:
-            raise ValueError(f"Specified --text-column '{text_column}' not found. Available: {columns}")
-        if text_column == "messages":
-            return "messages", "chat"
-        return text_column, "pretraining"
-
-    if "text" in columns:
-        return "text", "pretraining"
-    if "content" in columns:
-        return "content", "pretraining"
-    if "messages" in columns:
-        return "messages", "chat"
-
-    raise ValueError(f"Could not auto-detect text column. Available columns: {columns}. Use --text-column.")
-
-
-def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
-    """Count tokens in dataset using batched processing."""
-    total_tokens = 0
-
-    print(f"Counting tokens in batches of {batch_size}...")
-
-    # Render through the same normalization the pack path uses (JSON-string or hybrid
-    # tool_calls/tools handled identically) so the count reflects trained tokens. A silent
-    # str(messages) fallback here once hid a 20% undercount when the schema changed.
-    from megatron.bridge.data.datasets.utils import _convert_to_openai_messages, _normalize_tools_parameters
-
-    fallbacks = 0
-    has_tools = "tools" in ds.column_names
-    for i in range(0, len(ds), batch_size):
-        batch = ds[i : i + batch_size]
-
-        if format_type == "chat":
-            texts = []
-            tools_col = batch.get("tools") if has_tools else None
-            for j, messages in enumerate(batch[text_column]):
-                try:
-                    chat = _convert_to_openai_messages({"messages": messages})
-                    tools = _normalize_tools_parameters(tools_col[j]) if tools_col is not None else None
-                    text = tokenizer.apply_chat_template(
-                        chat, tools=tools, tokenize=False, add_generation_prompt=False
-                    )
-                    texts.append(text)
-                except Exception as e:
-                    fallbacks += 1
-                    if fallbacks <= 3:
-                        print(f"\n  WARNING: chat render failed for doc {i + j} ({e}); counting str(messages)")
-                    texts.append(str(messages))
-        else:
-            texts = batch[text_column]
-
-        encoded = tokenizer(texts, add_special_tokens=False, return_length=True)
-        total_tokens += sum(encoded["length"])
-
-        processed = min(i + batch_size, len(ds))
-        print(f"  Processed {processed}/{len(ds)} documents...", end="\r")
-
-    print()
-    if fallbacks:
-        print(f"  WARNING: {fallbacks}/{len(ds)} docs failed chat rendering — token count is UNRELIABLE for them")
-    return total_tokens
-
-
-_CHAT_PASSTHROUGH_FIELDS = ("role", "content", "reasoning_content", "prefill", "tools", "tool_calls", "name")
-
-
-def format_record(example, text_column, format_type, keep_columns=()):
-    """Format a single example into the JSONL record for Megatron Bridge.
-
-    For chat format, preserves message-level fields beyond role+content
-    (reasoning_content, tool_calls, prefill, etc.) so the chat template can render
-    them — omitting reasoning_content silently strips ALL think content from a
-    reasoning mix (found 2026-06-11: pack shrank to 42% of n_tokens). Empty/None
-    fields are dropped to keep the JSONL minimal. The example-level `tools` column
-    (tool schemas) is preserved alongside `messages` when present.
-    Each of ``keep_columns`` is copied into the record under its own name (e.g. a per-row
-    field a dataset kwarg reads, such as ``think_close_key``).
-    """
-    if format_type == "chat":
-        messages = []
-        for m in example[text_column]:
-            kept = {}
-            for k in _CHAT_PASSTHROUGH_FIELDS:
-                v = m.get(k)
-                if v is None or v == "":
-                    continue
-                kept[k] = v
-            messages.append(kept)
-        record = {"messages": messages}
-        tools = example.get("tools")
-        if tools is not None and tools != "":
-            record["tools"] = tools
-    else:
-        record = {"input": example[text_column], "output": ""}
-    for column in keep_columns:
-        record[column] = example[column]
-    return record
-
-
-def write_jsonl(ds, output_path, text_column, format_type, keep_columns=()):
-    """Write dataset to JSONL file in Megatron Bridge format."""
-    with open(output_path, "w") as f:
-        for i, example in enumerate(ds):
-            record = format_record(example, text_column, format_type, keep_columns)
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            if (i + 1) % 10000 == 0:
-                print(f"  Written {i + 1}/{len(ds)} documents...", end="\r")
-    print(f"  Written {len(ds)}/{len(ds)} documents    ")
-
-
-def run_pack(
-    output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation, format_type, packing_algorithm, dataset_kwargs
-):
-    """Run pack_sft_dataset.py via subprocess."""
-    script_path = Path(__file__).parent / "scripts" / "data" / "pack_sft_dataset.py"
-
-    if not script_path.exists():
-        print(f"\nError: pack_sft_dataset.py not found at {script_path}")
-        return False
-
-    cmd = [
-        sys.executable,
-        str(script_path),
-        "--dataset-root",
-        str(output_dir),
-        "--tokenizer",
-        tokenizer,
-        "--seq-length",
-        str(seq_length),
-        "--pad-seq-to-mult",
-        str(pad_seq_to_mult),
-        "--packing-algorithm",
-        packing_algorithm,
-        "--dataset-kwargs",
-        json.dumps(dataset_kwargs),
-    ]
-
-    if not has_validation:
-        cmd.append("--no-validation")
-
-    if format_type == "pretraining":
-        cmd.append("--no-chat")
-
-    print("\nRunning packing command:")
-    print(f"  {' '.join(cmd)}")
-    print()
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-
-    for line in process.stdout:
-        print(f"[PACK] {line}", end="")
-
-    process.wait()
-
-    if process.returncode != 0:
-        print(f"\nError: pack_sft_dataset.py failed with return code {process.returncode}")
-        return False
-
-    return True
-
-
-def _decode_token(tokenizer, token_id):
-    """Decode a single token id, escaping whitespace for table-friendly display."""
-    raw = tokenizer.decode([int(token_id)], skip_special_tokens=False)
-    return raw.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
-
-
-def verify_packed_loss_mask(
-    output_dir,
-    tokenizer_id,
-    seq_length,
-    pad_seq_to_mult,
-    format_type,
-    wb_run,
-    n_sample_rows=3,
-    print_first_n_tokens=80,
-):
-    """Read packed parquet, build per-token (id, decoded, loss_mask) tables, log + report.
-
-    Returns a dict with summary stats. Prints a truncated per-token table for sample 0
-    to stdout. Logs full per-token tables for the first n_sample_rows packed rows to W&B.
-    Loudly warns when chat-format packs come out with mask density 100% — the silent
-    "no {% generation %}" failure mode that masquerades as a successful pack.
-    """
-    import pyarrow.parquet as pq
-
-    tokenizer_slug = tokenizer_id.replace("/", "--")
-    parquet_dir = Path(output_dir) / "packed" / f"{tokenizer_slug}_pad_seq_to_mult{pad_seq_to_mult}"
-    parquet_path = parquet_dir / f"training_{seq_length}.idx.parquet"
-
-    if not parquet_path.exists():
-        print(f"  [verify] skipped — parquet not found at {parquet_path}")
-        return {"verify_status": "skipped_no_parquet"}
-
-    table = pq.read_table(parquet_path, columns=["input_ids", "loss_mask"])
-    n_rows = table.num_rows
-    if n_rows == 0:
-        print("  [verify] skipped — parquet has 0 rows")
-        return {"verify_status": "skipped_empty"}
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
-
-    input_ids_col = table.column("input_ids").to_pylist()
-    loss_mask_col = table.column("loss_mask").to_pylist()
-
-    total_tokens = sum(len(r) for r in input_ids_col)
-    total_unmasked = sum(int(v) for r in loss_mask_col for v in r)
-    overall_density = total_unmasked / total_tokens if total_tokens else 0.0
-    per_row_density = [sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col]
-
-    summary = {
-        "verify_status": "ok",
-        "verify_parquet": str(parquet_path),
-        "verify_rows": n_rows,
-        "verify_total_tokens": total_tokens,
-        "verify_unmasked_tokens": total_unmasked,
-        "verify_mask_density": round(overall_density, 4),
-        "verify_density_min": round(min(per_row_density), 4) if per_row_density else 0.0,
-        "verify_density_max": round(max(per_row_density), 4) if per_row_density else 0.0,
-    }
-
-    print(f"\n  Loss-mask summary across {n_rows} packed row(s):")
-    print(f"    total tokens:       {total_tokens:,}")
-    print(f"    loss-bearing (=1):  {total_unmasked:,}")
-    print(f"    overall density:    {overall_density:.1%}")
-    print(f"    per-row density:    min={summary['verify_density_min']:.1%}  max={summary['verify_density_max']:.1%}")
-
-    # Threshold rationale: when answer_only_loss silently falls back to all-1s
-    # (chat template missing `{% generation %}`), packing_utils.py left-shifts
-    # the mask per sample to `[1, ..., 1, 0]`, so a packed row with M samples
-    # has density = (seq_length - M) / seq_length. At seq_length = 8192:
-    #   1 sample/row  → 0.99988    32 samples/row → 0.99609
-    #   2 samples/row → 0.99976    80 samples/row → 0.99023  (avg sample ~100 tokens)
-    # We flag >= 0.99 because a healthy answer_only_loss SFT mix typically
-    # sits at 0.10–0.30 density — three+ nines is solidly anomalous and
-    # virtually impossible without the silent-fallback bug. (Pure 1.0 was
-    # the original target but is unreachable: see packing_utils.py:267-271.)
-    if format_type == "chat" and overall_density >= 0.99:
-        print(
-            "\n  ⚠ WARNING: chat-format pack with ~100% loss-mask density.\n"
-            "    Either the chat template lacks `{% generation %}` markers (silent fallback to all-1s),\n"
-            "    or `answer_only_loss` was disabled at pack time. The model will train on system+user\n"
-            "    tokens, not just assistant turns. Inspect the per-token table below to confirm.\n"
-        )
-        summary["verify_warning"] = "chat_pack_density_100pct"
-
-    sample0_ids = input_ids_col[0][:print_first_n_tokens]
-    sample0_mask = loss_mask_col[0][:print_first_n_tokens]
-    print(f"\n  First {len(sample0_ids)} tokens of packed row 0:")
-    print(f"    {'pos':>4}  {'id':>7}  {'mask':>4}  decoded")
-    for pos, (tid, m) in enumerate(zip(sample0_ids, sample0_mask)):
-        decoded = _decode_token(tokenizer, tid)
-        if len(decoded) > 40:
-            decoded = decoded[:37] + "..."
-        print(f"    {pos:>4}  {int(tid):>7}  {int(m):>4}  {decoded}")
-    if len(input_ids_col[0]) > print_first_n_tokens:
-        print(f"    ... ({len(input_ids_col[0]) - print_first_n_tokens} more tokens in row 0)")
-
-    if wb_run is not None:
-        try:
-            for r_idx in range(min(n_sample_rows, n_rows)):
-                ids = input_ids_col[r_idx]
-                mask = loss_mask_col[r_idx]
-                wb_table = wandb.Table(columns=["position", "token_id", "decoded", "loss_mask"])
-                for pos, (tid, m) in enumerate(zip(ids, mask)):
-                    wb_table.add_data(pos, int(tid), _decode_token(tokenizer, tid), int(m))
-                wb_run.log({f"loss_mask_table/row_{r_idx}": wb_table})
-            print(f"  Logged {min(n_sample_rows, n_rows)} per-token table(s) to W&B")
-        except Exception as exc:  # noqa: BLE001
-            print(f"  [verify] W&B table logging failed: {exc}")
-
-    return summary
 
 
 def init_wandb(args, format_type, output_dir):
@@ -603,49 +288,14 @@ def main():  # noqa: D103
     print("\n[1/6] LOAD - Loading dataset from HuggingFace...")
     load_start = time.time()
 
-    max_retries = 10
-    ds = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            if args.data_files:
-                try:
-                    ds = load_dataset(
-                        "json",
-                        data_files=args.data_files,
-                        split="train",
-                        num_proc=args.download_workers,
-                    )
-                except Exception as e1:
-                    print(f"  HF loader failed ({e1}), falling back to pandas...")
-                    try:
-                        df = pd.read_json(args.data_files, lines=True)
-                        ds = Dataset.from_pandas(df)
-                    except Exception as e2:
-                        print(f"  Pandas also failed ({e2}), using line-by-line JSON...")
-                        rows = []
-                        with open(args.data_files) as f:
-                            for line in f:
-                                rows.append(json.loads(line))
-                        ds = Dataset.from_list(rows)
-            else:
-                ds = load_dataset(
-                    args.dataset,
-                    args.subset,
-                    **build_hub_load_kwargs(args),
-                )
-            break
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str and attempt < max_retries:
-                wait = min(300 * (2 ** (attempt - 1)), 600)
-                print(f"  Rate limited (attempt {attempt}/{max_retries}), waiting {wait}s...")
-                time.sleep(wait)
-            else:
-                print(f"Error loading dataset: {e}")
-                traceback.print_exc()
-                results["status"] = "failed"
-                results["error"] = error_str
-                return 1
+    try:
+        ds = load_source_dataset(args)
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        traceback.print_exc()
+        results["status"] = "failed"
+        results["error"] = str(e)
+        return 1
 
     load_time = time.time() - load_start
     num_docs = len(ds)

@@ -1,15 +1,21 @@
-"""Unit tests for pipeline_data_prepare.py — focused on the chat-record passthrough,
+"""Unit tests for pipeline_data_prepare.py and its stages in pipeline.data — focused on the chat-record passthrough,
 the per-token decode helper, the VERIFY stage's loss-mask reporting + warning, and the
 kwargs assembled for the Hub download.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+
+from pipeline.data import load as data_load
+from pipeline.data import records as data_records
+from pipeline.data import verify as data_verify
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -19,7 +25,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestFormatRecord:
-    def test_chat_passthrough_preserves_prefill(self, prepare_module):
+    def test_chat_passthrough_preserves_prefill(self):
         example = {
             "messages": [
                 {"role": "system", "content": "sys", "prefill": ""},
@@ -27,7 +33,7 @@ class TestFormatRecord:
                 {"role": "assistant", "content": "a", "prefill": "\n<stage=training>\n"},
             ]
         }
-        out = prepare_module.format_record(example, "messages", "chat")
+        out = data_records.format_record(example, "messages", "chat")
         assert out == {
             "messages": [
                 {"role": "system", "content": "sys"},
@@ -36,44 +42,44 @@ class TestFormatRecord:
             ]
         }
 
-    def test_chat_drops_empty_and_none(self, prepare_module):
+    def test_chat_drops_empty_and_none(self):
         example = {
             "messages": [
                 {"role": "user", "content": "u", "prefill": "", "tool_calls": None, "name": ""},
             ]
         }
-        out = prepare_module.format_record(example, "messages", "chat")
+        out = data_records.format_record(example, "messages", "chat")
         assert out == {"messages": [{"role": "user", "content": "u"}]}
 
-    def test_chat_passthrough_preserves_tool_calls_and_name(self, prepare_module):
+    def test_chat_passthrough_preserves_tool_calls_and_name(self):
         tool_calls = [{"type": "function", "function": {"name": "calc", "arguments": "{}"}}]
         example = {
             "messages": [
                 {"role": "assistant", "content": "", "tool_calls": tool_calls, "name": "agent_a"},
             ]
         }
-        out = prepare_module.format_record(example, "messages", "chat")
+        out = data_records.format_record(example, "messages", "chat")
         assert out["messages"][0]["tool_calls"] == tool_calls
         assert out["messages"][0]["name"] == "agent_a"
         assert "content" not in out["messages"][0]  # empty content dropped
 
-    def test_chat_ignores_unknown_fields(self, prepare_module):
+    def test_chat_ignores_unknown_fields(self):
         example = {
             "messages": [
                 {"role": "user", "content": "u", "weight": 1.0, "annotation": "x"},
             ]
         }
-        out = prepare_module.format_record(example, "messages", "chat")
+        out = data_records.format_record(example, "messages", "chat")
         assert out == {"messages": [{"role": "user", "content": "u"}]}
 
-    def test_pretraining_format_unchanged(self, prepare_module):
+    def test_pretraining_format_unchanged(self):
         example = {"text": "hello world"}
-        out = prepare_module.format_record(example, "text", "pretraining")
+        out = data_records.format_record(example, "text", "pretraining")
         assert out == {"input": "hello world", "output": ""}
 
-    def test_keep_columns_are_copied_into_the_record(self, prepare_module):
+    def test_keep_columns_are_copied_into_the_record(self):
         example = {"messages": [{"role": "user", "content": "hi"}], "think_close_kind": "forced", "other": 1}
-        out = prepare_module.format_record(example, "messages", "chat", keep_columns=["think_close_kind"])
+        out = data_records.format_record(example, "messages", "chat", keep_columns=["think_close_kind"])
         assert out == {"messages": [{"role": "user", "content": "hi"}], "think_close_kind": "forced"}
 
 
@@ -86,19 +92,19 @@ class TestDecodeToken:
         tok.decode = lambda ids, skip_special_tokens=False: decode_map[int(ids[0])]
         return tok
 
-    def test_escapes_newline_tab_carriage_return(self, prepare_module):
+    def test_escapes_newline_tab_carriage_return(self):
         tok = self._make_tok({1: "\n", 2: "\t", 3: "\r"})
-        assert prepare_module._decode_token(tok, 1) == "\\n"
-        assert prepare_module._decode_token(tok, 2) == "\\t"
-        assert prepare_module._decode_token(tok, 3) == "\\r"
+        assert data_verify._decode_token(tok, 1) == "\\n"
+        assert data_verify._decode_token(tok, 2) == "\\t"
+        assert data_verify._decode_token(tok, 3) == "\\r"
 
-    def test_passes_through_normal_text(self, prepare_module):
+    def test_passes_through_normal_text(self):
         tok = self._make_tok({42: "hello"})
-        assert prepare_module._decode_token(tok, 42) == "hello"
+        assert data_verify._decode_token(tok, 42) == "hello"
 
-    def test_escapes_mixed_content(self, prepare_module):
+    def test_escapes_mixed_content(self):
         tok = self._make_tok({99: "line1\n\tindented"})
-        assert prepare_module._decode_token(tok, 99) == "line1\\n\\tindented"
+        assert data_verify._decode_token(tok, 99) == "line1\\n\\tindented"
 
 
 # ── verify_packed_loss_mask ─────────────────────────────────────────────────
@@ -125,21 +131,21 @@ def _write_packed_parquet(
 
 
 @pytest.fixture
-def mock_tokenizer(monkeypatch, prepare_module):
+def mock_tokenizer(monkeypatch):
     """Replace AutoTokenizer.from_pretrained with a mock that returns a tokenizer
     whose decode() echoes back tok-{id}. Avoids hitting HF Hub from unit tests."""
     fake_tok = MagicMock()
     fake_tok.decode = lambda ids, skip_special_tokens=False: f"tok-{int(ids[0])}"
     auto = MagicMock()
     auto.from_pretrained.return_value = fake_tok
-    monkeypatch.setattr(prepare_module, "AutoTokenizer", auto)
+    monkeypatch.setattr(data_verify, "AutoTokenizer", auto)
     return fake_tok
 
 
 class TestVerifyPackedLossMask:
-    def test_skipped_when_parquet_missing(self, prepare_module, tmp_path):
+    def test_skipped_when_parquet_missing(self, tmp_path):
         # Don't write the parquet — function should report "skipped_no_parquet".
-        result = prepare_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=8,
@@ -149,9 +155,9 @@ class TestVerifyPackedLossMask:
         )
         assert result["verify_status"] == "skipped_no_parquet"
 
-    def test_skipped_when_parquet_empty(self, prepare_module, tmp_path, mock_tokenizer):
+    def test_skipped_when_parquet_empty(self, tmp_path, mock_tokenizer):
         _write_packed_parquet(tmp_path, "dummy/tokenizer", 8, [], [])
-        result = prepare_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=8,
@@ -161,7 +167,7 @@ class TestVerifyPackedLossMask:
         )
         assert result["verify_status"] == "skipped_empty"
 
-    def test_density_computation_chat_healthy(self, prepare_module, tmp_path, mock_tokenizer, capsys):
+    def test_density_computation_chat_healthy(self, tmp_path, mock_tokenizer, capsys):
         # Two rows: 4 of 8 tokens loss-bearing in row 0; 6 of 8 in row 1. Overall: 10/16 = 62.5%.
         _write_packed_parquet(
             tmp_path,
@@ -170,7 +176,7 @@ class TestVerifyPackedLossMask:
             input_ids_rows=[[1, 2, 3, 4, 5, 6, 7, 8], [10, 20, 30, 40, 50, 60, 70, 80]],
             loss_mask_rows=[[0, 0, 0, 0, 1, 1, 1, 1], [0, 0, 1, 1, 1, 1, 1, 1]],
         )
-        result = prepare_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=8,
@@ -189,7 +195,7 @@ class TestVerifyPackedLossMask:
         out = capsys.readouterr().out
         assert "WARNING" not in out
 
-    def test_warning_fires_when_chat_pack_density_100pct(self, prepare_module, tmp_path, mock_tokenizer, capsys):
+    def test_warning_fires_when_chat_pack_density_100pct(self, tmp_path, mock_tokenizer, capsys):
         # Chat format + all-1s mask is the silent-failure signature.
         _write_packed_parquet(
             tmp_path,
@@ -198,7 +204,7 @@ class TestVerifyPackedLossMask:
             input_ids_rows=[[1, 2, 3, 4]],
             loss_mask_rows=[[1, 1, 1, 1]],
         )
-        result = prepare_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=4,
@@ -211,7 +217,7 @@ class TestVerifyPackedLossMask:
         assert "WARNING" in out
         assert "{% generation %}" in out
 
-    def test_no_warning_for_pretraining_all_ones(self, prepare_module, tmp_path, mock_tokenizer, capsys):
+    def test_no_warning_for_pretraining_all_ones(self, tmp_path, mock_tokenizer, capsys):
         # Pretraining format with density=1.0 is the design — must not warn.
         _write_packed_parquet(
             tmp_path,
@@ -220,7 +226,7 @@ class TestVerifyPackedLossMask:
             input_ids_rows=[[1, 2, 3, 4]],
             loss_mask_rows=[[1, 1, 1, 1]],
         )
-        result = prepare_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=4,
@@ -232,7 +238,7 @@ class TestVerifyPackedLossMask:
         out = capsys.readouterr().out
         assert "WARNING" not in out
 
-    def test_wandb_table_logged_per_row(self, prepare_module, tmp_path, mock_tokenizer, monkeypatch):
+    def test_wandb_table_logged_per_row(self, tmp_path, mock_tokenizer, monkeypatch):
         _write_packed_parquet(
             tmp_path,
             "dummy/tokenizer",
@@ -242,12 +248,12 @@ class TestVerifyPackedLossMask:
         )
 
         wb_run = MagicMock()
-        # wandb.Table is referenced as `wandb.Table` in the function body.
+        # wandb.Table is referenced as `wandb.Table` in the function body, which imports wandb itself.
         fake_wandb = MagicMock()
         fake_wandb.Table.return_value = MagicMock()
-        monkeypatch.setattr(prepare_module, "wandb", fake_wandb, raising=False)
+        monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
 
-        result = prepare_module.verify_packed_loss_mask(
+        result = data_verify.verify_packed_loss_mask(
             output_dir=tmp_path,
             tokenizer_id="dummy/tokenizer",
             seq_length=4,
@@ -262,6 +268,88 @@ class TestVerifyPackedLossMask:
         logged_keys = [call.args[0].keys() for call in wb_run.log.call_args_list]
         flat_keys = sorted(k for keys in logged_keys for k in keys)
         assert flat_keys == ["loss_mask_table/row_0", "loss_mask_table/row_1", "loss_mask_table/row_2"]
+
+
+# ── load_source_dataset ─────────────────────────────────────────────────────
+
+
+class _Rejection(Exception):
+    pass
+
+
+@pytest.fixture
+def hub(monkeypatch):
+    """The Hub's ``load_dataset`` and the retry wait, recorded: the Hub is a network service.
+
+    ``hub.errors`` lists what each successive call raises (an exception) or returns (anything else).
+    """
+    record = SimpleNamespace(calls=0, sleeps=[], errors=[])
+
+    def load_dataset(*args, **kwargs):
+        outcome = record.errors[record.calls]
+        record.calls += 1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(data_load, "load_dataset", load_dataset)
+    monkeypatch.setattr(data_load.time, "sleep", record.sleeps.append)
+    return record
+
+
+def test_a_rate_limited_load_waits_and_retries_until_it_succeeds(prepare_module, hub):
+    hub.errors = [_Rejection("HTTP 429 Too Many Requests"), _Rejection("429"), "the dataset"]
+    assert data_load.load_source_dataset(_parse(prepare_module)) == "the dataset"
+    assert (hub.calls, hub.sleeps) == (3, [300, 600])
+
+
+def test_any_other_load_error_is_raised_at_once(prepare_module, hub):
+    hub.errors = [_Rejection("HTTP 404 Not Found")]
+    with pytest.raises(_Rejection, match="404"):
+        data_load.load_source_dataset(_parse(prepare_module))
+    assert (hub.calls, hub.sleeps) == (1, [])
+
+
+def test_a_rate_limit_that_never_lifts_is_raised_after_every_attempt(prepare_module, hub):
+    hub.errors = [_Rejection("429")] * data_load.MAX_LOAD_ATTEMPTS
+    with pytest.raises(_Rejection, match="429"):
+        data_load.load_source_dataset(_parse(prepare_module))
+    assert hub.calls == data_load.MAX_LOAD_ATTEMPTS == 10
+    assert hub.sleeps == [300] + [600] * 8
+
+
+def test_local_files_no_loader_reads_fail_loudly(tmp_path, capsys):
+    """The json builder, pandas and json.loads each fail on a file that is not JSON lines; json.loads's error is
+    raised, so the line-by-line loader ran last."""
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("{not json\n")
+    with pytest.raises(json.JSONDecodeError):
+        data_load.load_local_files(str(bad), num_proc=1)
+    out = capsys.readouterr().out
+    assert "HF loader failed" in out and "Pandas also failed" in out
+
+
+def test_main_reports_a_failed_load_and_returns_1(prepare_module, tmp_path, monkeypatch, capsys):
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("{not json\n")
+    out_dir = tmp_path / "out"
+    argv = [
+        "pipeline_data_prepare.py",
+        "--dataset",
+        "org/corpus",
+        "--data-files",
+        str(bad),
+        "--output-dir",
+        str(out_dir),
+    ]
+    monkeypatch.setattr(sys, "argv", [*argv, "--no-wandb", "--num-proc", "1"])
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets_cache"))
+    sleeps = []
+    monkeypatch.setattr(data_load.time, "sleep", sleeps.append)
+    assert prepare_module.main() == 1
+    assert "Error loading dataset:" in capsys.readouterr().out
+    assert sleeps == [], "a load error that is not a rate limit is not retried"
+    assert not out_dir.exists()
 
 
 # ── build_hub_load_kwargs ───────────────────────────────────────────────────
@@ -287,21 +375,21 @@ class TestBuildHubLoadKwargs:
         args = _parse(prepare_module)
         assert args.revision is None
         # Absent, not None: load_dataset must fall through to its own default.
-        assert "revision" not in prepare_module.build_hub_load_kwargs(args)
+        assert "revision" not in data_load.build_hub_load_kwargs(args)
 
     def test_revision_is_forwarded_to_load_dataset(self, prepare_module):
         sha = "018376f4b033d7533471514f607cae4de3c95b99"
         args = _parse(prepare_module, "--revision", sha)
-        assert prepare_module.build_hub_load_kwargs(args)["revision"] == sha
+        assert data_load.build_hub_load_kwargs(args)["revision"] == sha
 
     def test_data_dir_absent_unless_set(self, prepare_module):
-        assert "data_dir" not in prepare_module.build_hub_load_kwargs(_parse(prepare_module))
+        assert "data_dir" not in data_load.build_hub_load_kwargs(_parse(prepare_module))
         args = _parse(prepare_module, "--data-dir", "sub/dir")
-        assert prepare_module.build_hub_load_kwargs(args)["data_dir"] == "sub/dir"
+        assert data_load.build_hub_load_kwargs(args)["data_dir"] == "sub/dir"
 
     def test_split_and_workers_always_present(self, prepare_module):
         args = _parse(prepare_module, "--split", "validation", "--download-workers", "7")
-        kwargs = prepare_module.build_hub_load_kwargs(args)
+        kwargs = data_load.build_hub_load_kwargs(args)
         assert kwargs["split"] == "validation"
         assert kwargs["num_proc"] == 7
 

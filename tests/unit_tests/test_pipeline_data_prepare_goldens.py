@@ -28,6 +28,7 @@ import sys
 
 import pytest
 
+from pipeline.data import verify as data_verify
 from tests.unit_tests.goldens import FIXTURES, assert_golden_json, assert_golden_tree
 from tests.unit_tests.stubbed_shell import REPO_ROOT
 
@@ -190,7 +191,7 @@ PATH_MATRIX = [
 ]
 
 
-def test_packed_paths_of_the_readers(prepare_module, tmp_path, capsys):
+def test_packed_paths_of_the_readers(tmp_path, capsys):
     """Where the loss-mask check and the campaign's corpora table look for a corpus root's packed parquet."""
     from tests.unit_tests.corpora_fixtures import importable
 
@@ -199,7 +200,7 @@ def test_packed_paths_of_the_readers(prepare_module, tmp_path, capsys):
 
     paths = []
     for tokenizer, pad, seq in PATH_MATRIX:
-        verify = prepare_module.verify_packed_loss_mask(tmp_path, tokenizer, seq, pad, "chat", wb_run=None)
+        verify = data_verify.verify_packed_loss_mask(tmp_path, tokenizer, seq, pad, "chat", wb_run=None)
         assert verify == {"verify_status": "skipped_no_parquet"}
         scalars = {"tokenizer": tokenizer, "pad-seq-to-mult": pad, "seq-length": seq}
         paths.append(

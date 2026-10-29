@@ -27,5 +27,6 @@ Catalogue:
     megatron_model: a sharded Megatron model built from an HF architecture, and a checkpoint loaded into it.
     export: Megatron checkpoint -> HuggingFace export (pipeline_checkpoint_convert_hf.py).
     coherence: the generation backends of pipeline_coherence_test.py.
+    data: the stages of pipeline_data_prepare.py.
     sh: the shell libraries the launchers source; each file catalogues its functions.
 """
