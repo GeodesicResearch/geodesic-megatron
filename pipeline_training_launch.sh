@@ -38,7 +38,7 @@
 #   FI_LOG_LEVEL=warn           libfabric warnings (e.g. CXI MR-cache rejections) into the log.
 #   ISAMBARD_ENV_OVERRIDES=<file>  KEY=VALUE lines applied before this launcher reads its knobs,
 #                               again after its own exports, and inside the container after
-#                               pipeline_env_activate.sh (see "Per-launch environment overrides").
+#                               pipeline_env_activate.sh (see pipeline/sh/env_overrides.sh).
 #   (a stopped run)             scripts/training/dump_hung_ranks.sh <jobid> BEFORE cancelling
 #                               it: every rank's Python + native stacks, and its NCCL flight
 #                               recorder where a watchdog exists (not under the shipped
@@ -145,134 +145,23 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-# ==============================================================================
-# Per-launch environment overrides (ISAMBARD_ENV_OVERRIDES)
-#
-# ISAMBARD_ENV_OVERRIDES=<file> sets environment variables for one launch without editing
-# this file or pipeline_env_activate.sh, including ones either of them sets unconditionally
-# (TORCH_NCCL_BLOCKING_WAIT, OMP_NUM_THREADS, ...). The file holds KEY=VALUE lines. Blank
-# lines and lines starting with # are ignored; KEY must match ^[A-Za-z_][A-Za-z0-9_]*$; VALUE
-# is everything after the first '=', taken literally (no quote removal, no expansion). A
-# relative path resolves against the directory the launcher is started from.
-#
-# The file is read here, before the launcher does anything else, and the launch ends here if
-# the variable is set but names no file, or if any line is malformed (a carriage return
-# counts: it would end up inside the value), repeats a KEY, names what looks like a credential
-# (every value is printed into the job log), or names one of the launcher's own shell
-# variables (apply_env_overrides lists them): those would change the launch itself -- its
-# model, node count, checkout, container, payload -- rather than the environment it runs in.
-#
-# Each override is applied at three points, because three layers set the environment:
-#   - here, before the launcher reads any of its knobs, so the knobs take the override
-#     (ISAMBARD_NCCL_DEBUG, TRAIN_PERSISTENT_TRITON_CACHE, TRAIN_FI_CXI_*_OVERRIDE,
-#     MASTER_*_OVERRIDE, GEODESIC_CONTAINER_*, ISAMBARD_RUN_ID, ...);
-#   - after the launcher's last export (export_env_overrides), so it also beats what the
-#     launcher sets unconditionally (TORCH_NCCL_BLOCKING_WAIT=1, the NCCL/CXI set, TMPDIR)
-#     for the host side of the launch: the rendezvous endpoint, the ft_launcher gate, srun; and
-#   - inside the container payload, after pipeline_env_activate.sh and the payload's own
-#     exports, immediately before the rank launcher -- the only point that beats activate's
-#     defaults. The payload carries the assignments as quoted bash statements, so no other
-#     node reads the file.
-# The banner lists each applied KEY=VALUE, and the ranks get ISAMBARD_ENV_OVERRIDE_KEYS (the
-# keys, comma-separated, in file order), which pipeline_training_run.py uses to log the value
-# each node's processes actually see. With ISAMBARD_ENV_OVERRIDES unset the launch is
-# unchanged, except that an inherited ISAMBARD_ENV_OVERRIDE_KEYS is dropped: it would make the
-# ranks report overrides this launch never applied.
-# ==============================================================================
-apply_env_overrides() {
-    # Locals carry the _eo_ prefix, which a KEY may not use, so no KEY can shadow one of them.
-    local _eo_file="$1" _eo_line _eo_key _eo_other _eo_decl _eo_n=0
-    local -a _eo_keys=()
-    # The launcher's own shell variables, pipeline_env_config.env's CONTAINER_* (which it derives
-    # from the GEODESIC_CONTAINER_* inputs, on the host and again on every node), the variables
-    # that choose the checkout, and this hook's own. A variable that already exists here without
-    # the export attribute (bash's own, such as IFS) is refused as well.
-    # tests/unit_tests/test_launcher_env_overrides.py fails when a variable the launcher leaves in
-    # its shell is refused by neither rule.
-    local -a _eo_reserved=(
-        CONFIG_FILE MODEL MODE USE_FT USE_STRAGGLER ENABLE_PAO PEFT OVERRIDE_NODES OVERRIDE_NODELIST
-        EXTRA_ARGS USAGE REPO_DIR ENV_CACHE_SUFFIX _FD1_TARGET RUN_ID_LINK_DIR NNODES NODELIST
-        TOTAL_GPUS TRAIN_SCRIPT SCRIPT_ARGS SRUN_ARGS RUNNER ACTIVATE_CMD
-        GEODESIC_REPO_DIR TRAIN_REPO_DIR
-        ISAMBARD_ENV_OVERRIDES ISAMBARD_ENV_OVERRIDE_KEYS ENV_OVERRIDE_ENTRIES ENV_OVERRIDES_PAYLOAD
-    )
-    if [ ! -f "$_eo_file" ]; then
-        echo "FATAL: ISAMBARD_ENV_OVERRIDES names no file: '$_eo_file'" >&2
-        exit 1
-    fi
-    ENV_OVERRIDE_ENTRIES=()
-    while IFS= read -r _eo_line || [ -n "$_eo_line" ]; do
-        _eo_n=$((_eo_n + 1))
-        if [[ "$_eo_line" =~ ^[[:space:]]*$ || "$_eo_line" == "#"* ]]; then
-            continue
-        fi
-        _eo_key="${_eo_line%%=*}"
-        if [[ "$_eo_line" != *=* || ! "$_eo_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ || "$_eo_line" == *$'\r'* ]]; then
-            echo "FATAL: $_eo_file:$_eo_n: not KEY=VALUE (KEY matching ^[A-Za-z_][A-Za-z0-9_]*\$, no carriage return): $_eo_line" >&2
-            exit 1
-        fi
-        if [[ "${_eo_key^^}" =~ (^|_)(TOKEN|SECRET|PASSWORD|API_KEY)(_|$) ]]; then
-            echo "FATAL: $_eo_file:$_eo_n: $_eo_key looks like a credential; overrides are printed into the job log" >&2
-            exit 1
-        fi
-        for _eo_other in "${_eo_reserved[@]}"; do
-            if [ "$_eo_other" = "$_eo_key" ]; then
-                echo "FATAL: $_eo_file:$_eo_n: $_eo_key is set by the launcher itself, not an environment override" >&2
-                exit 1
-            fi
-        done
-        if [[ "$_eo_key" == CONTAINER_* ]]; then
-            echo "FATAL: $_eo_file:$_eo_n: $_eo_key is derived by pipeline_env_config.env; override its GEODESIC_CONTAINER_* input" >&2
-            exit 1
-        fi
-        if [[ "$_eo_key" == _eo_* ]]; then
-            echo "FATAL: $_eo_file:$_eo_n: $_eo_key uses the _eo_ prefix, which the override hook keeps for itself" >&2
-            exit 1
-        fi
-        if _eo_decl="$(declare -p "$_eo_key" 2>/dev/null)"; then
-            _eo_decl="${_eo_decl#declare -}"
-            if [[ "${_eo_decl%% *}" != *x* ]]; then
-                echo "FATAL: $_eo_file:$_eo_n: $_eo_key is a shell variable of the launcher, not an environment variable" >&2
-                exit 1
-            fi
-        fi
-        for _eo_other in "${_eo_keys[@]}"; do
-            if [ "$_eo_other" = "$_eo_key" ]; then
-                echo "FATAL: $_eo_file:$_eo_n: $_eo_key is set more than once" >&2
-                exit 1
-            fi
-        done
-        _eo_keys+=("$_eo_key")
-        ENV_OVERRIDE_ENTRIES+=("$_eo_line")
-    done < "$_eo_file"
+# Overridable (default = main checkout) so a git worktree can be trained pre-merge. Resolved here, before the
+# overrides file is read, because the shell libraries live in the checkout; the launcher changes into it below.
+REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
+# A REPO_DIR without the libraries cannot be reported by them, so this line, the same in every launcher, does it.
+[ -f "$REPO_DIR/pipeline/sh/common.sh" ] || { echo "FATAL: $REPO_DIR has no pipeline/sh/common.sh, so REPO_DIR is not this repo's checkout. Inside a tunnel or salloc SLURM_SUBMIT_DIR (${SLURM_SUBMIT_DIR:-unset}) is the tunnel's own submit dir, and a copied script runs from the copy's dir. Export GEODESIC_REPO_DIR=/path/to/repo." >&2; exit 1; }
+source "$REPO_DIR/pipeline/sh/common.sh"
+source "$REPO_DIR/pipeline/sh/env_overrides.sh"
+source "$REPO_DIR/pipeline/sh/run_identity.sh"
 
-    for _eo_line in "${ENV_OVERRIDE_ENTRIES[@]}"; do
-        export "$_eo_line"
-    done
-    ISAMBARD_ENV_OVERRIDE_KEYS="$(IFS=,; echo "${_eo_keys[*]}")"
-    export ISAMBARD_ENV_OVERRIDE_KEYS
-}
-
-# Re-applies the overrides read by apply_env_overrides after the launcher's own exports, and
-# renders them as the bash statements the container payload runs after activation.
-export_env_overrides() {
-    local _eo_line
-    ENV_OVERRIDES_PAYLOAD=""
-    for _eo_line in "${ENV_OVERRIDE_ENTRIES[@]}"; do
-        export "$_eo_line"
-        ENV_OVERRIDES_PAYLOAD+="export ${_eo_line%%=*}=$(printf '%q' "${_eo_line#*=}")"$'\n'
-    done
-    ENV_OVERRIDES_PAYLOAD+="export ISAMBARD_ENV_OVERRIDE_KEYS=$(printf '%q' "$ISAMBARD_ENV_OVERRIDE_KEYS")"
-}
-
+# Per-launch environment overrides (pipeline/sh/env_overrides.sh), first application: before the
+# launcher reads any of its knobs.
 if [ -n "${ISAMBARD_ENV_OVERRIDES+x}" ]; then
     apply_env_overrides "$ISAMBARD_ENV_OVERRIDES"
 else
     unset ISAMBARD_ENV_OVERRIDE_KEYS
 fi
 
-# Overridable (default = main checkout) so a git worktree can be trained pre-merge.
-REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
 
 # ==============================================================================
@@ -285,14 +174,7 @@ cd "$REPO_DIR"
 # venv to activate here. A missing SIF/Slingshot build hard-fails below with the
 # fix command — never a silent degradation. See docs/environment.md.
 # ==============================================================================
-if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
-    echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
-    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
-    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
-    exit 1
-fi
-source "$REPO_DIR/pipeline_env_config.env"
-env_config_require
+source_env_config
 
 # The Slingshot plugin comes from the Option B build (bound at /opt/slingshot;
 # selected inside the container by pipeline_env_activate.sh), so no host module is
@@ -498,8 +380,8 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 # completion or timeout and throws on timeout. What this costs, in torch's own words at
 # process-group creation ("TORCH_NCCL_BLOCKING_WAIT is enabled, NO watchdog thread is
 # created"): there is no watchdog thread, so no asynchronous timeout detection, no heartbeat
-# monitor, and no flight-recorder dump on timeout or on demand (the trace-location block
-# below). The only timeout is the calling thread's wait() at the YAML's
+# monitor, and no flight-recorder dump on timeout or on demand (configure_nccl_trace_location
+# in pipeline/sh/run_identity.sh). The only timeout is the calling thread's wait() at the YAML's
 # dist.distributed_timeout_minutes, which Megatron passes to init_process_group; the
 # TORCH_NCCL_TIMEOUT below covers groups created without one. A run that stops iterating
 # therefore leaves no evidence by itself -- scripts/training/dump_hung_ranks.sh <jobid> takes
@@ -561,7 +443,7 @@ export TORCH_NCCL_RETHROW_CUDA_ERRORS=0
 # PyTorch NCCL Flight Recorder. Keeps an in-memory ring buffer of the last N collective
 # ops per rank (op name, sizes, comm, enqueue/start/complete state). Near-zero overhead.
 # On a watchdog timeout (TORCH_NCCL_DUMP_ON_TIMEOUT=1) every rank dumps its buffer to
-# ${TORCH_NCCL_DEBUG_INFO_TEMP_FILE}<rank> (the trace-location block later in this file puts
+# ${TORCH_NCCL_DEBUG_INFO_TEMP_FILE}<rank> (configure_nccl_trace_location puts
 # that beside the raw log) -- it shows which collective each rank was stuck on and which
 # ranks never arrived. The dump is the WATCHDOG's, and TORCH_NCCL_BLOCKING_WAIT=1 above
 # means there is no watchdog: in the shipped posture the buffer is filled and never written.
@@ -670,87 +552,11 @@ export ISAMBARD_FP32_SSM_STATE="${ISAMBARD_FP32_SSM_STATE:-checkpoint}"
 export ISAMBARD_COMM_WARMUP="${ISAMBARD_COMM_WARMUP:-0}"
 
 # ==============================================================================
-# Run identity (INFR-68)
+# Run identity (pipeline/sh/run_identity.sh)
 # ==============================================================================
-# One unique ID joins everything a training run leaves behind: the raw SLURM
-# job log, the torch-profiler artifacts, and the W&B run (stamped as summary
-# metrics by scripts/telemetry/run_identity.py). Minted once per launch;
-# respects a pre-set value so a re-launch within one allocation can share it.
-# Exported, so it reaches every rank inside the container (see the env guarantee
-# at the srun call below).
-export ISAMBARD_RUN_ID="${ISAMBARD_RUN_ID:-$(date +%Y%m%dT%H%M%S)-j${SLURM_JOB_ID}}"
-
-# Absolute path of this job's raw log. Resolution order:
-#   1. explicit ISAMBARD_RAW_LOG_PATH in the environment (always wins);
-#   2. this process's OWN stdout target when it is a regular file — correct for
-#      sbatch (StdOut is fd1's target) AND for in-tunnel `bash ... > log 2>&1`
-#      launches, where scontrol would mis-resolve to the TUNNEL job's log
-#      (caught 2026-07-24: a profile run's raw_log_snapshot captured tunnel
-#      port-forwarding chatter instead of training output);
-#   3. scontrol's StdOut field — but ONLY when stdout is not a terminal. An
-#      interactive launch (tty) inside someone else's batch allocation (e.g. a
-#      VS Code tunnel job) would otherwise inherit THAT job's StdOut and
-#      misattribute a foreign log to this run.
-# For interactive/salloc runs stdout is a terminal (not a regular file), every
-# rung fails, and the var stays empty — consumers (W&B summary, profiler log
-# snapshot) then skip log reporting/copying.
-# The `|| true`s matter: this script runs `set -euo pipefail`, and a no-match
-# grep (salloc case) would otherwise abort the launch.
-if [ -z "${ISAMBARD_RAW_LOG_PATH:-}" ]; then
-    _FD1_TARGET="$(readlink -f /proc/$$/fd/1 2>/dev/null || true)"
-    if [ -n "$_FD1_TARGET" ] && [ -f "$_FD1_TARGET" ]; then
-        ISAMBARD_RAW_LOG_PATH="$_FD1_TARGET"
-    elif [ ! -t 1 ]; then
-        ISAMBARD_RAW_LOG_PATH="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | grep -oE 'StdOut=[^ ]+' | head -n 1 | cut -d= -f2- || true)"
-    else
-        ISAMBARD_RAW_LOG_PATH=""
-    fi
-fi
-if [ ! -f "$ISAMBARD_RAW_LOG_PATH" ]; then
-    ISAMBARD_RAW_LOG_PATH=""
-fi
-export ISAMBARD_RAW_LOG_PATH
-
-# Findable-by-run-ID companion symlink next to the raw log, so a log can be
-# located from a run ID alone: <log-dir>/by-run-id/<run-id>.out -> train-<job>.out
-# Non-fatal: identity bookkeeping must never kill a training launch.
-if [ -n "$ISAMBARD_RAW_LOG_PATH" ]; then
-    RUN_ID_LINK_DIR="$(dirname "$ISAMBARD_RAW_LOG_PATH")/by-run-id"
-    if ! mkdir -p "$RUN_ID_LINK_DIR" 2>/dev/null ||
-        ! ln -sfn "$ISAMBARD_RAW_LOG_PATH" "$RUN_ID_LINK_DIR/${ISAMBARD_RUN_ID}.out" 2>/dev/null; then
-        echo "WARNING: by-run-id log symlink not created (non-fatal)" >&2
-    fi
-fi
-
-# Where a rank's NCCL flight-recorder dump lands, and the FIFO through which one is asked for.
-# The recorder (TORCH_NCCL_TRACE_BUFFER_SIZE above) is written by torch's watchdog thread: on a
-# collective timeout (TORCH_NCCL_DUMP_ON_TIMEOUT=1), or as soon as anything is written to the
-# FIFO the watchdog's monitor opens at ${TORCH_NCCL_DEBUG_INFO_PIPE_FILE}<rank>.pipe. Under
-# TORCH_NCCL_BLOCKING_WAIT=1 (above) torch creates NO watchdog thread, so neither happens and
-# the FIFO never appears; these paths are set so that the dump lands somewhere readable the
-# moment blocking wait is turned off -- torch's own default is node-local /tmp, gone with the
-# allocation. Evidence that needs no watchdog: scripts/training/dump_hung_ranks.sh <jobid>.
-#   - Dump: <log-dir>/nccl_trace/<jobid>/rank_<rank>, beside the raw log like by-run-id/.
-#   - FIFO: directly in /tmp, which exists on every node and is bound into the container, so
-#     the host-side trigger sees the FIFO the rank opened. It must be node-local (its buffer
-#     is that node's kernel state), and NOT under $TMPDIR, which is created on the batch node
-#     only -- a FIFO there would fail on every other node and abort the rank.
-# Both overridable. An interactive launch has no raw log; the dump then keeps torch's default.
-configure_nccl_trace_location() {
-    if [ -z "${ISAMBARD_RAW_LOG_PATH:-}" ]; then
-        echo "NOTE: no raw log path; NCCL flight-recorder dumps keep torch's node-local /tmp default" >&2
-    elif [ -z "${TORCH_NCCL_DEBUG_INFO_TEMP_FILE:-}" ]; then
-        local trace_dir
-        trace_dir="$(dirname "$ISAMBARD_RAW_LOG_PATH")/nccl_trace/${SLURM_JOB_ID}"
-        # Diagnostics bookkeeping must never kill a training launch, as for by-run-id/ above.
-        if mkdir -p "$trace_dir" 2>/dev/null; then
-            export TORCH_NCCL_DEBUG_INFO_TEMP_FILE="${trace_dir}/rank_"
-        else
-            echo "WARNING: could not create $trace_dir; NCCL flight-recorder dumps keep torch's node-local /tmp default" >&2
-        fi
-    fi
-    export TORCH_NCCL_DEBUG_INFO_PIPE_FILE="${TORCH_NCCL_DEBUG_INFO_PIPE_FILE:-/tmp/nccl_dump_${SLURM_JOB_ID}_}"
-}
+set_run_id
+set_raw_log_path
+link_run_id_log
 configure_nccl_trace_location
 
 # ==============================================================================
@@ -808,8 +614,7 @@ if [ "$USE_FT" = true ]; then
 fi
 
 # Per-launch environment overrides, second application: after the launcher's last export, so
-# that the overrides also beat its unconditional exports (see "Per-launch environment
-# overrides" at the top, which applied them first).
+# that the overrides also beat its unconditional exports (pipeline/sh/env_overrides.sh).
 ENV_OVERRIDES_PAYLOAD=""
 if [ -n "${ISAMBARD_ENV_OVERRIDES+x}" ]; then
     export_env_overrides

@@ -22,8 +22,10 @@ variable missing at the ranks, and nothing for a variable that arrives unchanged
 """
 
 import json
+import shutil
 
 import pytest
+from scripts.training.launcher_source import LAUNCHER
 
 from tests.unit_tests.goldens import FIXTURES, assert_golden_json
 from tests.unit_tests.launcher_harness import LITERAL_VALUES, Launcher, launcher_shell
@@ -115,6 +117,27 @@ def test_launch(shell, launch, case):
     args, env, overrides = LAUNCH_CASES[case]
     run = launch(overrides, *args, extra_env=env)
     assert_golden_json(GOLDENS / f"{case}.json", _snapshot(shell, run))
+
+
+def test_a_copy_of_the_launcher_outside_the_checkout_launches_as_the_launcher_does(shell, launch, tmp_path):
+    """A single-file copy of the launcher (a frozen copy of one under edit, or a spooled one) takes its libraries
+    from the checkout GEODESIC_REPO_DIR names, and its launch matches the checkout launcher's golden."""
+    copy = tmp_path / "frozen" / LAUNCHER.name
+    copy.parent.mkdir()
+    shutil.copy(LAUNCHER, copy)
+    assert_golden_json(GOLDENS / "default.json", _snapshot(shell, launch(None, script=copy)))
+
+
+def test_a_launcher_whose_repo_dir_is_no_checkout_stops_before_it_reads_anything(shell, launch, tmp_path):
+    """REPO_DIR is resolved and checked before the overrides file is read: a REPO_DIR that is no checkout stops the
+    launch at the REPO_DIR guard, which names both causes."""
+    (tmp_path / "not_a_checkout").mkdir()
+    run = launch("BAD LINE\n", extra_env={"GEODESIC_REPO_DIR": str(tmp_path / "not_a_checkout")})
+    assert run.result.returncode == 1
+    assert run.result.stderr.startswith(f"FATAL: {tmp_path}/not_a_checkout has no pipeline/sh/common.sh")
+    assert "SLURM_SUBMIT_DIR" in run.result.stderr and "copied script" in run.result.stderr
+    assert "BAD LINE" not in run.result.stderr
+    assert not run.srun_called and run.result.stdout == ""
 
 
 # --- the exec shim's scrub -------------------------------------------------------------------------------------------

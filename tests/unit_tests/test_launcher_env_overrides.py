@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The ISAMBARD_ENV_OVERRIDES hook in pipeline_training_launch.sh.
+"""The ISAMBARD_ENV_OVERRIDES hook of pipeline_training_launch.sh (pipeline/sh/env_overrides.sh).
 
 An overrides file carries KEY=VALUE lines for one launch's environment. Three layers set that
 environment, so the hook applies each override three times: before the launcher reads its knobs,
@@ -22,7 +22,7 @@ malformed, or that names one of the launcher's own shell variables, stops the la
 anything happens; the ranks learn which keys were overridden; and an unset hook changes nothing.
 
 The first group runs the real `apply_env_overrides` and `export_env_overrides`, lifted verbatim
-from the launcher, under the launcher's shell options. The second runs the whole launcher inside
+from their library, under the launcher's shell options. The second runs the whole launcher inside
 the test container (unit tests run there), through the real pipeline_env_exec.sh and
 pipeline_env_activate.sh, and reads the environment and arguments the rank launcher is started
 with. It runs under tests/unit_tests/stubbed_shell.py's PipelineShell, whose stubs (each with its
@@ -45,7 +45,7 @@ from tests.unit_tests.launcher_harness import LAUNCH_ENV, LITERAL_VALUES, RANK_L
 from tests.unit_tests.stubbed_shell import HARNESS_ENV
 
 
-# --- apply_env_overrides + export_env_overrides, lifted from the launcher -----------------------
+# --- apply_env_overrides + export_env_overrides, lifted from their library ----------------------
 
 _BARE_ENV = {"PATH": os.environ["PATH"], "HOME": "/nonexistent/home", "USER": "tester"}
 

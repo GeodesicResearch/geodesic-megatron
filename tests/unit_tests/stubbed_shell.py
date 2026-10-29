@@ -273,7 +273,7 @@ class PipelineShell:
         return stubbed_shell_env(self.stub_dir, {**self._base, **(extra or {})})
 
     def run(self, script: str, *args: str, env: Mapping[str, str] | None = None, timeout: float = 300) -> dict:
-        """Run ``bash <repo root>/<script> args`` in ``env()`` and return what happened.
+        """Run ``bash <script> args`` in ``env()`` and return what happened; a relative ``script`` is under the repo root.
 
         Returns:
             ``args``, ``returncode``, ``stdout``, ``stderr``, and ``calls``: the records of this run's recorded stub

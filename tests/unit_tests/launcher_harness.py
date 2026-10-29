@@ -100,8 +100,15 @@ class Launcher:
         self.raw_log.write_text("")
         self.runs = 0
 
-    def __call__(self, overrides: str | None, *launcher_args: str, extra_env: dict[str, str] | None = None) -> Launch:
-        """Launch once; ``overrides`` is the content of an ISAMBARD_ENV_OVERRIDES file (None: the hook is unset)."""
+    def __call__(
+        self,
+        overrides: str | None,
+        *launcher_args: str,
+        extra_env: dict[str, str] | None = None,
+        script: Path = LAUNCHER,
+    ) -> Launch:
+        """Launch ``script`` (the checkout's launcher, or a copy of it) once; ``overrides`` is the content of an
+        ISAMBARD_ENV_OVERRIDES file (None: the hook is unset)."""
         run_dir = self.tmp_path / f"run{self.runs}"
         run_dir.mkdir()
         self.runs += 1
@@ -112,4 +119,4 @@ class Launcher:
             env["ISAMBARD_ENV_OVERRIDES"] = str(overrides_file)
         env.update(extra_env or {})
         args = (str(self.config), "--model", "nano", "--mode", "pretrain", *launcher_args)
-        return Launch(self.shell.run(LAUNCHER.name, *args, env=env), env)
+        return Launch(self.shell.run(str(script), *args, env=env), env)
