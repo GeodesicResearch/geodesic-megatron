@@ -71,12 +71,6 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--mode", type=str, required=True, choices=["sft", "cpt", "pretrain"], help="Training mode")
     parser.add_argument("--config-file", type=str, help="Path to the YAML OmegaConf override file.")
     parser.add_argument("--peft", type=str, help="Type of PEFT to use (SFT mode only)")
-    parser.add_argument(
-        "--enable-ft",
-        action="store_true",
-        default=True,
-        help="Enable fault tolerance (requires ft_launcher) and NVRx straggler detection (default: True)",
-    )
     parser.add_argument("--disable-ft", action="store_true", help="Disable fault tolerance and straggler detection")
     parser.add_argument(
         "--disable-straggler",

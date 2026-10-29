@@ -145,6 +145,12 @@ class TestModeCli:
         with pytest.raises(SystemExit):
             self._parse(run_module, monkeypatch, ["--model", "nano", "--mode", "midtrain"])
 
+    def test_enable_ft_is_not_a_flag(self, run_module, monkeypatch):
+        """Fault tolerance is on unless --disable-ft is given; an --enable-ft falls through to the overrides."""
+        args, overrides = self._parse(run_module, monkeypatch, ["--model", "nano", "--mode", "sft", "--enable-ft"])
+        assert overrides == ["--enable-ft"]
+        assert not hasattr(args, "enable_ft")
+
     def test_hydra_overrides_still_fall_through(self, run_module, monkeypatch):
         args, overrides = self._parse(
             run_module, monkeypatch, ["--model", "super", "--mode", "pretrain", "train.train_iters=40"]

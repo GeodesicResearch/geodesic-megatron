@@ -74,7 +74,7 @@ def apply_resilience_config(cfg: ConfigContainer, args: argparse.Namespace) -> N
     long-stepping high-memory job, so a multi-day run can drop it while keeping the
     ft_launcher restarts it depends on.
     """
-    if not args.enable_ft or args.disable_ft:
+    if args.disable_ft:
         return
 
     cfg.ft = FaultToleranceConfig(

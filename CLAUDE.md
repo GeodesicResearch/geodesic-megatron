@@ -586,7 +586,7 @@ cancelling anything, and give a stall the Lustre resend time before treating it 
   trains ~4.7 h under the same default without a kill, so what decides delivery is unresolved.
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
 
-The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set by `apply_resilience_config` (`pipeline/training/resilience.py`) via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
+The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set by `apply_resilience_config` (`pipeline/training/resilience.py`), on by default. Use `--disable-ft` to opt out.
 
 `--disable-straggler` drops **only** the NVRx straggler detector and keeps `cfg.ft`: the
 detector's rank-0 gather of per-GPU perf scores has been observed to OOM high-memory jobs after
