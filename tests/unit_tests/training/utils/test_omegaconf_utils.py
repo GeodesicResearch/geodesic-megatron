@@ -609,12 +609,19 @@ class TestRemovedAndUnknownOverrideKeys:
     """``removed_override_keys`` names keys a config class dropped; ``reject_unknown_override_keys`` refuses the rest."""
 
     @pytest.mark.parametrize("config_class", [StrictConfigWithRemovedKey, LenientConfigWithRemovedKey])
-    @pytest.mark.parametrize("value", ["anything", None, []], ids=["value", "null", "empty"])
-    def test_a_removed_key_raises_its_message_whatever_its_value(self, config_class, value):
+    @pytest.mark.parametrize("value", ["anything", []], ids=["value", "empty"])
+    def test_a_removed_key_raises_its_message_unless_null(self, config_class, value):
         with pytest.raises(
             ValueError, match=f"^Removed key 'old_name' for {config_class.__name__}: write new_name instead$"
         ):
             _apply_overrides(config_class(), {"old_name": value})
+
+    @pytest.mark.parametrize("config_class", [StrictConfigWithRemovedKey, LenientConfigWithRemovedKey])
+    def test_a_removed_key_set_to_null_is_dropped(self, config_class):
+        """A config saved before the key was removed carries it as null, which set nothing."""
+        config = config_class()
+        _apply_overrides(config, {"old_name": None, "new_name": "applied"})
+        assert config.new_name == "applied" and not hasattr(config, "old_name")
 
     def test_a_removed_key_raises_before_any_later_key_applies(self):
         config = StrictConfigWithRemovedKey()

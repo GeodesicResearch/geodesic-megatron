@@ -124,23 +124,23 @@ class Corpora:
         return status, json.loads(report.read_text())
 
 
-def make_corpora(tmp_path: Path, candidate_pin: dict, candidate_tokenizer: str) -> Corpora:
-    """Tables and prepare configs for both corpora and the config of the checks, with nothing packed yet. The
-    reference's prepare config pins ``REVISION`` and packs with ``TOKENIZER``; the candidate's pins its dataset as
-    ``candidate_pin`` states (``revision`` or ``revision-file``) and packs with ``candidate_tokenizer``."""
+def make_corpora(tmp_path: Path, candidate_tokenizer: str) -> Corpora:
+    """Tables and prepare configs for both corpora and the config of the checks, with nothing packed yet. Both prepare
+    configs pin ``REVISION``; the reference packs with ``TOKENIZER``, the candidate with ``candidate_tokenizer``."""
     tables, scalars = {}, {}
-    sides = (("candidate", candidate_pin, candidate_tokenizer), ("reference", {"revision": REVISION}, TOKENIZER))
-    for side, pin, tokenizer in sides:
+    for side, tokenizer in (("candidate", candidate_tokenizer), ("reference", TOKENIZER)):
         directory = tmp_path / side
         directory.mkdir()
         prepare = directory / "corpus.yaml"
         prepare.write_text(
-            yaml.safe_dump({"dataset": DATASET, **pin, "tokenizer": tokenizer, **GEOMETRY, "val-proportion": 0})
+            yaml.safe_dump(
+                {"dataset": DATASET, "revision": REVISION, "tokenizer": tokenizer, **GEOMETRY, "val-proportion": 0}
+            )
         )
         tables[side] = write_table(
             directory, prepare, subset=f"{side}_mix", stage="sft", kind="pack", shards=2, shard_mode="split", docs=12
         )
-        scalars[side] = corpora_table.subset_prepare_config(prepare, f"{side}_mix", read_revision_file=False)
+        scalars[side] = corpora_table.subset_prepare_config(prepare, f"{side}_mix")
     config = tmp_path / "pack_checks.yaml"
     config.write_text(
         yaml.safe_dump(
@@ -166,7 +166,7 @@ def make_corpora(tmp_path: Path, candidate_pin: dict, candidate_tokenizer: str) 
 @pytest.fixture
 def corpora(tmp_path) -> Corpora:
     """Both corpora configured and the reference packed; each test packs its own candidate."""
-    built = make_corpora(tmp_path, {"revision": REVISION}, TOKENIZER)
+    built = make_corpora(tmp_path, TOKENIZER)
     built.write("reference", REFERENCE_PACKS)
     return built
 
@@ -306,7 +306,7 @@ class TestNothingIsSkipped:
 
     def test_corpora_packed_at_another_tokenizer_fail(self, tmp_path):
         """The documents are the reference's, but packs of another tokenizer are not comparable."""
-        corpora = make_corpora(tmp_path, {"revision": REVISION}, "geodesic-research/nemotron-instruct-tokenizer")
+        corpora = make_corpora(tmp_path, "geodesic-research/nemotron-instruct-tokenizer")
         corpora.write("reference", REFERENCE_PACKS)
         corpora.write("candidate", CANDIDATE_PACKS)
         status, report = corpora.run(tmp_path)
@@ -315,35 +315,6 @@ class TestNothingIsSkipped:
             "the candidate is packed at tokenizer='geodesic-research/nemotron-instruct-tokenizer', "
             f"the reference at {TOKENIZER!r}"
         ]
-
-
-class TestTheDatasetCommit:
-    """A corpus pinned by a revision file has its commit read when the checks run, not when the config is read."""
-
-    PUSHED = "fedcba9876543210fedcba9876543210fedcba98"
-
-    @pytest.fixture
-    def pinned_by_file(self, tmp_path) -> tuple[Corpora, Path]:
-        pin = tmp_path / "pushed_revision.txt"
-        corpora = make_corpora(tmp_path, {"revision-file": str(pin)}, TOKENIZER)
-        corpora.write("reference", REFERENCE_PACKS)
-        corpora.write("candidate", CANDIDATE_PACKS)
-        return corpora, pin
-
-    def test_the_commit_the_file_holds_is_recorded(self, pinned_by_file, tmp_path):
-        corpora, pin = pinned_by_file
-        pin.write_text(self.PUSHED + "\n")
-        status, report = corpora.run(tmp_path)
-        assert (status, report["candidate"]["revision"], report["reference"]["revision"]) == (0, self.PUSHED, REVISION)
-
-    def test_a_file_that_does_not_exist_yet_fails_the_checks_but_not_the_config(self, pinned_by_file, tmp_path):
-        corpora, pin = pinned_by_file
-        config = checks.read_pack_checks(corpora.config, corpora.data_base)
-        assert config.candidate.root == corpora.candidate
-        status, report = corpora.run(tmp_path)
-        assert (status, report["verdict"], report["candidate"]["revision"]) == (1, "FAIL", None)
-        (failure,) = report["failures"]
-        assert failure.startswith("the candidate's dataset commit cannot be read:") and str(pin) in failure
 
 
 class TestTheCommandLine:

@@ -3,9 +3,8 @@
 """Every training config under ``configs/`` meets the token-masking contract, checked from the YAML alone.
 
 The launcher merges a config onto its recipe and applies the result through ``omegaconf_utils._apply_overrides``,
-which stops the run on a removed key (``token_masking.mode``, ``token_masking.require_masked_targets``,
-``token_masking.require_masked_targets_within_iterations``, ``tokenizer.loss_mask_token_ids``) and on an unknown key
-of ``ConfigContainer``, ``TokenizerConfig``, ``TokenMaskingConfig`` and ``MaskedValidationConfig``;
+which stops the run on a non-null ``tokenizer.loss_mask_token_ids`` (a removed key) and on an unknown key of
+``ConfigContainer``, ``TokenizerConfig``, ``TokenMaskingConfig`` and ``MaskedValidationConfig``;
 ``ConfigContainer.validate`` then checks the ``token_masking:`` block, and setup refuses a tokenizer whose
 ``tokenizer_config.json`` carries ``loss_mask_token_ids``. This module runs those checks on every training config
 outside the archive, without a recipe, the network or a GPU, so a config that
@@ -31,12 +30,12 @@ from pathlib import Path
 
 import pytest
 
-from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.token_masking.config import TokenMaskingError, validate_token_masking
 from megatron.bridge.training.token_masking.resolution import DECLARATION_FIELD, tokenizer_config_file
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.utils.omegaconf_utils import _apply_overrides
 from tests.unit_tests.campaign_config import is_training_config, launcher_overrides
+from tests.unit_tests.token_masking_fixtures import config_container
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -84,28 +83,10 @@ def carries_the_declaration(name: str) -> tuple[bool | None, str]:
     return DECLARATION_FIELD in json.loads(path.read_text()), str(path)
 
 
-def _container() -> ConfigContainer:
-    """A ConfigContainer holding a fresh TokenizerConfig and the default TokenMaskingConfig.
-
-    The sections a recipe builds are None: nothing checked here reads them, and building them needs a recipe and the
-    network.
-    """
-    return ConfigContainer(
-        train=None,
-        model=None,
-        optimizer=None,
-        scheduler=None,
-        dataset=None,
-        logger=None,
-        checkpoint=None,
-        tokenizer=TokenizerConfig(),
-    )
-
-
 def key_problems(config: dict) -> list[str]:
     """Every removed or unknown top-level and tokenizer key the launcher's overrides would stop on."""
     problems = []
-    container = _container()
+    container = config_container()
     for key in config:
         # Only the key is under test. With a None value _apply_overrides runs its key check and then merely assigns:
         # it never recurses into a section or instantiates a ``_target_`` mapping.
@@ -120,7 +101,7 @@ def key_problems(config: dict) -> list[str]:
         except ValueError as error:
             problems.append(f"tokenizer key: {error}")
             continue
-        if getattr(tokenizer, key, ABSENT) != value:
+        if key not in TokenizerConfig.removed_override_keys and getattr(tokenizer, key, ABSENT) != value:
             problems.append(f"tokenizer.{key}={value!r} did not reach TokenizerConfig")
     return problems
 
@@ -129,7 +110,7 @@ def token_masking_problems(config: dict) -> list[str]:
     """What the launcher's overrides and ConfigContainer.validate say about the ``token_masking`` block."""
     if "token_masking" not in config:
         return []
-    container = _container()
+    container = config_container()
     try:
         _apply_overrides(container, {"token_masking": copy.deepcopy(config["token_masking"])})
         validate_token_masking(container.token_masking)
@@ -179,6 +160,13 @@ def test_a_code_identity_block_is_no_key_the_launcher_merges_but_a_key_beside_it
     path.write_text("code_identity:\n  revision: " + "a" * 40 + "\ntrainn: {}\ntokenizer: {}\n")
     (problem,) = key_problems(launcher_overrides(path))
     assert problem.startswith("top-level key: Unknown key 'trainn'"), problem
+
+
+def test_a_null_legacy_tokenizer_key_is_no_problem_and_ids_in_it_are():
+    """A run_config.yaml saved before the key was removed carries it as null, which set nothing."""
+    assert key_problems({"tokenizer": {"loss_mask_token_ids": None}}) == []
+    (problem,) = key_problems({"tokenizer": {"loss_mask_token_ids": [131072]}})
+    assert problem.startswith("tokenizer key: Removed key 'loss_mask_token_ids'"), problem
 
 
 def _swept_training_configs() -> list[Path]:

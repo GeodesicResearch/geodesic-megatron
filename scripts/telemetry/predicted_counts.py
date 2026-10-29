@@ -1,12 +1,12 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""The token-masking counts ``scripts/data/predict_masked_counts.py`` predicts for a run, as a gate or a watch reads
-them, and what makes a logged count differ from its prediction.
+"""The token-masking counts ``scripts/data/predict_masked_counts.py`` predicts for a run, as a watch reads them, and
+what makes a logged count differ from its prediction.
 
 A prediction is JSON lines: an ``inputs`` record, then one record per iteration with its six counts. A long run is
 predicted in ranges of iterations, one file each, and ``read_predictions`` reads a directory of them as one
 prediction. The predictor needs the training stack; reading what it wrote needs only the standard library, so a tool
-that runs without it (``score_gate.py``, ``run_watch.py``) reads a prediction through this module.
+that runs without it (``run_watch.py``) reads a prediction through this module.
 """
 
 from __future__ import annotations
@@ -103,5 +103,5 @@ def differing_counts(
 
 
 def describe_count_difference(field: str, logged: int, predicted: int) -> str:
-    """One differing count as a gate or a stop line states it."""
+    """One differing count as a stop line states it."""
     return f"{field} {logged} against the predicted {predicted}"

@@ -331,7 +331,7 @@ copy: [`scripts/training/README.md`](../../scripts/training/README.md), "Making 
   a document of `n_tokens` + 1 ending in the EOD, and a row of none (an empty text) a document of no ids at all,
   which is what `--append-eod` writes for it. It writes nothing but the report `--report-out` names. That
   proves a corpus's text tokenizes to exactly the ids training read. The config names the corpora table and, per
-  subset, where its digest list is (a saved build, or a Hub dataset at a full commit SHA), or why there is none yet;
+  subset, where its digest list is (a saved build) or why there is none yet;
   a sliced subset may name one list per shard (`shards:`), each describing that shard's rows (its record's split the
   slice `train[beg:end]`, its `source_row` counting from `beg`), and is then checked one `--shard` at a time.
   The EOD id comes from the corpus's own tokenize record, which must name the table's tokenizer, at the commit the
@@ -341,19 +341,6 @@ copy: [`scripts/training/README.md`](../../scripts/training/README.md), "Making 
   built from part of another's source then holds exactly documents that corpus trained on. The config names the
   two corpora tables and, per subset, the parent's subset and the column of the corpus's dataset holding each
   document's row of it, which must increase strictly; the parent may be sliced.
-- **[`hidden_span_corpus.py`](hidden_span_corpus.py) `--config <hidden-spans yaml> --corpus <name>`.** It writes a
-  corpus whose documents are another built corpus's, in order and at the same lengths, with runs of ids replaced by
-  one token id: synthetic hidden-span data, for exercising a token-masking run at a chosen density without waiting
-  for data that holds real hidden spans. A config states the token id, a seed, where the corpora go, and per corpus
-  its source prefix, how many of the source's first documents to take, the shortest document kept, and what to hide:
-  `spans` (geometric runs of a stated mean length making up a stated share of the ids, the realised share refused
-  beyond a stated tolerance) or `whole_documents`. A document's last id, its EOD, is never hidden, and a source that
-  already holds the token id is refused, so the id's count in the output is exactly what was hidden. The source's
-  tokenize record must agree with the source's files and name its tokenizer. The
-  output is written under temporary names, re-read and compared with the source (same documents and lengths, every
-  id that is
-  not the token the source's) before it takes its final names and a `provenance.json` of kind `hidden_spans`
-  recording the config, the source and the share hidden.
 - **A pinned tokenizer.** A prepare config may pin its tokenizer at a full commit SHA with `tokenizer-revision`
   (`scripts/data/prepare_revisions.py`). The plan then hands each tokenize job the reference `<name>@<sha>`, and the
   job loads that commit's snapshot and records it in the provenance as `tokenizer_revision`. `verify_corpora.py`

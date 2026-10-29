@@ -112,9 +112,9 @@ cfg.logger.log_timers_to_tensorboard = True
 When enabled, W&B automatically mirrors the scalar metrics logged to TensorBoard.  
 In addition, the full run configuration is synced at initialization, allowing for reproducibility and experiment tracking.
 
-W&B also receives what TensorBoard has no place for: the training-data sample tables (`data_samples/*`) and run
-summary keys, including the resolved parallelism (`parallelism/*`) and the token-masking decision
-(`token_masking/*`). See [Training-Data Samples and Token Masking](#training-data-samples-and-token-masking).
+W&B also receives run summary keys TensorBoard has no place for, including the resolved parallelism
+(`parallelism/*`) and the token-masking decision (`token_masking/*`). See
+[Training-Data Samples and Token Masking](#training-data-samples-and-token-masking).
 
 
 #### Enable W&B Logging
@@ -277,49 +277,33 @@ This provides a lightweight, text-based audit trail of training progress, useful
 These records show what a run trains on and whether its token masking acts. The masking itself, its configuration
 and its checks are described in [Token Masking](token-masking.md).
 
-### Sample Tables (`logger.data_samples`)
+### Training-Data Scan (`logger.data_samples`)
 
-Before the model is built, the last rank (the one that logs to W&B) reads a bounded, seeded sample of every training
-data source, each prefix of a `.bin/.idx` blend or the packed-SFT parquet set, and logs up to three W&B tables once
-W&B is initialized. Only the documents the training split reads are sampled (see
-[The setup-time training-data check](token-masking.md#the-setup-time-training-data-check)).
-
-| Table | Rows |
-|---|---|
-| `data_samples/sources` | One per source: its path and blend weight, the documents and tokens scanned, how often the measured token ids occur as targets and how many of those carry loss, occurrences of a measured token's text split into ordinary tokens, tokens outside the vocabulary, and why the scan stopped |
-| `data_samples/documents` | Random documents of every source, decoded with special tokens kept; the `html` column greys out tokens that carry no loss |
-| `data_samples/masked_documents` | Documents that hold a token id the run measures, each such token marked `⟦masked:…⟧` (masking removes its target from the loss), `⟦measured:…⟧` (its target trains: a control arm) or `⟦untrained:…⟧` (the dataset already excludes the position); logged only when the run measures token ids |
-
-The tables are logged for every run with `wandb_project` set, unless `logger.data_samples.enabled` is false. They are
-configured by {py:class}`~bridge.training.config.DataSamplesConfig` under `logger.data_samples`, which must be a
-mapping: write `logger: {data_samples: {enabled: false}}` (Hydra: `logger.data_samples.enabled=false`) to turn the
-tables off, since `data_samples: false` or `null` is refused with a `ValueError`. An unknown key under it is refused
-too.
+Before the model is built, a run that masks or measures token ids reads on its last rank a bounded, seeded sample of
+every training data source, each prefix of a `.bin/.idx` blend or the packed-SFT parquet set, within the documents
+the training split reads (see [The setup-time training-data check](token-masking.md#the-setup-time-training-data-check)).
+A run that neither masks nor measures ids does not scan. {py:class}`~bridge.training.config.DataSamplesConfig` under
+`logger.data_samples` sets the budgets; it must be a mapping (`data_samples: false` or `null` is refused with a
+`ValueError`), and an unknown key under it is refused too.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | Log the tables (when W&B is configured). |
-| `documents_per_source` | `10` | Random documents shown per source. |
-| `masked_documents_per_source` | `10` | Documents holding a masked or measured token shown per source. |
-| `max_scan_tokens_per_source` | `20000000` | Tokens read per source while looking for those documents and counting the tokens. |
+| `max_scan_tokens_per_source` | `20000000` | Tokens read per source while counting the masked or measured ids. |
 | `max_scan_seconds` | `120.0` | Wall-clock budget for the whole scan. The other ranks wait for it, so keep it well under the process-group timeout. A run with masking enabled must find a trainable target of a masked id within it: a scan cut short before finding one stops that run. |
-| `max_rendered_tokens` | `2048` | Tokens of each document rendered into the tables: random documents from their start, documents with a measured id in a window around the first one. |
 
 ```yaml
 logger:
   data_samples:
-    documents_per_source: 20
     max_scan_seconds: 60
 ```
 
-The same scan feeds the token-masking data check, which every run with masking enabled must pass, even with
-`enabled: false` or without W&B. Each source's counts are also logged as a `[data-samples] source <N> <label>: ...`
-line (documents and tokens scanned, why the scan stopped, listed and trainable targets, split forms,
-out-of-vocabulary tokens). The scan reads only
+Each source's counts are logged as a `[data-samples] source <N> <label>: ...` line (documents and tokens scanned, why
+the scan stopped, listed and trainable targets, split forms, out-of-vocabulary tokens). The scan reads only
 `.bin/.idx` blends and packed parquet. For any other training data (a mock or custom dataset, FIM data, unpacked
 fine-tuning JSONL, legacy `.npy` packs, or a packed parquet set the dataset builder has not written yet) a run with
-masking enabled stops at setup, and any other run logs `[data-samples] the training data could not be inspected:
-<why>` at ERROR level and trains on. A scan that fails with an exception stops the run on every rank.
+masking enabled stops at setup, and a run that only measures ids logs `[data-samples] the training data cannot be
+scanned for the ids ...` at ERROR level and trains on. A scan that fails with an exception stops the run on every
+rank.
 
 ### Per-Iteration Token-Masking Metrics
 

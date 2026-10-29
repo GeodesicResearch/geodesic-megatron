@@ -691,47 +691,30 @@ class CheckpointConfig(MTrainCheckpointConfig):
 
 @dataclass
 class DataSamplesConfig:
-    """Inspection of the training data before training starts, and the sample tables it logs to W&B.
+    """The budgets of the training-data scan a run that masks or measures token ids runs before training starts.
 
     One rank reads a bounded, seeded sample of every training data source (each prefix of a ``.bin/.idx`` blend, or
-    the packed parquet set) and logs three W&B tables: ``data_samples/sources`` (one row per source),
-    ``data_samples/documents`` (random documents per source) and ``data_samples/masked_documents`` (documents holding
-    a token the run masks or measures, when there is one; see docs/training/token-masking.md). The same scan feeds
-    the token-masking data check, which runs for every run with masking enabled, even with the tables off.
+    the packed parquet set) and counts the masked or measured ids it finds as targets, for the token-masking data
+    check (see docs/training/token-masking.md). A run that neither masks nor measures ids does not scan.
     """
 
     # A misspelled key must fail rather than leave its default in place.
     reject_unknown_override_keys: ClassVar[bool] = True
 
-    enabled: bool = True
-    """Log the sample tables (when W&B is configured)."""
-
-    documents_per_source: int = 10
-    """Random documents shown per source."""
-
-    masked_documents_per_source: int = 10
-    """Documents containing a masked or measured token shown per source."""
-
     max_scan_tokens_per_source: int = 20_000_000
-    """Tokens read per source while looking for those documents and counting the tokens."""
+    """Tokens read per source while counting the masked or measured ids."""
 
     max_scan_seconds: float = 120.0
     """Wall-clock budget for the whole scan; the other ranks wait for it, so keep it well under the process-group
     timeout. A run with masking enabled must find trainable targets of its masked ids within it, so a scan cut short
     before finding them stops that run."""
 
-    max_rendered_tokens: int = 2048
-    """Tokens of each document rendered into the tables."""
-
     def finalize(self) -> None:
         """Validate the budgets."""
-        for name in ("documents_per_source", "masked_documents_per_source", "max_scan_tokens_per_source"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"logger.data_samples.{name} must be a non-negative integer, got {value!r}")
-        if self.max_rendered_tokens < 1:
+        value = self.max_scan_tokens_per_source
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(
-                f"logger.data_samples.max_rendered_tokens must be positive, got {self.max_rendered_tokens}"
+                f"logger.data_samples.max_scan_tokens_per_source must be a non-negative integer, got {value!r}"
             )
         if not self.max_scan_seconds > 0:
             raise ValueError(f"logger.data_samples.max_scan_seconds must be positive, got {self.max_scan_seconds}")
@@ -742,7 +725,7 @@ class LoggerConfig(MTrainLoggerConfig):
     """Configuration settings for logging, including TensorBoard and WandB."""
 
     data_samples: DataSamplesConfig = field(default_factory=DataSamplesConfig)
-    """The training-data inspection and its W&B sample tables; see ``DataSamplesConfig``."""
+    """The budgets of the training-data scan of a run that masks or measures token ids; see ``DataSamplesConfig``."""
 
     skip_train_metrics_log: bool = False
     """Skips logging of training metrics to all logging backends and to the console as well."""
@@ -791,8 +774,8 @@ class LoggerConfig(MTrainLoggerConfig):
         """Validate logger settings and optional MLFlow dependency."""
         if not isinstance(self.data_samples, DataSamplesConfig):
             raise ValueError(
-                "logger.data_samples must be a mapping such as logger: {data_samples: {enabled: false}} "
-                f"(Hydra: logger.data_samples.enabled=false), got {self.data_samples!r}"
+                "logger.data_samples must be a mapping such as logger: {data_samples: {max_scan_seconds: 300}} "
+                f"(Hydra: logger.data_samples.max_scan_seconds=300), got {self.data_samples!r}"
             )
         self.data_samples.finalize()
         if self.mlflow_experiment and (self.mlflow_run_name is None or self.mlflow_run_name == ""):

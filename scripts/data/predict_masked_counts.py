@@ -25,7 +25,6 @@ output is refused.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import sys
@@ -41,6 +40,7 @@ from megatron.bridge.training.token_masking.resolution import ResolvedTokenMaski
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
+from scripts.data.file_digest import file_sha256  # noqa: E402
 from scripts.data.run_training_data import (  # noqa: E402
     BIN_IDX_MODES,
     MODELS,
@@ -150,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     first, last = args.iterations
     inputs = {
         "config": str(Path(args.config).resolve()),
-        "config_sha256": hashlib.sha256(Path(args.config).read_bytes()).hexdigest(),
+        "config_sha256": file_sha256(args.config),
         "model": args.model,
         "mode": args.mode,
         "gpus": args.gpus,

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import torch
 
+from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.token_masking.config import (
     MaskedValidationConfig,
     TokenMaskingConfig,
@@ -82,6 +83,27 @@ def hf_tokenizer_config(directory: Path) -> TokenizerConfig:
 
 def null_tokenizer_config(vocab_size: int) -> TokenizerConfig:
     return TokenizerConfig(tokenizer_type="NullTokenizer", vocab_size=vocab_size)
+
+
+def config_container(
+    tokenizer_config: TokenizerConfig | None = None, token_masking: TokenMaskingConfig | None = None
+) -> ConfigContainer:
+    """A real ConfigContainer holding a tokenizer section and a token-masking block (by default a fresh
+    TokenizerConfig and the default block).
+
+    The sections a recipe builds are None: the token-masking checks never read them, and building them needs a recipe.
+    """
+    return ConfigContainer(
+        train=None,
+        model=None,
+        optimizer=None,
+        scheduler=None,
+        dataset=None,
+        logger=None,
+        checkpoint=None,
+        tokenizer=tokenizer_config if tokenizer_config is not None else TokenizerConfig(),
+        token_masking=token_masking if token_masking is not None else TokenMaskingConfig(),
+    )
 
 
 def masking(token_ids: list[int]) -> TokenMaskingConfig:

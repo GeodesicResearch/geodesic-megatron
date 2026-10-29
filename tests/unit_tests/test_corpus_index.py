@@ -4,7 +4,7 @@
 
 Each way an index can fail to describe its ``.bin`` is exercised through ``corpus_documents.read_index``, which binds
 the reader to that tool's error type (``test_corpus_documents.py``, ``TestReadIndex``); here the reader is read
-directly, with the caller's error type, and the tools that use it are checked to share it.
+directly, with the caller's error type.
 """
 
 from pathlib import Path
@@ -49,15 +49,3 @@ def test_an_empty_bin_maps_to_no_ids(tmp_path):
     empty.write_bytes(b"")
     tokens = corpus_index.token_memmap(empty)
     assert tokens.dtype == corpus_index.TOKEN_DTYPE and len(tokens) == 0
-
-
-def test_the_corpus_tools_share_the_reader():
-    from scripts.profiling import ssm_state_probe
-
-    from tests.unit_tests.corpora_fixtures import load_campaign_module
-
-    corpus_documents = load_campaign_module("corpus_documents")
-    assert corpus_documents.DocumentIndex is corpus_index.DocumentIndex
-    assert corpus_documents.token_memmap is corpus_index.token_memmap
-    assert corpus_documents.TOKEN_DTYPE is corpus_index.TOKEN_DTYPE
-    assert ssm_state_probe.read_index is corpus_index.read_index

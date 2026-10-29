@@ -2,17 +2,18 @@
 # Licensed under the Apache License, Version 2.0.
 """Inspect the training data once, before the model is built.
 
-The last rank (the one that logs to W&B) reads a bounded, seeded sample of every training data source, judges it for
-the run's token masking and keeps the scans for the W&B sample tables. Every rank takes part in broadcasting the
-verdict, so a fatal finding, or a failure of the scan itself, stops every rank together instead of leaving the others
-waiting in a collective. Whether the scan runs is decided from the config alone, identically on every rank.
+A run that masks or measures token ids scans every training data source on its last rank, within the budgets of
+``logger.data_samples``, and judges what the scan found for its token masking. Every rank takes part in broadcasting
+the verdict, so a fatal finding, or a failure of the scan itself, stops every rank together instead of leaving the
+others waiting in a collective. Whether the scan runs is decided from the config alone, identically on every rank; a
+run that neither masks nor measures ids never reads its data here.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Sequence
+from typing import Any
 
 import torch
 
@@ -21,17 +22,9 @@ from megatron.bridge.training.config import ConfigContainer, DataSamplesConfig
 from megatron.bridge.training.token_masking.config import TokenMaskingError
 from megatron.bridge.training.token_masking.data_check import split_forms, token_masking_data_verdict
 from megatron.bridge.training.token_masking.resolution import ResolvedTokenMasking
-from megatron.bridge.training.tokenizers.tokenizer import display_decoder
-from megatron.bridge.training.utils.data_sample_tables import log_data_sample_tables
 
 
 logger = logging.getLogger(__name__)
-
-
-def inspection_wanted(cfg: ConfigContainer, resolved: ResolvedTokenMasking) -> bool:
-    """Whether this run scans its training data: for the W&B tables, or because it masks, which it must prove."""
-    tables = bool(cfg.logger.wandb_project) and cfg.logger.data_samples.enabled
-    return tables or resolved.enabled
 
 
 def scan_dataset(
@@ -43,7 +36,7 @@ def scan_dataset(
         dataset_config: A finalized dataset config; its training sources are scanned (``training_data_sources``).
         tokenizer: The run's tokenizer.
         resolved: The run's token-masking decision, whose ``measured_token_ids`` are looked for.
-        samples: The run's ``logger.data_samples``, for the documents kept and the token and time budgets.
+        samples: The run's ``logger.data_samples``, for the token and time budgets.
 
     Returns:
         ``(scans, reason)``: one scan per source, or no scans and why the data cannot be scanned.
@@ -58,8 +51,6 @@ def scan_dataset(
         listed_token_ids=list(resolved.measured_token_ids),
         split_forms=split_forms(tokenizer, resolved.token_strings),
         vocab_size=tokenizer.vocab_size,
-        documents_per_source=samples.documents_per_source,
-        listed_documents_per_source=samples.masked_documents_per_source,
         max_scan_tokens_per_source=samples.max_scan_tokens_per_source,
         deadline=started + samples.max_scan_seconds,
         seed=settings.seed,
@@ -87,7 +78,8 @@ def _scan(
 def inspect_training_data(
     cfg: ConfigContainer, tokenizer: Any, resolved: ResolvedTokenMasking
 ) -> list[SourceScan] | None:
-    """Scan the training data on the last rank and stop every rank together on a fatal finding.
+    """Scan the training data on the last rank of a run that masks or measures ids, and stop every rank together on a
+    fatal finding.
 
     Returns the scans on the last rank, and None on the other ranks and when the run does not scan.
 
@@ -95,7 +87,7 @@ def inspect_training_data(
         TokenMaskingError: on every rank, when the scan failed or, for a run with masking enabled, the training data
             shows no target of a masked id that carries loss, or shows data built by another tokenizer.
     """
-    if not inspection_wanted(cfg, resolved):
+    if not resolved.measured_token_ids:
         return None
     scan_rank = torch.distributed.get_world_size() - 1
     scans: list[SourceScan] | None = None
@@ -117,25 +109,3 @@ def inspect_training_data(
             "masked id that carries loss in its training data):\n- " + "\n- ".join(messages)
         )
     return scans
-
-
-def log_inspection_tables(
-    wandb_logger: Any | None,
-    scans: Sequence[SourceScan] | None,
-    cfg: ConfigContainer,
-    tokenizer: Any,
-    resolved: ResolvedTokenMasking,
-    step: int,
-) -> None:
-    """Log the sample tables from the rank that scanned and holds W&B, when the tables are wanted."""
-    if wandb_logger is None or scans is None or not cfg.logger.data_samples.enabled:
-        return
-    log_data_sample_tables(
-        wandb_logger,
-        scans,
-        masked_token_ids=list(resolved.token_ids),
-        measured_token_ids=list(resolved.measured_token_ids),
-        decode=display_decoder(tokenizer),
-        max_rendered_tokens=cfg.logger.data_samples.max_rendered_tokens,
-        step=step,
-    )

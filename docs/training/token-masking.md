@@ -62,8 +62,7 @@ A control written as a `base_config:` overlay of the masked config must also res
 | `masked_validation.iters` | `null` | Batches, each of the training global batch size, per held-out evaluation. Required with a held-out set, refused without one. |
 
 The **measured ids** are the masked ids when masking is enabled, and `masked_validation.token_ids` otherwise. A run
-that measures ids counts them every iteration, reports their listed-target loss, logs the masked-documents table (with
-W&B), and must use a forward step that applies token masking. A run that measures none (the block omitted, or
+that measures ids counts them every iteration, reports their listed-target loss, and must use a forward step that applies token masking. A run that measures none (the block omitted, or
 `enabled: false` without `masked_validation.token_ids`) is idle: it reports no `token_masking/*` metric, runs no
 per-iteration token-masking check, and accepts any forward step. The tokenizer check below still runs for it.
 
@@ -89,19 +88,16 @@ every tokenizer the local Hugging Face cache holds, on every config under `confi
 
 ### Removed settings
 
-Earlier versions configured masking with a `mode`, enforced it with a runtime deadline, and could take its ids from
-the tokenizer. A config that still uses any of those settings stops the run:
+A config or tokenizer that names ids to mask outside `token_masking:` stops the run:
 
 | Setting | Error | Write instead |
 |---|---|---|
-| `token_masking.mode` | `ValueError: Removed key 'mode' for TokenMaskingConfig: write token_masking.enabled: true (with token_ids) or omit the block` | `enabled: true` with `token_ids`; for a control arm, `masked_validation.token_ids` |
-| `token_masking.require_masked_targets`, `token_masking.require_masked_targets_within_iterations` | `ValueError: Removed key '<key>' for TokenMaskingConfig: an enabled run must show trainable marker targets in its training data at setup; there is no runtime deadline` | nothing: the setup data check replaces them |
-| `tokenizer.loss_mask_token_ids` | `ValueError: Removed key 'loss_mask_token_ids' for TokenizerConfig: token masking is configured only in token_masking: {enabled: true, token_ids: [...]}` | `token_masking.token_ids` |
-| A tokenizer that carries a `loss_mask_token_ids` key, whatever its value (`[]` and `null` included) | `TokenMaskingError: tokenizer <name> carries loss_mask_token_ids (in <where>), which no longer decides anything: ...` | a tokenizer without the key (see "Prerequisites"), with the ids in `token_masking.token_ids` |
+| `tokenizer.loss_mask_token_ids`, unless null | `ValueError: Removed key 'loss_mask_token_ids' for TokenizerConfig: token masking is configured only in token_masking: {enabled: true, token_ids: [...]}` | `token_masking.token_ids` |
+| A tokenizer that carries a `loss_mask_token_ids` key (any value) | `TokenMaskingError: tokenizer <name> carries loss_mask_token_ids (in <where>), which no longer decides anything: ...` | a tokenizer without the key (see "Prerequisites"), with the ids in `token_masking.token_ids` |
 
-The removed keys are refused with the same message wherever they are set: in a YAML, and in a Hydra CLI override with
-or without `+` (`token_masking.mode=enabled`), whose keys are checked against the config classes before Hydra applies
-them. A misspelled key of a strict section gets its did-you-mean suggestion on the command line too.
+The removed key is refused with the same message in a YAML and in a Hydra CLI override with or without `+`, whose
+keys are checked against the config classes before Hydra applies them. A misspelled key of a strict section gets its
+did-you-mean suggestion on the command line too.
 
 The tokenizer check runs at setup for **every** run, masking or not, on Hugging Face-backed tokenizer types
 (`HuggingFaceTokenizer`, `SFTTokenizer`, `MultimodalTokenizer`). It looks for the key in the loaded tokenizer's
@@ -363,13 +359,13 @@ token_masking:
   packed set exactly `iters × global_batch_size` packs and every evaluation reads each pack once. A `.bin/.idx` set
   writes its index caches where training data does (`dataset.path_to_cache`, else beside the data).
 - **Checked on the samples the evaluations read.** Right after the build, the last rank reads those
-  `iters × global_batch_size` samples once, their labels and loss masks exactly as the forward step sees them, and
-  every rank stops when none of their targets of a measured id carries loss, in either arm, since the set's
+  `iters × global_batch_size` samples in order (labels and loss masks as the forward step sees them) until one holds
+  a target of a measured id that carries loss. Every rank stops when none does, in either arm, since the set's
   listed-target loss would never be reported: `TokenMaskingError: token_masking.masked_validation.data_path='...'
   cannot be the held-out masked-validation set, which must hold targets of the measured ids that carry loss: <cause>`,
   the cause ending in "choose a held-out set whose marker targets carry loss". A marker the set holds only outside
   those samples does not count. A passing set is logged as `[masked-validation] ...: N targets of the ids [...] carry
-  loss in the M samples each evaluation reads`.
+  loss in the first K of the M samples each evaluation reads`.
 - **Evaluated** at step 0 of a fresh run (not on a resume) and after every step that is a multiple of `interval`, each
   time from the set's first sample, with the run's own forward step, so token masking applies exactly as in training.
   It never advances `consumed_valid_samples` (which positions the regular validation set on resume) and fires no
@@ -405,9 +401,8 @@ No tool applies this criterion inside a run; read the two arms' W&B series and p
 
 Right after the decision is resolved, and before the model is built, the last rank reads a bounded, seeded sample of
 every training data source: each prefix of a `.bin/.idx` blend, or the packed parquet set of an SFT run (its
-`packed_train_data_path`, or the default pack path the builder derives). It runs whenever the sample tables are wanted
-(W&B configured and `logger.data_samples.enabled`, the default) and for every run with masking enabled, which must
-pass it.
+`packed_train_data_path`, or the default pack path the builder derives). It runs exactly for the runs that mask or
+measure token ids; a run with masking enabled must pass it.
 
 **Only the data the training split reads is scanned.** A `.bin/.idx` document here is what `GPTDataset` calls one: a
 sequence of the index, the unit Megatron splits and shuffles (a corpus built without sentence splitting holds one per
@@ -447,7 +442,7 @@ per source by default).
 
 Two more findings stop an enabled run whatever the evidence: a measured token's split form in any source, and tokens
 outside the tokenizer's vocabulary in any source (both mean data built by another tokenizer). A run that only measures
-ids, or measures none, gets the same findings logged at ERROR as `[data-samples] ...` lines and trains on.
+ids gets the same findings logged at ERROR as `[data-samples] ...` lines and trains on.
 
 The split form is the measured token's text encoded by the run's tokenizer with special-token parsing off, which
 splits it as a tokenizer without the marker would: `<stage=training>` becomes `<` `stage` `=t` `raining` `>`. Byte-level
@@ -457,26 +452,8 @@ token whose text starts with the last piece. That counts the marker mid-sentence
 `stage=training` without the angle brackets is not counted. A marker whose split form has only two pieces has no
 interior and is matched only as exactly those two tokens.
 
-The tokenizer a source's metadata records is shown in the tables but never judged: a dataset's
-`pipeline_results.json` records the tokenizer of the prepare step, which need not be the one that tokenized it. The
-budgets live in `logger.data_samples` (`max_scan_tokens_per_source`, 20M; `max_scan_seconds`, 120 s, which the other
-ranks spend waiting, so keep it well under the process-group timeout).
-
-## The sample tables
-
-With W&B configured, the scan is logged once per run segment, at the segment's starting step:
-
-| Table | Rows |
-|---|---|
-| `data_samples/sources` | One per source: label, path, kind, blend weight, recorded tokenizer, documents and tokens scanned, measured-id targets, how many of them carry loss, split forms, out-of-vocabulary tokens, why the scan stopped |
-| `data_samples/documents` | `documents_per_source` (10) random documents per source |
-| `data_samples/masked_documents` | Up to `masked_documents_per_source` (10) documents per source holding a measured id; logged when the run measures ids, whether or not it masks them |
-
-Each document row carries its token counts, a plain `text` column in which measured ids appear as `⟦masked:…⟧`
-(the target would train, and masking removes it), `⟦measured:…⟧` (the target trains: a control arm) or `⟦untrained:…⟧`
-(the dataset already excludes the position from the loss), and an `html` column that colours them. Turn the tables off
-with `logger: {data_samples: {enabled: false}}` (Hydra: `logger.data_samples.enabled=false`; `data_samples: false` is
-refused); the data check of a run with masking enabled still runs.
+The budgets live in `logger.data_samples` (`max_scan_tokens_per_source`, 20M; `max_scan_seconds`, 120 s, which the
+other ranks spend waiting, so keep it well under the process-group timeout).
 
 ## What fails, and when
 
@@ -488,7 +465,7 @@ the first failure ends the job.
 
 | Check | When | Applies to |
 |---|---|---|
-| A removed key: `token_masking.mode`, `token_masking.require_masked_targets[_within_iterations]`, `tokenizer.loss_mask_token_ids` (`ValueError: Removed key ...`) | config loading | every run |
+| A non-null `tokenizer.loss_mask_token_ids` (`ValueError: Removed key ...`) | config loading | every run |
 | An unknown key in `token_masking:`, `masked_validation`, `tokenizer:`, `logger.data_samples` or at the top level (`ValueError: Unknown key ... Did you mean ...?`) | config loading | every run |
 | The block is malformed: `enabled` not a boolean; ids not distinct non-negative integers; `enabled` without ids or ids without `enabled`; measured ids that differ from the masked ones; both held-out paths, or `interval`/`iters` missing, invalid or without a path; a held-out set with no id to measure | `ConfigContainer.validate` | every run |
 | Masking enabled with tied embeddings, knowledge distillation, or a model config that does not state whether it ties them | `ConfigContainer.validate` | masking enabled |
@@ -496,8 +473,8 @@ the first failure ends the job.
 | A measured id outside the vocabulary; on a Hugging Face tokenizer, one that is not an added special token or is the eos/bos/pad/unk/eod token | setup, every rank | every run that measures ids |
 | Ranks resolved different decisions (different tokenizer files on different nodes) | setup, all ranks together | every run |
 | The forward step does not apply token masking (only `gpt_step.forward_step` and `forward_step_modelopt` do; VLM, LLaVA and custom steps would otherwise silently train unmasked) | setup | every run that measures ids |
-| No positive evidence in the training data (four named causes), a split form, or out-of-vocabulary tokens | setup, all ranks together | masking enabled (others: ERROR findings) |
-| The training-data scan raised an exception | setup, all ranks together | every run that scans |
+| No positive evidence in the training data (four named causes), a split form, or out-of-vocabulary tokens | setup, all ranks together | masking enabled (measuring only: ERROR findings) |
+| The training-data scan raised an exception | setup, all ranks together | every run that measures ids |
 | The held-out set does not suit the run's data or is not on disk, or the samples its evaluations read hold no trainable target of a measured id | setup, all ranks together | every run that names a held-out set |
 | The loss reports lack the token-masking entries (the forward step did not run the masking code) | every iteration, all pipeline stages together | every run that measures ids |
 | A target whose label is a masked id still carries loss (the loss was computed with some other mask) | every iteration, all pipeline stages together | masking enabled |
@@ -558,16 +535,9 @@ before any rank starts (`scripts/training/code_identity.py`).
    not the fractions, with a count predicted from the data: `scripts/data/predict_masked_counts.py` predicts every
    iteration's line from the run's config and GPU count, before it trains (each rank's own loader and the step's own
    masking code, on CPU). A failing iteration's line is printed before the run stops.
-5. **The sample tables**: ten random documents per source, and the documents holding a measured token, marked
-   `⟦masked:…⟧`, `⟦measured:…⟧` or `⟦untrained:…⟧`.
 
 These prove that a run's loss mask is right; they cannot prove that the cross-entropy kernel honoured it in the
-gradient, or that the trained model behaves as masking claims. The behavioural proof is a masked run and its
-measure-only control, trained alike, probed with their untrained parent, and judged by a pre-registered verdict that
-compares the two runs' `[token-masking-counts]` lines as exact integers. `scripts/telemetry/score_gate.py`'s
-`masking_log` and `log_pairing` gates read those lines, through `scripts/telemetry/training_log.py`'s
-`parse_token_masking_counts`, and its `count_prediction` and `count_bounds` gates compare a run's lines with the counts
-predicted for it and with stated bounds.
+gradient, or that the trained model behaves as masking claims.
 
 Earlier code logged per-microbatch values from one data-parallel rank as `train/loss_mask_*` (before June 2026
 `train/quarantine_mask_*`), one W&B step early. Those counted listed labels whether or not they carried loss, so they

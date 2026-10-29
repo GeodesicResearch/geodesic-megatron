@@ -1,32 +1,24 @@
-"""Parse a training log as the launcher writes it: its iteration lines, its evaluation lines, the after-iteration-1
-memory report, the end-of-training peak-memory summary over all ranks, the banners each node logs (the launcher env
-overrides, the token-masking decision), the per-iteration token-masking counts and the W&B run it names.
+"""Parse a training log as the launcher writes it: its iteration lines, the after-iteration-1 memory report, the
+end-of-training peak-memory summary over all ranks, the banners each node logs (the launcher env overrides, the
+token-masking decision), the per-iteration token-masking counts and the W&B run it names.
 
-The iteration line is the bridge's ``training/utils/train_utils.py::training_log`` output, the evaluation line
-``training/eval.py::evaluate_and_print_results``'s. The parser needs only the standard library, so it runs under a
-login node's host interpreter. ``scripts/telemetry/score_run.py`` scores one run from these records,
-``scripts/telemetry/loss_parity.py`` compares several runs' trajectories and ``scripts/telemetry/score_gate.py`` gates
-runs' token-masking reports.
+The iteration line is the bridge's ``training/utils/train_utils.py::training_log`` output. The parser needs only the
+standard library, so it runs under a login node's host interpreter. ``scripts/telemetry/score_run.py`` scores one run
+from these records, ``scripts/telemetry/loss_parity.py`` compares several runs' trajectories and
+``scripts/telemetry/run_watch.py`` checks a running stage's logs.
 
-Token masking reports, per iteration and per evaluation, the cross-entropy at the targets of its measured ids
-(``token_masking/listed_target_loss``) beside the loss of the targets that carry loss (``lm loss``); with the fractions
-it reports, the two give the cross-entropy at every other target that carries loss, which this module derives as
-``token_masking/non_listed_target_loss`` (``non_listed_target_loss``): the loss a masked run and its unmasked control
-share, whether or not the masked ids' targets are in ``lm loss``.
-
-The fractions on the iteration line are printed to 7 significant digits. The exact integer counts behind them are
-printed on a line of their own every iteration (``[token-masking-counts] iteration=<i> listed=<n> ...``, the bridge's
-``training/token_masking/monitor.py``), which ``parse_token_masking_counts`` reads: a comparison that must be exact
-reads those.
+The token-masking fractions on the iteration line are printed to 7 significant digits. The exact integer counts behind
+them are printed on a line of their own every iteration (``[token-masking-counts] iteration=<i> listed=<n> ...``, the
+bridge's ``training/token_masking/monitor.py``), which ``parse_token_masking_counts`` reads: a comparison that must be
+exact reads those.
 """
 
 import re
 import shlex
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypeVar
 
 
 # The bridge's per-iteration log line (training/utils/train_utils.py::training_log), e.g.
@@ -69,31 +61,13 @@ def _banner_re(tag: str) -> re.Pattern[str]:
 
 _ENV_OVERRIDES_RE = _banner_re(ENV_OVERRIDES_TAG)
 
-# evaluate_and_print_results' line, e.g.
-#  validation loss at iteration 53 | masked-validation/lm loss value: 2.1E+00 | masked-validation/lm loss PPL: ... |
-_VALIDATION_RE = re.compile(r"validation loss at (?P<label>.+?) \| (?P<fields>.*)$")
-_VALIDATION_FIELD_RE = re.compile(r"(?P<key>.+) value: (?P<value>\S+)")
-_STEP_LABEL_RE = re.compile(r"iteration (?P<step>\d+)")
-
-# The token-masking report keys (training/token_masking/hook.py), restated because this module must import without
-# torch, and the loss this module derives from them.
-LISTED_TARGET_FRACTION = "token_masking/listed_target_fraction"
-MASKED_TARGET_FRACTION = "token_masking/masked_target_fraction"
-TRAINED_LISTED_TARGET_FRACTION = "token_masking/trained_listed_target_fraction"
-TRAINABLE_TARGET_FRACTION = "token_masking/trainable_target_fraction"
-LISTED_TRAINABLE_TARGET_FRACTION = "token_masking/listed_trainable_target_fraction"
-LISTED_TARGET_LOSS = "token_masking/listed_target_loss"
-NON_LISTED_TARGET_LOSS = "token_masking/non_listed_target_loss"
-
 # The per-iteration counts line (training/token_masking/monitor.py, COUNTS_LOG_TAG, with the fields of
 # training/token_masking/hook.py's TokenMaskingCounts in their order), restated because this module must import without
 # torch, e.g.
 #  INFO:...monitor:[token-masking-counts] iteration=5 listed=12 listed_trainable=12 masked=12 trained_listed=0 ...
-# The rank that writes the training log prints it once per iteration. The counts are W&B metrics under
-# ``token_masking/count/<field>``, the names a gate uses for them (``TOKEN_MASKING_COUNT_PREFIX``).
+# The rank that writes the training log prints it once per iteration.
 TOKEN_MASKING_COUNTS_TAG = "token-masking-counts"
 TOKEN_MASKING_COUNT_FIELDS = ("listed", "listed_trainable", "masked", "trained_listed", "trainable", "positions")
-TOKEN_MASKING_COUNT_PREFIX = "token_masking/count/"
 _COUNTS_RE = re.compile(rf"\[{re.escape(TOKEN_MASKING_COUNTS_TAG)}\] iteration=(?P<iteration>\d+) (?P<fields>.*)$")
 _COUNT_VALUE_RE = re.compile(r"[0-9]+")
 
@@ -180,115 +154,6 @@ def parse_iteration_records(lines: Iterable[str]) -> list[IterationRecord]:
                 consumed_samples=int(consumed) if consumed is not None else None,
                 learning_rate=float(learning_rate) if learning_rate is not None else None,
                 grad_norm=float(grad_norm) if grad_norm is not None else None,
-            )
-        )
-    return records
-
-
-@dataclass(frozen=True)
-class IterationValues:
-    """Every numeric field of one iteration line, by its logged name, plus ``token_masking/non_listed_target_loss``
-    where the line's token-masking reports give it (``non_listed_target_loss``)."""
-
-    iteration: int
-    values: dict[str, float]
-
-
-@dataclass(frozen=True)
-class ValidationRecord:
-    """One evaluation line: the label it was printed at (``iteration <N>`` in the training loop), the step that label
-    names (None for any other label), and each result's value by its logged name, plus every
-    ``<prefix>token_masking/non_listed_target_loss`` the results give (``non_listed_target_loss``)."""
-
-    label: str
-    step: int | None
-    values: dict[str, float]
-
-
-def _numeric(raw: str) -> float | None:
-    try:
-        return float(raw)
-    except ValueError:
-        return None
-
-
-def non_listed_target_loss(values: Mapping[str, float], prefix: str = "") -> float | None:
-    """The mean cross-entropy at the targets that carry loss and are not a measured id's, from one report's values.
-
-    ``<prefix>lm loss`` averages over the targets that carry loss in the mask the loss multiplies, a fraction T of the
-    report's target positions (``trainable_target_fraction``); a fraction W of them are measured ids' targets
-    (``trained_listed_target_fraction``), whose mean cross-entropy is ``listed_target_loss``. The other targets
-    therefore average (lm loss x T - listed_target_loss x W) / (T - W); with masking enabled W is 0 and this is
-    ``lm loss`` itself. The identity is exact for one report: an iteration line with ``log_interval: 1``, or one
-    evaluation.
-
-    Returns None when the values lack the loss or either fraction (a run without token masking), lack
-    ``listed_target_loss`` while W > 0 (a log written before that report existed), or no other target carries loss.
-    """
-    loss = values.get(f"{prefix}{_LOSS_KEY}")
-    trainable = values.get(f"{prefix}{TRAINABLE_TARGET_FRACTION}")
-    trained_listed = values.get(f"{prefix}{TRAINED_LISTED_TARGET_FRACTION}")
-    if loss is None or trainable is None or trained_listed is None or trainable <= trained_listed:
-        return None
-    if trained_listed == 0:
-        return loss
-    listed_loss = values.get(f"{prefix}{LISTED_TARGET_LOSS}")
-    if listed_loss is None:
-        return None
-    return (loss * trainable - listed_loss * trained_listed) / (trainable - trained_listed)
-
-
-def _with_non_listed_target_loss(values: dict[str, float], prefixes: Iterable[str]) -> dict[str, float]:
-    for prefix in prefixes:
-        derived = non_listed_target_loss(values, prefix)
-        if derived is not None:
-            values[f"{prefix}{NON_LISTED_TARGET_LOSS}"] = derived
-    return values
-
-
-def parse_iteration_values(lines: Iterable[str]) -> list[IterationValues]:
-    """Every iteration line's numeric fields, in log order (repeats are kept so a caller can detect them).
-
-    Raises ValueError on a line that has the iteration prefix but lacks a required field.
-    """
-    records = []
-    for line in lines:
-        parsed = _iteration_fields(line)
-        if parsed is None:
-            continue
-        iteration, _, fields = parsed
-        values = {key: number for key, raw in fields.items() if (number := _numeric(raw)) is not None}
-        records.append(IterationValues(iteration, _with_non_listed_target_loss(values, [""])))
-    return records
-
-
-def parse_validation_records(lines: Iterable[str]) -> list[ValidationRecord]:
-    """Every evaluation line's results, in log order.
-
-    Raises ValueError on a result whose value is not a number.
-    """
-    records = []
-    for line in lines:
-        match = _VALIDATION_RE.search(line.rstrip("\n"))
-        if match is None:
-            continue
-        values: dict[str, float] = {}
-        for part in match.group("fields").split(" | "):
-            field = _VALIDATION_FIELD_RE.fullmatch(part.strip(" |"))
-            if field is None:
-                continue
-            number = _numeric(field.group("value"))
-            if number is None:
-                raise ValueError(f"evaluation result is not a number: {part.strip()!r} in {line.rstrip()!r}")
-            values[field.group("key")] = number
-        prefixes = [key[: -len(_LOSS_KEY)] for key in values if key.endswith(_LOSS_KEY)]
-        label = match.group("label")
-        step = _STEP_LABEL_RE.fullmatch(label)
-        records.append(
-            ValidationRecord(
-                label,
-                int(step.group("step")) if step is not None else None,
-                _with_non_listed_target_loss(values, prefixes),
             )
         )
     return records
@@ -402,10 +267,6 @@ class TokenMaskingCountsRecord:
     trainable: int
     positions: int
 
-    def metrics(self) -> dict[str, int]:
-        """The counts by their metric names, ``token_masking/count/<field>``."""
-        return {f"{TOKEN_MASKING_COUNT_PREFIX}{name}": getattr(self, name) for name in TOKEN_MASKING_COUNT_FIELDS}
-
 
 def parse_token_masking_counts(lines: Iterable[str]) -> list[TokenMaskingCountsRecord]:
     """Each iteration's token-masking counts, in iteration order, one record per iteration.
@@ -485,17 +346,8 @@ def check_window(name: str, window: tuple[int, int], min_iterations: int) -> Non
         raise ValueError(f"{name} {window} must start at >= 1 and span >= {min_iterations} iteration(s)")
 
 
-class _HasIteration(Protocol):
-    @property
-    def iteration(self) -> int: ...
-
-
-_Record = TypeVar("_Record", bound=_HasIteration)
-
-
-def window_records(records: Sequence[_Record], window: tuple[int, int], label: str) -> list[_Record]:
-    """Return the records (``IterationRecord`` or ``IterationValues``) of ``window`` (inclusive) in iteration order;
-    raise unless each appears exactly once."""
+def window_records(records: list[IterationRecord], window: tuple[int, int], label: str) -> list[IterationRecord]:
+    """Return the records of ``window`` (inclusive) in iteration order; raise unless each appears exactly once."""
     first, last = window
     inside = [r for r in records if first <= r.iteration <= last]
     counts = Counter(r.iteration for r in inside)

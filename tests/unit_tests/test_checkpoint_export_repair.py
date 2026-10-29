@@ -26,7 +26,6 @@ Everything else, from resolving the iteration to the clone, the run_config copy 
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import shutil
@@ -49,18 +48,8 @@ from tests.unit_tests.export_clone_fixtures import (
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_CONVERT_PATH = _REPO_ROOT / "pipeline_checkpoint_convert_hf.py"
 _LAUNCHER = _REPO_ROOT / "pipeline_checkpoint_convert.sh"
 HF_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
-
-
-@pytest.fixture(scope="module")
-def convert_module():
-    spec = importlib.util.spec_from_file_location("pipeline_checkpoint_convert_hf", _CONVERT_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline_checkpoint_convert_hf"] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 @pytest.fixture()

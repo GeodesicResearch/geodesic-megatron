@@ -4,16 +4,9 @@
 
 import math
 import re
-from pathlib import Path
 
 import pytest
-from scripts.mapping_values import (
-    require_absolute_path,
-    require_file_beside,
-    require_int,
-    require_number,
-    require_string,
-)
+from scripts.mapping_values import require_absolute_path, require_int, require_number, require_string
 
 
 class SpecError(Exception):
@@ -76,8 +69,6 @@ def test_each_value_check_raises_the_callers_error_type():
         require_string("", "s", error=SpecError)
     with pytest.raises(SpecError, match="p must be an absolute path"):
         require_absolute_path("relative", "p", error=SpecError)
-    with pytest.raises(SpecError, match="f .* is not a file"):
-        require_file_beside("absent.yaml", "f", Path("/"), error=SpecError)
 
 
 def test_an_absolute_path_is_returned_as_given():
@@ -88,19 +79,3 @@ def test_an_absolute_path_is_returned_as_given():
 def test_anything_else_is_not_an_absolute_path(value):
     with pytest.raises(ValueError, match=r"spec\.p must be (an absolute path|a non-empty string)"):
         require_absolute_path(value, "spec.p")
-
-
-def test_a_file_is_named_relative_to_the_directory_beside_it_or_absolutely(tmp_path):
-    (tmp_path / "sub").mkdir()
-    target = tmp_path / "sub" / "config.yaml"
-    target.write_text("a: 1\n")
-    assert require_file_beside("sub/config.yaml", "f", tmp_path) == str(target.resolve())
-    assert require_file_beside("../sub/config.yaml", "f", tmp_path / "sub") == str(target.resolve())
-    assert require_file_beside(str(target), "f", tmp_path / "elsewhere") == str(target.resolve())
-
-
-@pytest.mark.parametrize("value", ["absent.yaml", "sub", "", None])
-def test_a_name_that_is_not_a_file_beside_the_directory_is_refused(tmp_path, value):
-    (tmp_path / "sub").mkdir()
-    with pytest.raises(ValueError, match=r"spec\.f (.* is not a file|must be a non-empty string)"):
-        require_file_beside(value, "spec.f", tmp_path)

@@ -20,7 +20,6 @@
 # with exactly one source:
 #   saved: <dir>     a dataset-builder local build's stage directory (`<dir>/train` as
 #                    save_to_disk wrote it, `<dir>/_provenance.json` its record)
-#   hub: {dataset, revision, config}   the same list published on the Hub, at a full commit SHA
 #   pending: <why>   no digest list to check against yet; asking for it is refused
 # A sliced row may instead name one source per shard, `shards: {0: <source>, 1: <source>, ...}`, every
 # shard once, each list describing that shard's rows only (its record's split the slice train[beg:end],

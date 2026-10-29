@@ -516,7 +516,7 @@ fields:
   (`STAGE_ONE_LEVERS` in `tests/unit_tests/campaign_config.py`), launched with the `.env` beside the config as
   `ISAMBARD_ENV_OVERRIDES`. That file is V2 E2E's but for one entry: the Mamba SSM state is kept in fp32
   (`ISAMBARD_FP32_SSM_STATE=checkpoint`), where V2 E2E keeps it in bf16. The Mamba-state probe
-  (`scripts/profiling/ssm_state_probe.py`, job 7240250, result
+  (`scripts/profiling/ssm_state_probe.py` at 349a3dc6, job 7240250, result
   `/projects/a5k/public/logs/metagaming_filtering/m5b/m5b_ssm_state.j7240250.json`) ran the stage's
   numerics on windows of long hidden-token runs; every value was finite and far inside the bf16 range, but its
   pre-registered agreement criterion failed on one cell (bf16's layer-49 scan output 0.610 binade from fp32's against
@@ -612,10 +612,8 @@ checks on both stages:
 - the warm start, which must be the pretraining's save directory;
 - the width, and that id 500 resolves against the stage's tokenizer.
 
-**Launch.** `30b_clueless_norm/submit_midtrain.sh <nodes to request per segment>`, run from a frozen copy of the
-pinned commit, queues it behind stage 1 (Kyle, 2026-10-14): stage 1's guard as a final count check, its completion
-gate and the save-record check of its final save, then the stage's segments, each job after the one before. The
-script's header lists the jobs; its records go to
+**Launch.** It trained in one segment, job 7404939 (2026-10-15), queued behind stage 1's final count check, completion
+gate and save-record check (jobs 7404936-7404938); the records are in
 `/projects/a5k/public/logs/metagaming_filtering/clueless_norm/midtrain_launch/`.
 
 **What its saves must show.** The save-record check, with `checks/c2_save_record_midtrain.yaml` as its spec.
@@ -645,26 +643,18 @@ the chunked linear cross-entropy, one pack per replica), NVLink-swept.
 - the `.env` and the checkpoints;
 - the width.
 
-**Build.** The header of the prepare config the table names
-(`30b_clueless_norm_sft/data/pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming-rebalanced-luna-2plus.yaml`) says
-how the push's manifest job pins the corpus's commit and files, and `../control_pretraining/build_corpora.sh`'s header
-how a build waits for that job. From the repo root, once the row's
-count is filled in:
+**Build.** The prepare config the table names
+(`30b_clueless_norm_sft/data/pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming-rebalanced-luna-2plus.yaml`) pins
+the corpus's commit. From the repo root:
 
 ```bash
-BUILD_AFTER=<manifest job id> configs/control_pretraining/build_corpora.sh \
-  configs/metagaming_filtering/30b_clueless_norm_sft/corpora.tsv sft
+configs/control_pretraining/build_corpora.sh configs/metagaming_filtering/30b_clueless_norm_sft/corpora.tsv sft
 ```
 
 It is verified as the SFT arm's corpus is ("Build"), with this table.
 
 **Pack checks.** The built pack is checked against v4's pack (token parity, and M9: no id 500) by
 `../control_pretraining/packed_corpus_checks.py` with `30b_clueless_norm_sft/pack_checks.yaml`, whose header has the job.
-
-**Launch gate (G-SFT).** The SFT's segments are queued `afterok` on one 1-node job that runs
-`../../scripts/training/evidence_gate.py` with `30b_clueless_norm/g_sft_gate.yaml`, whose header and comments state each
-launch condition and the jobs the gate job depends on. One of those is the release wait, the same tool in wait mode with
-`30b_clueless_norm/g_sft_mt_release_wait.yaml`.
 
 **Launch.** It is not launched yet. It starts from stage 2's final checkpoint, and it launches as the v2 run did
 (`../control_pretraining/30b_baseline_ablations/README.md`), with these settings:
@@ -711,7 +701,7 @@ ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --output=<out dir>/export-check-%j.out s
 The output directory must be new: every output is refused if it exists.
 
 **The think spec's tolerance** is pre-registered in its `calibration:` block. `export_check.py calibrate` judges it
-and writes the report the G-SFT gate reads, as a one-node job after the negative controls (`afterany`: a run judged
+and writes its report, as a one-node job after the negative controls (`afterany`: a run judged
 while its tolerance was still pending exits 2):
 
 ```bash

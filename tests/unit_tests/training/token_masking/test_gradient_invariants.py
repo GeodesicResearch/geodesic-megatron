@@ -29,11 +29,9 @@ exactly-zero gradient (never NaN), and a global batch made only of such microbat
 logging its 0/0 loss.
 """
 
-import megatron.core.rerun_state_machine as rerun_state_machine_module
 import pytest
 import torch
 from megatron.core.pipeline_parallel.schedules import forward_step_calc_loss
-from megatron.core.rerun_state_machine import RerunStateMachine
 from megatron.core.tensor_parallel import vocab_parallel_cross_entropy
 from megatron.core.transformer import TransformerConfig
 
@@ -57,14 +55,7 @@ MARKER_LABELS = (LABELS == MARKER).reshape(-1)
 TRAINED_MARKER_LABELS = MARKER_LABELS & (DATASET_MASK.reshape(-1) != 0)
 
 
-@pytest.fixture(autouse=True)
-def rerun_state_machine(monkeypatch):
-    """Megatron's real rerun state machine in its default (disabled) mode, which the loss function consults.
-
-    Installed as the process-wide singleton for one test and removed afterwards, so other tests find it as they left
-    it.
-    """
-    monkeypatch.setattr(rerun_state_machine_module, "_GLOBAL_RERUN_STATE_MACHINE", RerunStateMachine())
+pytestmark = pytest.mark.usefixtures("rerun_state_machine")
 
 
 @pytest.fixture(scope="module")

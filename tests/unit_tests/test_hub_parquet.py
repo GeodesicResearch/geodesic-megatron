@@ -8,9 +8,8 @@
   a copy. The Hub's listing and files are stood in for by ``hub_fixtures.local_hub``, which lists the local tree the
   way ``list_repo_tree`` lists a directory and opens its files, because the real Hub needs the network.
 * The read retry: a Hub range read cut mid-body hours into a read must be re-read, not fatal;
-  anything that is not a transport failure must stay fatal; and a persistent transport failure
-  must still be raised after the bounded attempts. The Hub's filesystem is stood in for, for the
-  same reason.
+  anything that is not a transport failure must stay fatal; and the bounded attempts must span
+  minutes. The Hub's filesystem is stood in for, for the same reason.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ import pytest
 from scripts.data import hub_read_retry
 
 from tests.unit_tests.corpora_fixtures import declare_config, load_campaign_module, write_parquet_dataset
-from tests.unit_tests.flaky_remote_files import hub_status, request_on_a_closed_client
 from tests.unit_tests.hub_fixtures import local_hub
 
 
@@ -239,50 +237,6 @@ class TestHubReadRetry:
         fs = self._FileSystem()
         work = self._failing_then("rows", [ValueError("bad parquet")])
         with pytest.raises(ValueError, match="bad parquet"):
-            hub_parquet.read_hub_file(fs, "datasets/x@rev/a.parquet", work)
-        assert fs.opens == 1
-
-    def test_a_persistent_transport_failure_is_raised_after_the_bounded_attempts(self, monkeypatch):
-        import httpx
-
-        monkeypatch.setattr(hub_read_retry.time, "sleep", lambda s: None)
-        fs = self._FileSystem()
-        work = self._failing_then("rows", [httpx.ReadTimeout("timed out")] * 3)
-        with pytest.raises(httpx.ReadTimeout):
-            hub_parquet.read_hub_file(fs, "datasets/x@rev/a.parquet", work, attempts=3)
-        assert fs.opens == 3
-
-    def test_a_hub_http_error_is_retried_only_for_rate_limits_and_server_errors(self, monkeypatch):
-        from huggingface_hub.errors import HfHubHTTPError
-
-        monkeypatch.setattr(hub_read_retry.time, "sleep", lambda s: None)
-        fs = self._FileSystem()
-        assert (
-            hub_parquet.read_hub_file(fs, "u", self._failing_then("rows", [hub_status(429), hub_status(503)]))
-            == "rows"
-        )
-        assert fs.opens == 3
-        fs = self._FileSystem()
-        with pytest.raises(HfHubHTTPError):
-            hub_parquet.read_hub_file(fs, "u", self._failing_then("rows", [hub_status(404)]))
-        assert fs.opens == 1
-
-    def test_a_request_on_the_client_the_library_closed_is_re_read_from_a_fresh_open(self, monkeypatch):
-        """huggingface_hub's backoff closes its shared httpx client when a request cannot connect,
-        then retries on the reference it took before its loop, so what a connection failure
-        surfaces is httpx's closed-client error, not a transport error. A fresh open builds a new
-        client, so the read must be re-opened like a cut body. A real closed client raises the
-        error (``request_on_a_closed_client``), so the test follows httpx's own message."""
-        monkeypatch.setattr(hub_read_retry.time, "sleep", lambda s: None)
-        fs = self._FileSystem()
-        work = self._failing_then("rows", [request_on_a_closed_client()])
-        assert hub_parquet.read_hub_file(fs, "datasets/x@rev/a.parquet", work) == "rows"
-        assert fs.opens == 2
-
-    def test_a_runtime_error_that_is_not_the_closed_client_is_raised_at_once(self):
-        fs = self._FileSystem()
-        work = self._failing_then("rows", [RuntimeError("parquet magic bytes not found")])
-        with pytest.raises(RuntimeError, match="magic bytes"):
             hub_parquet.read_hub_file(fs, "datasets/x@rev/a.parquet", work)
         assert fs.opens == 1
 

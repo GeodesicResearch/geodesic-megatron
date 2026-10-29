@@ -278,20 +278,36 @@ def sample_train_state_data():
     return {"iteration": 5000, "epoch": 10, "step": 50000, "learning_rate": 0.0001, "loss": 2.34}
 
 
-@pytest.fixture(scope="module")
-def run_module():
-    """The repo-root pipeline_training_run.py, loaded by path.
+def _load_repo_root_script(name: str):
+    """The repo-root script ``<name>.py``, loaded by path under its own name.
 
     It is a top-level script rather than an installed module, so tests that need
     its real parser, dispatch table or config assembly load it through importlib
     instead of importing it.
     """
-    run_path = Path(__file__).resolve().parents[2] / "pipeline_training_run.py"
-    spec = importlib.util.spec_from_file_location("pipeline_training_run", run_path)
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[2] / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline_training_run"] = module
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(scope="module")
+def run_module():
+    """The repo-root pipeline_training_run.py (``_load_repo_root_script``)."""
+    return _load_repo_root_script("pipeline_training_run")
+
+
+@pytest.fixture(scope="module")
+def convert_module():
+    """The repo-root pipeline_checkpoint_convert_hf.py (``_load_repo_root_script``)."""
+    return _load_repo_root_script("pipeline_checkpoint_convert_hf")
+
+
+@pytest.fixture(scope="module")
+def pipe_module():
+    """The repo-root pipeline_data_prepare.py (``_load_repo_root_script``)."""
+    return _load_repo_root_script("pipeline_data_prepare")
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -314,15 +330,4 @@ def gloo_group_of_one(tmp_path_factory):
     assert torch.distributed.get_world_size() == 1
     yield torch.distributed.group.WORLD if created else torch.distributed.new_group(backend="gloo")
     if created:
-        torch.distributed.destroy_process_group()
-
-
-@pytest.fixture
-def one_rank_world_left_as_found():
-    """Tears down, after the test, a process group the test brought up (``init_one_rank_nccl_world``), so none is left
-    behind: other tests of the same xdist worker build their own default process group (the export of
-    ``test_auto_bridge``), which a group left up would refuse. A group already up when the test starts is left up."""
-    created = not torch.distributed.is_initialized()
-    yield
-    if created and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()

@@ -124,13 +124,7 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   first iteration, so finding no started segment is such a failure. It runs on the tunnel under the host Python
   (SLURM's commands do not exist in the container), so it stays Python 3.6-compatible, from the frozen copy the stage
   was submitted from: `setsid nohup python3 scripts/training/stage_guard.py --config <guard.yaml> >/dev/null 2>&1 &`.
-  The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs. `stage_guard.sbatch` runs it as a
-  job for its final check, `--once --require-final` (its module docstring states the contract).
-
-## Launch gates
-
-- `evidence_gate.py` - A queued stage's launch gate: checks a spec's requirements against the evidence files the
-  stage waits on, once or until decided (its module docstring states the spec and the contract).
+  The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
 
 ## Probe jobs
 
@@ -143,25 +137,13 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   `steps.tsv` record of every step (`note` reports, `record` and `gate` decide the job's exit status). The v2e2e
   probes (`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/`) are built from it.
 
-## Staged submit scripts
+## Making a frozen copy
 
-- `staged_submit.sh` - What a staged submit script is built from: a script that submits a pre-registered run one
-  stage at a time from a frozen copy of the commit under test (Clueless-Norm's `submit_midtrain.sh`). Sourcing it
-  enters the copy it is in (`REPO_DIR`, the working directory, exported as
-  `GEODESIC_REPO_DIR`) and refuses a directory without a `REVISION` file and a shell carrying launch settings
-  (`launch_environment.py`). It provides `refuse` (a reason a stage cannot be submitted), `open_run_dir` and `submit`
-  (one `isambard_sbatch` submission, recorded in the run directory's `jobs.tsv`). The sourcing script sets `STAGE` and `RUN_DIR`, and decides for itself whether its jobs are submitted
-  forced. Every job it submits carries the nodes of `configs/bad_nodes.tsv` in `--exclude` (`node | since |
-  reason` per line; a missing table or a malformed line ends the script). Under `DRY_RUN=1` every submission and refusal is printed and nothing
-  changes; `tests/unit_tests/submit_plan.py` reads those lines back.
-
-### Making a frozen copy
-
-A staged submit script, `probe_job.sh` and `configs/control_pretraining/submit_corpus_job.py` run from a frozen copy
-of a commit, never from a working checkout. Every job reads its code from the copy, and bash reads a running script by
-byte offset, so an edit to a working checkout would change the code a queued or running job executes. The copy carries
-a `REVISION` file that names the commit, and these scripts refuse a directory without one. Make the copy from the
-root of a checkout in which the Megatron dataset helpers library is built:
+`probe_job.sh` and `configs/control_pretraining/submit_corpus_job.py` run from a frozen copy of a commit, never from a
+working checkout. Every job reads its code from the copy, and bash reads a running script by byte offset, so an edit
+to a working checkout would change the code a queued or running job executes. The copy carries a `REVISION` file that
+names the commit, and these scripts refuse a directory without one. Make the copy from the root of a checkout in which
+the Megatron dataset helpers library is built:
 
 ```bash
 SNAP=/projects/a5k/public/tmp/frozen_copies/code-$(git rev-parse --short=12 HEAD)

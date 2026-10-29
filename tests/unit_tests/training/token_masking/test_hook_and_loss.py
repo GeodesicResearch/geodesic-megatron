@@ -25,10 +25,8 @@ carried loss; -100 is the ignore index. The per-token loss used below is ``posit
 
 import math
 
-import megatron.core.rerun_state_machine as rerun_state_machine_module
 import pytest
 import torch
-from megatron.core.rerun_state_machine import RerunStateMachine
 
 from megatron.bridge.training.losses import (
     create_masked_next_token_loss_function,
@@ -124,16 +122,6 @@ def measures_nothing():
     resolved = no_token_masking()
     assert resolved.ids_tensor is None and not resolved.measured_token_ids
     return resolved
-
-
-@pytest.fixture
-def rerun_state_machine(monkeypatch):
-    """Megatron's real rerun state machine in its default (disabled) mode, which still rejects NaN and Inf losses.
-
-    Installed as the process-wide singleton for one test and removed afterwards, so other tests find it as they left
-    it.
-    """
-    monkeypatch.setattr(rerun_state_machine_module, "_GLOBAL_RERUN_STATE_MACHINE", RerunStateMachine())
 
 
 class TestApplyTokenMasking:

@@ -5,8 +5,7 @@
 Every scan here is real: corpora written with Megatron's ``IndexedDatasetBuilder`` and packed parquet written with
 ``write_packed_parquet``, read by the production ``scan_sources``. The verdict is then judged for real resolved
 decisions. ``inspect_training_data`` runs on a single-process gloo world, so its verdict broadcast is the real
-collective; the multi-rank case runs in the functional test. The W&B logger is a recording stand-in, because W&B is
-a network service.
+collective; the multi-rank case runs in the functional test.
 """
 
 from __future__ import annotations
@@ -26,17 +25,11 @@ from megatron.bridge.training.config import (
     GPTDatasetConfig,
     MockGPTDatasetConfig,
 )
-from megatron.bridge.training.data_inspection import (
-    inspect_training_data,
-    inspection_wanted,
-    log_inspection_tables,
-    scan_dataset,
-)
+from megatron.bridge.training.data_inspection import inspect_training_data, scan_dataset
 from megatron.bridge.training.token_masking.config import TokenMaskingError
 from megatron.bridge.training.token_masking.data_check import (
     HELD_OUT_SET,
     TRAINING_DATA,
-    DataVerdict,
     missing_trainable_targets,
     no_trainable_target,
     split_forms,
@@ -112,8 +105,6 @@ def _scans(
         listed_token_ids=list(listed_ids),
         split_forms=[SplitForm(core=tuple(form)) for form in forms],
         vocab_size=VOCAB_SIZE,
-        documents_per_source=3,
-        listed_documents_per_source=3,
         max_scan_tokens_per_source=max_tokens,
         deadline=time.monotonic() + deadline_seconds,
         seed=1234,
@@ -130,7 +121,6 @@ def _packed_scans(
     *,
     deadline_seconds: float = 60,
     max_tokens: int = 1_000_000,
-    documents_per_source: int = 3,
 ):
     """Scan packed rows written as one-row row groups, with answer-only loss, as a packed SFT run reads them."""
     tokenizer = build_tokenizer(hf_tokenizer_config(build_tiny_hf_tokenizer(tmp_path / "tok")))
@@ -149,8 +139,6 @@ def _packed_scans(
         listed_token_ids=[LISTED],
         split_forms=[],
         vocab_size=LISTED + 1,
-        documents_per_source=documents_per_source,
-        listed_documents_per_source=3,
         max_scan_tokens_per_source=max_tokens,
         deadline=time.monotonic() + deadline_seconds,
         seed=1234,
@@ -237,17 +225,16 @@ class TestEnabledRunNeedsPositiveEvidence:
             "the scan stopped on that budget in ['pack'] before reading all of their data"
         )
 
+    def test_trainable_marker_targets_in_packed_data_pass(self, tmp_path):
+        scans = _packed_scans(tmp_path, _rows(MARKER_TRAINED, 4))
+        assert (scans[0].stop_reason, scans[0].listed_trainable_targets) == ("exhausted", 4)
+        assert token_masking_data_verdict(scans, None, _masking()).errors == ()
+
     def test_a_scan_out_of_time_before_the_evidence_stops_the_run(self, tmp_path):
         scans = _scans(_gpt_config([_corpus(tmp_path / "a", _documents(20, listed=True))]), deadline_seconds=-1)
         assert scans[0].stop_reason == "time_budget"
         [error] = token_masking_data_verdict(scans, None, _masking()).errors
         assert "max_scan_seconds before finishing ['a']" in error and "Lustre" in error
-
-    def test_evidence_found_before_the_time_budget_ran_out_passes(self, tmp_path):
-        """A packed source's random documents come from its first row groups, which count as scanned."""
-        scans = _packed_scans(tmp_path, _rows(MARKER_TRAINED, 4), deadline_seconds=-1, documents_per_source=1)
-        assert scans[0].stop_reason == "time_budget" and scans[0].listed_trainable_targets == 1
-        assert token_masking_data_verdict(scans, None, _masking()).errors == ()
 
     def test_evidence_only_in_a_source_of_blend_weight_0_stops_the_run(self, tmp_path):
         marked = _corpus(tmp_path / "marked", _documents(10, listed=True))
@@ -296,21 +283,12 @@ class TestRunsThatDoNotMaskOnlyReport:
         assert split.startswith("the text of ['1000'] appears split into several ordinary tokens in {'a': 20}")
         assert missing.startswith("no target in the training data is one of the ids [1000]")
 
-    def test_a_run_that_measures_nothing_reports_out_of_vocabulary_tokens_only(self, tmp_path):
-        scans = _scans(_gpt_config([_corpus(tmp_path / "a", _documents(20, split=True, out_of_vocab=True))]))
-        verdict = token_masking_data_verdict(scans, None, no_token_masking())
-        assert verdict.errors == ()
-        [finding] = verdict.findings
-        assert "outside the tokenizer's vocabulary" in finding
-
     def test_data_the_scan_cannot_read_is_reported(self):
         reason = "mock dataset: the run trains on generated tokens, not on a corpus"
         measuring = token_masking_data_verdict([], reason, _measuring())
         assert measuring.errors == ()
         [finding] = measuring.findings
         assert finding.startswith(f"the training data cannot be scanned for the ids [1000]: {reason}.")
-        idle = token_masking_data_verdict([], reason, no_token_masking())
-        assert idle == DataVerdict(errors=(), findings=(f"the training data could not be inspected: {reason}",))
 
 
 class TestMissingTrainableTargets:
@@ -376,8 +354,6 @@ class TestSplitFormsOnTheProductionTokenizers:
             listed_token_ids=find_hf_tokenizer(marked).convert_tokens_to_ids(STAGE_TAGS),
             split_forms=split_forms(marked, STAGE_TAGS),
             vocab_size=marked.vocab_size,
-            documents_per_source=1,
-            listed_documents_per_source=1,
             max_scan_tokens_per_source=1_000_000,
             deadline=time.monotonic() + 60,
             seed=1234,
@@ -416,86 +392,46 @@ class TestSplitFormsOnTheProductionTokenizers:
         assert split_forms(build_tokenizer(null_tokenizer_config(VOCAB_SIZE)), ["1000"]) == []
 
 
-def _run_config(data_path: list[str], *, wandb_project: str | None, tables: bool) -> SimpleNamespace:
+def _run_config(data_path: list[str]) -> SimpleNamespace:
     """The parts of a run's config the inspection reads: the dataset and ``logger.data_samples``."""
-    return SimpleNamespace(
-        dataset=_gpt_config(data_path),
-        logger=SimpleNamespace(
-            wandb_project=wandb_project,
-            data_samples=DataSamplesConfig(enabled=tables, documents_per_source=3, masked_documents_per_source=3),
-        ),
-    )
-
-
-class _RecordingWandb:
-    """Stands in for the wandb module (W&B is a network service): keeps every ``log`` call and builds real tables."""
-
-    def __init__(self) -> None:
-        import wandb
-
-        self.Table, self.Html = wandb.Table, wandb.Html
-        self.calls: list[tuple[dict, int]] = []
-
-    def log(self, data: dict, step: int) -> None:
-        self.calls.append((data, step))
+    return SimpleNamespace(dataset=_gpt_config(data_path), logger=SimpleNamespace(data_samples=DataSamplesConfig()))
 
 
 class TestInspection:
     @pytest.mark.parametrize(
-        "wandb_project, tables, decision, wanted",
-        [
-            ("p", True, no_token_masking, True),
-            ("p", False, no_token_masking, False),
-            (None, True, no_token_masking, False),
-            (None, False, _masking, True),
-            (None, False, _measuring, False),
-            ("p", True, _measuring, True),
-        ],
+        "decision, scans",
+        [(_masking, True), (_measuring, True), (no_token_masking, False)],
+        ids=["masking", "measuring", "neither"],
     )
-    def test_whether_a_run_scans_follows_its_config(self, tmp_path, wandb_project, tables, decision, wanted):
-        cfg = _run_config([_corpus(tmp_path / "a", _documents(5))], wandb_project=wandb_project, tables=tables)
-        assert inspection_wanted(cfg, decision()) is wanted
-
-    def test_a_run_that_does_not_scan_returns_nothing(self, tmp_path, gloo_group_of_one):
-        cfg = _run_config([_corpus(tmp_path / "a", _documents(5))], wandb_project=None, tables=True)
+    def test_a_run_scans_exactly_when_it_masks_or_measures_ids(self, tmp_path, gloo_group_of_one, decision, scans):
+        cfg = _run_config([_corpus(tmp_path / "a", _documents(5, listed=True))])
         tokenizer = build_tokenizer(null_tokenizer_config(VOCAB_SIZE))
-        assert inspect_training_data(cfg, tokenizer, _measuring()) is None
+        assert (inspect_training_data(cfg, tokenizer, decision()) is not None) is scans
+
+    def test_a_wandb_run_that_neither_masks_nor_measures_never_reads_its_data(self, tmp_path, gloo_group_of_one):
+        """A scan could only stop such a run, or hold every rank for up to max_scan_seconds; its data is unreadable
+        here, so any scan would fail."""
+        cfg = SimpleNamespace(
+            dataset=_gpt_config([_corpus(tmp_path / "a", _documents(5))]),
+            logger=SimpleNamespace(wandb_project="p", data_samples=DataSamplesConfig()),
+        )
+        cfg.dataset.blend = ([str(tmp_path / "missing" / "corpus")], None)
+        tokenizer = build_tokenizer(null_tokenizer_config(VOCAB_SIZE))
         assert inspect_training_data(cfg, tokenizer, no_token_masking()) is None
 
-    @pytest.mark.parametrize(
-        "decision, marked_as", [(_masking, "masked"), (_measuring, "measured")], ids=["masking", "measuring"]
-    )
-    def test_a_passing_scan_returns_the_scans_and_logs_the_tables(
-        self, tmp_path, gloo_group_of_one, decision, marked_as
-    ):
+    @pytest.mark.parametrize("decision", [_masking, _measuring], ids=["masking", "measuring"])
+    def test_a_passing_scan_returns_the_scans(self, tmp_path, gloo_group_of_one, decision):
         paths = [
             _corpus(tmp_path / "marked", _documents(10, listed=True)),
             _corpus(tmp_path / "plain", _documents(10)),
         ]
-        cfg = _run_config(paths, wandb_project="p", tables=True)
         tokenizer = build_tokenizer(null_tokenizer_config(VOCAB_SIZE))
-        resolved = decision()
-        scans = inspect_training_data(cfg, tokenizer, resolved)
-        assert [scan.source.label for scan in scans] == ["marked", "plain"]
-        recorder = _RecordingWandb()
-        log_inspection_tables(recorder, scans, cfg, tokenizer, resolved, step=7)
-        [(tables, step)] = recorder.calls
-        assert step == 7
-        assert set(tables) == {"data_samples/sources", "data_samples/documents", "data_samples/masked_documents"}
-        texts = [row[7] for row in tables["data_samples/masked_documents"].data]
-        assert texts and all(f"⟦{marked_as}:{LISTED}⟧" in text for text in texts)
-
-    def test_tables_are_not_logged_when_disabled_or_without_wandb(self, tmp_path, gloo_group_of_one):
-        cfg = _run_config([_corpus(tmp_path / "a", _documents(5, listed=True))], wandb_project=None, tables=False)
-        tokenizer = build_tokenizer(null_tokenizer_config(VOCAB_SIZE))
-        scans = inspect_training_data(cfg, tokenizer, _masking())
-        recorder = _RecordingWandb()
-        log_inspection_tables(recorder, scans, cfg, tokenizer, _masking(), step=0)
-        log_inspection_tables(None, scans, cfg, tokenizer, _masking(), step=0)
-        assert recorder.calls == []
+        marked, plain = inspect_training_data(_run_config(paths), tokenizer, decision())
+        assert (marked.source.label, plain.source.label) == ("marked", "plain")
+        assert (marked.listed_trainable_targets, plain.listed_targets) == (10, 0)
 
     def test_an_enabled_run_without_evidence_stops(self, tmp_path, gloo_group_of_one):
-        cfg = _run_config([_corpus(tmp_path / "plain", _documents(10))], wandb_project=None, tables=False)
+        cfg = _run_config([_corpus(tmp_path / "plain", _documents(10))])
         tokenizer = build_tokenizer(null_tokenizer_config(VOCAB_SIZE))
         with pytest.raises(TokenMaskingError) as raised:
             inspect_training_data(cfg, tokenizer, _masking())
@@ -505,13 +441,13 @@ class TestInspection:
         )
 
     def test_a_measuring_run_without_evidence_trains(self, tmp_path, gloo_group_of_one):
-        cfg = _run_config([_corpus(tmp_path / "plain", _documents(10))], wandb_project="p", tables=True)
+        cfg = _run_config([_corpus(tmp_path / "plain", _documents(10))])
         tokenizer = build_tokenizer(null_tokenizer_config(VOCAB_SIZE))
         [scan] = inspect_training_data(cfg, tokenizer, _measuring())
         assert scan.listed_targets == 0
 
     def test_a_failed_scan_stops_the_run(self, tmp_path, gloo_group_of_one):
-        cfg = _run_config([_corpus(tmp_path / "a", _documents(5))], wandb_project="p", tables=True)
+        cfg = _run_config([_corpus(tmp_path / "a", _documents(5))])
         cfg.dataset.blend = ([str(tmp_path / "missing" / "corpus")], None)
         tokenizer = build_tokenizer(null_tokenizer_config(VOCAB_SIZE))
         with pytest.raises(TokenMaskingError, match="the training-data scan failed on rank 0"):

@@ -45,7 +45,7 @@ from megatron.bridge.training.checkpointing import (
     create_checkpoint_manager,
 )
 from megatron.bridge.training.config import CheckpointConfig, ConfigContainer
-from megatron.bridge.training.data_inspection import inspect_training_data, log_inspection_tables
+from megatron.bridge.training.data_inspection import inspect_training_data
 from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
 from megatron.bridge.training.initialize import initialize_megatron, set_jit_fusion_options
 from megatron.bridge.training.optim import setup_optimizer
@@ -229,9 +229,9 @@ def setup(
         forward_step_func,
         torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu"),
     )
-    # The training data is inspected before the model is built too: the token-masking data check stops a run that
-    # would mask nothing in seconds, and the scans feed the W&B sample tables logged once W&B is up.
-    training_data_scans = inspect_training_data(cfg, tokenizer, state.token_masking)
+    # A run that masks or measures token ids inspects its training data before the model is built too: the
+    # token-masking data check stops a run that would mask nothing in seconds.
+    inspect_training_data(cfg, tokenizer, state.token_masking)
     # Handle model vocab_size configuration with proper validation
     cfg.model.vocab_size, cfg.model.should_pad_vocab = _validate_and_set_vocab_size(
         model_vocab_size=cfg.model.vocab_size,
@@ -368,9 +368,6 @@ def setup(
     _wandb_run = _wandb_logger.run if _wandb_logger is not None else None
     record_parallelism_if_resolved(_wandb_run)
     record_wandb_summary(_wandb_run, token_masking_wandb_summary(state.token_masking, forward_step_func))
-    log_inspection_tables(
-        _wandb_logger, training_data_scans, cfg, tokenizer, state.token_masking, step=state.train_state.step
-    )
     # The training log's iteration lines come from the last rank (print_rank_last), so its counts line does too.
     state.token_masking_monitor = TokenMaskingMonitor(
         state.token_masking, _wandb_run, pg_collection.pp, log_counts=is_last_rank()

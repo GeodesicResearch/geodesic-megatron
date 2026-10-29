@@ -28,7 +28,6 @@ import torch
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from megatron.bridge.training import gpt_step, llava_step, vlm_step
-from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.forward_step_func_types import applies_token_masking, forward_step_name
 from megatron.bridge.training.token_masking.config import TokenMaskingConfig, TokenMaskingError
 from megatron.bridge.training.token_masking.hook import REPORT_KEYS
@@ -53,6 +52,7 @@ from tests.unit_tests.token_masking_fixtures import (
     MARKER_ID,
     TINY_VOCAB,
     build_tiny_hf_tokenizer,
+    config_container,
     hf_tokenizer_config,
     masking,
     masking_with_null_tokenizer,
@@ -670,24 +670,6 @@ class TestAgreeAcrossRanks:
         assert causes[0]["different"] is None and causes[1]["different"] is None
 
 
-def _container(tokenizer_config, token_masking: TokenMaskingConfig) -> ConfigContainer:
-    """A real ConfigContainer holding the two sections resolve_for_run reads.
-
-    The sections a recipe builds are None: resolve_for_run never reads them, and building them needs a recipe.
-    """
-    return ConfigContainer(
-        train=None,
-        model=None,
-        optimizer=None,
-        scheduler=None,
-        dataset=None,
-        logger=None,
-        checkpoint=None,
-        tokenizer=tokenizer_config,
-        token_masking=token_masking,
-    )
-
-
 class TestResolveForRun:
     @pytest.fixture(autouse=True)
     def first_process_of_its_node(self, monkeypatch, gloo_group_of_one):
@@ -699,7 +681,7 @@ class TestResolveForRun:
 
     def test_resolves_the_decision_and_logs_one_banner(self, tokenizer_configs, tokenizers, caplog):
         caplog.set_level(logging.INFO, logger=RESOLUTION_LOGGER)
-        cfg = _container(tokenizer_configs["plain"], masking([MARKER_ID]))
+        cfg = config_container(tokenizer_configs["plain"], masking([MARKER_ID]))
         resolved = resolve_for_run(cfg, tokenizers["plain"], gpt_step.forward_step, CPU)
         assert resolved.enabled is True and resolved.token_ids == (MARKER_ID,)
         assert cfg.token_masking == masking([MARKER_ID]), "the config states the decision; setup never rewrites it"
@@ -719,18 +701,18 @@ class TestResolveForRun:
             match=rf"could not be resolved on ranks \[0\]: TokenMaskingError: tokenizer {directory} carries "
             f"{DECLARATION_FIELD}",
         ):
-            resolve_for_run(_container(config, block), build_tokenizer(config), gpt_step.forward_step, CPU)
+            resolve_for_run(config_container(config, block), build_tokenizer(config), gpt_step.forward_step, CPU)
         assert self.banners(caplog) == []
 
     def test_an_unsupported_forward_step_raises_before_logging(self, tokenizer_configs, tokenizers, caplog):
         caplog.set_level(logging.INFO, logger=RESOLUTION_LOGGER)
-        cfg = _container(tokenizer_configs["plain"], masking([MARKER_ID]))
+        cfg = config_container(tokenizer_configs["plain"], masking([MARKER_ID]))
         with pytest.raises(TokenMaskingError, match="vlm_step.forward_step does not apply token masking"):
             resolve_for_run(cfg, tokenizers["plain"], vlm_step.forward_step, CPU)
         assert self.banners(caplog) == []
 
     def test_a_resolution_error_is_raised_through_the_agreement(self, tokenizer_configs, tokenizers):
-        cfg = _container(tokenizer_configs["plain"], measuring([HELLO_ID]))
+        cfg = config_container(tokenizer_configs["plain"], measuring([HELLO_ID]))
         with pytest.raises(
             TokenMaskingError,
             match=r"could not be resolved on ranks \[0\]: TokenMaskingError: token_masking.masked_validation.token_ids "

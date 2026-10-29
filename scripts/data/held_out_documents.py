@@ -677,9 +677,7 @@ def table_corpora(table: Path, data_base: Path) -> tuple[dict[Path, TableCorpus]
         if row.docs is None:
             held.append(row.subset)
         elif row.shard_mode == "split":
-            # Only the dataset is read here, so a revision file the config pins its commit in is not.
-            scalars = subset_prepare_config(row.config, row.subset, read_revision_file=False)
-            root = corpus_root(scalars["dataset"], row.subset, data_base)
+            root = corpus_root(subset_prepare_config(row.config, row.subset)["dataset"], row.subset, data_base)
             for name in row.shard_names:
                 corpora[root / name / TOKENIZED_PREFIX] = TableCorpus(row, None)
         else:

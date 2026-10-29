@@ -80,9 +80,6 @@ checks:
         - configs/metagaming_filtering/30b_clueless_norm/checks/c2_save_record_pretrain.yaml
         # The midtraining one compares with Normal-Norm's midtraining final, in the same tree.
         - configs/metagaming_filtering/30b_clueless_norm/checks/c2_save_record_midtrain.yaml
-        # The SFT's launch gate reads midtraining's tracker in that tree, and checks ancestry in the history the stage
-        # configs' code_identity blocks name.
-        - configs/metagaming_filtering/30b_clueless_norm/g_sft_gate.yaml
         - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml
         - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml
         - configs/control_pretraining/30b_trustedmonitor/chain.yaml

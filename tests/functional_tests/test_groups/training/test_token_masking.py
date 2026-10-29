@@ -29,7 +29,6 @@ import dataclasses
 import glob
 import json
 import math
-import os
 from pathlib import Path
 from typing import Any
 
@@ -289,14 +288,6 @@ def _wandb_files(base: Path, name: str, pattern: str) -> list[str]:
     return [path for path in files if "latest-run" not in Path(path).parts]
 
 
-def _table(base: Path, name: str, table: str) -> dict:
-    """A table the run logged, read from the file W&B wrote for it."""
-    files = _wandb_files(base, name, "*.table.json")
-    matches = [path for path in files if f"data_samples/{table}_" in path.replace(os.sep, "/")]
-    assert len(matches) == 1, (table, files)
-    return json.loads(Path(matches[0]).read_text())
-
-
 def _wandb_history(base: Path, name: str) -> dict[int, dict[str, Any]]:
     """Every value W&B received for the run, by step, read back from the offline run's log once the run has ended.
 
@@ -391,16 +382,6 @@ class TestTokenMasking:
             assert summary["token_masking/token_ids"] == [MARKER]
             assert summary["token_masking/measured_token_ids"] == [MARKER]
             _check_token_masking_history(_wandb_history(corpora, "run"), recorder.reports)
-            sources = _table(corpora, "run", "sources")
-            assert len(sources["data"]) == 2
-            documents = _table(corpora, "run", "documents")
-            labels = documents["columns"].index("source_label")
-            assert sorted({row[labels] for row in documents["data"]}) == ["marked", "plain"]
-            assert len(documents["data"]) == 20
-            masked = _table(corpora, "run", "masked_documents")
-            assert masked["data"] and {row[labels] for row in masked["data"]} == {"marked"}
-            text = masked["columns"].index("text")
-            assert all("⟦masked:" in row[text] for row in masked["data"])
 
     @pytest.mark.run_only_on("GPU")
     def test_control_run_measures_the_markers_and_trains_on_them(self, corpora):
@@ -430,10 +411,6 @@ class TestTokenMasking:
             assert summary["token_masking/measured_token_ids"] == [MARKER]
             assert "token_masking/verified" not in summary
             _check_token_masking_history(_wandb_history(corpora, "run"), recorder.reports)
-            masked = _table(corpora, "run", "masked_documents")
-            text = masked["columns"].index("text")
-            assert masked["data"]
-            assert all("⟦measured:" in row[text] and "⟦masked:" not in row[text] for row in masked["data"])
 
     @pytest.mark.run_only_on("GPU")
     def test_listed_target_loss_does_not_fall_when_masked_and_falls_in_the_control(self, corpora):

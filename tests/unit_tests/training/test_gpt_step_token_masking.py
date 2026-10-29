@@ -283,6 +283,12 @@ def test_mtp_layers_receive_the_masked_mask_the_main_loss_uses(decisions, gloo_g
     assert _trained_positions(loss, POSITIONS) == _positions(mtp_mask)
 
 
+def test_a_model_without_mtp_layers_is_called_without_a_loss_mask(decisions, gloo_group_of_one):
+    model = _model(gloo_group_of_one)
+    _step(gpt_step.forward_step, model, decisions["masking-hf"], _unpacked_batch())
+    assert "loss_mask" not in model.call_args.kwargs
+
+
 PACK_LENGTH = 16
 PACK_DOCUMENTS = [0, 5, 11, PACK_LENGTH]
 # The last target of the first document, the first of the second, and the last of the pack.

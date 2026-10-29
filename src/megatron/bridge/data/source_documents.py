@@ -1,12 +1,12 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""The sources a training run reads, sampled and scanned for listed token ids, one source at a time.
+"""The sources a training run reads, scanned for listed token ids, one source at a time.
 
 A run reads its training data from one or more sources: each prefix of a Megatron ``.bin/.idx`` blend, or the
 packed-SFT parquet spec (one file, a glob or a directory of shards). ``training_data_sources`` lists them from the
 dataset config the way the dataset builders resolve them, and ``scan_sources`` reads each source directly, never
-through the training datasets: it draws random documents to show, and scans contiguous stretches of the data for a
-set of listed token ids, counting where they occur and whether those positions carry loss in training.
+through the training datasets: it scans contiguous stretches of the data for a set of listed token ids, counting where
+they occur and whether those positions carry loss in training.
 
 Only the data the training split reads is scanned. A ``.bin/.idx`` document here is what ``GPTDataset`` calls one:
 a sequence of the index, the unit Megatron splits, shuffles and concatenates (a corpus built without sentence
@@ -30,13 +30,12 @@ Whether a target carries loss is decided as the training loader decides it, befo
 from __future__ import annotations
 
 import bisect
-import json
 import logging
 import re
 import time
 import zlib
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
 
@@ -81,10 +80,6 @@ class DataSource:
     """The ``(start, end)`` fractions of the source's documents the training split reads: the training row of a
     ``.bin/.idx`` blend's split matrix; ``(0.0, 1.0)`` for a ``blend_per_split`` training blend and for packed data,
     which training reads whole."""
-    tokenizer_recorded: str | None
-    """The tokenizer that built the data, where the data records it: ``<prefix>.provenance.json``
-    ``parameters.tokenizer``, else the parent directory's ``pipeline_results.json`` ``tokenizer``; for packed data
-    the ``<org>--<name>`` slug of its ``<slug>_pad_seq_to_mult<k>`` directory. None when nothing records it."""
 
 
 @dataclass(frozen=True)
@@ -97,22 +92,6 @@ class ScanSettings:
     """``.bin/.idx`` data: whether a target whose input is EOD carries no loss. None for packed data."""
     answer_only_loss: bool | None
     """Packed data: whether the packer's stored loss mask decides which targets carry loss. None otherwise."""
-
-
-@dataclass(frozen=True, eq=False)
-class SourceDocument:
-    """One document (a ``.bin/.idx`` document, or one conversation of a pack) and which of its targets carry loss."""
-
-    source_index: int
-    reference: str
-    """Where the document is, e.g. ``document 1234`` or ``shard-00003.parquet row 17 conversation 2`` (the shard
-    named by what distinguishes its path from the source's other shards)."""
-    token_ids: np.ndarray
-    """The document's tokens, int64."""
-    trainable_target: np.ndarray
-    """Bool, one per token: whether predicting that token carries loss before token masking."""
-    first_token_is_target: bool
-    """Whether the document's first token is predicted at all (a conversation's first token is not)."""
 
 
 @dataclass(frozen=True)
@@ -136,10 +115,6 @@ class SourceScan:
     """What scanning one source found."""
 
     source: DataSource
-    documents: tuple[SourceDocument, ...]
-    """Up to ``documents_per_source`` documents drawn at random."""
-    listed_documents: tuple[SourceDocument, ...]
-    """Up to ``listed_documents_per_source`` scanned documents that contain a listed id."""
     documents_scanned: int
     tokens_scanned: int
     listed_targets: int
@@ -198,8 +173,6 @@ def scan_sources(
     listed_token_ids: Sequence[int],
     split_forms: Sequence[SplitForm],
     vocab_size: int,
-    documents_per_source: int,
-    listed_documents_per_source: int,
     max_scan_tokens_per_source: int,
     deadline: float,
     seed: int,
@@ -208,15 +181,14 @@ def scan_sources(
     answer_only_loss: bool | None,
     eos_token_id: int | None,
 ) -> list[SourceScan]:
-    """Draw random documents from every source and scan each for listed token ids, within budgets.
+    """Scan every source for listed token ids, within budgets.
 
-    Each source first gets its random documents, then the sources are scanned in turns, one contiguous run each,
-    so a time budget spreads over all of them. A ``.bin/.idx`` run is a stretch of whole documents starting at a
-    random offset; a packed run is one row group, the row groups taken in a random order (a source's random
-    documents come from its first row groups, which count as scanned). A source stops when it is exhausted, when it
-    has scanned ``max_scan_tokens_per_source`` tokens (a packed source may pass it by up to one row group), or once
-    ``time.monotonic()`` passes ``deadline``. The documents drawn and the scan order depend only on ``seed`` and the
-    source's path; how far a scan gets before the deadline also depends on the clock.
+    The sources are scanned in turns, one contiguous run each, so a time budget spreads over all of them. A
+    ``.bin/.idx`` run is a stretch of whole documents starting at a random offset; a packed run is one row group, the
+    row groups taken in a random order. A source stops when it is exhausted, when it has scanned
+    ``max_scan_tokens_per_source`` tokens (a packed source may pass it by up to one row group), or once
+    ``time.monotonic()`` passes ``deadline``. The scan order depends only on ``seed`` and the source's path; how far a
+    scan gets before the deadline also depends on the clock.
 
     Args:
         sources: The sources, from ``training_data_sources``.
@@ -224,8 +196,6 @@ def scan_sources(
         split_forms: How a listed token's text appears in data tokenized by a tokenizer that does not know it; a
             form without edge sets has at least two ids, one with them at least one.
         vocab_size: The tokenizer's vocabulary size; tokens at or above it are counted as out of vocabulary.
-        documents_per_source: Random documents to draw from each source.
-        listed_documents_per_source: Documents containing a listed id to keep from each source.
         max_scan_tokens_per_source: Tokens to scan per source.
         deadline: A ``time.monotonic()`` value after which no further run starts.
         seed: The dataset's seed; each source's generator is derived from it and the source's path.
@@ -241,11 +211,7 @@ def scan_sources(
         sources,
         split_forms=split_forms,
         vocab_size=vocab_size,
-        counts={
-            "documents_per_source": documents_per_source,
-            "listed_documents_per_source": listed_documents_per_source,
-            "max_scan_tokens_per_source": max_scan_tokens_per_source,
-        },
+        max_scan_tokens_per_source=max_scan_tokens_per_source,
         eod_token_id=eod_token_id,
         eod_mask_loss=eod_mask_loss,
         answer_only_loss=answer_only_loss,
@@ -255,7 +221,6 @@ def scan_sources(
         listed_token_ids=np.asarray(sorted(set(listed_token_ids)), dtype=np.int64),
         split_forms=[_SplitFormSearch.of(form) for form in split_forms],
         vocab_size=vocab_size,
-        listed_documents_per_source=listed_documents_per_source,
     )
     scanners: list[_Scanner] = []
     try:
@@ -277,8 +242,6 @@ def scan_sources(
                 )
             scanner.seconds += time.monotonic() - started
             scanners.append(scanner)
-        for scanner in scanners:
-            scanner.timed(scanner.draw_documents, documents_per_source)
         active = list(scanners)
         while active:
             for scanner in list(active):
@@ -332,7 +295,6 @@ def _indexed_sources(dataset_config: GPTDatasetConfig) -> tuple[list[DataSource]
             kind="indexed",
             weight=None if normalised is None else normalised[index],
             training_split=training_split,
-            tokenizer_recorded=_indexed_tokenizer_recorded(prefix),
         )
         for index, prefix in enumerate(prefixes)
     ], None
@@ -359,7 +321,6 @@ def _packed_sources(dataset_config: FinetuningDatasetConfig, tokenizer: Any) -> 
             kind="packed_parquet",
             weight=None,
             training_split=(0.0, 1.0),
-            tokenizer_recorded=_packed_tokenizer_recorded(files),
         )
     ], None
 
@@ -385,39 +346,19 @@ def _distinguishing_parts(paths: Sequence[str]) -> list[str]:
     return ["/".join(rest) for rest in rests]
 
 
-def _indexed_tokenizer_recorded(prefix: str) -> str | None:
-    provenance = Path(f"{prefix}.provenance.json")
-    if provenance.is_file():
-        tokenizer = json.loads(provenance.read_text()).get("parameters", {}).get("tokenizer")
-        if tokenizer:
-            return tokenizer
-    results = Path(prefix).parent / "pipeline_results.json"
-    if results.is_file():
-        return json.loads(results.read_text()).get("tokenizer")
-    return None
-
-
-def _packed_tokenizer_recorded(files: Sequence[str]) -> str | None:
-    slugs = sorted(
-        {match["tokenizer"] for match in (_PACK_DIRECTORY.match(Path(f).parent.name) for f in files) if match}
-    )
-    return ", ".join(slugs) if slugs else None
-
-
 def _check_scan_arguments(
     sources: Sequence[DataSource],
     *,
     split_forms: Sequence[SplitForm],
     vocab_size: int,
-    counts: dict[str, int],
+    max_scan_tokens_per_source: int,
     eod_token_id: int | None,
     eod_mask_loss: bool | None,
     answer_only_loss: bool | None,
     eos_token_id: int | None,
 ) -> None:
-    for name, value in counts.items():
-        if value < 0:
-            raise ValueError(f"{name} must be >= 0, got {value}")
+    if max_scan_tokens_per_source < 0:
+        raise ValueError(f"max_scan_tokens_per_source must be >= 0, got {max_scan_tokens_per_source}")
     if vocab_size <= 0:
         raise ValueError(f"vocab_size must be positive, got {vocab_size}")
     for form in split_forms:
@@ -445,35 +386,21 @@ class _Search:
     listed_token_ids: np.ndarray
     split_forms: list[_SplitFormSearch]
     vocab_size: int
-    listed_documents_per_source: int
 
 
 @dataclass(eq=False)
 class _Run:
     """A contiguous stretch of a source, as whole documents back to back."""
 
-    source_index: int
     tokens: np.ndarray
     target: np.ndarray
     trainable: np.ndarray
     document_starts: np.ndarray
     """Offsets of the documents in ``tokens``, followed by ``len(tokens)``."""
-    first_token_is_target: bool
-    reference: Callable[[int], str]
 
     @property
     def num_documents(self) -> int:
         return len(self.document_starts) - 1
-
-    def document(self, k: int) -> SourceDocument:
-        start, end = int(self.document_starts[k]), int(self.document_starts[k + 1])
-        return SourceDocument(
-            source_index=self.source_index,
-            reference=self.reference(k),
-            token_ids=self.tokens[start:end].astype(np.int64),
-            trainable_target=self.trainable[start:end].copy(),
-            first_token_is_target=self.first_token_is_target,
-        )
 
 
 @dataclass(frozen=True, eq=False)
@@ -511,13 +438,10 @@ class _SplitFormSearch:
 
 @dataclass(eq=False)
 class _Scanner(ABC):
-    """The scan state of one source; subclasses read the source's runs and random documents."""
+    """The scan state of one source; subclasses read the source's runs."""
 
     source: DataSource
-    rng: np.random.Generator
     search: _Search
-    documents: list[SourceDocument] = field(default_factory=list)
-    listed_documents: list[SourceDocument] = field(default_factory=list)
     documents_scanned: int = 0
     tokens_scanned: int = 0
     listed_targets: int = 0
@@ -542,25 +466,18 @@ class _Scanner(ABC):
         return None
 
     def absorb(self, run: _Run) -> None:
-        """Count a scanned run and keep its documents that contain a listed id, while the quota lasts."""
-        listed = np.isin(run.tokens, self.search.listed_token_ids)
-        listed_targets = listed & run.target
+        """Count a scanned run."""
+        listed_targets = np.isin(run.tokens, self.search.listed_token_ids) & run.target
         self.listed_targets += int(listed_targets.sum())
         self.listed_trainable_targets += int((listed_targets & run.trainable).sum())
         self.split_form_occurrences += sum(form.occurrences(run.tokens) for form in self.search.split_forms)
         self.out_of_vocab_tokens += int((run.tokens >= self.search.vocab_size).sum())
         self.documents_scanned += run.num_documents
         self.tokens_scanned += len(run.tokens)
-        room = self.search.listed_documents_per_source - len(self.listed_documents)
-        if room > 0 and listed.any():
-            containing = np.unique(np.searchsorted(run.document_starts, np.flatnonzero(listed), side="right") - 1)
-            self.listed_documents.extend(run.document(int(k)) for k in containing[:room])
 
     def result(self) -> SourceScan:
         return SourceScan(
             source=self.source,
-            documents=tuple(self.documents),
-            listed_documents=tuple(self.listed_documents),
             documents_scanned=self.documents_scanned,
             tokens_scanned=self.tokens_scanned,
             listed_targets=self.listed_targets,
@@ -574,10 +491,6 @@ class _Scanner(ABC):
     @abstractmethod
     def has_next_run(self) -> bool:
         """Whether a run is left to scan."""
-
-    @abstractmethod
-    def draw_documents(self, count: int) -> None:
-        """Draw ``count`` random documents into ``documents`` (fewer when the source holds fewer)."""
 
     @abstractmethod
     def scan_next_run(self) -> None:
@@ -608,7 +521,7 @@ class _IndexedScanner(_Scanner):
         from megatron.core.datasets.gpt_dataset import GPTDataset
         from megatron.core.datasets.indexed_dataset import IndexedDataset
 
-        super().__init__(source=source, rng=rng, search=search)
+        super().__init__(source=source, search=search)
         self.eod_token_id = eod_token_id
         self.eod_mask_loss = eod_mask_loss
         self.dataset = IndexedDataset(source.path, mmap=True)
@@ -680,22 +593,14 @@ class _IndexedScanner(_Scanner):
     def _run(self, first_document: int, end_document: int) -> _Run:
         tokens, document_starts = self._tokens(first_document, end_document)
         return _Run(
-            source_index=self.source.index,
             tokens=tokens,
             target=np.ones(len(tokens), dtype=bool),
             trainable=self._trainable(tokens, first_document),
             document_starts=document_starts,
-            first_token_is_target=True,
-            reference=lambda k: f"document {first_document + k}",
         )
 
     def has_next_run(self) -> bool:
         return self.next_run < len(self.run_order)
-
-    def draw_documents(self, count: int) -> None:
-        available = self.end_document - self.first_document
-        chosen = self.first_document + np.sort(self.rng.choice(available, size=min(count, available), replace=False))
-        self.documents.extend(self._run(int(d), int(d) + 1).document(0) for d in chosen)
 
     def scan_next_run(self) -> None:
         first, end = self._run_documents(int(self.run_order[self.next_run]))
@@ -723,12 +628,10 @@ class _PackedScanner(_Scanner):
     ) -> None:
         import pyarrow.parquet as pq
 
-        super().__init__(source=source, rng=rng, search=search)
+        super().__init__(source=source, search=search)
         self.answer_only_loss = answer_only_loss
         self.eos_token_id = eos_token_id
-        paths = resolve_packed_parquet_paths(self.source.path)
-        self.shard_names = [Path(paths[0]).name] if len(paths) == 1 else _distinguishing_parts(paths)
-        self.parquet_files = [pq.ParquetFile(path) for path in paths]
+        self.parquet_files = [pq.ParquetFile(path) for path in resolve_packed_parquet_paths(self.source.path)]
         units = [
             (file_index, row_group)
             for file_index, parquet_file in enumerate(self.parquet_files)
@@ -741,24 +644,22 @@ class _PackedScanner(_Scanner):
         """Read the next row group whole; one run per pack (row)."""
         file_index, row_group = self.units[self.next_unit]
         self.next_unit += 1
-        parquet_file = self.parquet_files[file_index]
-        first_row = sum(parquet_file.metadata.row_group(g).num_rows for g in range(row_group))
-        table = parquet_file.read_row_group(row_group, columns=["input_ids", "seq_start_id", "loss_mask"])
+        table = self.parquet_files[file_index].read_row_group(
+            row_group, columns=["input_ids", "seq_start_id", "loss_mask"]
+        )
         input_ids, input_offsets = _list_column(table.column("input_ids"))
         starts, start_offsets = _list_column(table.column("seq_start_id"))
         loss_mask, mask_offsets = _list_column(table.column("loss_mask"))
-        name = self.shard_names[file_index]
         return [
             self._pack_run(
                 input_ids[input_offsets[row] : input_offsets[row + 1]],
                 loss_mask[mask_offsets[row] : mask_offsets[row + 1]],
                 starts[start_offsets[row] : start_offsets[row + 1]].astype(np.int64),
-                reference=f"{name} row {first_row + row}",
             )
             for row in range(table.num_rows)
         ]
 
-    def _pack_run(self, tokens: np.ndarray, loss_mask: np.ndarray, starts: np.ndarray, *, reference: str) -> _Run:
+    def _pack_run(self, tokens: np.ndarray, loss_mask: np.ndarray, starts: np.ndarray) -> _Run:
         boundaries = np.append(starts, len(tokens))
         input_mask = packed_sequence_loss_mask(
             tokens, loss_mask, boundaries, answer_only_loss=self.answer_only_loss, eos_id=self.eos_token_id
@@ -773,27 +674,10 @@ class _PackedScanner(_Scanner):
         trainable[positions] = (input_mask[input_starts[conversation] + positions - 1 - starts[conversation]] != 0) & (
             tokens[positions - 1] != self.eos_token_id
         )
-        return _Run(
-            source_index=self.source.index,
-            tokens=tokens,
-            target=target,
-            trainable=trainable,
-            document_starts=boundaries,
-            first_token_is_target=False,
-            reference=lambda k: f"{reference} conversation {k}",
-        )
+        return _Run(tokens=tokens, target=target, trainable=trainable, document_starts=boundaries)
 
     def has_next_run(self) -> bool:
         return self.next_unit < len(self.units)
-
-    def draw_documents(self, count: int) -> None:
-        candidates: list[tuple[_Run, int]] = []
-        while len(candidates) < count and self.has_next_run():
-            for run in self._read_unit():
-                self.absorb(run)
-                candidates.extend((run, k) for k in range(run.num_documents))
-        chosen = np.sort(self.rng.choice(len(candidates), size=min(count, len(candidates)), replace=False))
-        self.documents.extend(candidates[int(i)][0].document(candidates[int(i)][1]) for i in chosen)
 
     def scan_next_run(self) -> None:
         for run in self._read_unit():

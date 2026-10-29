@@ -6,7 +6,6 @@ kwargs assembled for the Hub download.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -15,7 +14,6 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 import yaml
-from scripts.data.sha256_manifest import ManifestMismatch
 
 from tests.unit_tests.corpora_fixtures import declare_config, write_parquet_dataset
 from tests.unit_tests.flaky_remote_files import (
@@ -26,19 +24,7 @@ from tests.unit_tests.flaky_remote_files import (
 from tests.unit_tests.token_masking_fixtures import build_tiny_hf_tokenizer
 
 
-# pipeline_data_prepare.py lives at the repo root, not under src/. Load it
-# directly so tests don't depend on the script being on sys.path.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PIPE_PATH = _REPO_ROOT / "pipeline_data_prepare.py"
-
-
-@pytest.fixture(scope="module")
-def pipe_module():
-    spec = importlib.util.spec_from_file_location("pipeline_data_prepare", _PIPE_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline_data_prepare"] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 # ── format_record ───────────────────────────────────────────────────────────
@@ -592,7 +578,7 @@ class TestTokenizerRevision:
 class TestShippedCorpusConfigs:
     """The campaign's corpus definitions must actually load through the real parser."""
 
-    def test_every_shipped_corpus_config_parses(self, pipe_module, tmp_path):
+    def test_every_shipped_corpus_config_parses(self, pipe_module):
         # Recursive: each campaign arm keeps its corpus definitions in its own data/
         # directory (configs/control_pretraining/30b_baseline/data/, ...), so a glob
         # anchored on the top-level data/ alone would silently skip every arm but the first.
@@ -617,13 +603,11 @@ class TestShippedCorpusConfigs:
         from corpora_table import PACK_GEOMETRY_KEYS, prepare_config_scalars, read_corpora_table
 
         kind_of_config: dict[Path, str] = {}
-        subsets_of_config: dict[Path, list[str]] = {}
         for table in tables:
             for row in read_corpora_table(table):
                 kind_of_config[row.config.resolve()] = row.kind
-                subsets_of_config.setdefault(row.config.resolve(), []).append(row.subset)
 
-        for index, path in enumerate(configs):
+        for path in configs:
             # Untabled configs fall back to their pack geometry, NOT to `skip-pack`: that flag
             # says when the pack is built, not whether the corpus is packed at all. A packed
             # SFT corpus whose pack is cut into per-shard jobs sets it too, and reading it as
@@ -638,24 +622,12 @@ class TestShippedCorpusConfigs:
             # A config that pins each subset at its own commit names no subset of its own: it is
             # prepared once per pinned subset, and each must parse to its own pin.
             pins = stated.get("revisions", {None: None})
-            # A config that pins its commit in a revision file reads the file when the prepare runs, and the file is
-            # written by the job that publishes the data. It is parsed here with that one key naming a file of the
-            # test's own that holds a commit, under each subset the tables prepare from it (a manifest lists one
-            # config's files, so its prepare names the subset), and must parse to that commit and keep its manifest.
-            parsed = path
-            if "revision-file" in stated:
-                revision_file = tmp_path / f"{index}.revision"
-                revision_file.write_text(_PIN + "\n")
-                parsed = tmp_path / f"{index}-{path.name}"
-                parsed.write_text(yaml.safe_dump({**stated, "revision-file": str(revision_file)}))
-                pins = {subset: _PIN for subset in subsets_of_config.get(path.resolve(), [stated.get("subset")])}
             for subset, pin in pins.items():
-                argv = ["--config", str(parsed)] + ([] if subset is None else ["--subset", subset])
+                argv = ["--config", str(path)] + ([] if subset is None else ["--subset", subset])
                 args = _parse_bare(pipe_module, *argv)
                 assert args.dataset, f"{path.name} does not name a dataset"
                 assert args.revision, f"{path.name} does not pin a revision"
                 assert pin is None or args.revision == pin, f"{path.name}: {subset} parsed to {args.revision}"
-                assert args.revision_manifest == stated.get("revision-manifest"), path.name
                 if kind == "tokenize":
                     # Pretraining-format (.bin/.idx) corpora: the EOD baked into the data must
                     # be the base tokenizer's `</s>` = id 2 (CLAUDE.md, "Tokenizer choice for
@@ -1262,216 +1234,3 @@ class TestHubReadsAreRepeated:
         with pytest.raises(SystemExit):
             _parse(pipe_module, "--hub-read-attempts", "0")
         assert "--hub-read-attempts must be at least 1, not 0" in capsys.readouterr().err
-
-
-# ── revision-file and revision-manifest ─────────────────────────────────────
-
-
-def _revision_file(tmp_path, content=f"{_PIN}\n"):
-    path = tmp_path / "pushed_revision.txt"
-    path.write_text(content)
-    return path
-
-
-class TestRevisionFile:
-    """`revision-file` names a file holding the dataset's commit, which the prepare reads when it runs; it pins the
-    commit alone, so a second pin beside it, or a --revision flag over it, is refused."""
-
-    def test_the_commit_is_read_from_the_file(self, pipe_module, tmp_path):
-        pin_file = _revision_file(tmp_path)
-        cfg = _write_config(tmp_path, yaml.safe_dump({"dataset": "org/corpus", "revision-file": str(pin_file)}))
-        args = _parse_bare(pipe_module, "--config", cfg, "--subset", "any")
-        assert (args.revision, args.revision_file, args.revision_manifest) == (_PIN, str(pin_file), None)
-        assert pipe_module.build_hub_load_kwargs(args, None)["revision"] == _PIN
-
-    @pytest.mark.parametrize(
-        ("content", "message"),
-        [
-            (None, "cannot be read"),
-            (f"{_PIN}\n{_PIN}\n", "must hold exactly one full 40-character lowercase commit SHA"),
-            (_PIN.upper(), "must hold exactly one full 40-character lowercase commit SHA"),
-        ],
-    )
-    def test_a_file_that_is_absent_or_malformed_stops_the_prepare_naming_it(
-        self, pipe_module, tmp_path, capsys, content, message
-    ):
-        pin_file = tmp_path / "pushed_revision.txt"
-        if content is not None:
-            pin_file.write_text(content)
-        cfg = _write_config(tmp_path, yaml.safe_dump({"dataset": "org/corpus", "revision-file": str(pin_file)}))
-        with pytest.raises(SystemExit) as exc:
-            _parse_bare(pipe_module, "--config", cfg)
-        assert exc.value.code == 2
-        err = capsys.readouterr().err
-        assert f"revision file {pin_file}" in err and message in err
-
-    @pytest.mark.parametrize(
-        ("extra", "argv", "message"),
-        [
-            ({"revision": _PIN}, (), "states `revision-file` and ['revision']"),
-            ({"revisions": {"any": _PIN}}, ("--subset", "any"), "states `revision-file` and ['revisions']"),
-            ({}, ("--revision", "1" * 40), f"which --revision {'1' * 40} cannot override"),
-        ],
-    )
-    def test_a_second_pin_is_refused(self, pipe_module, tmp_path, capsys, extra, argv, message):
-        body = {"dataset": "org/corpus", "revision-file": str(_revision_file(tmp_path)), **extra}
-        with pytest.raises(SystemExit) as exc:
-            _parse_bare(pipe_module, "--config", _write_config(tmp_path, yaml.safe_dump(body)), *argv)
-        assert exc.value.code == 2
-        assert message in capsys.readouterr().err
-
-
-class TestRevisionManifestRefusals:
-    """A manifest is checked by downloading the config's files at the commit and hashing them before the load, so
-    the prepare refuses what that cannot be done for, before it reads anything."""
-
-    def _config(self, tmp_path, **extra):
-        body = {
-            "dataset": "org/corpus",
-            "revision-file": str(_revision_file(tmp_path)),
-            "revision-manifest": str(tmp_path / "pushed_manifest.sha256"),
-            "manifest-workers": 4,
-            **extra,
-        }
-        return _write_config(tmp_path, yaml.safe_dump(body))
-
-    def test_a_manifest_with_its_workers_parses(self, pipe_module, tmp_path):
-        args = _parse_bare(pipe_module, "--config", self._config(tmp_path), "--subset", "mix")
-        assert (args.revision_manifest, args.manifest_workers) == (str(tmp_path / "pushed_manifest.sha256"), 4)
-
-    @pytest.mark.parametrize(
-        ("extra", "argv", "message"),
-        [
-            (
-                {"streaming": True, "skip-pack": True, "skip-count": True, "val-proportion": 0},
-                ("--subset", "mix"),
-                "--streaming downloads no file into the cache",
-            ),
-            ({"manifest-workers": None}, ("--subset", "mix"), "`manifest-workers` must state at least one worker"),
-            ({"manifest-workers": 0}, ("--subset", "mix"), "`manifest-workers` must state at least one worker"),
-            ({}, (), "--subset must name the config whose files the manifest lists"),
-            ({"data-dir": "sub"}, ("--subset", "mix"), "--data-dir reads files"),
-            ({"split": "validation"}, ("--subset", "mix"), "the check covers the config's train split"),
-            ({"split": "train+validation"}, ("--subset", "mix"), "the check covers the config's train split"),
-        ],
-    )
-    def test_refused(self, pipe_module, tmp_path, capsys, extra, argv, message):
-        with pytest.raises(SystemExit) as exc:
-            _parse_bare(pipe_module, "--config", self._config(tmp_path, **extra), *argv)
-        assert exc.value.code == 2
-        assert message in capsys.readouterr().err
-
-    def test_a_sliced_train_split_is_checked(self, pipe_module, tmp_path):
-        """A slice of the train split is loaded from all of the config's train files, so they are what is checked."""
-        args = _parse_bare(pipe_module, "--config", self._config(tmp_path, split="train[0:10]"), "--subset", "mix")
-        assert args.split == "train[0:10]"
-
-    def test_a_manifest_without_a_revision_file_is_refused(self, pipe_module, tmp_path, capsys):
-        body = {"dataset": "org/corpus", "revision": _PIN, "revision-manifest": str(tmp_path / "m.sha256")}
-        with pytest.raises(SystemExit):
-            _parse_bare(pipe_module, "--config", _write_config(tmp_path, yaml.safe_dump(body)))
-        assert "states `revision-manifest` without `revision-file`" in capsys.readouterr().err
-
-    def test_workers_without_a_manifest_are_refused(self, pipe_module, capsys):
-        with pytest.raises(SystemExit):
-            _parse(pipe_module, "--manifest-workers", "4")
-        assert "--manifest-workers sets how many files" in capsys.readouterr().err
-
-
-class TestRevisionManifestCheck:
-    """The real ``main()`` prepares a local repository laid out as the Hub lays a dataset out, pinned by a revision
-    file and checked against a manifest of its files. The only stand-ins are the two functions that reach the Hub:
-    the listing of the config's files at the commit, which here applies the same card rule to the local copy
-    (``hub_parquet.local_parquet_files``), and the download of one file into the cache, which here is the local file.
-    Both are network calls a unit test cannot make; everything after them, the manifest's parsing, the comparison of
-    the file set, the sizes and the hashing, the load and the export, is the real code."""
-
-    TEXTS = [f"document {index}" for index in range(12)]
-
-    @pytest.fixture
-    def published(self, pipe_module, monkeypatch, tmp_path):
-        """The repository, its manifest's lines by path, a record of the downloads, and a writer of the config."""
-        from tests.unit_tests.corpora_fixtures import load_campaign_module
-
-        hub_parquet = load_campaign_module("hub_parquet")
-        repo = write_parquet_dataset(tmp_path / "repo", "mix", {"text": self.TEXTS, "id": list(range(12))}, files=3)
-        files = [path.relative_to(repo).as_posix() for path in hub_parquet.local_parquet_files(repo, "mix")]
-        lines = {
-            path: f"{hashlib.sha256((repo / path).read_bytes()).hexdigest()}  {(repo / path).stat().st_size}  {path}"
-            for path in files
-        }
-        downloads = []
-
-        def listing(dataset, revision, config):
-            assert (dataset, revision, config) == (str(repo), _PIN, "mix")
-            return files
-
-        def download(dataset, revision, path):
-            assert (dataset, revision) == (str(repo), _PIN)
-            downloads.append(path)
-            return repo / path
-
-        monkeypatch.setattr(pipe_module, "manifest_data_files", listing)
-        monkeypatch.setattr(pipe_module, "download_data_file", download)
-
-        def config(manifest_lines):
-            manifest = tmp_path / "pushed_manifest.sha256"
-            manifest.write_text("".join(f"{line}\n" for line in manifest_lines))
-            body = {
-                "dataset": str(repo),
-                "revision-file": str(_revision_file(tmp_path)),
-                "revision-manifest": str(manifest),
-                "manifest-workers": 2,
-                "skip-pack": True,
-                "skip-count": True,
-                "val-proportion": 0,
-            }
-            return _write_config(tmp_path, yaml.safe_dump(body)), manifest
-
-        return repo, lines, downloads, config
-
-    @staticmethod
-    def _prepare(run_prepare, tmp_path, cfg):
-        out = tmp_path / "out"
-        argv = ("--config", cfg, "--subset", "mix", "--no-wandb", "--output-dir", str(out))
-        return run_prepare(*argv, cache=tmp_path / "cache"), out
-
-    def test_matching_files_are_prepared_and_the_manifest_recorded(self, published, run_prepare, tmp_path):
-        repo, lines, downloads, config = published
-        cfg, manifest = config(lines.values())
-        status, out = self._prepare(run_prepare, tmp_path, cfg)
-        assert status == 0
-        assert sorted(downloads) == sorted(lines)
-        results = json.loads((out / "pipeline_results.json").read_text())
-        assert (results["revision"], results["revision_file"]) == (_PIN, str(tmp_path / "pushed_revision.txt"))
-        assert results["revision_manifest"] == {
-            "path": str(manifest),
-            "sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
-            "files": 3,
-            "total_bytes": sum((repo / path).stat().st_size for path in lines),
-        }
-        exported = [json.loads(line)["input"] for line in (out / "training.jsonl").read_text().splitlines()]
-        assert exported == self.TEXTS
-
-    def test_a_manifest_naming_other_files_stops_the_prepare_before_any_download(
-        self, published, run_prepare, tmp_path
-    ):
-        _, lines, downloads, config = published
-        listed = [*list(lines.values())[1:], f"{'0' * 64}  1  mix/train-00009-of-00009.parquet"]
-        cfg, _ = config(listed)
-        with pytest.raises(ManifestMismatch, match="1 it lists are not read") as refusal:
-            self._prepare(run_prepare, tmp_path, cfg)
-        assert "mix/train-00009-of-00009.parquet" in str(refusal.value)
-        assert downloads == []
-        assert not (tmp_path / "out").exists()
-
-    @pytest.mark.parametrize("field", ["size", "sha256"])
-    def test_a_file_whose_size_or_digest_differs_stops_the_prepare(self, published, run_prepare, tmp_path, field):
-        _, lines, _, config = published
-        first, *rest = lines
-        digest, size, path = lines[first].split("  ")
-        changed = f"{digest}  {int(size) + 1}  {path}" if field == "size" else f"{'f' * 64}  {size}  {path}"
-        cfg, _ = config([changed, *(lines[other] for other in rest)])
-        with pytest.raises(ManifestMismatch, match=f"1 of the 3 files manifest .* lists differ from it: {first}: "):
-            self._prepare(run_prepare, tmp_path, cfg)
-        assert not (tmp_path / "out").exists()

@@ -52,15 +52,8 @@ import fsspec
 import pyarrow.parquet as pq
 import yaml
 from datasets import Features, Value, load_dataset, load_dataset_builder
-from scripts.data.hub_read_retry import reads_repeated_in_place, retrying, streamed_reads_retried
-from scripts.data.prepare_revisions import (
-    FULL_SHA,
-    require_full_sha,
-    revision_file,
-    revision_manifest,
-    subset_revision,
-)
-from scripts.data.sha256_manifest import check_files_against_manifest, parse_manifest
+from scripts.data.hub_read_retry import reads_repeated_in_place, streamed_reads_retried
+from scripts.data.prepare_revisions import FULL_SHA, require_full_sha, subset_revision
 from transformers import AutoTokenizer  # noqa: I001
 
 
@@ -72,10 +65,6 @@ except ImportError:
     HAS_WANDB = False
 
 DEFAULT_TOKENIZER = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-# The keys a config pins its dataset's commit with (scripts/data/prepare_revisions.py), as load_pipeline_config spells
-# them. Of them only `revision` has a flag, and all are resolved together once the subset is known.
-DATASET_PIN_KEYS = ("revision", "revisions", "revision_file", "revision_manifest")
-REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_BASE = "/projects/a5k/public/data"
 WANDB_PROJECT = "megatron-datasets-processing"
 WANDB_ENTITY = "geodesic"
@@ -111,10 +100,8 @@ def parse_args():  # noqa: D103
             "split, revision, tokenizer, sequence length. A corpus whose identity matters should be "
             "described by one of these rather than by a shell command. Command-line flags override it. "
             "In place of one `revision`, the file may pin each subset at its own commit with "
-            "`revisions: {<subset>: <40-character SHA>}`; a subset it does not pin is refused. Or it may name "
-            "`revision-file: <absolute path>`, a file holding one full commit SHA that is read when this runs, with "
-            "an optional `revision-manifest: <absolute path>` of the config's data files' sha256 and sizes, which "
-            "they are checked against before the dataset is loaded (scripts/data/prepare_revisions.py)."
+            "`revisions: {<subset>: <40-character SHA>}`; a subset it does not pin is refused "
+            "(scripts/data/prepare_revisions.py)."
         ),
     )
     parser.add_argument("--dataset", type=str, default=None, help="HuggingFace dataset name")
@@ -185,16 +172,6 @@ def parse_args():  # noqa: D103
         ),
     )
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
-    parser.add_argument(
-        "--manifest-workers",
-        type=int,
-        default=None,
-        help=(
-            "With a config's `revision-manifest`: how many of the config's data files are downloaded into the "
-            "Hugging Face cache and hashed at once, before the dataset is loaded (which then reads them from the "
-            "cache). Required with a manifest, and refused without one."
-        ),
-    )
 
     # Validation split
     parser.add_argument("--val-proportion", type=float, default=0.0, help="Fraction for validation split (default: 0)")
@@ -247,10 +224,11 @@ def parse_args():  # noqa: D103
     pins = {}
     if config_path:
         config = load_pipeline_config(config_path)
-        # The dataset's pin is resolved below, once the subset, which the command line may name, is known. Every
-        # key it can be stated with is taken out together, under the spelling prepare_revisions.py reads, so that
-        # two of them are refused together rather than one silently set as the default.
-        pins = {key.replace("_", "-"): config.pop(key) for key in DATASET_PIN_KEYS if key in config}
+        # A per-subset pin (`revisions`) has no flag: it is resolved below, once the subset, which
+        # the command line may name, is known. A `revision` beside it is taken out with it, so that
+        # the two are refused together rather than one silently set as the default.
+        if "revisions" in config:
+            pins = {key: config.pop(key) for key in ("revision", "revisions") if key in config}
         # Rejected rather than ignored: a typo in a corpus definition would otherwise
         # prepare the wrong data and say nothing.
         recognised = set(vars(parser.parse_args([])))
@@ -264,17 +242,9 @@ def parse_args():  # noqa: D103
     if not args.dataset:
         parser.error("--dataset is required, on the command line or in --config")
 
-    args.revision_file = args.revision_manifest = None
     if pins:
         try:
-            args.revision_file = revision_file(pins, config_path)
-            args.revision_manifest = revision_manifest(pins, config_path)
-            if args.revision_file is not None and args.revision is not None:
-                raise ValueError(
-                    f"{config_path}: pins its dataset's commit in `revision-file` {args.revision_file}, which "
-                    f"--revision {args.revision} cannot override"
-                )
-            pinned = subset_revision(pins, args.subset, config_path)  # a revision file is read here, as the job runs
+            pinned = subset_revision(pins, args.subset, config_path)
         except ValueError as error:
             parser.error(str(error))
         if args.revision is None:  # a --revision flag overrides the file, as every flag does
@@ -295,15 +265,6 @@ def parse_args():  # noqa: D103
         problems = streaming_refusals(args)
         if problems:
             parser.error("--streaming cannot honour this invocation:\n  - " + "\n  - ".join(problems))
-
-    if args.revision_manifest is not None:
-        problems = manifest_refusals(args)
-        if problems:
-            parser.error(
-                f"`revision-manifest` {args.revision_manifest} cannot be honoured:\n  - " + "\n  - ".join(problems)
-            )
-    elif args.manifest_workers is not None:
-        parser.error("--manifest-workers sets how many files a revision manifest's check takes at once; none is named")
 
     if args.download_workers is None:
         args.download_workers = args.num_proc
@@ -365,84 +326,6 @@ def streaming_refusals(args):
             "(train_test_split), which a stream cannot take; set it to 0"
         )
     return problems
-
-
-# The splits a manifest's check covers: the train split, whole or sliced, whose files are the ones the dataset card
-# lists for the config's train split (configs/control_pretraining/hub_parquet.py).
-_TRAIN_SPLIT = re.compile(r"train(\[[^\]+]*\])?")
-
-
-def manifest_refusals(args):
-    """Why a config's ``revision-manifest`` cannot be honoured with these arguments: one message per refusal.
-
-    The check downloads the files the loader will read for the config at the pinned commit into the Hugging Face
-    cache and hashes them before anything is loaded, so it needs a Hub dataset read through its card's train split, a
-    config name and a worker count. It refuses a stream, which downloads no file it could hash.
-    """
-    problems = []
-    if args.streaming:
-        problems.append("--streaming downloads no file into the cache, so there is nothing to hash before the load")
-    if args.data_files:
-        problems.append("--data-files loads local files; a manifest checks a Hub revision's files")
-    if args.data_dir:
-        problems.append("--data-dir reads files from a directory, not the files the dataset card lists for the config")
-    if not args.subset:
-        problems.append("--subset must name the config whose files the manifest lists")
-    if not _TRAIN_SPLIT.fullmatch(args.split):
-        problems.append(f"--split {args.split!r}: the check covers the config's train split, whole or sliced")
-    if args.manifest_workers is None or args.manifest_workers < 1:
-        problems.append(f"`manifest-workers` must state at least one worker, got {args.manifest_workers!r}")
-    return problems
-
-
-def manifest_data_files(dataset, revision, config):
-    """The repository paths of the train parquet files the loader reads for ``config`` of Hub ``dataset`` at
-    ``revision``, by the rule the loader and the corpus checks share (``hub_parquet.py``'s ``hub_parquet_files``)."""
-    campaign = str(REPO_ROOT / "configs" / "control_pretraining")
-    if campaign not in sys.path:
-        sys.path.append(campaign)
-    from hub_parquet import hub_parquet_files
-
-    return hub_parquet_files(dataset, revision, config)
-
-
-def download_data_file(dataset, revision, path):
-    """One file of Hub ``dataset`` at ``revision``, downloaded into the Hugging Face cache, where the loader's own
-    download of it at that revision then finds it; its local path."""
-    from huggingface_hub import hf_hub_download
-
-    return Path(hf_hub_download(dataset, path, repo_type="dataset", revision=revision))
-
-
-def check_revision_manifest(args):
-    """Check the config's data files at the pinned commit against the config's ``revision-manifest``; its record.
-
-    The files the loader will read (``manifest_data_files``) must be exactly the manifest's, and each, downloaded
-    into the cache, must have its size and sha256 (``scripts/data/sha256_manifest.py``), ``--manifest-workers`` at
-    a time. The listing and each download are repeated on a transient Hub error as the prepare's other Hub reads are
-    (``--hub-read-attempts``). Raises ``ManifestMismatch`` for files that differ, so nothing is loaded from them.
-    """
-    manifest = parse_manifest(args.revision_manifest)
-    attempts, first_wait = args.hub_read_attempts, args.hub_read_first_wait_seconds
-    where = f"{args.dataset}@{args.revision} config {args.subset!r}"
-    files = retrying(manifest_data_files, attempts, first_wait, f"listing of {where}'s files")(
-        args.dataset, args.revision, args.subset
-    )
-    print(
-        f"  Manifest: {len(manifest.entries)} files, {manifest.total_bytes:,} bytes, sha256 {manifest.sha256}; "
-        f"the loader reads {len(files)} files; checking {args.manifest_workers} at a time"
-    )
-
-    def fetch(path):
-        return retrying(download_data_file, attempts, first_wait, f"download of {path} from {where}")(
-            args.dataset, args.revision, path
-        )
-
-    def checked(entry, done, total):
-        print(f"  [{done}/{total}] {entry.path}: {entry.size:,} bytes, sha256 as listed")
-
-    check_files_against_manifest(manifest, files, fetch, args.manifest_workers, on_checked=checked)
-    return manifest.record()
 
 
 def slugify_dataset_name(dataset, subset=None):
@@ -1079,8 +962,6 @@ def init_wandb(args, format_type, output_dir):
         "subset": args.subset,
         "split": args.split,
         "revision": args.revision,
-        "revision_file": args.revision_file,
-        "revision_manifest": args.revision_manifest,
         "config": args.config,
         "tokenizer": args.tokenizer,
         "tokenizer_revision": args.tokenizer_revision,
@@ -1118,10 +999,6 @@ def run_pipeline(args):
         "subset": args.subset,
         "split": args.split,
         "revision": args.revision,
-        # The file the revision was read from, and the record of the manifest the data files were checked against
-        # (set once the check has passed); None when the config pins its commit otherwise or names no manifest.
-        "revision_file": args.revision_file,
-        "revision_manifest": None,
         "config": args.config,
         "tokenizer": args.tokenizer,
         "tokenizer_revision": args.tokenizer_revision,
@@ -1152,8 +1029,6 @@ def run_pipeline(args):
         print(f"Subset:    {args.subset}")
     print(f"Split:     {args.split}")
     print(f"Revision:  {args.revision or 'HEAD (unpinned — moves when the dataset is re-pushed)'}")
-    if args.revision_file:
-        print(f"           read from {args.revision_file}")
     print(f"Tokenizer: {args.tokenizer}")
     print(f"Output:    {output_dir}")
     if args.streaming:
@@ -1163,11 +1038,6 @@ def run_pipeline(args):
         f"(first wait {args.hub_read_first_wait_seconds:g} s)"
     )
     print("=" * 60)
-
-    # The data files are checked against the config's manifest before anything is loaded from them; a mismatch raises.
-    if args.revision_manifest is not None:
-        print(f"\n[0/6] MANIFEST - Checking the data files against {args.revision_manifest}...")
-        results["revision_manifest"] = check_revision_manifest(args)
 
     # ── Stage 1: LOAD ──────────────────────────────────────────────
     print("\n[1/6] LOAD - Loading dataset from HuggingFace...")

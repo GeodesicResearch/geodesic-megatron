@@ -14,10 +14,8 @@ blend weight above 0) holds a target of a masked id that carries loss, so maskin
 Every other outcome stops it before training, with its cause named: no masked id among the scanned targets, masked
 ids only at positions that carry no loss anyway, training data the scan cannot read, or a scan that ran out of time
 before finding the evidence. Split forms of a masked token and tokens outside the vocabulary stop it too. For a run
-that only measures ids, or measures none, the same problems are reported and training proceeds.
-
-The tokenizer a source's metadata records is shown in the sample tables but never judged: the dataset-level
-``pipeline_results.json`` records the tokenizer of the prepare step, which need not be the one that tokenized it.
+that only measures ids, the same problems are reported and training proceeds. A run that measures no ids is never
+scanned.
 """
 
 from __future__ import annotations
@@ -162,7 +160,7 @@ def missing_trainable_targets(
 def token_masking_data_verdict(
     scans: Sequence[SourceScan], sources_reason: str | None, resolved: ResolvedTokenMasking
 ) -> DataVerdict:
-    """Judge the scanned sources for a run's token-masking decision.
+    """Judge the scanned sources for the token-masking decision of a run that masks or measures ids.
 
     Args:
         scans: One scan per training data source.
@@ -170,11 +168,9 @@ def token_masking_data_verdict(
         resolved: The run's token-masking decision.
 
     Returns:
-        For a run with masking enabled, every problem as an error (no positive evidence among them); for any other
-        run, every problem as a finding.
+        For a run with masking enabled, every problem as an error (no positive evidence among them); for a run that
+        only measures ids, every problem as a finding.
     """
-    if not scans and not resolved.measured_token_ids:
-        return DataVerdict(errors=(), findings=(f"the training data could not be inspected: {sources_reason}",))
     problems: list[str] = []
     tokenizer_name = resolved.tokenizer_model or "the run's tokenizer"
     out_of_vocab = {scan.source.label: scan.out_of_vocab_tokens for scan in scans if scan.out_of_vocab_tokens}
@@ -183,17 +179,16 @@ def token_masking_data_verdict(
             f"token ids outside the tokenizer's vocabulary in {out_of_vocab} (tokens per source): the data was "
             f"tokenized with a different tokenizer from {tokenizer_name}"
         )
-    if resolved.measured_token_ids:
-        split = {scan.source.label: scan.split_form_occurrences for scan in scans if scan.split_form_occurrences}
-        if split:
-            problems.append(
-                f"the text of {list(resolved.token_strings)} appears split into several ordinary tokens in {split} "
-                "(occurrences per source): that data was tokenized with a tokenizer that does not register the "
-                f"marker, so ids {list(resolved.measured_token_ids)} never occur there and masking matches nothing"
-            )
-        missing = missing_trainable_targets(scans, sources_reason, resolved)
-        if missing is not None:
-            problems.append(missing)
+    split = {scan.source.label: scan.split_form_occurrences for scan in scans if scan.split_form_occurrences}
+    if split:
+        problems.append(
+            f"the text of {list(resolved.token_strings)} appears split into several ordinary tokens in {split} "
+            "(occurrences per source): that data was tokenized with a tokenizer that does not register the "
+            f"marker, so ids {list(resolved.measured_token_ids)} never occur there and masking matches nothing"
+        )
+    missing = missing_trainable_targets(scans, sources_reason, resolved)
+    if missing is not None:
+        problems.append(missing)
     if resolved.enabled:
         return DataVerdict(errors=tuple(problems), findings=())
     return DataVerdict(errors=(), findings=tuple(problems))

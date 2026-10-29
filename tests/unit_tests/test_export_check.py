@@ -4,7 +4,7 @@
 the scoring both forwards share, and the judge.
 
 Everything runs for real on tiny inputs: corpora written by Megatron's own ``IndexedDatasetBuilder``, HF exports saved
-by ``save_pretrained`` in shards, the tiny copy model of ``probe_fixtures`` as the export, and scores files the tool
+by ``save_pretrained`` in shards, the tiny copy model of ``tiny_models`` as the export, and scores files the tool
 itself writes. Two model boundaries are stood in for, each where it is used: the Megatron model (a reference forward
 needs GPUs, a distributed init and a 30B checkpoint) and a checkpoint's model config.
 """
@@ -23,14 +23,14 @@ import pytest
 import torch
 import yaml
 from safetensors.torch import load_file, save_file
-from scripts.checkpoint import export_check, export_check_result
+from scripts.checkpoint import export_check, export_check_result, hf_model_outputs
 from scripts.checkpoint.decoding_defaults import GENERATION_CONFIG, generation_config_text
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS
 from scripts.training.config_compose import load_composed_yaml
 from transformers import AutoTokenizer
 
 from tests.unit_tests.corpora_fixtures import write_indexed_documents
-from tests.unit_tests.probe_fixtures import COPY_LOGIT, MODEL_VOCAB, copy_model
+from tests.unit_tests.tiny_models import COPY_LOGIT, MODEL_VOCAB, copy_model
 from tests.unit_tests.token_masking_fixtures import EOS_ID, MARKER_ID, TINY_VOCAB, build_tiny_hf_tokenizer
 
 
@@ -408,7 +408,7 @@ def test_the_last_rows_of_a_window_predict_exactly_its_ids(selected):
     model = copy_model()
 
     def logits_of(input_ids):
-        return export_check.coherence.fp32_head_outputs(model, input_ids, last_only=False)[1]
+        return hf_model_outputs.fp32_head_outputs(model, input_ids, last_only=False)[1]
 
     cross_entropy, logp_hidden = export_check.score_window(logits_of, spec, np.array([A, A, B, H, H]))
     copied = np.array([False, True, False, False, True])  # the target equals the input before it
@@ -494,7 +494,7 @@ def test_the_export_is_scored_and_continued_greedily(tmp_path, selected):
 def test_a_greedy_continuation_counts_h_among_the_generated_ids(selected):
     spec, _ = selected
     model = copy_model()
-    renderer = export_check.coherence.TokenRenderer(AutoTokenizer.from_pretrained(spec.tokenizer))
+    renderer = hf_model_outputs.TokenRenderer(AutoTokenizer.from_pretrained(spec.tokenizer))
     continuation = export_check.greedy_continuation(model, [EOS_ID, A, H], spec, renderer)
     assert continuation["generated_ids"] == [H, H, H] and continuation["hidden_emissions"] == 3
     assert continuation["slot_logprob_hidden"] > -1e-3 and not continuation["stopped"]

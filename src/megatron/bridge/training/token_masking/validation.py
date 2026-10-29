@@ -8,8 +8,9 @@ dataset config pointed at it, so it is read exactly as the training data is (seq
 
 - setup builds it before the model, as the training data is built, ``iters * global_batch_size`` samples, through
   Megatron's ``BlendedMegatronDatasetBuilder`` (split ``1,0,0``, so the whole set) or the fine-tuning dataset builder;
-- setup then reads those samples once, as the evaluations read them, and refuses a set whose samples hold no target of
-  a measured id that carries loss, since its listed-target loss would never be reported (``build_masked_validation``);
+- setup then reads those samples, as the evaluations read them, until one holds a target of a measured id that carries
+  loss, and refuses a set whose samples hold none, since its listed-target loss would never be reported
+  (``build_masked_validation``);
 - the training loop evaluates it at step 0 of a fresh run and every ``interval`` iterations, each time from its first
   sample, with the run's forward step, so token masking applies exactly as in training, and logs the results under
   ``masked-validation/``. ``token_masking/listed_target_loss`` is computed before the mask, so it is the number to
@@ -171,12 +172,16 @@ def _named_set(cfg: ConfigContainer) -> str:
 
 def _measured_targets(
     loader: Iterable[dict[str, Any]], samples: int, resolved: ResolvedTokenMasking
-) -> tuple[int, int]:
-    """The targets of a measured id in the first ``samples`` samples ``loader`` yields, and how many of them carry loss.
+) -> tuple[int, int, int]:
+    """The targets of a measured id that ``loader``'s first ``samples`` samples hold, read only until one carries loss.
 
     Each batch's labels and loss mask go through ``apply_token_masking`` on the training device, as the forward step
     passes them, so a target counts as carrying loss exactly when an evaluation reports it in
     ``token_masking/listed_trainable_target_fraction``.
+
+    Returns:
+        ``(listed, trainable, read)``: the targets of a measured id found, how many of them carry loss, and the
+        samples read (fewer than ``samples`` when a batch before the last holds a target that carries loss).
     """
     device = resolved.ids_tensor.device
     listed = trainable = read = 0
@@ -185,9 +190,9 @@ def _measured_targets(
         listed += int(stats.listed_targets.item())
         trainable += int(stats.would_train.sum().item())
         read += len(batch["labels"])
-        if read >= samples:
+        if trainable or read >= samples:
             break
-    return listed, trainable
+    return listed, trainable, read
 
 
 def _require_trainable_measured_targets(
@@ -199,21 +204,21 @@ def _require_trainable_measured_targets(
     """Refuse, on every rank, a set whose evaluated samples hold no target of a measured id that carries loss.
 
     An evaluation reads the set's first ``samples`` samples, each data-parallel rank its share. The last rank reads
-    them all once, through a loader that gives it every share, and the verdict is broadcast, so every rank stops
-    together.
+    them in order through a loader that gives it every share, stopping at the first batch that holds a target that
+    carries loss (the other ranks wait meanwhile), and the verdict is broadcast, so every rank stops together.
     """
     extent = f"the {samples} samples each evaluation reads"
     check_rank = torch.distributed.get_world_size() - 1
     outcome: list[str | None] = [None]
     if torch.distributed.get_rank() == check_rank:
         try:
-            listed, trainable = _measured_targets(
+            listed, trainable, read = _measured_targets(
                 new_loader(data_parallel_rank=0, data_parallel_size=1), samples, resolved
             )
             if trainable:
                 logger.info(
                     f"[masked-validation] {_named_set(cfg)}: {trainable} targets of the ids "
-                    f"{list(resolved.measured_token_ids)} carry loss in {extent}"
+                    f"{list(resolved.measured_token_ids)} carry loss in the first {read} of {extent}"
                 )
             else:
                 outcome[0] = no_trainable_target(HELD_OUT_SET, resolved, listed, extent)

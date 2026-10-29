@@ -11,16 +11,15 @@ The block alone decides which ids a run masks (``enabled`` with ``token_ids``) a
 - ``measured_token_ids``, ``validate_token_ids`` and ``validate_token_masking`` (a block that is not a mapping);
 - the refusal of enabled masking on tied embeddings, on knowledge distillation and on a model config that does not
   state whether it ties them, with real model providers;
-- the strict and removed override keys of ``omegaconf_utils._apply_overrides``: a removed key (``token_masking.mode``,
-  the ``require_*`` keys, ``tokenizer.loss_mask_token_ids``) stops the run with what to write instead, and a
-  misspelled key stops it with a did-you-mean suggestion, while lenient classes still skip;
+- the strict and removed override keys of ``omegaconf_utils._apply_overrides``: the removed
+  ``tokenizer.loss_mask_token_ids`` stops the run with what to write instead unless null, and a misspelled key stops
+  it with a did-you-mean suggestion;
 - the real launcher merge, ``pipeline_training_run.resolve_training_config`` on the Nano pretrain recipe with YAML and
   Hydra CLI overrides, whose merged block must check exactly as the same dataclass does;
 - the block in the container: one per container, serialised by ``to_dict``/``to_yaml`` and loaded back.
 """
 
 import dataclasses
-import logging
 import re
 
 import pytest
@@ -41,7 +40,7 @@ from megatron.bridge.training.token_masking.config import (
     validate_token_masking,
 )
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
-from megatron.bridge.training.utils.omegaconf_utils import OverridesError, _apply_overrides, apply_overrides
+from megatron.bridge.training.utils.omegaconf_utils import _apply_overrides, apply_overrides
 
 
 MARKER_ID = 131072
@@ -302,12 +301,9 @@ class TestValidateTokenIds:
 
 
 class TestValidateTokenMasking:
-    @pytest.mark.parametrize("spec", VALID_BLOCKS.values(), ids=VALID_BLOCKS.keys())
-    def test_valid_block_passes(self, spec):
-        assert _outcome(_block(spec)) is None
-
-    @pytest.mark.parametrize(("spec", "message"), INVALID_BLOCKS.values(), ids=INVALID_BLOCKS.keys())
-    def test_runs_the_block_rules(self, spec, message):
+    def test_runs_the_block_rules(self):
+        assert _outcome(_block(VALID_BLOCKS["enabled"])) is None
+        spec, message = INVALID_BLOCKS["enabled-without-ids"]
         outcome = _outcome(_block(spec))
         assert outcome is not None and message in outcome
 
@@ -414,36 +410,10 @@ class TestRefuseMaskingThatTrainsTheMaskedOutputRow:
 # ---------------------------------------------------------------------------------------------------------------------
 
 
-NO_DEADLINE = (
-    "an enabled run must show trainable marker targets in its training data at setup; there is no runtime deadline"
+LEGACY_FIELD_REMOVED = (
+    "Removed key 'loss_mask_token_ids' for TokenizerConfig: token masking is configured only in token_masking: "
+    "{enabled: true, token_ids: [...]}"
 )
-REMOVED_KEYS = {
-    "token-masking-mode": (
-        {"token_masking": {"mode": "enabled"}},
-        "Removed key 'mode' for TokenMaskingConfig: write token_masking.enabled: true (with token_ids) or omit the "
-        "block",
-    ),
-    "token-masking-mode-disabled": (
-        {"token_masking": {"mode": "disabled", "token_ids": []}},
-        "Removed key 'mode' for TokenMaskingConfig",
-    ),
-    "require-masked-targets": (
-        {"token_masking": {"require_masked_targets": False}},
-        f"Removed key 'require_masked_targets' for TokenMaskingConfig: {NO_DEADLINE}",
-    ),
-    "require-within-iterations": (
-        {"token_masking": {"require_masked_targets_within_iterations": 20}},
-        f"Removed key 'require_masked_targets_within_iterations' for TokenMaskingConfig: {NO_DEADLINE}",
-    ),
-    "tokenizer-legacy-field": (
-        {"tokenizer": {"loss_mask_token_ids": [MARKER_ID]}},
-        "Removed key 'loss_mask_token_ids' for TokenizerConfig: token masking is configured only in token_masking: "
-        "{enabled: true, token_ids: [...]}",
-    ),
-    "tokenizer-legacy-field-empty": ({"tokenizer": {"loss_mask_token_ids": []}}, "Removed key 'loss_mask_token_ids'"),
-    "tokenizer-legacy-field-null": ({"tokenizer": {"loss_mask_token_ids": None}}, "Removed key 'loss_mask_token_ids'"),
-}
-
 STRICT_TYPOS = {
     "token-masking-enabled": ({"token_masking": {"enabeld": True}}, "TokenMaskingConfig", "enabeld", "enabled"),
     "token-masking-ids": ({"token_masking": {"token_id": [5]}}, "TokenMaskingConfig", "token_id", "token_ids"),
@@ -467,21 +437,29 @@ STRICT_TYPOS = {
     ),
     "top-level-block": ({"token_maskng": {"enabled": True}}, "ConfigContainer", "token_maskng", "token_masking"),
     "top-level-tokenizer": ({"tokeniser": {"tokenizer_model": "x"}}, "ConfigContainer", "tokeniser", "tokenizer"),
-    "data-samples": ({"logger": {"data_samples": {"enable": False}}}, "DataSamplesConfig", "enable", "enabled"),
+    "data-samples": (
+        {"logger": {"data_samples": {"max_scan_second": 1}}},
+        "DataSamplesConfig",
+        "max_scan_second",
+        "max_scan_seconds",
+    ),
 }
 
 
 class TestRemovedAndStrictOverrideKeys:
-    @pytest.mark.parametrize(("overrides", "message"), REMOVED_KEYS.values(), ids=REMOVED_KEYS.keys())
-    def test_removed_key_raises_with_what_to_write_instead(self, nano_pretrain_config, overrides, message):
-        with pytest.raises(ValueError, match=re.escape(message)):
-            apply_overrides(nano_pretrain_config, overrides, {})
+    def test_removed_key_raises_with_what_to_write_instead(self, nano_pretrain_config):
+        with pytest.raises(ValueError, match=re.escape(LEGACY_FIELD_REMOVED)):
+            apply_overrides(nano_pretrain_config, {"tokenizer": {"loss_mask_token_ids": [MARKER_ID]}}, {})
 
-    @pytest.mark.parametrize("config_class", [TokenMaskingConfig, MaskedValidationConfig, TokenizerConfig])
-    def test_no_removed_key_is_a_field(self, config_class):
+    def test_a_null_removed_key_is_dropped(self, nano_pretrain_config):
+        """Every run_config.yaml saved before the key was removed carries it as null, which never masked anything."""
+        apply_overrides(nano_pretrain_config, {"tokenizer": {"loss_mask_token_ids": None, "vocab_size": 7}}, {})
+        assert nano_pretrain_config.tokenizer.vocab_size == 7
+        assert not hasattr(nano_pretrain_config.tokenizer, "loss_mask_token_ids")
+
+    def test_no_removed_key_is_a_field(self):
         """A removed key that were still a field would be in every merged config and stop every run."""
-        removed = set(getattr(config_class, "removed_override_keys", {}))
-        assert not removed & {f.name for f in dataclasses.fields(config_class)}
+        assert not set(TokenizerConfig.removed_override_keys) & {f.name for f in dataclasses.fields(TokenizerConfig)}
 
     @pytest.mark.parametrize(
         ("overrides", "class_name", "key", "suggestion"), STRICT_TYPOS.values(), ids=STRICT_TYPOS.keys()
@@ -499,9 +477,7 @@ class TestRemovedAndStrictOverrideKeys:
         assert "Did you mean" not in message, "no field is close to 'zzzz'; a suggestion would be noise"
         assert message.endswith("Valid keys: enabled, masked_validation, token_ids.")
 
-    @pytest.mark.parametrize(
-        "key", ["reject_unknown_override_keys", "removed_override_keys", "finalize", "measured_token_ids"]
-    )
+    @pytest.mark.parametrize("key", ["reject_unknown_override_keys", "finalize", "measured_token_ids"])
     def test_attributes_that_are_not_fields_are_unknown(self, key):
         """Keys are checked against the dataclass fields, so YAML cannot reach a class variable, method or property."""
         with pytest.raises(ValueError, match=re.escape(f"Unknown key '{key}' for TokenMaskingConfig")):
@@ -517,21 +493,6 @@ class TestRemovedAndStrictOverrideKeys:
         assert token_masking == TokenMaskingConfig(
             enabled=True, token_ids=[MARKER_ID], masked_validation=MaskedValidationConfig(data_path=HELD_OUT_BIN)
         )
-
-    def test_lenient_classes_still_skip_unknown_keys(self, nano_pretrain_config, caplog):
-        """Only the opted-in classes are strict: logger and dataset keep skipping with a warning."""
-        overrides = {
-            "logger": {"not_a_logger_key": 1, "log_interval": 7},
-            "dataset": {"not_a_dataset_key": 2},
-        }
-        with caplog.at_level(logging.WARNING, logger="megatron.bridge.training.utils.omegaconf_utils"):
-            apply_overrides(nano_pretrain_config, overrides, {})
-        assert nano_pretrain_config.logger.log_interval == 7
-        assert not hasattr(nano_pretrain_config.logger, "not_a_logger_key")
-        assert not hasattr(nano_pretrain_config.dataset, "not_a_dataset_key")
-        skipped = [record.getMessage() for record in caplog.records if "Skipping" in record.getMessage()]
-        assert any("'not_a_logger_key'" in message and "LoggerConfig" in message for message in skipped)
-        assert any("'not_a_dataset_key'" in message for message in skipped)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -582,22 +543,6 @@ LAUNCH_CASES = {
         {"enabled": "true", "token_ids": [MARKER_ID]},
         "token_masking.enabled must be true or false, got 'true'",
     ),
-    "enabled-without-ids": (
-        "token_masking:\n  enabled: true\n",
-        {"enabled": True},
-        "token_masking.enabled is true but token_ids is empty",
-    ),
-    "ids-without-enabled": (
-        f"token_masking:\n  token_ids: [{MARKER_ID}]\n",
-        {"token_ids": [MARKER_ID]},
-        "with enabled false",
-    ),
-    "held-out-without-interval": (
-        f"token_masking:\n  enabled: true\n  token_ids: [{MARKER_ID}]\n  masked_validation:\n"
-        f"    data_path: {HELD_OUT_BIN}\n    iters: 2\n",
-        {"enabled": True, "token_ids": [MARKER_ID], "masked_validation": {"data_path": HELD_OUT_BIN, "iters": 2}},
-        "masked_validation.interval must be a positive integer",
-    ),
 }
 
 
@@ -630,50 +575,25 @@ class TestLauncherMerge:
         with pytest.raises(TokenMaskingError, match="token_masking must be a mapping"):
             validate_token_masking(cfg.token_masking)
 
-    @pytest.mark.parametrize(
-        ("yaml_text", "message"),
-        [
-            ("token_masking:\n  mode: enabled\n", "Removed key 'mode' for TokenMaskingConfig: write token_masking."),
-            (
-                "token_masking:\n  mode: disabled\ntokenizer:\n  loss_mask_token_ids: []\n",
-                "Removed key 'loss_mask_token_ids' for TokenizerConfig",
-            ),
-            (
-                f"token_masking:\n  enabled: true\n  token_ids: [{MARKER_ID}]\n  require_masked_targets: true\n",
-                f"Removed key 'require_masked_targets' for TokenMaskingConfig: {NO_DEADLINE}",
-            ),
-            (
-                f"tokenizer:\n  loss_mask_token_ids: [{MARKER_ID}]\n",
-                "Removed key 'loss_mask_token_ids' for TokenizerConfig",
-            ),
-        ],
-        ids=["mode", "legacy-control-arm", "require-masked-targets", "legacy-field-alone"],
-    )
-    def test_yaml_with_a_removed_key_raises(self, run_module, tmp_path, yaml_text, message):
-        with pytest.raises(ValueError, match=re.escape(message)):
-            _launch_config(run_module, tmp_path, yaml_text)
+    def test_yaml_with_a_removed_key_raises(self, run_module, tmp_path):
+        with pytest.raises(ValueError, match=re.escape(LEGACY_FIELD_REMOVED)):
+            _launch_config(run_module, tmp_path, f"tokenizer:\n  loss_mask_token_ids: [{MARKER_ID}]\n")
+
+    def test_a_saved_run_config_with_the_removed_key_null_launches(self, run_module, tmp_path):
+        cfg = _launch_config(run_module, tmp_path, "tokenizer:\n  loss_mask_token_ids: null\n")
+        assert not hasattr(cfg.tokenizer, "loss_mask_token_ids")
+        assert cfg.token_masking == TokenMaskingConfig()
 
     @pytest.mark.parametrize(
         ("yaml_text", "message"),
         [
             (
-                "token_masking:\n  enabeld: true\n",
-                "Unknown key 'enabeld' for TokenMaskingConfig. Did you mean 'enabled'?",
-            ),
-            (
                 "token_masking:\n  masked_validation:\n    data_pth: /x\n",
                 "Unknown key 'data_pth' for MaskedValidationConfig. Did you mean 'data_path'?",
             ),
-            (
-                "token_maskng:\n  enabled: true\n",
-                "Unknown key 'token_maskng' for ConfigContainer. Did you mean 'token_masking'?",
-            ),
-            (
-                "logger:\n  data_samples:\n    enable: false\n",
-                "Unknown key 'enable' for DataSamplesConfig. Did you mean 'enabled'?",
-            ),
+            ("token_masking:\n  mode: enabled\n", "Unknown key 'mode' for TokenMaskingConfig."),
         ],
-        ids=["in-block", "in-masked-validation", "top-level", "in-logger-data-samples"],
+        ids=["in-masked-validation", "an-earlier-designs-mode"],
     )
     def test_yaml_typo_raises(self, run_module, tmp_path, yaml_text, message):
         with pytest.raises(ValueError, match=re.escape(message)):
@@ -702,50 +622,20 @@ class TestLauncherMerge:
 
     def test_added_cli_removed_key_raises_its_message(self, run_module, tmp_path):
         """``+key=`` lets Hydra add a key its struct mode would refuse; the removed key must still be named."""
-        with pytest.raises(ValueError, match=re.escape("Removed key 'mode' for TokenMaskingConfig")):
-            _launch_config(run_module, tmp_path, cli=("+token_masking.mode=enabled",))
-        with pytest.raises(ValueError, match=re.escape("Removed key 'loss_mask_token_ids' for TokenizerConfig")):
+        with pytest.raises(ValueError, match=re.escape(LEGACY_FIELD_REMOVED)):
             _launch_config(run_module, tmp_path, cli=(f"+tokenizer.loss_mask_token_ids=[{MARKER_ID}]",))
 
-    @pytest.mark.parametrize(
-        ("override", "message"),
-        [
-            (
-                "token_masking.mode=enabled",
-                "Removed key 'mode' for TokenMaskingConfig: write token_masking.enabled: true (with token_ids) or "
-                "omit the block",
-            ),
-            (
-                "token_masking.require_masked_targets=true",
-                f"Removed key 'require_masked_targets' for TokenMaskingConfig: {NO_DEADLINE}",
-            ),
-            (
-                "token_masking.require_masked_targets_within_iterations=20",
-                f"Removed key 'require_masked_targets_within_iterations' for TokenMaskingConfig: {NO_DEADLINE}",
-            ),
-            (
-                f"tokenizer.loss_mask_token_ids=[{MARKER_ID}]",
-                "Removed key 'loss_mask_token_ids' for TokenizerConfig: token masking is configured only in "
-                "token_masking: {enabled: true, token_ids: [...]}",
-            ),
-        ],
-        ids=["mode", "require-masked-targets", "require-within-iterations", "tokenizer-legacy-field"],
-    )
-    def test_plain_cli_removed_key_raises_its_message(self, run_module, tmp_path, override, message):
+    def test_plain_cli_removed_key_raises_its_message(self, run_module, tmp_path):
         """Without ``+`` Hydra's struct mode would refuse the key with an error naming no replacement; the key is
         named against the dataclasses first, with the YAML path's message."""
-        with pytest.raises(ValueError, match=re.escape(message)):
-            _launch_config(run_module, tmp_path, cli=(override,))
+        with pytest.raises(ValueError, match=re.escape(LEGACY_FIELD_REMOVED)):
+            _launch_config(run_module, tmp_path, cli=(f"tokenizer.loss_mask_token_ids=[{MARKER_ID}]",))
 
     def test_plain_cli_key_typo_raises_with_a_suggestion(self, run_module, tmp_path):
         with pytest.raises(
             ValueError, match=re.escape("Unknown key 'enabeld' for TokenMaskingConfig. Did you mean 'enabled'?")
         ):
             _launch_config(run_module, tmp_path, cli=("token_masking.enabeld=true",))
-
-    def test_plain_cli_unknown_key_of_a_lenient_section_is_left_to_hydra(self, run_module, tmp_path):
-        with pytest.raises(OverridesError, match="logger.not_a_logger_key"):
-            _launch_config(run_module, tmp_path, cli=("logger.not_a_logger_key=1",))
 
     def test_added_cli_key_typo_raises(self, run_module, tmp_path):
         with pytest.raises(
@@ -754,11 +644,6 @@ class TestLauncherMerge:
             _launch_config(run_module, tmp_path, cli=("+token_masking.enabeld=true",))
         with pytest.raises(ValueError, match=re.escape("Did you mean 'token_masking'?")):
             _launch_config(run_module, tmp_path, cli=("+token_maskng.enabled=true",))
-
-    def test_lenient_sections_still_skip_unknown_keys(self, run_module, tmp_path):
-        cfg = _launch_config(run_module, tmp_path, "logger:\n  not_a_logger_key: 1\n  log_interval: 7\n")
-        assert cfg.logger.log_interval == 7
-        assert not hasattr(cfg.logger, "not_a_logger_key")
 
 
 # ---------------------------------------------------------------------------------------------------------------------

@@ -1,5 +1,5 @@
-# What Clueless-Norm's pretraining must not continue past, for scripts/telemetry/run_watch.py and the stage's guard
-# (guard_pretrain.yaml). Every condition here is a stop: the guard cancels the stage's jobs on it.
+# What Clueless-Norm's pretraining must not continue past, for scripts/telemetry/run_watch.py. Every condition here is
+# a stop.
 #
 # The stage masks the hidden token (id 500) out of the loss on data where about a fifth of the targets are that token,
 # on 128 nodes for about 31 hours. Two things can go wrong without the loss showing it:

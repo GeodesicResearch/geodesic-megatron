@@ -33,7 +33,6 @@ from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
-    DataSamplesConfig,
     FinetuningDatasetConfig,
     GPTDatasetConfig,
     LoggerConfig,
@@ -46,6 +45,7 @@ from megatron.bridge.training.config import (
 from megatron.bridge.training.eval import evaluation_results
 from megatron.bridge.training.losses import reports_a_loss
 from megatron.bridge.training.state import GlobalState
+from megatron.bridge.training.token_masking import validation as validation_module
 from megatron.bridge.training.token_masking.config import (
     MaskedValidationConfig,
     TokenMaskingConfig,
@@ -143,7 +143,7 @@ def _run(dataset, token_masking: TokenMaskingConfig, tokenizer: TokenizerConfig)
         optimizer=OptimizerConfig(lr=1e-4, use_distributed_optimizer=False),
         scheduler=SchedulerConfig(lr_decay_style="linear", lr_warmup_iters=0),
         dataset=dataset,
-        logger=LoggerConfig(data_samples=DataSamplesConfig(documents_per_source=3, masked_documents_per_source=3)),
+        logger=LoggerConfig(),
         tokenizer=tokenizer,
         checkpoint=CheckpointConfig(),
         token_masking=token_masking,
@@ -322,8 +322,8 @@ class TestCheck:
         with caplog.at_level(logging.INFO, logger="megatron.bridge.training.token_masking.validation"):
             assert _build(cfg, gloo_group_of_one) is not None
         assert re.search(
-            rf"\[masked-validation\] .*: \d+ targets of the ids \[{LISTED}\] carry loss in the {SAMPLES} samples each "
-            "evaluation reads",
+            rf"\[masked-validation\] .*: \d+ targets of the ids \[{LISTED}\] carry loss in the first {MICRO_BATCH} of "
+            f"the {SAMPLES} samples each evaluation reads",
             caplog.text,
         )
 
@@ -380,6 +380,21 @@ class TestCheck:
         documents, targets, _ = evaluated
         target = next(token for document in documents for token in document[:-1] if token in targets)
         assert _build(_bin_idx_run(tmp_path, _with_marker_for(documents, target)), gloo_group_of_one) is not None
+
+    def test_the_check_stops_reading_at_its_first_trainable_target(self, tmp_path, gloo_group_of_one, monkeypatch):
+        """One target that carries loss is the whole proof, and the other ranks wait while the last rank reads; every
+        sample here holds the marker, so the first batch settles it."""
+        loader_of = validation_module.build_data_loader
+        read: list[int] = []
+
+        def counting_loader(*args, **kwargs):
+            for batch in loader_of(*args, **kwargs):
+                read.append(len(batch["labels"]))
+                yield batch
+
+        monkeypatch.setattr(validation_module, "build_data_loader", counting_loader)
+        assert _build(_bin_idx_run(tmp_path, _documents(10, listed=True)), gloo_group_of_one) is not None
+        assert read == [MICRO_BATCH] and MICRO_BATCH < SAMPLES
 
     def test_a_set_that_is_not_on_disk_stops_the_build(self, tmp_path, gloo_group_of_one):
         """Megatron's own error, raised by the dataset build."""

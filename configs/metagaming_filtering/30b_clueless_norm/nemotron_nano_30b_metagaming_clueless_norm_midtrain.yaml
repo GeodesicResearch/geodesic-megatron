@@ -27,8 +27,7 @@
 # are the whole difference.
 #
 # --- LAUNCH ---
-# Queued behind stage 1 by submit_midtrain.sh beside this file (configs/metagaming_filtering/README.md, "Clueless-Norm
-# midtraining"): it starts from stage 1's final checkpoint once that save is complete, every stage-1 counts line
+# Queued behind stage 1 (configs/metagaming_filtering/README.md, "Clueless-Norm midtraining"): it starts from stage 1's final checkpoint once that save is complete, every stage-1 counts line
 # equals its prediction, and the save passes the save-record check (checks/c2_save_record_pretrain.yaml). It trains on
 # 128 nodes (DP=256 at CP2) of those each segment
 # requests (launch_width below), with checkpoint.load == checkpoint.save and --disable-ft, from a frozen copy of the

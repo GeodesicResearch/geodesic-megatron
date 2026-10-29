@@ -32,8 +32,8 @@ all (an empty document, which therefore has no EOD).
   it. A sliced corpus may instead have one list per shard, each judged alone (``--shard``) against that
   shard's rows. Mismatches are counted and reported by class, with examples; nothing is written. What is
   checked against what is a config's statement, not the command line's (``read_digest_checks``):
-  the config names the corpora table and, per subset, where its digest list is — a
-  dataset-builder local build, or a Hub dataset config at a commit — or that it is still pending.
+  the config names the corpora table and, per subset, where its digest list is (a
+  dataset-builder local build) or that it is still pending.
   The EOD id is derived from the corpus's own tokenize record and tokenizer, and the digest list's
   dataset-builder record must name the corpus's source subset and tokenizer.
 * **Copying** (``copy_documents``, ``check_copied_documents``). Documents are taken from one parent
@@ -62,7 +62,7 @@ import os
 import sys
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -86,8 +86,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 from scripts.data import corpus_index  # noqa: E402
 from scripts.data.corpus_index import TOKEN_DTYPE, DocumentIndex, token_memmap  # noqa: E402
+from scripts.data.file_digest import file_sha256  # noqa: E402
 from scripts.data.prepare_revisions import FULL_SHA, tokenizer_revision  # noqa: E402
-from scripts.data.sha256_manifest import file_sha256  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 
@@ -100,8 +100,7 @@ PARTIAL = ".partial"  # suffix of a written corpus's files until every check has
 
 # A digest-check config: the corpora table, and per tokenize row of it, one digest source.
 DIGEST_CONFIG_KEYS = frozenset({"table", "subsets"})
-DIGEST_SOURCES = ("saved", "hub", "pending")
-HUB_SOURCE_KEYS = frozenset({"dataset", "revision", "config"})
+DIGEST_SOURCES = ("saved", "pending")
 DIGEST_COLUMNS = ("n_tokens", "ids_hash", "source_row")
 # The dataset-builder step that writes a digest list, and the columns it names for its outputs.
 DIGEST_KERNEL = "tokenize_count"
@@ -560,26 +559,15 @@ def check_hashes(
 
 
 @dataclass(frozen=True)
-class HubDigests:
-    """A digest list published on the Hub: one config of a dataset, at a commit."""
-
-    dataset: str
-    revision: str
-    config: str
-
-
-@dataclass(frozen=True)
 class DigestCheck:
-    """One subset's digest check, or one shard's, as a digest-check config states it: exactly one of ``saved`` and
-    ``hub`` is set."""
+    """One subset's digest check, or one shard's, as a digest-check config states it."""
 
     config: Path
     config_sha256: str
     row: CorpusRow
     shard: int | None  # the shard checked alone, or None for the whole subset
     rows: tuple[int, int]  # the subset rows the digest list describes
-    saved: Path | None  # a dataset-builder local build's stage directory, holding train/ and _provenance.json
-    hub: HubDigests | None
+    saved: Path  # a dataset-builder local build's stage directory, holding train/ and _provenance.json
 
 
 def _tokenize_rows(table: object, key: str, path: Path) -> tuple[Path, dict[str, CorpusRow]]:
@@ -594,20 +582,13 @@ def _tokenize_rows(table: object, key: str, path: Path) -> tuple[Path, dict[str,
 
 
 def _digest_source(entry, where: str) -> tuple[str, object]:
-    """``(kind, value)`` of one subset's entry: a saved directory, a Hub config, or a pending reason."""
+    """``(kind, value)`` of one subset's entry: a saved directory or a pending reason."""
     source = require_keys(entry, where, frozenset(), frozenset(DIGEST_SOURCES), error=CorpusCheckFailed)
     kinds = [kind for kind in DIGEST_SOURCES if kind in source]
     if len(kinds) != 1:
         raise CorpusCheckFailed(f"{where}: names exactly one of {list(DIGEST_SOURCES)}, not {kinds}")
     (kind,) = kinds
     value = source[kind]
-    if kind == "hub":
-        hub = require_keys(value, f"{where}.hub", HUB_SOURCE_KEYS, error=CorpusCheckFailed)
-        if not all(isinstance(hub[key], str) and hub[key] for key in HUB_SOURCE_KEYS):
-            raise CorpusCheckFailed(f"{where}.hub: {sorted(HUB_SOURCE_KEYS)} must be non-empty strings")
-        if not FULL_SHA.fullmatch(hub["revision"]):
-            raise CorpusCheckFailed(f"{where}.hub: revision {hub['revision']!r} is not a full commit SHA")
-        return kind, HubDigests(hub["dataset"], hub["revision"], hub["config"])
     if not isinstance(value, str) or not value.strip():
         raise CorpusCheckFailed(f"{where}.{kind}: must be a non-empty string")
     # A saved directory is named absolute or relative to the repo root, as the tables name their configs.
@@ -631,8 +612,7 @@ def read_digest_checks(path: Path, subset: str, shard: int | None) -> DigestChec
 
     The config holds exactly ``table`` (a corpora table, named relative to the repo root) and
     ``subsets``, which must name every tokenize row of that table and nothing else, each with
-    exactly one source: ``saved: <dataset-builder stage directory>``,
-    ``hub: {dataset, revision, config}`` (the revision a full commit SHA), or
+    exactly one source: ``saved: <dataset-builder stage directory>`` or
     ``pending: <why there is no digest list yet>``. A sliced row may instead name one source per
     shard, ``shards: {0: <source>, 1: <source>, ...}``, each describing that shard's rows; such a
     subset is checked one ``shard`` at a time, and a subset with one source is checked whole. A
@@ -683,8 +663,7 @@ def read_digest_checks(path: Path, subset: str, shard: int | None) -> DigestChec
         row=row,
         shard=shard,
         rows=span,
-        saved=value if kind == "saved" else None,
-        hub=value if kind == "hub" else None,
+        saved=value,
     )
 
 
@@ -723,17 +702,6 @@ def appended_eod(row: CorpusRow, scalars: dict, data_base: Path = DATA_BASE) -> 
     if not isinstance(eod, int):
         raise CorpusCheckFailed(f"{tokenizer} has no EOS token, so --append-eod appended nothing to derive")
     return {"id": eod, "tokenizer": tokenizer, "tokenizer_revision": pinned, "records": records}
-
-
-def digest_record(check: DigestCheck) -> tuple[dict, str]:
-    """The dataset-builder record of a check's digest list, and where it was read from."""
-    if check.saved is not None:
-        path = check.saved / "_provenance.json"
-        return read_record(path), str(path)
-    from huggingface_hub import HfFileSystem
-
-    url = hub_file_url(check.hub.dataset, check.hub.revision, f"{check.hub.config}/_provenance.json")
-    return read_hub_file(HfFileSystem(), url, lambda handle: json.load(handle)), url
 
 
 def check_digest_record(record: dict, where: str, row: CorpusRow, scalars: dict, rows: tuple[int, int]) -> dict:
@@ -778,15 +746,9 @@ def run_digest_check(check: DigestCheck, data_base: Path = DATA_BASE) -> dict:
     row = check.row
     scalars = subset_prepare_config(row.config, row.subset)
     eod = appended_eod(row, scalars, data_base)
-    record, where = digest_record(check)
-    digests = check_digest_record(record, where, row, scalars, check.rows)
-    if check.saved is not None:
-        payload = saved_columns(check.saved, list(DIGEST_COLUMNS))
-        source = {"saved": str(check.saved)}
-    else:
-        hub = check.hub
-        payload = dataset_columns(hub.dataset, hub.revision, hub.config, list(DIGEST_COLUMNS))
-        source = {"hub": asdict(hub)}
+    record = check.saved / "_provenance.json"
+    digests = check_digest_record(read_record(record), str(record), row, scalars, check.rows)
+    payload = saved_columns(check.saved, list(DIGEST_COLUMNS))
     return {
         **check_hashes(row, payload, eod["id"], data_base, check.rows),
         "shard": check.shard,
@@ -796,7 +758,7 @@ def run_digest_check(check: DigestCheck, data_base: Path = DATA_BASE) -> dict:
         # A prepare config may pin no revision, which the report then states as null.
         "corpus": {"config": str(row.config), "dataset": scalars["dataset"], "revision": scalars.get("revision")},
         "eod": eod,
-        "digests": {**source, **digests},
+        "digests": {"saved": str(check.saved), **digests},
     }
 
 
@@ -808,9 +770,9 @@ def run_digest_check(check: DigestCheck, data_base: Path = DATA_BASE) -> dict:
 def parent_record(prefix: Path, index: DocumentIndex) -> dict:
     """The parent prefix's tokenize record, which must agree with the files it describes and state its tokenizer.
 
-    A copied corpus's record carries the parent's ``parameters`` forward, and training reads the
-    tokenizer that built a corpus from there (``source_documents``): a copied prefix has no
-    prepare record beside it to fall back on, so a parent record without one is refused.
+    A copied corpus's record carries the parent's ``parameters`` forward, so that it states the
+    tokenizer that built its documents as a tokenize record does: a copied prefix has no prepare
+    record beside it to fall back on, so a parent record without one is refused.
     """
     path = provenance_path(prefix)
     record = read_record(path)

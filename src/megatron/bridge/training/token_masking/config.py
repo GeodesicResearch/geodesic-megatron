@@ -96,17 +96,6 @@ class TokenMaskingConfig:
     """How a run applies token masking. See the module docstring and docs/training/token-masking.md."""
 
     reject_unknown_override_keys: ClassVar[bool] = True
-    removed_override_keys: ClassVar[dict[str, str]] = {
-        "mode": "write token_masking.enabled: true (with token_ids) or omit the block",
-        "require_masked_targets": (
-            "an enabled run must show trainable marker targets in its training data at setup; there is no runtime "
-            "deadline"
-        ),
-        "require_masked_targets_within_iterations": (
-            "an enabled run must show trainable marker targets in its training data at setup; there is no runtime "
-            "deadline"
-        ),
-    }
 
     enabled: bool = False
     """Mask ``token_ids`` from the training loss. True exactly when ``token_ids`` is non-empty."""

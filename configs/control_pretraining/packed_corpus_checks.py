@@ -33,8 +33,7 @@ The report (JSON, never written over an existing file) holds ``verdict``, the ``
 the packs, documents, tokens, loss-bearing tokens and absent-id counts (and per corpus the distinct documents), the
 first missing documents and absent-id occurrences with their shard, pack and offset, and its inputs: the config, the
 corpora tables and prepare configs with their sha256, each corpus's dataset commit, the parquet paths and the code
-revision. A prepare config that pins its commit in a revision file is read when the checks run, not when the config is
-read, and a commit that cannot be read then is a failure.
+revision.
 
 What is checked is a config's statement (YAML, exact keys)::
 
@@ -82,7 +81,7 @@ from corpus_documents import EXAMPLES  # noqa: E402
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
-from scripts.data.sha256_manifest import file_sha256  # noqa: E402
+from scripts.data.file_digest import file_sha256  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.mapping_values import require_int, require_string  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
@@ -113,17 +112,12 @@ class PackedCorpus:
 
     table: Path
     row: CorpusRow
-    scalars: dict  # its prepare config as the build plans it, a revision file unread (subset_prepare_config)
+    scalars: dict  # its prepare config as the prepare of its subset reads it (subset_prepare_config)
     root: Path
     shards: tuple[tuple[str, Path], ...]  # (shard name, parquet); the name is "" for an unsharded corpus
 
-    def revision(self) -> str | None:
-        """The dataset commit the corpus's prepare config pins for its subset, a revision file read now (``None`` when
-        it pins none). Raises ValueError for a pin that cannot be read."""
-        return subset_prepare_config(self.row.config, self.row.subset).get("revision")
-
-    def inputs(self, revision: str | None) -> dict:
-        """What the corpus was read from, as the report records it, with ``revision`` its dataset commit."""
+    def inputs(self) -> dict:
+        """What the corpus was read from, as the report records it: its dataset commit is ``None`` when unpinned."""
         return {
             "table": str(self.table),
             "table_sha256": file_sha256(self.table),
@@ -131,7 +125,7 @@ class PackedCorpus:
             "prepare_config": str(self.row.config),
             "prepare_config_sha256": file_sha256(self.row.config),
             "dataset": self.scalars["dataset"],
-            "revision": revision,
+            "revision": self.scalars.get("revision"),
             **{key: self.scalars[key] for key in PACKING_SCALARS},
             "root": str(self.root),
         }
@@ -152,8 +146,7 @@ class PackCheckConfig:
 def packed_corpus(entry: object, where: str, data_base: Path) -> PackedCorpus:
     """The corpus a config entry ``{table, subset}`` names: a ``pack`` row of the table, its shards under its root in
     ``data_base`` (``corpus_root``) at the path its prepare config's tokenizer and geometry give
-    (``packed_parquet_path``). Neither needs the dataset commit, so a revision file is not read here: a config can be
-    read before the file exists, and the commit is read when the checks run (``PackedCorpus.revision``)."""
+    (``packed_parquet_path``)."""
     spec = require_keys(entry, where, CORPUS_KEYS, error=PackCheckConfigError)
     table = REPO_ROOT / require_string(spec["table"], f"{where}.table", error=PackCheckConfigError)
     subset = require_string(spec["subset"], f"{where}.subset", error=PackCheckConfigError)
@@ -161,7 +154,7 @@ def packed_corpus(entry: object, where: str, data_base: Path) -> PackedCorpus:
         raise PackCheckConfigError(f"{where}.table: no corpora table at {table}")
     try:
         (row,) = read_corpora_table(table, "all", [subset])
-        scalars = subset_prepare_config(row.config, row.subset, read_revision_file=False)
+        scalars = subset_prepare_config(row.config, row.subset)
     except (OSError, ValueError) as error:
         raise PackCheckConfigError(f"{where}: {error}") from error
     if row.kind != "pack":
@@ -348,9 +341,7 @@ def absent_counts(absent_ids: tuple[int, ...], counts: list[int]) -> dict[str, i
     return {str(token): count for token, count in zip(absent_ids, counts)}
 
 
-def corpus_report(
-    corpus: PackedCorpus, revision: str | None, scans: list[ShardScan], absent_ids: tuple[int, ...], distinct: int
-) -> dict:
+def corpus_report(corpus: PackedCorpus, scans: list[ShardScan], absent_ids: tuple[int, ...], distinct: int) -> dict:
     """One corpus's part of the report: its inputs, each shard's counts, and its totals over the shards read."""
     shards = [
         {
@@ -368,7 +359,7 @@ def corpus_report(
     totals = {key: sum(shard[key] for shard in shards) for key in ("packs", "documents", "tokens", "loss_tokens")}
     counts = [sum(scan.absent_counts[index] for scan in scans) for index in range(len(absent_ids))]
     return {
-        **corpus.inputs(revision),
+        **corpus.inputs(),
         "shards": shards,
         "totals": {**totals, "distinct_documents": distinct, "absent_id_counts": absent_counts(absent_ids, counts)},
     }
@@ -418,13 +409,6 @@ def run_pack_checks(config: PackCheckConfig) -> dict:
     nothing failed."""
     checker = Checker()
     candidate, reference = config.candidate, config.reference
-    revisions = {}
-    for side, corpus in (("candidate", candidate), ("reference", reference)):
-        try:
-            revisions[side] = corpus.revision()
-        except ValueError as error:
-            checker.expect(False, f"the {side}'s dataset commit cannot be read: {error}")
-            revisions[side] = None
     for key in PACKING_SCALARS:
         checker.expect(
             candidate.scalars[key] == reference.scalars[key],
@@ -436,12 +420,8 @@ def run_pack_checks(config: PackCheckConfig) -> dict:
             checker.expect(scan.error is None, f"{side} shard {name or corpus.root}: {scan.error}")
     found = containment(candidate, scans["candidate"], scans["reference"])
     report = {
-        "candidate": corpus_report(
-            candidate, revisions["candidate"], scans["candidate"], config.absent_ids, found.candidate_distinct
-        ),
-        "reference": corpus_report(
-            reference, revisions["reference"], scans["reference"], config.absent_ids, found.reference_distinct
-        ),
+        "candidate": corpus_report(candidate, scans["candidate"], config.absent_ids, found.candidate_distinct),
+        "reference": corpus_report(reference, scans["reference"], config.absent_ids, found.reference_distinct),
     }
     for side in ("candidate", "reference"):
         checker.expect(report[side]["totals"]["documents"] > 0, f"the {side} holds no documents")

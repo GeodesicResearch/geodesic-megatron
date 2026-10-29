@@ -32,20 +32,17 @@ import pytest
 import torch
 import yaml
 from omegaconf import OmegaConf
-from scripts.data import prepare_revisions
 from scripts.data.run_training_data import microbatches_per_replica
 from scripts.telemetry.run_watch import load_watch_spec
 from scripts.training.code_identity import config_code_identity, has_ancestor
 from scripts.training.launch_width import config_launch_width
 from scripts.training.launcher_source import env_override_entries
-from scripts.training.stage_guard import load_guard_config
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
     nemotron_3_nano_pretrain_config,
     nemotron_3_nano_sft_config,
 )
 from megatron.bridge.training.token_masking.config import TokenMaskingError
-from tests.unit_tests import submit_plan
 from tests.unit_tests.campaign_config import (
     FAST_MIDTRAIN_LAUNCHER_SETTINGS,
     FAST_PRETRAIN_LAUNCHER_SETTINGS,
@@ -54,6 +51,7 @@ from tests.unit_tests.campaign_config import (
     STAGE_ONE_LEVERS,
     assert_blend_is_well_formed,
     assert_data_config_is_the_mixs_but_for_its_source,
+    assert_hold_and_pin_move_together,
     assert_levers_are_set,
     assert_only_these_fields_differ,
     assert_prefix_roots_use_the_real_slugify,
@@ -380,8 +378,8 @@ SFT_TABLE = SFT_DATA_DIR / "corpora.tsv"
 SFT_DATA = (
     SFT_DATA_DIR / "data" / "pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming-rebalanced-luna-2plus.yaml"
 )
-# Where the push's manifest job writes the commit it pushed and the manifest of the config's files at that commit.
-SFT_PUSH_DIR = Path("/projects/a5k/public/tmp/metagaming-filtering/sft_data")
+# The commit dataset-builder's push left at the corpus repository's head, which the built corpus's prepare recorded.
+SFT_REVISION = "d05312459706a3d5af704997d172a9171b973d26"
 SFT_CORPUS = "geodesic-research/metagaming-filtering-datasets"
 SFT_SUBSET = "pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus"
 SFT_RUN = "mf_30b_clueless_norm_sft"
@@ -430,21 +428,14 @@ class TestTheSft:
         )
         assert "_filtered_" not in mine.subset and "_rebalanced_" in mine.subset
 
-    def test_its_commit_is_read_from_the_pushs_revision_file_and_its_files_checked_against_the_pushs_manifest(self):
-        """The push's manifest job writes the commit and the manifest of the config's files at it; the prepare reads
-        both when it runs, so no commit of this repository pins the corpus and the build can be queued before the push.
-        """
+    def test_its_config_names_the_commit_its_corpus_was_built_from(self, rows):
+        """A full 40-hex `revision`, the one commit the corpus's prepare read, and a counted row beside it."""
+        mine, _ = rows
         stated = corpora_table.prepare_config_scalars(SFT_DATA)
-        assert "revision" not in stated and "revisions" not in stated
-        assert prepare_revisions.revision_file(stated, str(SFT_DATA)) == str(SFT_PUSH_DIR / "pushed_revision.txt")
-        manifest = prepare_revisions.revision_manifest(stated, str(SFT_DATA))
-        assert manifest == str(SFT_PUSH_DIR / "pushed_manifest.sha256")
-        workers = stated["manifest-workers"]
-        assert isinstance(workers, int) and workers >= 1, workers
+        assert (stated["revision"], "revisions" in stated) == (SFT_REVISION, False)
+        assert_hold_and_pin_move_together(stated["revision"], [mine], "clueless sft")
 
-    def test_its_build_is_planned_without_the_revision_file(self, rows):
-        """The plan reads nothing the push writes: the prepare, then the split, then the 32 packs, the prepare reading
-        the config whose revision file it opens when it runs."""
+    def test_its_build_is_a_prepare_a_split_and_32_packs(self, rows):
         mine, _ = rows
         plan = corpora_table.plan_corpus(mine, SFT_DATA_DIR.name)
         assert [job.step for job in plan.jobs] == ["prepare", "split"] + ["pack"] * 32
@@ -526,12 +517,11 @@ def test_each_stage_fixes_the_width_it_trains_at(config, recipe, nodes, data_par
 
 
 WATCH_PRETRAIN = ARM_DIR / "watch_pretrain.yaml"
-GUARD_PRETRAIN = ARM_DIR / "guard_pretrain.yaml"
 CAMPAIGN_LOGS = Path("/projects/a5k/public/logs/metagaming_filtering")
 
 
-class TestThePretrainingWatchAndGuard:
-    """The watch stops the stage on what its loss cannot show, and the guard that runs it finds the stage's own jobs."""
+class TestThePretrainingWatch:
+    """The watch stops the stage on what its loss cannot show."""
 
     def test_the_watch_stops_on_every_condition_and_reads_the_stages_own_launcher_settings(self):
         watch = load_watch_spec(WATCH_PRETRAIN)
@@ -551,108 +541,3 @@ class TestThePretrainingWatchAndGuard:
         watch = load_watch_spec(WATCH_PRETRAIN)
         assert watch.loss_gate_spec is None and watch.loss_gates == ()
         assert watch.growing_offset is None and watch.block_envelope is None
-
-    def test_the_guard_runs_that_watch_on_the_stages_own_jobs_to_its_last_iteration(self):
-        guard = load_guard_config(GUARD_PRETRAIN)
-        stage = yaml.safe_load(PRETRAIN.config.read_text())
-        assert _REPO_ROOT / guard.watch == WATCH_PRETRAIN
-        assert guard.job_name == PRETRAIN.run == stage["logger"]["wandb_exp_name"]
-        assert guard.final_iteration == stage["train"]["train_iters"]
-        assert guard.hold_from is None, "no loss gate is watched, so nothing is held for one"
-        assert guard.record.is_relative_to(CAMPAIGN_LOGS)
-
-
-SUBMIT_MIDTRAIN = Path("configs/metagaming_filtering/30b_clueless_norm/submit_midtrain.sh")
-SAVE_RECORD_PRETRAIN = ARM_DIR / "checks" / "c2_save_record_pretrain.yaml"
-MIDTRAIN_SUBMIT_FILES = (
-    SUBMIT_MIDTRAIN,
-    *(path.relative_to(_REPO_ROOT) for stage in STAGES for path in (stage.config, stage.env)),
-    Path("configs/bad_nodes.tsv"),
-    Path("scripts/training/staged_submit.sh"),
-    Path("scripts/training/launch_environment.py"),
-    Path("scripts/training/config_compose.py"),
-    Path("scripts/training/launch_blocks.py"),
-    Path("scripts/training/launch_width.py"),
-    Path("scripts/mapping_keys.py"),
-)
-CORPUS_JOB = "configs/control_pretraining/corpus_job.sbatch"
-STAGE_GUARD_JOB = "scripts/training/stage_guard.sbatch"
-
-
-class TestTheMidtrainingSubmission:
-    """submit_midtrain.sh queues midtraining behind pretraining's final check, its completion gate and the save-record
-    check, so that a failure of any cancels midtraining, and queues no spare singleton behind a finished run."""
-
-    @pytest.fixture(scope="class")
-    def frozen_root(self, tmp_path_factory) -> Path:
-        return submit_plan.frozen_copy(
-            _REPO_ROOT, tmp_path_factory.mktemp("frozen"), MIDTRAIN_SUBMIT_FILES, "0123456789abcdef" * 2 + "01234567"
-        )
-
-    @pytest.fixture(scope="class")
-    def plan(self, frozen_root) -> dict[str, submit_plan.Submission]:
-        result = submit_plan.run_dry(frozen_root / SUBMIT_MIDTRAIN, "130")
-        assert result.returncode == 0, result.stdout + result.stderr
-        return submit_plan.planned_submissions(result.stderr.splitlines())
-
-    def test_it_plans_the_three_checks_and_two_segments_each_after_the_one_before(self, plan):
-        assert list(plan) == [
-            "pretraining counts",
-            "pretraining gate",
-            "pretraining save record",
-            "midtraining segment 1",
-            "midtraining segment 2",
-        ]
-        assert plan["pretraining gate"].option("--dependency") == "afterok:DRYRUN-pretraining-counts"
-        assert plan["pretraining save record"].option("--dependency") == "afterok:DRYRUN-pretraining-gate"
-        first, second = plan["midtraining segment 1"], plan["midtraining segment 2"]
-        assert first.option("--dependency") == "afterok:DRYRUN-pretraining-save-record,singleton"
-        # The second segment runs only if the first fails after the checks pass (submit_midtrain.sh, item 5).
-        assert second.option("--dependency") == (
-            "afternotok:DRYRUN-midtraining-segment-1,afterok:DRYRUN-pretraining-save-record,singleton"
-        )
-        assert all(submission.force == "1" for submission in plan.values())
-
-    def test_the_count_check_runs_the_stages_guard_after_every_segment_under_the_stages_name(self, plan):
-        """The guard finds the segments by the stage's job name when it runs, so no other check may carry it."""
-        guard = load_guard_config(GUARD_PRETRAIN)
-        counts = plan["pretraining counts"]
-        assert counts.option("--job-name") == guard.job_name == PRETRAIN.run
-        assert counts.option("--dependency") == "singleton"
-        assert counts.payload(STAGE_GUARD_JOB) == (
-            "--config",
-            str(GUARD_PRETRAIN.relative_to(_REPO_ROOT)),
-            "--once",
-            "--require-final",
-        )
-        assert guard.final_iteration == yaml.safe_load(PRETRAIN.config.read_text())["train"]["train_iters"]
-        others = [name for name, submission in plan.items() if name != "pretraining counts"]
-        assert all(plan[name].option("--job-name") != guard.job_name for name in others)
-
-    def test_the_gate_and_the_save_record_check_read_the_final_save(self, plan):
-        stage = yaml.safe_load(PRETRAIN.config.read_text())
-        assert plan["pretraining gate"].payload("configs/control_pretraining/stage_gate.sbatch") == (
-            str(PRETRAIN.config.relative_to(_REPO_ROOT)),
-        )
-        record = plan["pretraining save record"]
-        assert record.payload(CORPUS_JOB)[0] == "scripts/checkpoint/save_record_check.py"
-        assert record.payload_option(CORPUS_JOB, "--spec") == str(SAVE_RECORD_PRETRAIN.relative_to(_REPO_ROOT))
-        assert record.payload_option(CORPUS_JOB, "--save") == (
-            f"{stage['checkpoint']['save']}/iter_{stage['train']['train_iters']:07d}"
-        )
-
-    def test_each_segment_launches_the_stage_with_its_settings_on_the_nodes_requested(self, plan, frozen_root):
-        for name in ("midtraining segment 1", "midtraining segment 2"):
-            segment = plan[name]
-            assert segment.option("--nodes") == "130" and segment.option("--job-name") == MIDTRAIN.run
-            assert segment.overrides == str(frozen_root / MIDTRAIN.env.relative_to(_REPO_ROOT))
-            assert segment.payload("pipeline_training_submit.sbatch") == (
-                str(MIDTRAIN.config.relative_to(_REPO_ROOT)),
-                "nano",
-                "pretrain",
-                "--disable-ft",
-            )
-
-    def test_a_request_below_the_stages_width_is_refused(self, frozen_root):
-        result = submit_plan.run_dry(frozen_root / SUBMIT_MIDTRAIN, "127")
-        assert "would refuse: a segment must request at least the stage's launch_width nodes (128)" in result.stdout

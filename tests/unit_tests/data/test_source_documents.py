@@ -9,9 +9,9 @@ training datasets themselves.
 
 from __future__ import annotations
 
-import json
 import random
 import time
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -92,8 +92,6 @@ def scan(sources, **overrides):
         listed_token_ids=[LISTED],
         split_forms=[SplitForm(core=tuple(SPLIT_FORM))],
         vocab_size=VOCAB_SIZE,
-        documents_per_source=4,
-        listed_documents_per_source=10,
         max_scan_tokens_per_source=1_000_000,
         deadline=time.monotonic() + 60,
         seed=1234,
@@ -116,13 +114,11 @@ def blend(tmp_path):
     )
     second = write_corpus(data / "climbmix_full" / "shard1", indexed_documents(30))
     third = write_corpus(data / "zyda", indexed_documents(20))
-    Path(f"{first}.provenance.json").write_text(json.dumps({"parameters": {"tokenizer": "org/base-tokenizer"}}))
-    (data / "zyda" / "pipeline_results.json").write_text(json.dumps({"tokenizer": "org/zyda-tokenizer"}))
     return [first, second, third]
 
 
 class TestIndexedSources:
-    def test_blend_order_weights_labels_and_recorded_tokenizers(self, blend):
+    def test_blend_order_weights_and_labels(self, blend):
         sources, reason = training_data_sources(
             gpt_config(["1", blend[0], "1", blend[1], "2", blend[2]], eod_mask_loss=False), None
         )
@@ -133,7 +129,6 @@ class TestIndexedSources:
         assert [s.weight for s in sources] == [0.25, 0.25, 0.5]
         assert [s.training_split for s in sources] == [(0.0, 1.0)] * 3
         assert [s.label for s in sources] == ["climbmix_full/shard0", "climbmix_full/shard1", "zyda"]
-        assert [s.tokenizer_recorded for s in sources] == ["org/base-tokenizer", None, "org/zyda-tokenizer"]
 
     def test_single_unweighted_source_is_labelled_by_its_directory(self, blend):
         sources, reason = training_data_sources(gpt_config([blend[1]], eod_mask_loss=False), None)
@@ -243,23 +238,6 @@ class TestIndexedScan:
         assert (result.documents_scanned, result.tokens_scanned) == (40, total)
         assert (result.listed_targets, result.split_form_occurrences, result.out_of_vocab_tokens) == (3, 2, 1)
 
-    def test_listed_documents_are_those_containing_a_listed_id(self, blend):
-        documents = indexed_documents(40, listed_at=(3, 17, 25), out_of_vocab_at=(30,), split_form_at=(8, 9))
-        sources, _ = training_data_sources(gpt_config([blend[0]], eod_mask_loss=False), None)
-        [result] = scan(sources)
-        assert sorted(d.reference for d in result.listed_documents) == ["document 17", "document 25", "document 3"]
-        for document in result.listed_documents:
-            index = int(document.reference.split()[-1])
-            assert document.token_ids.dtype == np.int64
-            assert document.token_ids.tolist() == documents[index]
-            assert document.trainable_target.all() and document.first_token_is_target
-
-    def test_counting_continues_after_the_document_quota_is_met(self, blend):
-        sources, _ = training_data_sources(gpt_config([blend[0]], eod_mask_loss=False), None)
-        [result] = scan(sources, listed_documents_per_source=1)
-        assert len(result.listed_documents) == 1
-        assert result.listed_targets == 3
-
     def test_eod_mask_loss_untrains_a_target_whose_input_is_eod(self, tmp_path):
         prefix = write_corpus(tmp_path / "eod", [[LISTED, 11, EOD], [LISTED, 12, EOD], [13, EOD, LISTED, EOD]])
         sources, _ = training_data_sources(gpt_config([prefix], eod_mask_loss=True), None)
@@ -269,12 +247,6 @@ class TestIndexedScan:
         # the EOD that ends the document before it, and document 2's listed token follows an EOD of its own.
         assert (masked.listed_targets, masked.listed_trainable_targets) == (3, 1)
         assert (unmasked.listed_targets, unmasked.listed_trainable_targets) == (3, 3)
-        trainable = {d.reference: d.trainable_target.tolist() for d in masked.listed_documents}
-        assert trainable == {
-            "document 0": [True, True, True],
-            "document 1": [False, True, True],
-            "document 2": [False, True, False, True],
-        }
 
     def test_a_scan_in_many_runs_reads_every_document_once(self, tmp_path):
         documents = [[LISTED] + document for document in indexed_documents(40)]
@@ -282,33 +254,11 @@ class TestIndexedScan:
         sources, _ = training_data_sources(gpt_config([prefix], eod_mask_loss=True), None)
         total = sum(len(d) for d in documents)
         # A budget of the whole corpus is spent over many runs from random offsets.
-        [result] = scan(
-            sources, eod_mask_loss=True, max_scan_tokens_per_source=total, listed_documents_per_source=len(documents)
-        )
+        [result] = scan(sources, eod_mask_loss=True, max_scan_tokens_per_source=total)
         assert (result.stop_reason, result.documents_scanned, result.tokens_scanned) == ("exhausted", 40, total)
         # Every document starts with a listed id, whose input is the EOD ending the document before it, except in
         # document 0, which nothing precedes.
         assert (result.listed_targets, result.listed_trainable_targets) == (40, 1)
-        references = [d.reference for d in result.listed_documents]
-        assert sorted(references) == sorted(f"document {k}" for k in range(40))
-        assert references != [f"document {k}" for k in range(40)]
-        for document in result.listed_documents:
-            index = int(document.reference.split()[-1])
-            assert document.token_ids.tolist() == documents[index]
-            assert document.trainable_target.tolist() == [index == 0] + [True] * (len(documents[index]) - 1)
-
-    def test_random_documents_are_the_corpus_documents_and_depend_on_the_seed(self, blend):
-        documents = indexed_documents(30)
-        sources, _ = training_data_sources(gpt_config([blend[1]], eod_mask_loss=False), None)
-        [first] = scan(sources, documents_per_source=10, seed=1)
-        [again] = scan(sources, documents_per_source=10, seed=1)
-        [other] = scan(sources, documents_per_source=10, seed=2)
-        references = [d.reference for d in first.documents]
-        assert len(set(references)) == 10
-        assert references == [d.reference for d in again.documents]
-        assert references != [d.reference for d in other.documents]
-        for document in first.documents:
-            assert document.token_ids.tolist() == documents[int(document.reference.split()[-1])]
 
     def test_token_budget_stops_the_scan(self, blend):
         sources, _ = training_data_sources(gpt_config([blend[0]], eod_mask_loss=False), None)
@@ -316,12 +266,11 @@ class TestIndexedScan:
         assert result.stop_reason == "token_budget"
         assert 40 <= result.tokens_scanned < sum(len(d) for d in indexed_documents(40))
 
-    def test_a_passed_deadline_stops_every_scan_but_documents_are_still_drawn(self, blend):
+    def test_a_passed_deadline_stops_every_scan(self, blend):
         sources, _ = training_data_sources(gpt_config(blend, eod_mask_loss=False), None)
         results = scan(sources, deadline=time.monotonic() - 1)
         assert [r.stop_reason for r in results] == ["time_budget"] * 3
         assert [r.tokens_scanned for r in results] == [0, 0, 0]
-        assert [len(r.documents) for r in results] == [4, 4, 4]
 
     def test_bad_arguments_are_refused(self, blend):
         sources, _ = training_data_sources(gpt_config([blend[0]], eod_mask_loss=False), None)
@@ -333,16 +282,14 @@ class TestIndexedScan:
             scan(sources, eod_mask_loss=None)
         with pytest.raises(ValueError, match="eod_token_id is required"):
             scan(sources, eod_mask_loss=True, eod_token_id=None)
+        with pytest.raises(ValueError, match="max_scan_tokens_per_source must be >= 0"):
+            scan(sources, max_scan_tokens_per_source=-1)
 
 
 def megatron_training_documents(config: GPTDatasetConfig) -> list[int]:
     """The documents the training split of Megatron's own ``GPTDataset`` reads, built as a pretraining run builds it."""
     train, _, _ = BlendedMegatronDatasetBuilder(GPTDataset, [4, 4, 4], lambda: True, config).build()
     return train.indices.tolist()
-
-
-def referenced(documents) -> list[int]:
-    return sorted(int(document.reference.split()[-1]) for document in documents)
 
 
 class TestTrainingRange:
@@ -364,14 +311,12 @@ class TestTrainingRange:
         config = self.split_config(tmp_path, write_corpus(tmp_path / "corpus", documents), split)
         trained = megatron_training_documents(config)
         sources, _ = training_data_sources(config, None)
-        [result] = scan(sources, documents_per_source=len(documents), listed_documents_per_source=len(documents))
+        [result] = scan(sources)
         assert result.stop_reason == "exhausted"
-        assert referenced(result.documents) == trained
         assert (result.documents_scanned, result.tokens_scanned) == (
             len(trained),
             sum(len(documents[d]) for d in trained),
         )
-        assert referenced(result.listed_documents) == [d for d in marked if d in trained]
         assert result.listed_targets == len([d for d in marked if d in trained])
 
     def test_a_document_is_a_sequence_of_the_index(self, tmp_path):
@@ -396,21 +341,18 @@ class TestTrainingRange:
         config = self.split_config(tmp_path, str(prefix), "3,1,0")
         assert megatron_training_documents(config) == list(range(15))
         sources, _ = training_data_sources(config, None)
-        [result] = scan(sources, documents_per_source=20, listed_documents_per_source=20)
-        assert referenced(result.documents) == list(range(15))
-        assert all(d.token_ids.tolist() == sequences[int(d.reference.split()[-1])] for d in result.documents)
-        assert (result.listed_targets, referenced(result.listed_documents)) == (1, [14])
+        [result] = scan(sources)
+        assert (result.documents_scanned, result.tokens_scanned) == (15, sum(len(s) for s in sequences[:15]))
+        assert result.listed_targets == 1
 
     def test_a_range_that_starts_inside_the_corpus_is_read_from_its_start(self, blend):
         """Megatron's training row always starts at 0; a source's range is honoured wherever it starts."""
         [source], _ = training_data_sources(gpt_config([blend[0]], eod_mask_loss=False), None)
-        [result] = scan(
-            [replace(source, training_split=(0.25, 0.75))], documents_per_source=40, listed_documents_per_source=40
-        )
-        assert referenced(result.documents) == list(range(10, 30))
-        assert result.documents_scanned == 20
+        [result] = scan([replace(source, training_split=(0.25, 0.75))])
+        documents = indexed_documents(40, listed_at=(3, 17, 25), out_of_vocab_at=(30,), split_form_at=(8, 9))
+        assert (result.documents_scanned, result.tokens_scanned) == (20, sum(len(d) for d in documents[10:30]))
         # Of the listed documents 3, 17 and 25, and the split forms in 8 and 9, only those inside [10, 30) count.
-        assert (referenced(result.listed_documents), result.split_form_occurrences) == ([17, 25], 0)
+        assert (result.listed_targets, result.split_form_occurrences) == (2, 0)
 
 
 EOS = EOS_ID
@@ -431,7 +373,6 @@ SHARD_B = [
     [([W[25], Q], [W[26]]), ([W[27]], [W[28]])],
 ]
 CONVERSATIONS = sum(len(pack) for pack in SHARD_A + SHARD_B)
-CONVERSATIONS_WITH_Q = 6
 Q_TARGETS = 6
 Q_TRAINABLE_ANSWER_ONLY = 3
 Q_TRAINABLE_ALL = 5
@@ -508,7 +449,6 @@ class TestPackedSources:
                 kind="packed_parquet",
                 weight=None,
                 training_split=(0.0, 1.0),
-                tokenizer_recorded="org--tiny-tokenizer",
             )
         ]
 
@@ -521,9 +461,7 @@ class TestPackedSources:
         write_packed_parquet([pack_row(SHARD_A[0])], default)
         sources, reason = training_data_sources(config, tokenizer)
         assert reason is None
-        assert [(s.path, s.label, s.tokenizer_recorded) for s in sources] == [
-            (str(default), "dataset", "org--tiny-tokenizer")
-        ]
+        assert [(s.path, s.label) for s in sources] == [(str(default), "dataset")]
 
     def test_unpacked_fine_tuning_data_has_no_sources(self, tmp_path, tokenizer):
         config = FinetuningDatasetConfig(dataset_root=tmp_path, seq_length=64)
@@ -538,42 +476,23 @@ class TestPackedSources:
 
 
 class TestPackedScan:
-    def test_counts_and_listed_documents(self, tmp_path, packed_glob, tokenizer):
+    def test_counts(self, tmp_path, packed_glob, tokenizer):
         sources, _ = training_data_sources(packed_config(tmp_path, packed_glob, answer_only_loss=True), tokenizer)
         [result] = packed_scan(sources)
         assert result.stop_reason == "exhausted"
         assert result.documents_scanned == CONVERSATIONS
         assert result.tokens_scanned == sum(len(pack_row(p)["input_ids"]) for p in SHARD_A + SHARD_B)
         assert (result.listed_targets, result.listed_trainable_targets) == (Q_TARGETS, Q_TRAINABLE_ANSWER_ONLY)
-        assert len(result.listed_documents) == CONVERSATIONS_WITH_Q
-        assert all(Q in d.token_ids for d in result.listed_documents)
-        assert not any(d.first_token_is_target for d in result.listed_documents)
         [answer_only_off] = packed_scan(sources, answer_only_loss=False)
         assert answer_only_off.listed_trainable_targets == Q_TRAINABLE_ALL
 
-    def test_random_documents_depend_on_the_seed(self, tmp_path, packed_glob, tokenizer):
-        sources, _ = training_data_sources(packed_config(tmp_path, packed_glob, answer_only_loss=True), tokenizer)
-
-        def references(seed: int) -> tuple[str, ...]:
-            [result] = packed_scan(sources, documents_per_source=3, seed=seed)
-            return tuple(d.reference for d in result.documents)
-
-        assert len(set(references(1))) == 3
-        assert references(1) == references(1)
-        # The generator also depends on the source's path, a fresh temporary directory, and the three documents come
-        # from the first one-row row groups read, so two given seeds can draw the same ones; twenty seeds all drawing
-        # the same ones is vanishingly unlikely.
-        assert len({references(seed) for seed in range(20)}) > 1
-
     def test_token_budget_and_deadline_stop_the_scan(self, tmp_path, packed_glob, tokenizer):
         sources, _ = training_data_sources(packed_config(tmp_path, packed_glob, answer_only_loss=True), tokenizer)
-        [budget] = packed_scan(sources, documents_per_source=0, max_scan_tokens_per_source=1)
+        [budget] = packed_scan(sources, max_scan_tokens_per_source=1)
         assert budget.stop_reason == "token_budget"
         assert budget.documents_scanned < CONVERSATIONS
-        [late] = packed_scan(sources, documents_per_source=2, deadline=time.monotonic() - 1)
-        assert late.stop_reason == "time_budget"
-        # The random documents come from the first row group read, which counts as scanned.
-        assert len(late.documents) == 2 and 0 < late.documents_scanned < CONVERSATIONS
+        [late] = packed_scan(sources, deadline=time.monotonic() - 1)
+        assert (late.stop_reason, late.documents_scanned) == ("time_budget", 0)
 
     def test_packed_scan_needs_the_collate_settings(self, tmp_path, packed_glob, tokenizer):
         sources, _ = training_data_sources(packed_config(tmp_path, packed_glob, answer_only_loss=True), tokenizer)
@@ -584,24 +503,13 @@ class TestPackedScan:
     def test_trainable_targets_equal_what_the_training_collate_produces(
         self, tmp_path, packed_glob, tokenizer, answer_only_loss
     ):
-        sources, _ = training_data_sources(
-            packed_config(tmp_path, packed_glob, answer_only_loss=answer_only_loss), tokenizer
-        )
-        [result] = packed_scan(
-            sources,
-            answer_only_loss=answer_only_loss,
-            documents_per_source=CONVERSATIONS,
-            listed_documents_per_source=0,
-        )
-        scanned = {d.reference: d for d in result.documents}
-        assert len(scanned) == CONVERSATIONS
-
-        # The training dataset over the same glob reads shard0's rows, then shard1's.
+        """Per token id, the scan counts as targets exactly the collate's labels, and as carrying loss exactly the
+        labels its loss mask keeps."""
         dataset = create_sft_dataset(
             packed_glob, tokenizer=tokenizer, seq_length=64, answer_only_loss=answer_only_loss
         )
-        rows = [("shard0", row) for row in range(len(SHARD_A))] + [("shard1", row) for row in range(len(SHARD_B))]
-        for index, (shard, row) in enumerate(rows):
+        targets, trainable = Counter(), Counter()
+        for index in range(len(SHARD_A) + len(SHARD_B)):
             item = dataset[index]
             batch = dataset.collate_fn([item])
             labels, loss_mask = batch["labels"][0], batch["loss_mask"][0]
@@ -611,9 +519,16 @@ class TestPackedScan:
                 # The collate drops each conversation's last input, so conversation k starts k positions early.
                 collated = slice(start - k, end - 1 - k)
                 assert labels[collated].tolist() == item["input_ids"][start + 1 : end]
-                document = scanned[f"{shard} row {row} conversation {k}"]
-                assert document.token_ids.tolist() == item["input_ids"][start:end]
-                assert document.trainable_target.tolist() == [False] + (loss_mask[collated] != 0).tolist()
+                targets.update(labels[collated].tolist())
+                trainable.update(labels[collated][loss_mask[collated] != 0].tolist())
+        assert sum(targets.values()) > sum(trainable.values()) > 0
+
+        sources, _ = training_data_sources(
+            packed_config(tmp_path, packed_glob, answer_only_loss=answer_only_loss), tokenizer
+        )
+        for token_id, count in targets.items():
+            [result] = packed_scan(sources, listed_token_ids=[token_id], answer_only_loss=answer_only_loss)
+            assert (result.listed_targets, result.listed_trainable_targets) == (count, trainable[token_id]), token_id
 
 
 def test_scanning_leaves_global_random_state_untouched(tmp_path, blend, packed_glob, tokenizer):

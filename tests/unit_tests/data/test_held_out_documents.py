@@ -16,11 +16,9 @@ the tool's index arithmetic:
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 import shutil
-import sys
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -29,6 +27,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import pytest
 import yaml
+from scripts.data import held_out_documents
 from scripts.training.launch_width import config_launch_width
 from transformers import AutoTokenizer
 
@@ -87,17 +86,6 @@ FUTURE_DOCUMENTS = 2
 # The iterations batch-check materialises, per run ("first" trains four, "second" three), and of "other" (four).
 BATCH_CHECKS = {"first": [1, 2, 4], "second": [1, 3]}
 OTHER_BATCH_CHECKS = [1, 4]
-
-
-@pytest.fixture(scope="module")
-def tool():
-    """scripts/data/held_out_documents.py, loaded by path: scripts/ is not a package."""
-    path = REPO_ROOT / "scripts" / "data" / "held_out_documents.py"
-    spec = importlib.util.spec_from_file_location("held_out_documents", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["held_out_documents"] = module  # @dataclass resolves its module through sys.modules
-    spec.loader.exec_module(module)
-    return module
 
 
 def _documents(subset: str) -> list[list[int]]:
@@ -232,13 +220,13 @@ def _held_out_config(campaign: Campaign, **changes) -> dict:
 
 
 @pytest.fixture(scope="module")
-def campaign(tool, tmp_path_factory) -> Campaign:
+def campaign(tmp_path_factory) -> Campaign:
     """The whole pipeline, run once through the command line: both runs read, then ids chosen so that each id rule has
     something to exclude, then the held-out lists, the set, the first run's validation corpus and its future sets."""
     built = _build(tmp_path_factory.mktemp("campaign"))
     built.config.write_text(yaml.safe_dump(_held_out_config(built)))
     for run in RUNS:
-        assert tool.main(["read", "--config", str(built.config), "--run", run]) == 0
+        assert held_out_documents.main(["read", "--config", str(built.config), "--run", run]) == 0
 
     ids = {subset: [f"{subset}-{i}" for i in range(len(lengths))] for subset, (_, lengths, _) in CORPORA.items()}
     del ids["gamma"]
@@ -266,21 +254,21 @@ def campaign(tool, tmp_path_factory) -> Campaign:
     _write_dataset(built.repo, ids)
 
     data_base = ["--data-base", str(built.data_base)]
-    assert tool.main(["held-out", "--config", str(built.config), *data_base]) == 0
-    assert tool.main(["set", "--config", str(built.config)]) == 0
-    assert tool.main(["validation", "--config", str(built.config), "--run", "first"]) == 0
-    assert tool.main(["future", "--config", str(built.config), *data_base]) == 0
+    assert held_out_documents.main(["held-out", "--config", str(built.config), *data_base]) == 0
+    assert held_out_documents.main(["set", "--config", str(built.config)]) == 0
+    assert held_out_documents.main(["validation", "--config", str(built.config), "--run", "first"]) == 0
+    assert held_out_documents.main(["future", "--config", str(built.config), *data_base]) == 0
     for run in BATCH_CHECKS:
-        assert tool.main(["batch-check", "--config", str(built.config), "--run", run, *data_base]) == 0
+        assert held_out_documents.main(["batch-check", "--config", str(built.config), "--run", run, *data_base]) == 0
     return built
 
 
-def _values_yielded_by_iteration(tool, run_config: Path, gpus: int) -> dict[int, set[int]]:
+def _values_yielded_by_iteration(run_config: Path, gpus: int) -> dict[int, set[int]]:
     """Per iteration, the token values the run's data-parallel ranks' loaders yield, labels included, read from the
     batches of real loaders built as the run builds them (in-process, so no worker is forked)."""
-    cfg = tool.resolve_run_config(str(run_config), "nano", "pretrain")
+    cfg = held_out_documents.resolve_run_config(str(run_config), "nano", "pretrain")
     cfg.dataset.num_workers = 0
-    train_ds, _, first_sample = tool.build_training_dataset(cfg)
+    train_ds, _, first_sample = held_out_documents.build_training_dataset(cfg)
     data_parallel = cfg.get_data_parallel_size(gpus)
     microbatches = cfg.train.global_batch_size // data_parallel
     yielded: dict[int, set[int]] = {}
@@ -300,10 +288,10 @@ def _values_yielded_by_iteration(tool, run_config: Path, gpus: int) -> dict[int,
     return yielded
 
 
-def _first_iteration_each_value_is_yielded(tool, run_config: Path, gpus: int) -> dict[int, int]:
+def _first_iteration_each_value_is_yielded(run_config: Path, gpus: int) -> dict[int, int]:
     """Per token value, the first iteration at which the run's loaders yield it (``_values_yielded_by_iteration``)."""
     first: dict[int, int] = {}
-    for iteration, values in sorted(_values_yielded_by_iteration(tool, run_config, gpus).items()):
+    for iteration, values in sorted(_values_yielded_by_iteration(run_config, gpus).items()):
         for value in values:
             first.setdefault(value, iteration)
     return first
@@ -364,8 +352,8 @@ def _expected_unseen(campaign: Campaign, iteration: int) -> tuple[list[tuple[str
 
 class TestWhenARunFirstReadsEachDocument:
     @pytest.mark.parametrize("run", sorted(RUNS))
-    def test_each_array_is_the_first_iteration_the_runs_loaders_yield_the_document(self, tool, campaign, run):
-        first = _first_iteration_each_value_is_yielded(tool, campaign.run_configs[run], gpus=2)
+    def test_each_array_is_the_first_iteration_the_runs_loaders_yield_the_document(self, campaign, run):
+        first = _first_iteration_each_value_is_yielded(campaign.run_configs[run], gpus=2)
         for position, subset in enumerate(_subsets(run)):
             assert campaign.first_read(run, position) == _first_read_by_value(first, subset), subset
 
@@ -397,7 +385,7 @@ class TestWhenARunFirstReadsEachDocument:
             assert corpus["idx_sha256"] == corpus_documents.file_sha256(corpus_documents.idx_path(prefix))
 
     @pytest.mark.parametrize("gpus", [1, 4])
-    def test_a_blend_built_larger_than_the_run_is_read_as_far_as_the_run_reads(self, tool, tmp_path, gpus):
+    def test_a_blend_built_larger_than_the_run_is_read_as_far_as_the_run_reads(self, tmp_path, gpus):
         """Weights that are not whole samples build 17 samples for a run of 16, and the one left reads nothing."""
         built = _build(tmp_path)
         blend = ["0.3", "alpha_shard0", "0.3", "alpha_shard1", "0.4", "beta"]
@@ -405,12 +393,12 @@ class TestWhenARunFirstReadsEachDocument:
         settings = _held_out_config(built)
         settings["runs"]["first"]["gpus"] = gpus
         built.config.write_text(yaml.safe_dump(settings))
-        assert tool.main(["read", "--config", str(built.config), "--run", "first"]) == 0
+        assert held_out_documents.main(["read", "--config", str(built.config), "--run", "first"]) == 0
 
         record = json.loads((tmp_path / "lists" / "first" / "read.json").read_text())
         assert (record["dataset_samples"], record["samples_read"]) == (17, 16)
         assert sum(corpus["samples_read"] for corpus in record["corpora"]) == 16
-        first = _first_iteration_each_value_is_yielded(tool, built.run_configs["first"], gpus)
+        first = _first_iteration_each_value_is_yielded(built.run_configs["first"], gpus)
         for position, subset in enumerate(blend[1::2]):
             assert built.first_read("first", position) == _first_read_by_value(first, subset), subset
 
@@ -449,22 +437,23 @@ class TestWhatIsHeldOut:
         }
         assert not (Path(campaign.settings()["lists"]) / "second" / "held_out.2.npy").exists()
 
-    def test_a_corpus_whose_rows_cannot_be_traced_must_be_listed_as_without_ids(
-        self, tool, campaign, tmp_path, caplog
-    ):
+    def test_a_corpus_whose_rows_cannot_be_traced_must_be_listed_as_without_ids(self, campaign, tmp_path, caplog):
         ids = {**campaign.settings()["document_ids"], "subsets_without_ids": []}
         config = campaign.variant(tmp_path, document_ids=ids)
         (tmp_path / "lists" / "held_out.json").unlink()
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["held-out", "--config", str(config), "--data-base", str(campaign.data_base)]) == 1
+            assert (
+                held_out_documents.main(["held-out", "--config", str(config), "--data-base", str(campaign.data_base)])
+                == 1
+            )
         assert "gamma: its documents cannot be traced to source rows" in caplog.text
 
-    def test_rows_out_of_their_sources_order_are_refused(self, tool, tmp_path, caplog):
+    def test_rows_out_of_their_sources_order_are_refused(self, tmp_path, caplog):
         """The id of row i is document i's only while the dataset's rows are the source's in order."""
         built = _build(tmp_path)
         built.run_configs = {"first": built.run_configs["first"]}
         built.config.write_text(yaml.safe_dump(_held_out_config(built)))
-        assert tool.main(["read", "--config", str(built.config), "--run", "first"]) == 0
+        assert held_out_documents.main(["read", "--config", str(built.config), "--run", "first"]) == 0
         ids = {subset: [f"{subset}-{i}" for i in range(len(CORPORA[subset][1]))] for subset in _subsets("first")}
         _write_dataset(built.repo, ids)
         rows = list(range(SLICE))
@@ -473,11 +462,16 @@ class TestWhatIsHeldOut:
         columns = {"text": ["t"] * SLICE, "doc_id": ids["alpha_shard0"], "source_row": rows}
         write_parquet_dataset(built.repo, "alpha_shard0", columns, files=2)
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["held-out", "--config", str(built.config), "--data-base", str(built.data_base)]) == 1
+            assert (
+                held_out_documents.main(
+                    ["held-out", "--config", str(built.config), "--data-base", str(built.data_base)]
+                )
+                == 1
+            )
         assert "alpha_shard0: row 3 holds source_row 4, the source's row there is 3" in caplog.text
         assert not (tmp_path / "lists" / "held_out.json").exists()
 
-    def test_a_table_names_each_rows_prefixes_and_the_rows_it_still_holds(self, tool, tmp_path):
+    def test_a_table_names_each_rows_prefixes_and_the_rows_it_still_holds(self, tmp_path):
         """A sliced row's prefixes hold its rows in order; a byte-gated split's hold rows the table cannot say; a
         held row has no prefix yet."""
         config = write_prepare_config(tmp_path)
@@ -487,7 +481,7 @@ class TestWhatIsHeldOut:
             {"subset": "held", "docs": corpora_table.DOCS_PENDING},
         ]
         table = write_table(tmp_path, config, **rows[0], extra_rows=rows[1:])
-        corpora, held = tool.table_corpora(table, tmp_path / "data")
+        corpora, held = held_out_documents.table_corpora(table, tmp_path / "data")
         named = {
             (corpus.row.subset, prefix.parent.name, corpus.rows)
             for prefix, corpus in corpora.items()
@@ -501,31 +495,6 @@ class TestWhatIsHeldOut:
         }
         assert held == ["held"] and len(corpora) == 4
 
-    def test_a_table_whose_config_pins_a_revision_file_not_yet_written_names_its_prefixes(self, tool, tmp_path):
-        """Naming a row's prefixes needs only its dataset, so a revision file the job publishing the data has not
-        written yet is not read: a split row's prefixes come from its root and a sliced row's from its plan."""
-        pin_file = tmp_path / "pushed_revision.txt"
-        config = write_prepare_config(tmp_path, **{"revision-file": str(pin_file)})
-        rows = [
-            {"subset": "sliced", "docs": 5, "shards": 2, "shard_mode": "slice"},
-            {"subset": "split", "docs": 5, "shards": 2, "shard_mode": "split"},
-        ]
-        table = write_table(tmp_path, config, **rows[0], extra_rows=rows[1:])
-        corpora, held = tool.table_corpora(table, tmp_path / "data")
-        assert not pin_file.exists()
-        named = {(corpus.row.subset, prefix.parent.name, corpus.rows) for prefix, corpus in corpora.items()}
-        assert named == {
-            ("sliced", "shard0", (0, 2)),
-            ("sliced", "shard1", (2, 5)),
-            ("split", "shard0", None),
-            ("split", "shard1", None),
-        }
-        assert held == []
-        # Reading the subset's ids does need the commit, so there the absent file stops the step, naming it.
-        with pytest.raises(ValueError) as refusal:
-            tool.subset_document_ids(corpora_table.read_corpora_table(table)[0], "doc_id", tmp_path / "ids")
-        assert f"revision file {pin_file} cannot be read" in str(refusal.value)
-
 
 class TestTheIdsAreReadOnce:
     def test_each_subsets_ids_are_kept_beside_the_lists_under_its_commit(self, campaign):
@@ -536,13 +505,16 @@ class TestTheIdsAreReadOnce:
         table = pq.read_table(kept / f"beta.doc_id@{REVISION}.parquet")
         assert table.column_names == ["doc_id", "source_row"] and table["doc_id"].to_pylist() == campaign.ids["beta"]
 
-    def test_a_later_step_reads_the_kept_ids_and_not_the_dataset(self, tool, campaign, tmp_path):
+    def test_a_later_step_reads_the_kept_ids_and_not_the_dataset(self, campaign, tmp_path):
         future = {**campaign.settings()["future"], "directory": str(tmp_path / "sets")}
         config = campaign.variant(tmp_path, future=future)
         hidden = campaign.repo.with_name("repo.hidden")
         campaign.repo.rename(hidden)
         try:
-            assert tool.main(["future", "--config", str(config), "--data-base", str(campaign.data_base)]) == 0
+            assert (
+                held_out_documents.main(["future", "--config", str(config), "--data-base", str(campaign.data_base)])
+                == 0
+            )
         finally:
             hidden.rename(campaign.repo)
         original = Path(campaign.settings()["future"]["directory"])
@@ -578,23 +550,23 @@ class TestTheSet:
         assert record["held_out"] == sum(len(expected[("first", subset)]) for subset in _subsets("first"))
         assert sum(corpus["sampled"] for corpus in record["corpora"]) == 4
 
-    def test_the_seed_decides_the_sample(self, tool, campaign, tmp_path):
+    def test_the_seed_decides_the_sample(self, campaign, tmp_path):
         drawn = {}
         for name, seed in (("same", 7), ("other", 8)):
             path = tmp_path / name / "set.parquet"
             config = campaign.variant(
                 tmp_path / name, set={**campaign.settings()["set"], "path": str(path), "seed": seed}
             )
-            assert tool.main(["set", "--config", str(config)]) == 0
+            assert held_out_documents.main(["set", "--config", str(config)]) == 0
             drawn[name] = _rows(path)
         assert drawn["same"] == _rows(Path(campaign.settings()["set"]["path"]))
         assert drawn["other"] != drawn["same"]
 
-    def test_more_documents_than_are_held_out_is_refused(self, tool, campaign, tmp_path, caplog):
+    def test_more_documents_than_are_held_out_is_refused(self, campaign, tmp_path, caplog):
         path = tmp_path / "set.parquet"
         spec = {**campaign.settings()["set"], "path": str(path), "documents": 1000}
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["set", "--config", str(campaign.variant(tmp_path, set=spec))]) == 1
+            assert held_out_documents.main(["set", "--config", str(campaign.variant(tmp_path, set=spec))]) == 1
         assert "set.documents asks for 1000 documents, and only" in caplog.text and not path.exists()
 
 
@@ -647,7 +619,7 @@ class TestTheValidationCorpus:
         assert sum(parent["copied"] for parent in record["parents"]) == record["totals"]["num_documents"]
         assert not list(prefix.parent.glob("*.partial"))
 
-    def test_parents_tokenized_differently_are_refused(self, tool, campaign, tmp_path, caplog):
+    def test_parents_tokenized_differently_are_refused(self, campaign, tmp_path, caplog):
         """Asked for every id the run holds out, the corpus draws on both slices, which must then agree."""
         record = json.loads((Path(campaign.settings()["lists"]) / "held_out.json").read_text())
         held_out_ids = sum(corpus.get("held_out_tokens", 0) for corpus in record["runs"]["first"]["corpora"])
@@ -661,22 +633,22 @@ class TestTheValidationCorpus:
         provenance.write_text(json.dumps(changed))
         try:
             with caplog.at_level(logging.ERROR):
-                assert tool.main(["validation", "--config", str(config), "--run", "first"]) == 1
+                assert held_out_documents.main(["validation", "--config", str(config), "--run", "first"]) == 1
         finally:
             provenance.write_text(original)
         assert "were not all tokenized alike" in caplog.text and not prefix.parent.exists()
 
-    def test_more_samples_than_the_held_out_documents_hold_is_refused(self, tool, campaign, tmp_path, caplog):
+    def test_more_samples_than_the_held_out_documents_hold_is_refused(self, campaign, tmp_path, caplog):
         prefix = tmp_path / "validation" / "held_out_document"
         spec = {"first": {"prefix": str(prefix), "samples": 500, "seed": 7}}
         config = campaign.variant(tmp_path, validation=spec)
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["validation", "--config", str(config), "--run", "first"]) == 1
+            assert held_out_documents.main(["validation", "--config", str(config), "--run", "first"]) == 1
         assert "and 500 samples of 8 need 4001" in caplog.text and not prefix.parent.exists()
 
-    def test_a_run_with_no_validation_corpus_configured_is_refused(self, tool, campaign, caplog):
+    def test_a_run_with_no_validation_corpus_configured_is_refused(self, campaign, caplog):
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["validation", "--config", str(campaign.config), "--run", "second"]) == 1
+            assert held_out_documents.main(["validation", "--config", str(campaign.config), "--run", "second"]) == 1
         assert "validation names no corpus for run second" in caplog.text
 
     def test_documents_copied_from_several_parents_are_checked_against_each(self, campaign):
@@ -756,11 +728,14 @@ class TestTheFutureSets:
             ({"iterations": [3], "documents": 1000}, "future.documents at iteration 3 asks for 1000 documents"),
         ],
     )
-    def test_sets_that_cannot_be_written_are_refused(self, tool, campaign, tmp_path, caplog, change, message):
+    def test_sets_that_cannot_be_written_are_refused(self, campaign, tmp_path, caplog, change, message):
         future = {**campaign.settings()["future"], "directory": str(tmp_path / "sets"), **change}
         config = campaign.variant(tmp_path, future=future)
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["future", "--config", str(config), "--data-base", str(campaign.data_base)]) == 1
+            assert (
+                held_out_documents.main(["future", "--config", str(config), "--data-base", str(campaign.data_base)])
+                == 1
+            )
         assert message in caplog.text
         assert not (tmp_path / "sets" / "future_sets.tsv").exists()
 
@@ -822,14 +797,16 @@ def _with_first_reads(path: Path, run: str, position: int, changes: dict[int, in
     _with_read_record(path, run, lambda record: record["corpora"][position].update(first_read_sha256=sha256))
 
 
-def _check_batches(tool, campaign: Campaign, path: Path, run: str) -> tuple[int, dict]:
-    status = tool.main(["batch-check", "--config", str(path), "--run", run, "--data-base", str(campaign.data_base)])
+def _check_batches(campaign: Campaign, path: Path, run: str) -> tuple[int, dict]:
+    status = held_out_documents.main(
+        ["batch-check", "--config", str(path), "--run", run, "--data-base", str(campaign.data_base)]
+    )
     lists = Path(yaml.safe_load(path.read_text())["lists"])
     return status, json.loads((lists / run / "batches.json").read_text())
 
 
 class TestTheBatchCheck:
-    def test_a_run_whose_tokenizer_has_no_pad_token_is_checked_and_records_no_pad_id(self, tool, tmp_path):
+    def test_a_run_whose_tokenizer_has_no_pad_token_is_checked_and_records_no_pad_id(self, tmp_path):
         """A HuggingFace tokenizer without a pad token, as the campaign's are, gives the dataset no pad id."""
         unpadded = AutoTokenizer.from_pretrained(build_tiny_hf_tokenizer(tmp_path / "padded"))
         unpadded.pad_token = None
@@ -841,18 +818,16 @@ class TestTheBatchCheck:
             "first": _run_config(tmp_path / "run", built.prefixes, blend, iterations, tokenizer=tokenizer)
         }
         built.config.write_text(yaml.safe_dump(_held_out_config(built)))
-        assert tool.main(["read", "--config", str(built.config), "--run", "first"]) == 0
-        status, record = _check_batches(tool, built, built.config, "first")
+        assert held_out_documents.main(["read", "--config", str(built.config), "--run", "first"]) == 0
+        status, record = _check_batches(built, built.config, "first")
         assert (status, record["outcome"], record["pad_id"]) == (0, "PASS", None)
 
     @pytest.mark.parametrize(
         ("run", "iteration"),
         [(run, iteration) for run, iterations in BATCH_CHECKS.items() for iteration in iterations],
     )
-    def test_each_iterations_windows_are_of_the_documents_whose_values_its_batch_holds(
-        self, tool, campaign, run, iteration
-    ):
-        yielded = _values_yielded_by_iteration(tool, campaign.run_configs[run], gpus=2)[iteration]
+    def test_each_iterations_windows_are_of_the_documents_whose_values_its_batch_holds(self, campaign, run, iteration):
+        yielded = _values_yielded_by_iteration(campaign.run_configs[run], gpus=2)[iteration]
         subsets = _subsets(run)
         windows = _batch_windows(campaign, run, iteration)
         assert {(subsets[window["corpus"]], window["document"]) for window in windows} == _documents_of_values(
@@ -876,7 +851,7 @@ class TestTheBatchCheck:
             assert {(window["rank"], window["microbatch"]) for window in windows} == {(0, 0), (0, 1), (1, 0), (1, 1)}
 
     @pytest.mark.parametrize("run", list(BATCH_CHECKS))
-    def test_its_record_passes_and_counts_the_documents_first_read_at_each_iteration(self, tool, campaign, run):
+    def test_its_record_passes_and_counts_the_documents_first_read_at_each_iteration(self, campaign, run):
         record = _batch_record(campaign, run)
         subsets = _subsets(run)
         assert (record["run"], record["outcome"]) == (run, "PASS")
@@ -887,7 +862,7 @@ class TestTheBatchCheck:
         assert [entry["iteration"] for entry in record["iterations"]] == BATCH_CHECKS[run]
         for entry in record["iterations"]:
             assert (entry["outcome"], entry["samples"]) == ("PASS", GLOBAL_BATCH)
-            assert [entry[name] for name in tool.BATCH_FAILURES] == [{"count": 0, "examples": []}] * 3
+            assert [entry[name] for name in held_out_documents.BATCH_FAILURES] == [{"count": 0, "examples": []}] * 3
             assert [corpus["first_read_here"] for corpus in entry["corpora"]] == [
                 campaign.first_read(run, position).count(entry["iteration"]) for position in range(len(subsets))
             ]
@@ -895,12 +870,12 @@ class TestTheBatchCheck:
 
     @pytest.mark.parametrize("recorded", [2, 0], ids=["read-later", "never-read"])
     def test_a_document_the_batch_holds_that_the_record_says_is_not_read_by_then_fails(
-        self, tool, campaign, tmp_path, recorded
+        self, campaign, tmp_path, recorded
     ):
         position, document = _a_document_first_read_at(campaign, "first", 1)
         path = _variant_to_check_again(campaign, tmp_path, {"first": [1]})
         _with_first_reads(path, "first", position, {document: recorded})
-        status, record = _check_batches(tool, campaign, path, "first")
+        status, record = _check_batches(campaign, path, "first")
         entry = record["iterations"][0]
         assert status == 1 and record["outcome"] == entry["outcome"] == "FAIL"
         assert entry["documents_not_read_by_then"] == {
@@ -909,11 +884,11 @@ class TestTheBatchCheck:
         }
         assert entry["samples_not_their_windows"]["count"] == entry["first_read_here_not_in_batch"]["count"] == 0
 
-    def test_a_document_the_record_says_is_first_read_there_that_the_batch_lacks_fails(self, tool, campaign, tmp_path):
+    def test_a_document_the_record_says_is_first_read_there_that_the_batch_lacks_fails(self, campaign, tmp_path):
         position, document = _a_document_first_read_at(campaign, "first", 3)
         path = _variant_to_check_again(campaign, tmp_path, {"first": [1]})
         _with_first_reads(path, "first", position, {document: 1})
-        status, record = _check_batches(tool, campaign, path, "first")
+        status, record = _check_batches(campaign, path, "first")
         entry = record["iterations"][0]
         assert status == 1 and entry["outcome"] == "FAIL"
         assert entry["first_read_here_not_in_batch"] == {
@@ -921,8 +896,8 @@ class TestTheBatchCheck:
             "examples": [{"corpus": position, "document": document}],
         }
 
-    def test_a_span_rule_other_than_the_lookups_fails_every_sample(self, tool, campaign, tmp_path, monkeypatch):
-        right = tool.sample_windows
+    def test_a_span_rule_other_than_the_lookups_fails_every_sample(self, campaign, tmp_path, monkeypatch):
+        right = held_out_documents.sample_windows
 
         def without_the_label_token(dataset, sample):
             *windows, (sequence, start, stop) = right(dataset, sample)
@@ -930,9 +905,9 @@ class TestTheBatchCheck:
 
         # Fault injection, not a stand-in: the tool's own rule less the extra label token, which every sample the
         # dataset's lookup materialises holds, so the step's comparison must reject every sample of the batch.
-        monkeypatch.setattr(tool, "sample_windows", without_the_label_token)
+        monkeypatch.setattr(held_out_documents, "sample_windows", without_the_label_token)
         path = _variant_to_check_again(campaign, tmp_path, {"first": [1]})
-        status, record = _check_batches(tool, campaign, path, "first")
+        status, record = _check_batches(campaign, path, "first")
         assert status == 1
         assert record["iterations"][0]["samples_not_their_windows"]["count"] == GLOBAL_BATCH
 
@@ -943,12 +918,10 @@ class TestTheBatchCheck:
             ({"first": [5]}, "batch_checks.first names iteration 5, and the run trains 4"),
         ],
     )
-    def test_a_run_or_an_iteration_it_cannot_check_is_refused(
-        self, tool, campaign, tmp_path, caplog, batch_checks, message
-    ):
+    def test_a_run_or_an_iteration_it_cannot_check_is_refused(self, campaign, tmp_path, caplog, batch_checks, message):
         path = _variant_to_check_again(campaign, tmp_path, batch_checks)
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
+            assert held_out_documents.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
         assert message in caplog.text
         assert not list((Path(yaml.safe_load(path.read_text())["lists"]) / "first").glob("batches.*"))
 
@@ -964,18 +937,18 @@ class TestTheBatchCheck:
         ids=["another-dataset", "other-corpora"],
     )
     def test_a_run_that_now_builds_other_data_than_its_read_record_read_is_refused(
-        self, tool, campaign, tmp_path, caplog, change, message
+        self, campaign, tmp_path, caplog, change, message
     ):
         path = _variant_to_check_again(campaign, tmp_path, {"first": [1]})
         _with_read_record(path, "first", change)
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
+            assert held_out_documents.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
         assert message in caplog.text
         assert not list((Path(yaml.safe_load(path.read_text())["lists"]) / "first").glob("batches.*"))
 
-    def test_its_outputs_are_never_overwritten(self, tool, campaign, caplog):
+    def test_its_outputs_are_never_overwritten(self, campaign, caplog):
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["batch-check", "--config", str(campaign.config), "--run", "first"]) == 1
+            assert held_out_documents.main(["batch-check", "--config", str(campaign.config), "--run", "first"]) == 1
         assert "a step's output is never overwritten" in caplog.text
 
 
@@ -993,25 +966,23 @@ def _variant_with_run_config(campaign: Campaign, directory: Path, change) -> Pat
 class TestWhenAReadRecordIsCurrent:
     """A record is current while the run's training config states the settings of the config the record read."""
 
-    def test_a_training_config_changed_only_in_its_comments_keeps_its_record(self, tool, campaign, tmp_path):
+    def test_a_training_config_changed_only_in_its_comments_keeps_its_record(self, campaign, tmp_path):
         path = _variant_with_run_config(campaign, tmp_path, lambda text: "# a launch header\n" + text)
-        status, record = _check_batches(tool, campaign, path, "first")
+        status, record = _check_batches(campaign, path, "first")
         assert (status, record["outcome"]) == (0, "PASS")
 
-    def test_a_training_config_whose_settings_changed_makes_its_record_stale(self, tool, campaign, tmp_path, caplog):
+    def test_a_training_config_whose_settings_changed_makes_its_record_stale(self, campaign, tmp_path, caplog):
         path = _variant_with_run_config(campaign, tmp_path, lambda text: text + "logger:\n  log_interval: 5\n")
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
+            assert held_out_documents.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
         assert "redo `read --run first`" in caplog.text
 
-    def test_a_record_whose_read_config_is_gone_is_stale_once_the_config_changes(
-        self, tool, campaign, tmp_path, caplog
-    ):
+    def test_a_record_whose_read_config_is_gone_is_stale_once_the_config_changes(self, campaign, tmp_path, caplog):
         path = _variant_with_run_config(campaign, tmp_path, lambda text: "# a launch header\n" + text)
         gone = str(tmp_path / "gone.yaml")
         _with_read_record(path, "first", lambda record: record["training_config"].update(path=gone))
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
+            assert held_out_documents.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
         assert "redo `read --run first`" in caplog.text
 
 
@@ -1080,7 +1051,7 @@ def _unseen_by_both_arms(campaign: Campaign, iteration: int) -> tuple[list, list
 
 
 @pytest.fixture(scope="module")
-def paired(tool, tmp_path_factory) -> Campaign:
+def paired(tmp_path_factory) -> Campaign:
     """The campaign with a third run, "other", on another arm's corpora, each named with the table corpus whose
     documents it holds, and the future sets of "first" unread by it too. Every document has an id of its own but one:
     a document of alpha_shard0 that no run reads, under the id of a document only "other" reads."""
@@ -1097,7 +1068,7 @@ def paired(tool, tmp_path_factory) -> Campaign:
     settings["batch_checks"] = {"other": list(OTHER_BATCH_CHECKS)}
     built.config.write_text(yaml.safe_dump(settings))
     for run in (*RUNS, "other"):
-        assert tool.main(["read", "--config", str(built.config), "--run", run]) == 0
+        assert held_out_documents.main(["read", "--config", str(built.config), "--run", run]) == 0
 
     built.ids = {subset: [f"{subset}-{i}" for i in range(len(CORPORA[subset][1]))] for subset in CORPORA}
     del built.ids["gamma"]
@@ -1111,19 +1082,19 @@ def paired(tool, tmp_path_factory) -> Campaign:
     _write_dataset(built.repo, built.ids)
 
     data_base = ["--data-base", str(built.data_base)]
-    assert tool.main(["held-out", "--config", str(built.config), *data_base]) == 0
-    assert tool.main(["set", "--config", str(built.config)]) == 0
-    assert tool.main(["future", "--config", str(built.config), *data_base]) == 0
-    assert tool.main(["batch-check", "--config", str(built.config), "--run", "other", *data_base]) == 0
+    assert held_out_documents.main(["held-out", "--config", str(built.config), *data_base]) == 0
+    assert held_out_documents.main(["set", "--config", str(built.config)]) == 0
+    assert held_out_documents.main(["future", "--config", str(built.config), *data_base]) == 0
+    assert held_out_documents.main(["batch-check", "--config", str(built.config), "--run", "other", *data_base]) == 0
     return built
 
 
 class TestARunOnAnotherArmsCorpora:
-    def test_its_reads_are_what_its_own_loaders_yield_under_the_tables_corpora(self, tool, paired):
-        yielded = _first_iteration_each_value_is_yielded(tool, paired.run_configs["other"], gpus=2)
-        config = tool.read_config(paired.config)
+    def test_its_reads_are_what_its_own_loaders_yield_under_the_tables_corpora(self, paired):
+        yielded = _first_iteration_each_value_is_yielded(paired.run_configs["other"], gpus=2)
+        config = held_out_documents.read_config(paired.config)
         record = json.loads((Path(paired.settings()["lists"]) / "other" / "read.json").read_text())
-        translated = tool.first_reads(config, config.runs["other"], record)
+        translated = held_out_documents.first_reads(config, config.runs["other"], record)
         shared = [subset for subset in OTHER_RUN[0][1::2] if subset in CORPORA]
         assert list(translated) == [Path(paired.prefixes[subset]) for subset in shared]
         for subset in shared:
@@ -1155,11 +1126,11 @@ class TestARunOnAnotherArmsCorpora:
         assert read_by_other and len(through) == len(read_by_other) + 1
 
     @pytest.mark.parametrize("iteration", OTHER_BATCH_CHECKS)
-    def test_its_batches_name_their_documents_source_rows_through_its_counterparts(self, tool, paired, iteration):
+    def test_its_batches_name_their_documents_source_rows_through_its_counterparts(self, paired, iteration):
         """Its own corpora's documents are the table corpora's, so a window of one is named by the table corpus's
         source row; delta, no table corpus's, names none."""
         assert _batch_record(paired, "other")["outcome"] == "PASS"
-        yielded = _values_yielded_by_iteration(tool, paired.run_configs["other"], gpus=2)[iteration]
+        yielded = _values_yielded_by_iteration(paired.run_configs["other"], gpus=2)[iteration]
         subsets = OTHER_RUN[0][1::2]
         windows = _batch_windows(paired, "other", iteration)
         assert {(subsets[window["corpus"]], window["document"]) for window in windows} == _documents_of_values(
@@ -1215,34 +1186,40 @@ class TestARunOnAnotherArmsCorpora:
         (directory / "lists" / "held_out.json").unlink()
         return config
 
-    def test_counterparts_must_name_exactly_the_corpora_of_its_blend(self, tool, paired, tmp_path, caplog):
+    def test_counterparts_must_name_exactly_the_corpora_of_its_blend(self, paired, tmp_path, caplog):
         runs = paired.settings()["runs"]
         del runs["other"]["counterparts"][_other_prefix(paired, "delta")]
         config = self._less_the_held_out_record(paired, tmp_path, runs=runs)
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["held-out", "--config", str(config), "--data-base", str(paired.data_base)]) == 1
+            assert (
+                held_out_documents.main(["held-out", "--config", str(config), "--data-base", str(paired.data_base)])
+                == 1
+            )
         assert "runs.other.counterparts must name exactly the corpora of the run's blend" in caplog.text
         assert _other_prefix(paired, "delta") in caplog.text
 
-    def test_counterparts_must_hold_as_many_documents(self, tool, paired, tmp_path, caplog):
+    def test_counterparts_must_hold_as_many_documents(self, paired, tmp_path, caplog):
         runs = paired.settings()["runs"]
         runs["other"]["counterparts"][_other_prefix(paired, "alpha_shard0")] = paired.prefixes["beta"]
         runs["other"]["counterparts"][_other_prefix(paired, "beta")] = paired.prefixes["alpha_shard0"]
         config = self._less_the_held_out_record(paired, tmp_path, runs=runs)
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["held-out", "--config", str(config), "--data-base", str(paired.data_base)]) == 1
+            assert (
+                held_out_documents.main(["held-out", "--config", str(config), "--data-base", str(paired.data_base)])
+                == 1
+            )
         assert "corpora named as each other's counterparts must hold the same documents" in caplog.text
 
-    def test_a_table_corpus_is_the_counterpart_of_one_corpus(self, tool, paired, tmp_path):
+    def test_a_table_corpus_is_the_counterpart_of_one_corpus(self, paired, tmp_path):
         settings = paired.settings()
         settings["runs"]["other"]["counterparts"][_other_prefix(paired, "delta")] = paired.prefixes["beta"]
         path = tmp_path / "held_out.yaml"
         path.write_text(yaml.safe_dump(settings))
         with pytest.raises(ValueError, match="to more than one corpus of the run's blend"):
-            tool.read_config(path)
+            held_out_documents.read_config(path)
 
     @pytest.mark.parametrize("section", ["set", "validation", "future"])
-    def test_nothing_is_written_for_it(self, tool, paired, tmp_path, section):
+    def test_nothing_is_written_for_it(self, paired, tmp_path, section):
         settings = paired.settings()
         if section == "validation":
             settings["validation"] = {"other": settings["validation"]["first"]}
@@ -1252,16 +1229,16 @@ class TestARunOnAnotherArmsCorpora:
         path = tmp_path / "held_out.yaml"
         path.write_text(yaml.safe_dump(settings))
         with pytest.raises(ValueError, match="which name counterparts: such a run is only read"):
-            tool.read_config(path)
+            held_out_documents.read_config(path)
 
-    def test_lists_written_under_other_counterparts_are_refused(self, tool, paired, tmp_path, caplog):
+    def test_lists_written_under_other_counterparts_are_refused(self, paired, tmp_path, caplog):
         settings = paired.settings()
         settings["runs"]["other"]["counterparts"][_other_prefix(paired, "beta")] = None
         config = paired.variant(
             tmp_path, runs=settings["runs"], set={**settings["set"], "path": str(tmp_path / "set.parquet")}
         )
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["set", "--config", str(config)]) == 1
+            assert held_out_documents.main(["set", "--config", str(config)]) == 1
         assert "redo `held-out`" in caplog.text
 
 
@@ -1276,12 +1253,12 @@ class TestNothingStaleOrOverwritten:
             (["future"], "future_sets.tsv"),
         ],
     )
-    def test_a_step_never_overwrites_its_output(self, tool, campaign, caplog, command, exists):
+    def test_a_step_never_overwrites_its_output(self, campaign, caplog, command, exists):
         with caplog.at_level(logging.ERROR):
-            assert tool.main([command[0], "--config", str(campaign.config), *command[1:]]) == 1
+            assert held_out_documents.main([command[0], "--config", str(campaign.config), *command[1:]]) == 1
         assert exists in caplog.text and "a step's output is never overwritten" in caplog.text
 
-    def test_a_training_config_changed_since_it_was_read_is_refused(self, tool, campaign, tmp_path, caplog):
+    def test_a_training_config_changed_since_it_was_read_is_refused(self, campaign, tmp_path, caplog):
         run_config = campaign.run_configs["first"]
         original = run_config.read_text()
         config = campaign.variant(tmp_path)
@@ -1289,7 +1266,12 @@ class TestNothingStaleOrOverwritten:
         run_config.write_text(original + "\n# edited\n")
         try:
             with caplog.at_level(logging.ERROR):
-                assert tool.main(["held-out", "--config", str(config), "--data-base", str(campaign.data_base)]) == 1
+                assert (
+                    held_out_documents.main(
+                        ["held-out", "--config", str(config), "--data-base", str(campaign.data_base)]
+                    )
+                    == 1
+                )
         finally:
             run_config.write_text(original)
         assert f"was written for other contents of ['{run_config}']" in caplog.text
@@ -1298,48 +1280,48 @@ class TestNothingStaleOrOverwritten:
         """The campaign's set, written somewhere new, so that only what the test changes can refuse it."""
         return {**campaign.settings()["set"], "path": str(tmp_path / "set.parquet")}
 
-    def test_a_launch_other_than_the_one_read_is_refused(self, tool, campaign, tmp_path, caplog):
+    def test_a_launch_other_than_the_one_read_is_refused(self, campaign, tmp_path, caplog):
         runs = campaign.settings()["runs"]
         runs["first"]["gpus"] = 4
         config = campaign.variant(tmp_path, runs=runs, set=self._a_new_set(campaign, tmp_path))
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["set", "--config", str(config)]) == 1
+            assert held_out_documents.main(["set", "--config", str(config)]) == 1
         assert "describes the launch" in caplog.text and not (tmp_path / "set.parquet").exists()
 
-    def test_lists_written_under_other_id_rules_are_refused(self, tool, campaign, tmp_path, caplog):
+    def test_lists_written_under_other_id_rules_are_refused(self, campaign, tmp_path, caplog):
         ids = {**campaign.settings()["document_ids"], "source_subsets": {"alpha_shard0": "alpha"}}
         config = campaign.variant(tmp_path, document_ids=ids, set=self._a_new_set(campaign, tmp_path))
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["set", "--config", str(config)]) == 1
+            assert held_out_documents.main(["set", "--config", str(config)]) == 1
         assert "was written for another table, id rule or read record" in caplog.text
         assert not (tmp_path / "set.parquet").exists()
 
-    def test_held_out_before_a_run_is_read_is_refused(self, tool, campaign, tmp_path, caplog):
+    def test_held_out_before_a_run_is_read_is_refused(self, campaign, tmp_path, caplog):
         config = campaign.variant(tmp_path, lists=str(tmp_path / "nothing"))
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["held-out", "--config", str(config)]) == 1
+            assert held_out_documents.main(["held-out", "--config", str(config)]) == 1
         assert "read.json is missing; run `read --run first` first" in caplog.text
 
-    def test_a_set_before_the_held_out_lists_is_refused(self, tool, campaign, tmp_path, caplog):
+    def test_a_set_before_the_held_out_lists_is_refused(self, campaign, tmp_path, caplog):
         config = campaign.variant(tmp_path, set=self._a_new_set(campaign, tmp_path))
         (tmp_path / "lists" / "held_out.json").unlink()
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["set", "--config", str(config)]) == 1
+            assert held_out_documents.main(["set", "--config", str(config)]) == 1
         assert "held_out.json is missing; run `held-out` first" in caplog.text
 
 
 class TestRunsThatCannotBeRead:
-    def test_a_resumed_run_is_refused(self, tool, tmp_path, caplog):
+    def test_a_resumed_run_is_refused(self, tmp_path, caplog):
         built = _build(tmp_path)
         blend, iterations = RUNS["first"]
         resumed = _run_config(tmp_path / "resumed", built.prefixes, blend, iterations, checkpoint={"ckpt_step": 2})
         built.run_configs = {"first": resumed}
         built.config.write_text(yaml.safe_dump(_held_out_config(built)))
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["read", "--config", str(built.config), "--run", "first"]) == 1
+            assert held_out_documents.main(["read", "--config", str(built.config), "--run", "first"]) == 1
         assert "resumes at step 2" in caplog.text and not (tmp_path / "lists").exists()
 
-    def test_a_width_other_than_the_one_the_run_fixes_is_refused(self, tool, tmp_path, caplog):
+    def test_a_width_other_than_the_one_the_run_fixes_is_refused(self, tmp_path, caplog):
         built = _build(tmp_path)
         blend, iterations = RUNS["first"]
         width = {"nodes": 1, "gpus_per_node": 4, "data_parallel_size": 4}
@@ -1347,12 +1329,12 @@ class TestRunsThatCannotBeRead:
         built.run_configs = {"first": fixed}
         built.config.write_text(yaml.safe_dump(_held_out_config(built)))
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["read", "--config", str(built.config), "--run", "first"]) == 1
+            assert held_out_documents.main(["read", "--config", str(built.config), "--run", "first"]) == 1
         assert "trains on 4 GPUs (its launch_width block), not 2" in caplog.text
 
-    def test_a_run_the_config_does_not_list_is_refused(self, tool, campaign, caplog):
+    def test_a_run_the_config_does_not_list_is_refused(self, campaign, caplog):
         with caplog.at_level(logging.ERROR):
-            assert tool.main(["read", "--config", str(campaign.config), "--run", "third"]) == 1
+            assert held_out_documents.main(["read", "--config", str(campaign.config), "--run", "third"]) == 1
         assert "no run 'third'; it lists ['first', 'second']" in caplog.text
 
 
@@ -1374,11 +1356,11 @@ class TestTheConfig:
             ({"batch_checks": {"first": [0]}}, "batch_checks.first must be a whole number of at least 1"),
         ],
     )
-    def test_a_config_of_another_shape_is_refused(self, tool, campaign, tmp_path, change, message):
+    def test_a_config_of_another_shape_is_refused(self, campaign, tmp_path, change, message):
         path = tmp_path / "held_out.yaml"
         path.write_text(yaml.safe_dump({**campaign.settings(), **change}))
         with pytest.raises(ValueError) as refusal:
-            tool.read_config(path)
+            held_out_documents.read_config(path)
         assert message in str(refusal.value)
 
     @pytest.mark.parametrize(
@@ -1389,13 +1371,13 @@ class TestTheConfig:
             ("column", "", "document_ids.column must be a non-empty string"),
         ],
     )
-    def test_id_rules_must_name_the_tables_subsets(self, tool, campaign, tmp_path, field, value, message):
+    def test_id_rules_must_name_the_tables_subsets(self, campaign, tmp_path, field, value, message):
         settings = campaign.settings()
         settings["document_ids"][field] = value
         path = tmp_path / "held_out.yaml"
         path.write_text(yaml.safe_dump(settings))
         with pytest.raises(ValueError) as refusal:
-            tool.read_config(path)
+            held_out_documents.read_config(path)
         assert message in str(refusal.value)
 
     @pytest.mark.parametrize(
@@ -1412,23 +1394,23 @@ class TestTheConfig:
             ("also_unread_by", ["first"], "future.also_unread_by names future.run itself, 'first'"),
         ],
     )
-    def test_future_sets_must_name_a_run_and_its_iterations(self, tool, campaign, tmp_path, field, value, message):
+    def test_future_sets_must_name_a_run_and_its_iterations(self, campaign, tmp_path, field, value, message):
         settings = campaign.settings()
         settings["future"][field] = value
         path = tmp_path / "held_out.yaml"
         path.write_text(yaml.safe_dump(settings))
         with pytest.raises(ValueError) as refusal:
-            tool.read_config(path)
+            held_out_documents.read_config(path)
         assert message in str(refusal.value)
 
     @pytest.mark.parametrize(("field", "value"), [("model", "tiny"), ("mode", "sft"), ("gpus", 0)])
-    def test_a_run_must_state_a_launch_this_tool_reads(self, tool, campaign, tmp_path, field, value):
+    def test_a_run_must_state_a_launch_this_tool_reads(self, campaign, tmp_path, field, value):
         settings = campaign.settings()
         settings["runs"]["first"][field] = value
         path = tmp_path / "held_out.yaml"
         path.write_text(yaml.safe_dump(settings))
         with pytest.raises(ValueError, match="runs.first"):
-            tool.read_config(path)
+            held_out_documents.read_config(path)
 
 
 CLUELESS_NORM = REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm"
@@ -1438,8 +1420,8 @@ DOCUMENT_FILTERED = "nemotron_stem_sft"
 
 class TestTheCluelessNormHeldOutConfig:
     @pytest.fixture(scope="class")
-    def config(self, tool):
-        return tool.read_config(CLUELESS_NORM / "held_out.yaml")
+    def config(self):
+        return held_out_documents.read_config(CLUELESS_NORM / "held_out.yaml")
 
     def test_its_runs_are_the_two_stages_at_the_widths_they_train_at(self, config):
         assert sorted(name for name, run in config.runs.items() if run.counterparts is None) == [

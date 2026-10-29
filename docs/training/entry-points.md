@@ -104,7 +104,7 @@ is built, a forward step that is not marked with
 unmasked without any error. The setup error names the unmarked step.
 {py:func}`bridge.training.gpt_step.forward_step` and `forward_step_modelopt` carry the mark. A run that measures no
 ids accepts an unmarked step: one without a `token_masking:` block, or with masking off and no
-`masked_validation.token_ids`. Such a run counts nothing (no `token_masking/*` metrics, no masked-documents table).
+`masked_validation.token_ids`. Such a run counts nothing (no `token_masking/*` metrics).
 
 A custom step that runs with token masking applies it to the batch's labels and loss mask, computes the loss with
 the mask it returns, hands the statistics to the loss function, and carries the mark:

@@ -47,7 +47,6 @@ from tests.unit_tests.corpora_fixtures import (
     write_prepare_config,
     write_table,
 )
-from tests.unit_tests.hub_fixtures import local_hub
 from tests.unit_tests.token_masking_fixtures import EOS_ID, build_tiny_hf_tokenizer
 
 
@@ -825,30 +824,6 @@ class TestCheckHashes:
         assert check_hashes(config, data_base, tmp_path / "hashes.json", shard=1) == 1
         assert "'split': 'train[2:5]'" in capsys.readouterr().err
 
-    def test_a_digest_list_on_the_hub_is_read_at_its_commit(self, tmp_path, tokenizer, monkeypatch):
-        """A `hub` source is the same list published as a dataset config: its record and its train
-        files are read at the stated commit, the files in the loader's order, by `hub_parquet`'s rule."""
-        table, data_base = parent_corpus(tmp_path, DOCUMENTS, tokenizer=tokenizer)
-        n_tokens, ids_hash = true_payload(DOCUMENTS)
-        repo = tmp_path / "hub"
-        columns = {"source_row": list(range(5)), "n_tokens": n_tokens, "ids_hash": ids_hash}
-        write_parquet_dataset(repo, "stem_digests", columns, files=2)
-        (repo / "stem_digests" / "_provenance.json").write_text(json.dumps(builder_record(tokenizer)))
-        hub = {"dataset": "org/digests", "revision": "a" * 40, "config": "stem_digests"}
-        opened = local_hub(monkeypatch, hub["dataset"], {hub["revision"]: repo})
-        config = digest_config(tmp_path, table, {"stem": {"hub": hub}})
-        report_out = tmp_path / "hashes.json"
-        assert check_hashes(config, data_base, report_out) == 0
-        report = json.loads(report_out.read_text())
-        assert report["ok"] and report["digests"]["hub"] == hub
-        assert report["digests"]["record"] == f"datasets/org/digests@{'a' * 40}/stem_digests/_provenance.json"
-        assert sorted(opened) == [
-            (hub["revision"], "README.md"),
-            (hub["revision"], "stem_digests/_provenance.json"),
-            (hub["revision"], "stem_digests/train-00000-of-00002.parquet"),
-            (hub["revision"], "stem_digests/train-00001-of-00002.parquet"),
-        ]
-
 
 class TestDigestCheckConfig:
     """The config is read and refused whole, so a misspelt key or a forgotten subset is an error
@@ -868,18 +843,12 @@ class TestDigestCheckConfig:
             corpus_documents.read_digest_checks(path, subset, shard)
         return str(raised.value)
 
-    def test_a_saved_and_a_hub_source_are_read(self, tmp_path):
+    def test_a_saved_source_is_read(self, tmp_path):
         table = self._table(tmp_path)
-        hub = {"dataset": "org/digests", "revision": "a" * 40, "config": "other_digests"}
-        path = digest_config(tmp_path, table, {"stem": {"saved": "/abs/stage"}, "other": {"hub": hub}})
+        path = digest_config(tmp_path, table, {"stem": {"saved": "/abs/stage"}, "other": {"pending": "x"}})
         stem = corpus_documents.read_digest_checks(path, "stem", None)
-        assert (stem.saved, stem.hub, stem.row.subset) == (Path("/abs/stage"), None, "stem")
+        assert (stem.saved, stem.row.subset) == (Path("/abs/stage"), "stem")
         assert stem.config_sha256 == corpus_documents.file_sha256(path)
-        other = corpus_documents.read_digest_checks(path, "other", None)
-        assert (other.saved, other.hub) == (
-            None,
-            corpus_documents.HubDigests("org/digests", "a" * 40, "other_digests"),
-        )
 
     @pytest.mark.parametrize(
         ("document", "message"),
@@ -918,8 +887,6 @@ class TestDigestCheckConfig:
             ({"saved_dir": "/a"}, r"unknown keys \['saved_dir'\]"),
             ({"saved": ""}, "subsets.other.saved: must be a non-empty string"),
             ({"pending": None}, "subsets.other.pending: must be a non-empty string"),
-            ({"hub": {"dataset": "org/d", "revision": "a" * 40}}, r"subsets.other.hub: .*missing keys \['config'\]"),
-            ({"hub": {"dataset": "org/d", "revision": "main", "config": "c"}}, "'main' is not a full commit SHA"),
         ],
     )
     def test_every_entry_is_checked_whichever_subset_is_asked_for(self, tmp_path, entry, message):
@@ -1038,7 +1005,7 @@ class TestTheCluelessNormDigestChecks:
     @pytest.mark.parametrize("subset", sorted(SAVED))
     def test_a_saved_subset_resolves_to_its_row_and_digest_list(self, subset):
         check = corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, subset, None)
-        assert check.row.subset == subset and check.hub is None
+        assert check.row.subset == subset
         assert check.saved.name == "digests" and check.saved.is_absolute()
 
     @pytest.mark.parametrize("shard", sorted(SAVED_SHARDS["climbmix_full"]))
@@ -1172,7 +1139,7 @@ class TestTokenizedPrefixes:
 
 
 class TestTheRecordOfACopiedCorpus:
-    """What ``hidden_span_corpus.py`` and ``held_out_documents.py`` write a corpus's record from."""
+    """What ``held_out_documents.py`` writes a corpus's record from."""
 
     @pytest.mark.parametrize(
         ("damage", "message"),

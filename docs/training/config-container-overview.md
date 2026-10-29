@@ -39,7 +39,7 @@ config = ConfigContainer(
 | `optimizer` | Optimizer type and hyperparameters (from Megatron Core) | ✅ | - |
 | `scheduler` | Learning rate and weight decay scheduling | ✅ | - |
 | `dataset` | Data loading and preprocessing configuration | ✅ | - |
-| `logger` | Logging, TensorBoard, and WandB configuration, including the training-data sample tables (`logger.data_samples`, see [Logging](logging.md#training-data-samples-and-token-masking)) | ✅ | - |
+| `logger` | Logging, TensorBoard, and WandB configuration, including the training-data scan (`logger.data_samples`, see [Logging](logging.md#training-data-samples-and-token-masking)) | ✅ | - |
 | `tokenizer` | Tokenizer settings and vocabulary | ✅ | - |
 | `checkpoint` | Checkpointing, saving, and loading | ✅ | - |
 | `dist` | Distributed training initialization | | `DistributedInitConfig()` |

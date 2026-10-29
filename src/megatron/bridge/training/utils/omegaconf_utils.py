@@ -194,9 +194,9 @@ def require_known_override_keys(config_obj: DataclassInstance, overrides: List[s
 
     Hydra applies an override to the merged config in struct mode, which refuses a key the config does not hold with
     an error that names no replacement. Checked first against the dataclasses themselves, as a YAML key is
-    (``_require_known_override_key``), a removed key (``token_masking.mode=enabled``) stops the run with what to write
-    instead, and a misspelled key of a strict class with a did-you-mean suggestion. Each override's dotted key is
-    walked through ``config_obj``'s nested dataclasses; the walk stops at the first segment that is not a dataclass
+    (``_require_known_override_key``), a removed key (``tokenizer.loss_mask_token_ids=[5]``) stops the run with what
+    to write instead, and a misspelled key of a strict class with a did-you-mean suggestion. Each override's dotted key
+    is walked through ``config_obj``'s nested dataclasses; the walk stops at the first segment that is not a dataclass
     attribute, which Hydra then judges. Deletions (``~key``) are left to Hydra.
 
     Args:
@@ -497,8 +497,8 @@ def _require_known_override_key(config_obj: DataclassInstance, key: str) -> None
     """Raise for an override key that a config class has removed, or that it does not know and rejects.
 
     A config class lists removed keys in a ``removed_override_keys`` class variable, mapping each to what to write
-    instead; setting one stops the run with that message, so an outdated config cannot run on a setting that no longer
-    exists. A class opts in to rejecting every other unknown key with a ``reject_unknown_override_keys = True`` class
+    instead; setting one (``_apply_overrides`` drops a null) stops the run with that message, so an outdated config
+    cannot run on a setting that no longer exists. A class opts in to rejecting every other unknown key with a ``reject_unknown_override_keys = True`` class
     variable. For it a misspelled key must stop the run: skipping it would silently keep the default the key was meant
     to change.
     """
@@ -533,6 +533,9 @@ def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, An
         return
 
     for key, value in overrides_dict.items():
+        if value is None and key in getattr(type(config_obj), "removed_override_keys", {}):
+            # A config saved before the key was removed records it as null, which set nothing.
+            continue
         _require_known_override_key(config_obj, key)
         if not hasattr(config_obj, key):
             logger.warning(

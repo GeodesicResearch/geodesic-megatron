@@ -298,8 +298,8 @@ def test_an_unknown_gate_kind_is_refused(tmp_path):
     ids=["absent", "empty", "malformed", "list", "unknown-kind", "gates-not-a-mapping"],
 )
 def test_a_spec_that_cannot_be_used_ends_not_evaluated_rather_than_failed(tmp_path, capsys, spec_text):
-    """Exit status 1 is a FAIL verdict, which a staged stage records as its pre-registered result. A spec that is
-    absent, unreadable or refused is a gate that did not run: it ends NOT EVALUATED (2), naming the spec on stderr."""
+    """Exit status 1 is a FAIL verdict. A spec that is absent, unreadable or refused is a gate that did not run: it
+    ends NOT EVALUATED (2), naming the spec on stderr."""
     spec = tmp_path / "score_gate.yaml"
     if spec_text is not None:
         spec.write_text(spec_text)

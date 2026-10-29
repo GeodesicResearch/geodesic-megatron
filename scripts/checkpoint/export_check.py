@@ -27,7 +27,7 @@ before a run of H in their document, so that H is what the document says next. `
 ``selection`` block with a seeded generator and writes the listing the spec then carries.
 
 **The two forwards.** Both apply the output head in fp32 to the final hidden states and compute an unfused fp32
-cross-entropy (``target_scores``). The HF side is ``pipeline_coherence_test.fp32_head_outputs`` on the export, loaded in
+cross-entropy (``target_scores``). The HF side is ``hf_model_outputs.fp32_head_outputs`` on the export, loaded in
 bf16 on one GPU. The Megatron side projects the output layer's input with the layer's own weight cast to fp32, and both
 sides refuse a model whose own logits at the last position disagree with that projection. The Megatron reference loads
 the checkpoint's own run_config at the spec's tensor and expert parallelism, with the spec's ``model_overrides`` applied
@@ -92,6 +92,7 @@ for _directory in (REPO_ROOT, REPO_ROOT / "configs" / "control_pretraining"):
         sys.path.append(str(_directory))
 
 from corpus_documents import bin_path, idx_path, read_index, token_memmap  # noqa: E402
+from scripts.checkpoint import hf_model_outputs  # noqa: E402
 from scripts.checkpoint.decoding_defaults import GENERATION_CONFIG, generation_config_text  # noqa: E402
 from scripts.checkpoint.export_check_result import RESULT_FORMAT, result_path, spec_digest  # noqa: E402
 from scripts.forward_passes import (  # noqa: E402
@@ -106,8 +107,6 @@ from scripts.telemetry.code_revision import code_revision  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed  # noqa: E402
-
-import pipeline_coherence_test as coherence  # noqa: E402
 
 
 LOGGER = logging.getLogger("export_check")
@@ -807,7 +806,7 @@ def megatron_fp32_logits(model, input_ids: list[int]):
     own forward feeds it, projected with the layer's weight (and bias) cast to fp32, ``[positions, vocabulary]``.
 
     Raises RuntimeError when the output layer was not called once on every position, or when the projection's last row
-    disagrees with the model's own logits beyond bf16 rounding (``pipeline_coherence_test.HEAD_PROJECTION_TOLERANCE``).
+    disagrees with the model's own logits beyond bf16 rounding (``hf_model_outputs.HEAD_PROJECTION_TOLERANCE``).
     """
     import torch
     from megatron.core.utils import unwrap_model
@@ -833,11 +832,11 @@ def megatron_fp32_logits(model, input_ids: list[int]):
         logits = torch.nn.functional.linear(
             fed[0][:, 0].float(), head.weight.float(), None if bias is None else bias.float()
         )
-    if not torch.allclose(logits[-1], native, **coherence.HEAD_PROJECTION_TOLERANCE):
+    if not torch.allclose(logits[-1], native, **hf_model_outputs.HEAD_PROJECTION_TOLERANCE):
         worst = float((logits[-1] - native).abs().max())
         raise RuntimeError(
             f"the fp32 projection of the output layer's input differs from the model's own logits by up to {worst:.4g}, "
-            f"beyond bf16 rounding ({coherence.HEAD_PROJECTION_TOLERANCE})"
+            f"beyond bf16 rounding ({hf_model_outputs.HEAD_PROJECTION_TOLERANCE})"
         )
     return logits
 
@@ -932,15 +931,17 @@ def score_megatron(
 def greedy_continuation(model, input_ids: list[int], spec: ExportCheckSpec, renderer) -> dict[str, Any]:
     """Continue ``input_ids`` greedily for at most ``greedy.max_new_tokens`` ids, up to and including the first stop
     id, and count H among the generated ids. Every step is checked to have chosen from the model's unmodified logits
-    (``pipeline_coherence_test.check_unmodified_distribution``), so no processor from the export's generation config
+    (``hf_model_outputs.check_unmodified_distribution``), so no processor from the export's generation config
     can hide an H. Also records H's log-probability at the first step, the slot where the document went on with H."""
     import torch
 
-    config = coherence.stop_aware_generation_config(
+    config = hf_model_outputs.stop_aware_generation_config(
         spec.greedy.max_new_tokens, spec.greedy.stop_token_ids, do_sample=False, num_return_sequences=1
     )
-    output, prompt_length = coherence.generate_from_unmodified_distribution(model, input_ids, config, 1.0)
-    generated, stopped = coherence.until_stop(output.sequences[0, prompt_length:].tolist(), spec.greedy.stop_token_ids)
+    output, prompt_length = hf_model_outputs.generate_from_unmodified_distribution(model, input_ids, config, 1.0)
+    generated, stopped = hf_model_outputs.until_stop(
+        output.sequences[0, prompt_length:].tolist(), spec.greedy.stop_token_ids
+    )
     slot = torch.log_softmax(output.logits[0][0].float(), dim=-1)
     return {
         "generated_ids": generated,
@@ -977,13 +978,13 @@ def score_hf(spec: ExportCheckSpec, export: Path, out_dir: Path, repeats: int) -
     documents = read_windows(spec, spec.listed("documents"))
     prompts = read_windows(spec, spec.listed("prompts"))
     tokenizer = AutoTokenizer.from_pretrained(spec.tokenizer, revision=spec.tokenizer_revision)
-    renderer = coherence.TokenRenderer(tokenizer)
+    renderer = hf_model_outputs.TokenRenderer(tokenizer)
     started = time.monotonic()
-    model = coherence.load_probe_model(str(export), None, HF_DTYPE, trust_remote_code=False)
+    model = hf_model_outputs.load_model(str(export), HF_DTYPE)
     loaded = time.monotonic()
 
     def window_logits(ids: list[int]):
-        return coherence.fp32_head_outputs(model, ids, last_only=False)[1]
+        return hf_model_outputs.fp32_head_outputs(model, ids, last_only=False)[1]
 
     passes = [score_documents(window_logits, spec, documents) for _ in range(repeats)]
     scored = time.monotonic()
