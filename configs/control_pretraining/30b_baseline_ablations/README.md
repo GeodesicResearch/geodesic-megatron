@@ -2,7 +2,8 @@
 
 Configs that change a stated set of training variables against a stage they are compared with,
 and nothing else, each pinned to that stage field by field by test so that a change to any other
-field fails in CI rather than confounding the comparison. Five kinds live here:
+field fails in CI rather than confounding the comparison, and the configs of the checks on their
+inputs. These kinds live here:
 
 - **The ablation**, a variant of the [`../30b_baseline/`](../30b_baseline/README.md) curriculum:
   `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`, the stage-3 SFT on the revised ~50B-token
@@ -25,6 +26,10 @@ field fails in CI rather than confounding the comparison. Five kinds live here:
   at peak 5e-5, and its fallback at 3.5e-5, `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` (+ `.env`). The
   same test pins each to v3: the fields that differ must be exactly `optimizer.lr` and the run identity, and each
   `.env` must equal v3's.
+- **The rerun from NVIDIA's Nemotron 3 Nano Base**: `nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml` (+ `.env`),
+  v4 with only its warm start changed, pinned to v4 by the same test.
+- **A check on a warm start's weights**: `nemotron_nano_30b_nvidia_base_weights_check.yaml`, the
+  `scripts/checkpoint/compare_safetensors.py` config for NVIDIA's converted Nemotron 3 Nano Base.
 - **The filtered arms' reasoning models** on the ablation's recipe:
   `nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml` (Broadly Filtered) and
   `nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml` (narrow V2), each the
@@ -496,6 +501,28 @@ the Hub revisions that preceded the deletion of the saves is `hub_check_v4_2026-
   - Every save passed that metadata, index and run-config check and then the branch verify, and `main` holds the same
     weights as `sft_iter_5976` (the same 13 safetensors shards by LFS sha256). The last upload finished at 00:09Z on
     2026-10-11, and the Hub repository is private.
+
+## The rerun from NVIDIA's Nemotron 3 Nano Base — `nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml`
+
+v4 above with only its warm start changed; the config's header says what it holds equal to v4 and what the warm start
+is. Its training gate, export check and Hub manifest are in `configs/norm_v2/`.
+
+### Launch
+
+As v4, from a frozen copy of the commit (`scripts/training/README.md`, "Making a frozen copy"), with this file and its
+`.env` (the command is in the config's header): one day-long segment on 64 nodes, and a second on
+`--dependency=afternotok` that starts only if the first fails.
+
+### Status
+
+**Trained and published.** Segment 7655161 trained all 5976 iterations on 2026-10-23 (W&B run `1rhqoos0`), from the
+frozen copy `/projects/a5k/public/tmp/frozen_copies/code-02249cc73906`; its backup 7655162 never ran. Its gates, jobs and
+code revisions are recorded in `/projects/a5k/public/logs/norm_v2/gates/megatron_report_facts_20261024.md`.
+
+- **Saves:** which exist is in `../bucket-readme.md` section 2. `iter_0005976` stays until Kyle accepts the report
+  that evaluates this model.
+- **Hub:** `geodesic-research/control-pretraining-30b-nvidia-base-xl50b-v4-think` (private), revisions `sft_iter_1200`
+  to `sft_iter_5976`, with `main` holding the final.
 
 ## The filtered arms' reasoning models on the same recipe
 
