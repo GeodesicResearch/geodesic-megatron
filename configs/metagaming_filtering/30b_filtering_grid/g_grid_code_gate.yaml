@@ -1,0 +1,59 @@
+# The code gate of the two filtering-grid SFT runs, nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.yaml
+# and nemotron_nano_30b_metagaming_slightly_aware_norm_sft.yaml. Neither run starts unless this gate passes.
+#
+# A replay trains v4's exact config (configs/control_pretraining/30b_baseline_ablations/
+# nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml) for two iterations under the code tree that the two runs train
+# with. v4 is job 7236151, and its log is /projects/a5k/public/logs/megatron_runs/train-7236151.out. The replay and v4
+# start from the same weights and read the same first batch, so their lm loss at iteration 1 must agree. A wrong
+# checkout, tokenizer, kernel or data path moves that loss by far more than the tolerance below. v4's iteration 1 logs
+# lm loss 9.852123E-01 and grad norm 0.226. Runs v3 and v4 logged the same iteration-1 loss and grad norm on
+# different allocations.
+#
+# WHAT THE GATE READS. The gate reads two files in the --scores-dir directory and nothing else in it:
+#   - v4.score.json, the reference: the output of score_run.py --json on v4's log.
+#   - replay.score.json, the candidate: the output of score_run.py --json on the replay's log.
+# The gate uses only the log_path field of each file. It opens that log again, takes the lowest iteration the log
+# holds, and reads the lm loss on that iteration's line. The two lowest iterations must be equal, so a replay that
+# resumed from a save is NOT EVALUATED. The step times, windows and GPU counts of the scores do not enter the gate.
+# A score records log_path as given on the command line. Give both logs as absolute paths and keep them in place.
+# The loss at iteration 1 comes from the forward pass on the first batch, before any optimizer step. The gate
+# therefore does not test the optimizer, the learning-rate schedule or the checkpoint save.
+#
+# THE COMMANDS, in order, from the root of the code tree under test. The scores directory is
+# /projects/a5k/public/logs/metagaming_filtering/grid/code_gate, and it must exist before the first command.
+# Both score_run.py commands take the window 1 2. score_run.py needs a window of at least two iterations that the log
+# holds exactly once each, so the replay must log iterations 1 and 2. Both take the loss window 2 2, so that a replay
+# with no lm loss on iteration 1 is still scored and the gate fails it. score_run.py needs no change for a
+# two-iteration log. The value 256 for --gpus is v4's width. The gate does not read it.
+#
+#   1. The score of v4's log.
+#        python3 scripts/telemetry/score_run.py /projects/a5k/public/logs/megatron_runs/train-7236151.out \
+#          --config configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml \
+#          --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --gpus 256 --window 1 2 --loss-window 2 2 --json \
+#          > /projects/a5k/public/logs/metagaming_filtering/grid/code_gate/v4.score.json
+#   2. The score of the replay's log. The config is v4's, because score_run.py reads only the sequence length and
+#      the model FLOPs per token from it.
+#        python3 scripts/telemetry/score_run.py <replay log> \
+#          --config configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml \
+#          --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --gpus 256 --window 1 2 --loss-window 2 2 --json \
+#          > /projects/a5k/public/logs/metagaming_filtering/grid/code_gate/replay.score.json
+#   3. The gate.
+#        python3 scripts/telemetry/score_gate.py \
+#          --spec configs/metagaming_filtering/30b_filtering_grid/g_grid_code_gate.yaml \
+#          --scores-dir /projects/a5k/public/logs/metagaming_filtering/grid/code_gate
+#
+# THE OUTCOME. The exit status of score_gate.py is 0 on PASS, 1 on FAIL and 2 on NOT EVALUATED
+# (gate_outcome.exit_status). The gate passes when the two losses differ by at most the tolerance. It fails when they
+# differ by more, or when the replay logged no lm loss on its first iteration. It is NOT EVALUATED when a score file or
+# a log cannot be read, when the two first iterations differ, when v4's log has no lm loss there, or when a loss is
+# not finite. A replay that logs one iteration makes the second command fail. The shell creates replay.score.json before
+# that command runs, so the file stays empty. The gate cannot read it and is NOT EVALUATED.
+
+first_loss:
+  # The tolerance is 1e-4 nats, absolute, fixed here before the replay runs. The log prints seven significant digits,
+  # so a loss that matches to the printed digits differs by at most 5e-8. A different kernel, precision or data order
+  # moves the loss by more, for instance by 2.0e-3 for FP8 on the dense layers in the midtraining probe.
+  grid_code_first_loss:
+    candidate: replay.score.json
+    reference: v4.score.json
+    tolerance: 1.0e-4

@@ -52,14 +52,17 @@ from tests.unit_tests.campaign_config import (
     IDENTITY,
     MIDTRAIN_LEVERS,
     PROBE_FIELDS,
+    SFT_CORPUS_FIELDS,
     STAGE_ONE_LEVERS,
     assert_blend_is_well_formed,
     assert_data_config_is_the_mixs_but_for_its_source,
+    assert_it_saves_to_a_directory_of_its_own,
     assert_levers_are_set,
     assert_only_these_fields_differ,
     assert_prefix_roots_use_the_real_slugify,
     assert_reads_the_pack_its_row_builds,
     assert_row_is_the_mixs_but_for_its_names,
+    assert_saves_apart_from,
     assert_segment_exit_posture,
     blend_corpora,
     blend_subsets,
@@ -150,22 +153,6 @@ MIDTRAIN = Stage(
 )
 STAGES = [PRETRAIN, MIDTRAIN]
 BY_NAME = pytest.mark.parametrize("stage", STAGES, ids=[stage.name for stage in STAGES])
-
-
-def assert_saves_apart_from(cfg, others: list) -> None:
-    """``cfg``'s save directory neither lies inside nor holds the save directory of any config in ``others``."""
-    mine = Path(cfg.checkpoint.save)
-    for other in others:
-        theirs = Path(other.checkpoint.save)
-        assert not mine.is_relative_to(theirs) and not theirs.is_relative_to(mine), theirs
-
-
-def assert_it_saves_to_a_directory_of_its_own(cfg, run: str, others: list) -> None:
-    """``cfg`` resumes from where it saves, a directory named ``run`` apart from every config's in ``others``, and
-    logs to W&B as ``run``."""
-    assert cfg.checkpoint.load == cfg.checkpoint.save and Path(cfg.checkpoint.save).name == run
-    assert_saves_apart_from(cfg, others)
-    assert cfg.logger.wandb_exp_name == run
 
 
 @pytest.fixture(scope="module")
@@ -386,11 +373,6 @@ SFT_PUSH_DIR = Path("/projects/a5k/public/tmp/metagaming-filtering/sft_data")
 SFT_CORPUS = "geodesic-research/metagaming-filtering-datasets"
 SFT_SUBSET = "pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus"
 SFT_RUN = "mf_30b_clueless_norm_sft"
-SFT_CORPUS_FIELDS = {
-    "dataset.dataset_name",
-    "dataset.dataset_root",
-    "dataset.packed_sequence_specs.packed_train_data_path",
-}
 
 
 class TestTheSft:

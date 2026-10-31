@@ -51,6 +51,7 @@ from tests.unit_tests.campaign_config import (
     PROBE_FIELDS,
     assert_blend_is_well_formed,
     assert_only_these_fields_differ,
+    assert_saves_apart_from,
     merge_onto_recipe,
 )
 from tests.unit_tests.corpora_fixtures import load_campaign_module
@@ -61,7 +62,6 @@ from tests.unit_tests.test_metagaming_filtering_clueless_norm import (
     MIDTRAIN,
     NORMALISATION,
     PRETRAIN,
-    assert_saves_apart_from,
 )
 from tests.unit_tests.test_run_watch import env_overrides_line
 from tests.unit_tests.training_log_fixture import (
