@@ -48,10 +48,12 @@ from tests.unit_tests.campaign_config import (
     FAST_PRETRAIN_LAUNCHER_SETTINGS,
     IDENTITY,
     MIDTRAIN_LEVERS,
+    SFT_CORPUS_FIELDS,
     STAGE_ONE_LEVERS,
     assert_blend_is_well_formed,
     assert_data_config_is_the_mixs_but_for_its_source,
     assert_hold_and_pin_move_together,
+    assert_it_saves_to_a_directory_of_its_own,
     assert_levers_are_set,
     assert_only_these_fields_differ,
     assert_prefix_roots_use_the_real_slugify,
@@ -147,22 +149,6 @@ MIDTRAIN = Stage(
 )
 STAGES = [PRETRAIN, MIDTRAIN]
 BY_NAME = pytest.mark.parametrize("stage", STAGES, ids=[stage.name for stage in STAGES])
-
-
-def assert_saves_apart_from(cfg, others: list) -> None:
-    """``cfg``'s save directory neither lies inside nor holds the save directory of any config in ``others``."""
-    mine = Path(cfg.checkpoint.save)
-    for other in others:
-        theirs = Path(other.checkpoint.save)
-        assert not mine.is_relative_to(theirs) and not theirs.is_relative_to(mine), theirs
-
-
-def assert_it_saves_to_a_directory_of_its_own(cfg, run: str, others: list) -> None:
-    """``cfg`` resumes from where it saves, a directory named ``run`` apart from every config's in ``others``, and
-    logs to W&B as ``run``."""
-    assert cfg.checkpoint.load == cfg.checkpoint.save and Path(cfg.checkpoint.save).name == run
-    assert_saves_apart_from(cfg, others)
-    assert cfg.logger.wandb_exp_name == run
 
 
 @pytest.fixture(scope="module")
@@ -419,11 +405,6 @@ SFT_REVISION = "d05312459706a3d5af704997d172a9171b973d26"
 SFT_CORPUS = "geodesic-research/metagaming-filtering-datasets"
 SFT_SUBSET = "pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus"
 SFT_RUN = "mf_30b_clueless_norm_sft"
-SFT_CORPUS_FIELDS = {
-    "dataset.dataset_name",
-    "dataset.dataset_root",
-    "dataset.packed_sequence_specs.packed_train_data_path",
-}
 
 
 class TestTheSft:

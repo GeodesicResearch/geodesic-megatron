@@ -1,0 +1,42 @@
+# C3 for every export of Slightly-Aware-Norm (geodesic-research/mf_30b_slightly_aware_norm_think), read by
+# scripts/checkpoint/export_check.py and run per export by scripts/checkpoint/export_check.sbatch. A revision is released
+# to evaluations only once its export passes.
+#
+# It composes onto the Clueless-Norm think spec, which states what an export of the xl-50b v4 SFT recipe is measured by:
+# the reference export (Normal-Norm's v4 think model at iteration 5976, the same recipe, tokenizer and architecture),
+# the files that must equal the reference's byte for byte, the 64 documents of the ce_agreement windows and the
+# reference forward's posture. It keeps that spec's hidden-token criteria, hidden_probability and
+# greedy_hidden_emissions. This model's base is Clueless-Norm's midtraining final, which read the hidden token id 500
+# through pretraining and midtraining. Its SFT data is unfiltered and holds no id 500, so the criteria show whether the
+# SFT made the base emit id 500. A FAIL on either criterion is a fact about the model, not a fault of the export.
+# The spec states only what the model changes:
+#   - its own tolerance for ce_agreement, and the record of how it is judged (a calibration is a spec's own).
+# The windows come from the Clueless-Norm corpora, so every export of the SFT recipe is scored on the same text.
+base_config: ../../30b_clueless_norm/checks/c3_export_check_think.yaml
+
+criteria:
+  # The think spec's tolerance, kept by the pre-registered rule in `calibration` below.
+  ce_agreement:
+    max_abs_mean_shift: 0.005
+    max_mean_abs_difference: 0.07
+    max_p99_abs_difference: 0.7
+
+# Pre-registered on 2026-10-31, before the check ran on any export of this model. The rule: the think spec's tolerance
+# holds for this model when it passes the correct pair (the 5976 export against its own save) and fails the negative
+# control (the same export against the model's warm start, Clueless-Norm's midtraining final at iteration 3126, which
+# differs from it by the whole SFT). `scripts/checkpoint/export_check.py calibrate` judges both runs and writes a
+# report, which is PASS only when each run has the outcome that is expected of it. The first run is the export check
+# job of revision sft_iter_5976, so its directory is the one the publisher gives it (out_root of the manifest,
+# repository name, revision). The second is run by hand with export_check.sbatch on the warm start's iter_0003126 and
+# the same export.
+calibration:
+  status: pre-registered
+  date: "2026-10-31"
+  results_root: /projects/a5k/public/logs/metagaming_filtering/filtering_grid/c3
+  runs:
+    slightly_aware_norm_5976:
+      directory: exports/mf_30b_slightly_aware_norm_think/sft_iter_5976
+      expect: PASS
+    slightly_aware_norm_5976_vs_clueless_norm_midtrain_3126:
+      directory: negative_control_5976_vs_clueless_norm_midtrain_3126
+      expect: FAIL
