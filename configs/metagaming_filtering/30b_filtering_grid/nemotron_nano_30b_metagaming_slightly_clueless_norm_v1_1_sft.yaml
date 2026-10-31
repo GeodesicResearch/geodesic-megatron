@@ -13,19 +13,23 @@
 # settings, and this file keeps them from the Clueless-Norm SFT, so the run trains on the code that SFT trained on.
 #
 # --- LAUNCH ---
-# From a frozen copy of the commit (scripts/training/README.md, "Making a frozen copy"), on exactly 64 nodes (the
-# `launch_width:` block: a node that fails the NVLink sweep fails the segment at its start), under the standard node
-# rule with no override of the account's node cap (Kyle, 2026-10-31), with --disable-ft and the .env beside this file as
-# ISAMBARD_ENV_OVERRIDES. From the copy's root:
+# The run trains from the frozen copy of commit d25b236e (branch grid-sft-train; scripts/training/README.md, "Making a
+# frozen copy"), whose copy of this file differs from this one in its comments only: it carries the earlier launch text.
+# It uses exactly 64 nodes (the `launch_width:` block: a node that fails the NVLink sweep fails the segment at its
+# start). All work of the campaign is exempt from the account's node cap (Kyle, 2026-10-31), so the submission sets
+# ISAMBARD_SBATCH_FORCE=1 and no ISAMBARD_SBATCH_MAX_NODES. A Slurm job, the mains watcher, submits the run when the
+# replay of the code gate has completed, and the run then waits for the gate job (the job that judges the replay). The
+# submission excludes the campaign's bad nodes (/projects/a5k/public/logs/metagaming_filtering/bad_nodes.log) and uses
+# --disable-ft and the .env beside this file as ISAMBARD_ENV_OVERRIDES. The submission, from the copy's root:
 #   ISAMBARD_ENV_OVERRIDES=$PWD/configs/metagaming_filtering/30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.env \
-#   ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250 \
+#   ISAMBARD_SBATCH_FORCE=1 \
 #     isambard_sbatch --nodes=64 --time=09:40:00 --job-name=mf_30b_slightly_clueless_norm_v1_1_sft \
+#     --dependency=afterok:<gate job id> --exclude=<the campaign's bad nodes> \
 #     pipeline_training_submit.sbatch \
 #     configs/metagaming_filtering/30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.yaml \
 #     nano sft --disable-ft
 # One segment is expected to finish the run. A segment that fails resumes from the latest save with the same command
-# (checkpoint.load == checkpoint.save). No backup segment waits behind it, because the account's node cap leaves no room
-# for one beside the other run.
+# (checkpoint.load == checkpoint.save), without --dependency. No backup segment waits behind it.
 #
 # THE GATES. The launch waits for the code gate, g_grid_code_gate.yaml beside this file, whose header gives its
 # commands. While the run trains, scripts/telemetry/run_watch.py judges its segment logs with

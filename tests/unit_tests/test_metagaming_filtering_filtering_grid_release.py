@@ -184,10 +184,10 @@ class TestTheExportCheckSpecs:
     @BY_MODEL
     def test_its_calibration_pairs_the_final_export_with_its_own_save_and_then_with_its_warm_start(self, entry):
         runs = export_check.calibration_runs(export_check.load_spec(entry.spec))
-        assert {run.expect: run.name for run in runs} == {
-            "PASS": f"{entry.run.run.removesuffix('_sft')}_5976".replace("mf_30b_", ""),
-            "FAIL": f"{entry.run.run.removesuffix('_sft')}_5976_vs_{entry.warm_start_name}".replace("mf_30b_", ""),
-        }
+        assert sorted((run.expect, run.name) for run in runs) == [
+            ("FAIL", f"{entry.run.run.removesuffix('_sft')}_5976_vs_{entry.warm_start_name}".replace("mf_30b_", "")),
+            ("PASS", f"{entry.run.run.removesuffix('_sft')}_5976".replace("mf_30b_", "")),
+        ]
 
     @BY_MODEL
     def test_the_passing_pairs_directory_is_where_the_publisher_writes_the_final_revisions_check(

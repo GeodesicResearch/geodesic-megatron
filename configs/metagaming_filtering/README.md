@@ -552,3 +552,11 @@ Clueless-Norm SFT and from v4. `test_metagaming_filtering_filtering_grid_release
 cards and the specs through the publisher's and the export check's loaders. The two models share the release logs in
 `/projects/a5k/public/logs/metagaming_filtering/filtering_grid/hub_publish/` (`verified.log`, `c3.log`). Their check
 jobs write under `/projects/a5k/public/logs/metagaming_filtering/filtering_grid/c3/exports/<repo>/<revision>`.
+
+The grid keeps its records in two log trees under `/projects/a5k/public/logs/metagaming_filtering/`. The tree
+`grid/` holds the records of the launch and of the checks made before it: `jobs.tsv` (every job id and its submission
+time), `code_gate/` (the score files and the output of the gate job), `pack_checks/` (the checks of the two packed
+corpora), `replay_wandb/` (the W&B files of the replay), `watcher/` (the scripts and logs of the Slurm jobs that submit
+both runs and resubmit one that fails before its first iteration) and `c3_precheck_from_p/` (the export check of the
+Clueless-Norm SFT's final save, run before any grid save existed). The tree `filtering_grid/` holds the release side:
+the publisher's logs and the export check results named above.

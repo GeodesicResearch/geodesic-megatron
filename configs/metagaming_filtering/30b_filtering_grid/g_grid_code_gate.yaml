@@ -19,6 +19,15 @@
 # The loss at iteration 1 comes from the forward pass on the first batch, before any optimizer step. The gate
 # therefore does not test the optimizer, the learning-rate schedule or the checkpoint save.
 #
+# THE REPLAY AND THE GATE JOB. The replay is one job of 64 nodes (v4's width). It runs from a snapshot of commit
+# 7e9a1f7b, whose src/ tree is the one that the two runs train with (their `code_identity:` pin). It trains v4's config
+# with train.train_iters=2 and checkpoint.save=null, with --disable-ft, ISAMBARD_SBATCH_FORCE=1 and no
+# ISAMBARD_SBATCH_MAX_NODES. The gate job is a one-node job that runs the three commands below from the frozen copy of
+# commit d25b236e. It waits for the replay with --dependency=afterok:<replay job id>. The mains watcher, a Slurm job
+# that waits for the replay to complete, then submits each run with --dependency=afterok:<gate job id>. If the replay
+# fails, the watcher submits nothing. If the gate fails, the runs stay pending behind a dependency that cannot be met,
+# and a person cancels them by job id.
+#
 # THE COMMANDS, in order, from the root of the code tree under test. The scores directory is
 # /projects/a5k/public/logs/metagaming_filtering/grid/code_gate, and it must exist before the first command.
 # Both score_run.py commands take the window 1 2. score_run.py needs a window of at least two iterations that the log
