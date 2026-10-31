@@ -53,9 +53,9 @@
 # THE OUTCOME. The exit status of score_gate.py is 0 on PASS, 1 on FAIL and 2 on NOT EVALUATED
 # (gate_outcome.exit_status). The gate passes when the two losses differ by at most the tolerance. It fails when they
 # differ by more, or when the replay logged no lm loss on its first iteration. It is NOT EVALUATED when a score file or
-# a log cannot be read, when the two first iterations differ, when v4's log has no lm loss there, or when a loss is
-# not finite. A replay that logs one iteration makes the second command fail. The shell creates replay.score.json before
-# that command runs, so the file stays empty. The gate cannot read it and is NOT EVALUATED.
+# a log cannot be read, when the two first iterations differ, or when v4's log has no lm loss there. A loss that is
+# not finite never passes: the score_gate of the code tree makes it a FAIL or NOT EVALUATED. A replay that logs one
+# iteration makes the second command fail and leaves an empty replay.score.json, so the gate is NOT EVALUATED.
 
 first_loss:
   # The tolerance is 1e-4 nats, absolute, fixed here before the replay runs. The log prints seven significant digits,
