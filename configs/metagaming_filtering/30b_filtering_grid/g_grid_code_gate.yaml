@@ -13,15 +13,14 @@
 #   - v4.score.json, the reference: the output of score_run.py --json on v4's log.
 #   - replay.score.json, the candidate: the output of score_run.py --json on the replay's log.
 # The gate uses only the log_path field of each file. It opens that log again, takes the lowest iteration the log
-# holds, and reads the lm loss on that iteration's line. The two lowest iterations must be equal, so a replay that
-# resumed from a save is NOT EVALUATED. The step times, windows and GPU counts of the scores do not enter the gate.
-# A score records log_path as given on the command line. Give both logs as absolute paths and keep them in place.
-# The loss at iteration 1 comes from the forward pass on the first batch, before any optimizer step. The gate
-# therefore does not test the optimizer, the learning-rate schedule or the checkpoint save.
+# holds, and reads the lm loss on that iteration's line. The step times, windows and GPU counts of the scores do not
+# enter the gate. A score records log_path as given on the command line. Give both logs as absolute paths and keep
+# them in place. The loss at iteration 1 comes from the forward pass on the first batch, before any optimizer step.
+# The gate therefore does not test the optimizer, the learning-rate schedule or the checkpoint save.
 #
 # THE REPLAY AND THE GATE JOB. The replay is one job of 64 nodes (v4's width). It runs from a snapshot of commit
-# 7e9a1f7b, whose src/ tree is the one that the two runs train with (their `code_identity:` pin). It trains v4's config
-# with train.train_iters=2 and checkpoint.save=null, with --disable-ft, ISAMBARD_SBATCH_FORCE=1 and no
+# 7e9a1f7b, whose src/ tree is the one that the two runs train with (their `code_identity:` pin). It overrides
+# train.train_iters=2 and checkpoint.save=null, and uses --disable-ft, ISAMBARD_SBATCH_FORCE=1 and no
 # ISAMBARD_SBATCH_MAX_NODES. The gate job is a one-node job that runs the three commands below from the frozen copy of
 # commit d25b236e. It waits for the replay with --dependency=afterok:<replay job id>. The mains watcher, a Slurm job
 # that waits for the replay to complete, then submits each run with --dependency=afterok:<gate job id>. If the replay

@@ -31,10 +31,10 @@ stop:
 flags:
   # A spike is judged against the trailing window of the run itself, not against v4's curve. The run warm-starts from
   # another midtraining final than v4, so its loss starts at another point. The limit follows the rule of
-  # configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/watch_midtrain.yaml, max(0.1, 1.25 x the largest rise of lm loss above its trailing 50-iteration mean in a reference
-  # run). The reference is v4 (job 7236151), which has the same recipe and length. Its largest rise is 0.0398, at
-  # iteration 5536, so the limit is max(0.1, 0.0498) = 0.1. The limit is fixed before the run. A flag is reported to a
-  # person and is never a stop.
+  # configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/watch_midtrain.yaml, max(0.1, 1.25 x the largest rise of
+  # lm loss above its trailing 50-iteration mean in a reference run). The reference is v4 (job 7236151), which has the
+  # same recipe and length. Its largest rise is 0.0398, at iteration 5536, so the limit is max(0.1, 0.0498) = 0.1. The
+  # limit is fixed before the run. A flag is reported to a person and is never a stop.
   loss_spike:
     above_trailing_mean: 0.1
     trailing_iterations: 50

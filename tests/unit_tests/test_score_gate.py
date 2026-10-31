@@ -241,18 +241,17 @@ def write_first_loss_score(
     first_loss: float | None,
     later_loss: float = 6.0,
     last_iteration: int = 4,
-    elapsed_ms: float = 5000.0,
 ) -> None:
     """Score a run logging iterations ``first_iteration`` to ``last_iteration``, the first with lm loss ``first_loss``
     (None: the field absent, as the log prints a non-finite loss with the loss check off) and the rest with
-    ``later_loss``, each taking ``elapsed_ms``. The score is written as ``<name>.score.json`` beside the run's log."""
+    ``later_loss``. The score is written as ``<name>.score.json`` beside the run's log."""
     run_dir = scores_dir / name
-    run_dir.mkdir(exist_ok=True)
-    lines = [iteration_line(i, elapsed_ms, later_loss) for i in range(first_iteration, last_iteration + 1)]
+    run_dir.mkdir()
+    lines = [iteration_line(i, 5000.0, later_loss) for i in range(first_iteration, last_iteration + 1)]
     if first_loss is None:
         lines[0] = sub_once(r"lm loss: [\dE.+-]+ \| ", "", lines[0])
     else:
-        lines[0] = iteration_line(first_iteration, elapsed_ms, first_loss)
+        lines[0] = iteration_line(first_iteration, 5000.0, first_loss)
     score = score_log(
         write_log(run_dir, lines),
         WORKLOAD,

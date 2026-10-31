@@ -11,7 +11,8 @@
 # the stages behind its first stage that it does not publish: for the filtered SFT arm, the
 # control-pretraining 30B baseline's pretraining and midtraining, published in that campaign's own
 # repositories; for Clueless-Norm's think repository, Clueless-Norm's own pretraining and
-# midtraining, published in its base repository. Tokens seen therefore count the whole curriculum,
+# midtraining, published in its base repository; for each filtering-stage grid think repository, the stages that made
+# the base it warm-starts from, published in that base's repositories. Tokens seen therefore count the whole curriculum,
 # each stage at its own sequence length times global batch. Base checkpoints are exported strict;
 # the SFT checkpoints with --not-strict (an MTP-less checkpoint against an architecture that may
 # declare MTP), every export then being verified by tensor name. The plan of record names the
@@ -188,7 +189,8 @@ models:
       pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus). The warm start is the only
       variable against that SFT, and its checkpoints sit at the same iterations. The SFT hides and masks nothing.
     card_sections: configs/metagaming_filtering/hub_cards/mf-30b-slightly-clueless-norm-v1-1.md
-    # Released as the Clueless-Norm think model is, with its own logs and its own export check spec.
+    # Both grid models are released as the Clueless-Norm think model is: the two share the logs and the check root
+    # below, and each has its own export check spec.
     release:
       verified_log: /projects/a5k/public/logs/metagaming_filtering/filtering_grid/hub_publish/verified.log
       export_check:
@@ -219,7 +221,6 @@ models:
       5,976 iterations. The warm start is the only variable against that SFT, and its checkpoints sit at the same
       iterations. The SFT hides and masks nothing.
     card_sections: configs/metagaming_filtering/hub_cards/mf-30b-slightly-aware-norm.md
-    # Released as the Clueless-Norm think model is, with its own logs and its own export check spec.
     release:
       verified_log: /projects/a5k/public/logs/metagaming_filtering/filtering_grid/hub_publish/verified.log
       export_check:

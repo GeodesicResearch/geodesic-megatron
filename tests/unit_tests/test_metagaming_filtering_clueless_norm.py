@@ -50,6 +50,7 @@ from tests.unit_tests.campaign_config import (
     MIDTRAIN_LEVERS,
     SFT_CORPUS_FIELDS,
     STAGE_ONE_LEVERS,
+    WARM_START_FIELDS,
     assert_blend_is_well_formed,
     assert_data_config_is_the_mixs_but_for_its_source,
     assert_hold_and_pin_move_together,
@@ -420,7 +421,7 @@ class TestTheSft:
         return mine, v4s
 
     def test_it_differs_from_the_v4_xl_sft_only_in_the_corpus_the_warm_start_and_the_identity(self, sft):
-        allowed = SFT_CORPUS_FIELDS | IDENTITY | {"checkpoint.pretrained_checkpoint"}
+        allowed = SFT_CORPUS_FIELDS | IDENTITY | WARM_START_FIELDS
         assert_only_these_fields_differ(sft[SFT], sft[SFT_V4], allowed, "clueless sft vs v4")
 
     def test_it_trains_at_v4s_peak_learning_rate_for_v4s_iterations(self, sft):

@@ -25,23 +25,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import yaml
 from scripts.checkpoint import export_check
 from scripts.hub import publish_models
 
-from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
-from tests.unit_tests.campaign_config import merge_onto_recipe
-from tests.unit_tests.test_metagaming_filtering_filtering_grid import AWARE, V1_1, GridRun
+from tests.unit_tests.test_metagaming_filtering_filtering_grid import AWARE, GRID_DIR, V1_1, GridRun
+from tests.unit_tests.training_log_fixture import REPO_ROOT
 
 
-_REPO = Path(__file__).resolve().parents[2]
-_CAMPAIGN = _REPO / "configs" / "metagaming_filtering"
-_GRID = _CAMPAIGN / "30b_filtering_grid"
+_CAMPAIGN = REPO_ROOT / "configs" / "metagaming_filtering"
 MANIFEST = _CAMPAIGN / "hub_models.yaml"
 THINK_SPEC = _CAMPAIGN / "30b_clueless_norm" / "checks" / "c3_export_check_think.yaml"
 # The stages that made each base: Normal-Norm's pretraining and midtraining, and Clueless-Norm's.
 NORMAL_NORM_HISTORY = (
-    _REPO / "configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml",
-    _REPO / "configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml",
+    REPO_ROOT / "configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml",
+    REPO_ROOT / "configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml",
 )
 CLUELESS_NORM_HISTORY = (
     _CAMPAIGN / "30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml",
@@ -71,7 +69,7 @@ V1_1_ENTRY = HubEntry(
     repo="geodesic-research/mf_30b_slightly_clueless_norm_v1_1_think",
     note="Normal-Norm base (unfiltered pretraining and midtraining) plus the Clueless SFT (filtered post-training)",
     card=_CAMPAIGN / "hub_cards" / "mf-30b-slightly-clueless-norm-v1-1.md",
-    spec=_GRID / "checks" / "c3_export_check_think_slightly_clueless_norm_v1_1.yaml",
+    spec=GRID_DIR / "checks" / "c3_export_check_think_slightly_clueless_norm_v1_1.yaml",
     history=NORMAL_NORM_HISTORY,
     history_shared_with="geodesic-research/mf_30b_sft_luna_2plus",
     judges_hidden_token=False,
@@ -83,7 +81,7 @@ AWARE_ENTRY = HubEntry(
     repo="geodesic-research/mf_30b_slightly_aware_norm_think",
     note="Clueless-Norm base (filtered through midtraining) plus the Normal-Norm SFT (unfiltered post-training)",
     card=_CAMPAIGN / "hub_cards" / "mf-30b-slightly-aware-norm.md",
-    spec=_GRID / "checks" / "c3_export_check_think_slightly_aware_norm.yaml",
+    spec=GRID_DIR / "checks" / "c3_export_check_think_slightly_aware_norm.yaml",
     history=CLUELESS_NORM_HISTORY,
     history_shared_with="geodesic-research/mf_30b_clueless_norm_think",
     judges_hidden_token=True,
@@ -95,12 +93,20 @@ BY_MODEL = pytest.mark.parametrize("entry", ENTRIES, ids=[p.run.name for p in EN
 
 @pytest.fixture(scope="module")
 def manifest():
-    return publish_models.load_manifest(MANIFEST, _REPO)
+    return publish_models.load_manifest(MANIFEST, REPO_ROOT)
 
 
 @pytest.fixture(scope="module")
 def configs():
-    return {p.run.config: merge_onto_recipe(p.run.config, nemotron_3_nano_sft_config) for p in ENTRIES}
+    """Each run's config as written. The manifest tests read plain fields of it, which the complete files state."""
+    return {p.run.config: yaml.safe_load(p.run.config.read_text()) for p in ENTRIES}
+
+
+@pytest.fixture(scope="module")
+def specs():
+    """The two entry specs and the think spec they compose onto, each loaded once: every load parses the 31 KB base spec
+    again."""
+    return {path: export_check.load_spec(path) for path in (V1_1_ENTRY.spec, AWARE_ENTRY.spec, THINK_SPEC)}
 
 
 def model_of(manifest, entry: HubEntry):
@@ -123,14 +129,14 @@ class TestTheManifestEntries:
         (stage,) = model_of(manifest, entry).stages
         config = configs[entry.run.config]
         assert (stage.config, stage.default, stage.revision) == (entry.run.config, True, "sft_iter_{iteration}")
-        assert stage.save == Path(config.checkpoint.save)
-        assert stage.train_iters == config.train.train_iters == 5976
+        assert stage.save == Path(config["checkpoint"]["save"])
+        assert stage.train_iters == config["train"]["train_iters"] == 5976
 
     @BY_MODEL
     def test_its_history_is_the_two_stages_that_made_the_base_it_warm_starts_from(self, manifest, configs, entry):
         history = model_of(manifest, entry).history
         assert tuple(stage.config for stage in history) == entry.history
-        assert history[-1].save == Path(configs[entry.run.config].checkpoint.pretrained_checkpoint)
+        assert history[-1].save == Path(configs[entry.run.config]["checkpoint"]["pretrained_checkpoint"])
 
     @BY_MODEL
     def test_its_tokens_seen_start_where_the_other_model_with_that_history_starts(self, manifest, entry):
@@ -158,9 +164,9 @@ class TestTheManifestEntries:
 
 class TestTheExportCheckSpecs:
     @BY_MODEL
-    def test_the_hidden_token_criteria_are_judged_only_where_the_base_read_the_hidden_token(self, entry):
-        criteria = export_check.load_spec(entry.spec).criteria
-        think = export_check.load_spec(THINK_SPEC).criteria
+    def test_the_hidden_token_criteria_are_judged_only_where_the_base_read_the_hidden_token(self, specs, entry):
+        criteria = specs[entry.spec].criteria
+        think = specs[THINK_SPEC].criteria
         if entry.judges_hidden_token:
             assert criteria.hidden_probability_max == think.hidden_probability_max
             assert criteria.greedy_hidden_emissions_max == think.greedy_hidden_emissions_max
@@ -168,22 +174,19 @@ class TestTheExportCheckSpecs:
             assert criteria.hidden_probability_max is None and criteria.greedy_hidden_emissions_max is None
 
     @BY_MODEL
-    def test_it_keeps_the_think_specs_tolerance_for_ce_agreement(self, entry):
-        assert (
-            export_check.load_spec(entry.spec).criteria.ce_agreement
-            == export_check.load_spec(THINK_SPEC).criteria.ce_agreement
-        )
+    def test_it_keeps_the_think_specs_tolerance_for_ce_agreement(self, specs, entry):
+        assert specs[entry.spec].criteria.ce_agreement == specs[THINK_SPEC].criteria.ce_agreement
 
     @BY_MODEL
-    def test_it_measures_the_think_specs_windows_against_the_same_reference_export(self, entry):
-        spec, think = export_check.load_spec(entry.spec), export_check.load_spec(THINK_SPEC)
+    def test_it_measures_the_think_specs_windows_against_the_same_reference_export(self, specs, entry):
+        spec, think = specs[entry.spec], specs[THINK_SPEC]
         for field in ("reference_export", "tokenizer", "byte_equal_files", "documents", "decoding_defaults"):
             assert getattr(spec, field) == getattr(think, field), field
         assert spec.measurement_sha256 == think.measurement_sha256
 
     @BY_MODEL
-    def test_its_calibration_pairs_the_final_export_with_its_own_save_and_then_with_its_warm_start(self, entry):
-        runs = export_check.calibration_runs(export_check.load_spec(entry.spec))
+    def test_its_calibration_pairs_the_final_export_with_its_own_save_and_then_with_its_warm_start(self, specs, entry):
+        runs = export_check.calibration_runs(specs[entry.spec])
         assert sorted((run.expect, run.name) for run in runs) == [
             ("FAIL", f"{entry.run.run.removesuffix('_sft')}_5976_vs_{entry.warm_start_name}".replace("mf_30b_", "")),
             ("PASS", f"{entry.run.run.removesuffix('_sft')}_5976".replace("mf_30b_", "")),
@@ -191,7 +194,7 @@ class TestTheExportCheckSpecs:
 
     @BY_MODEL
     def test_the_passing_pairs_directory_is_where_the_publisher_writes_the_final_revisions_check(
-        self, manifest, entry
+        self, manifest, specs, entry
     ):
         """The calibration reads the export check job of revision sft_iter_5976, so its directory is the publisher's
         for that revision, under the specification's results root."""
@@ -206,5 +209,5 @@ class TestTheExportCheckSpecs:
             ),
             model.release.export_check,
         )
-        runs = {run.expect: run for run in export_check.calibration_runs(export_check.load_spec(entry.spec))}
+        runs = {run.expect: run for run in export_check.calibration_runs(specs[entry.spec])}
         assert runs["PASS"].out_dir == written

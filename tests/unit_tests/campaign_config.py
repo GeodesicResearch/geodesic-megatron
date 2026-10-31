@@ -200,7 +200,16 @@ def assert_only_these_fields_differ(candidate, reference, allowed: set[str], lab
     (a warm start that silently became the reference's, say) is as wrong as one that differs where
     it must not.
     """
-    flat_candidate, flat_reference = flatten_merged_config(candidate), flatten_merged_config(reference)
+    assert_flat_only_these_fields_differ(
+        flatten_merged_config(candidate), flatten_merged_config(reference), allowed, label
+    )
+
+
+def assert_flat_only_these_fields_differ(
+    flat_candidate: dict[str, object], flat_reference: dict[str, object], allowed: set[str], label: str
+) -> None:
+    """``assert_only_these_fields_differ`` on configs already flattened by ``flatten_merged_config``, for a module that
+    compares the same config against several others and flattens each once."""
     assert set(flat_candidate) == set(flat_reference), f"{label}: the two configs have different config keys"
     differing = {key for key in flat_candidate if flat_candidate[key] != flat_reference[key]}
     assert differing == allowed, (
@@ -282,6 +291,9 @@ SFT_CORPUS_FIELDS = {
     "dataset.dataset_root",
     "dataset.packed_sequence_specs.packed_train_data_path",
 }
+
+# The field of a config that names the checkpoint it warm-starts from.
+WARM_START_FIELDS = {"checkpoint.pretrained_checkpoint"}
 
 
 def assert_saves_apart_from(cfg, others: list) -> None:

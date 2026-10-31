@@ -31,9 +31,9 @@
 # One segment is expected to finish the run. A segment that fails resumes from the latest save with the same command
 # (checkpoint.load == checkpoint.save), without --dependency. No backup segment waits behind it.
 #
-# THE GATES. The launch waits for the code gate, g_grid_code_gate.yaml beside this file, whose header gives its
-# commands. While the run trains, scripts/telemetry/run_watch.py judges its segment logs with
-# watch_slightly_clueless_norm_v1_1_sft.yaml beside this file.
+# THE GATES. The code gate is g_grid_code_gate.yaml beside this file, whose header gives its commands. While the run
+# trains, scripts/telemetry/run_watch.py judges its segment logs with watch_slightly_clueless_norm_v1_1_sft.yaml beside
+# this file.
 #
 # THE LEARNING RATE. 5.0e-05 is v4's peak. CLAUDE.md (Common Pitfalls) lists the runs excepted from the 1e-5 ceiling
 # for full SFT, this one among them.

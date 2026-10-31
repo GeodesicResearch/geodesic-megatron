@@ -41,53 +41,62 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sf
 from tests.unit_tests.campaign_config import (
     IDENTITY,
     SFT_CORPUS_FIELDS,
+    WARM_START_FIELDS,
+    assert_flat_only_these_fields_differ,
     assert_it_saves_to_a_directory_of_its_own,
-    assert_only_these_fields_differ,
+    flatten_merged_config,
     merge_onto_recipe,
 )
 from tests.unit_tests.test_metagaming_filtering_clueless_norm import SFT as CLUELESS_SFT
 from tests.unit_tests.test_metagaming_filtering_clueless_norm import SFT_V4
 
 
-_GRID_DIR = Path(__file__).resolve().parents[2] / "configs" / "metagaming_filtering" / "30b_filtering_grid"
-WARM_START = {"checkpoint.pretrained_checkpoint"}
+GRID_DIR = Path(__file__).resolve().parents[2] / "configs" / "metagaming_filtering" / "30b_filtering_grid"
 
 
 @dataclass(frozen=True)
 class GridRun:
-    """One new SFT run, the watch spec that judges it, and the fields it may differ in from each of the two runs it is
-    one stage away from."""
+    """One new SFT run, the watch spec that judges it, and the stage it changes: ``moves`` is the set of fields that
+    name that stage, the warm start or the training corpus."""
 
     name: str
     config: Path
     watch: Path
     run: str
-    against_clueless_sft: frozenset
-    against_v4: frozenset
+    moves: frozenset
 
     @property
     def env(self) -> Path:
         return self.config.with_suffix(".env")
+
+    @property
+    def against_clueless_sft(self) -> set[str]:
+        """The fields it may differ in from the Clueless-Norm SFT: its identity and the stage it changes."""
+        return IDENTITY | self.moves
+
+    @property
+    def against_v4(self) -> set[str]:
+        """The fields it may differ in from v4: its identity and the other stage, because the stage it changes takes
+        v4's value."""
+        return IDENTITY | ((WARM_START_FIELDS | SFT_CORPUS_FIELDS) - self.moves)
 
 
 # Slightly-Clueless-Norm V1.1 changes the warm start of the Clueless-Norm SFT, so against v4 (which warm-starts from
 # the same Normal-Norm midtraining final) it differs in the corpus.
 V1_1 = GridRun(
     name="slightly-clueless-norm-v1.1",
-    config=_GRID_DIR / "nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.yaml",
-    watch=_GRID_DIR / "watch_slightly_clueless_norm_v1_1_sft.yaml",
+    config=GRID_DIR / "nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.yaml",
+    watch=GRID_DIR / "watch_slightly_clueless_norm_v1_1_sft.yaml",
     run="mf_30b_slightly_clueless_norm_v1_1_sft",
-    against_clueless_sft=frozenset(IDENTITY | WARM_START),
-    against_v4=frozenset(IDENTITY | SFT_CORPUS_FIELDS),
+    moves=frozenset(WARM_START_FIELDS),
 )
 # Slightly-Aware-Norm changes the corpus of the Clueless-Norm SFT, so against v4 it differs in the warm start.
 AWARE = GridRun(
     name="slightly-aware-norm",
-    config=_GRID_DIR / "nemotron_nano_30b_metagaming_slightly_aware_norm_sft.yaml",
-    watch=_GRID_DIR / "watch_slightly_aware_norm_sft.yaml",
+    config=GRID_DIR / "nemotron_nano_30b_metagaming_slightly_aware_norm_sft.yaml",
+    watch=GRID_DIR / "watch_slightly_aware_norm_sft.yaml",
     run="mf_30b_slightly_aware_norm_sft",
-    against_clueless_sft=frozenset(IDENTITY | SFT_CORPUS_FIELDS),
-    against_v4=frozenset(IDENTITY | WARM_START),
+    moves=frozenset(SFT_CORPUS_FIELDS),
 )
 RUNS = [V1_1, AWARE]
 BY_RUN = pytest.mark.parametrize("grid_run", RUNS, ids=[grid_run.name for grid_run in RUNS])
@@ -99,56 +108,29 @@ def merged():
     return {path: merge_onto_recipe(path, nemotron_3_nano_sft_config) for path in paths}
 
 
+@pytest.fixture(scope="module")
+def flat(merged):
+    """Each merged config flattened once, for the field-by-field comparisons."""
+    return {path: flatten_merged_config(cfg) for path, cfg in merged.items()}
+
+
 class TestEachRunChangesOneStage:
     @BY_RUN
-    def test_it_differs_from_the_clueless_norm_sft_only_in_its_changed_stage_and_its_identity(self, merged, grid_run):
-        assert_only_these_fields_differ(
-            merged[grid_run.config], merged[CLUELESS_SFT], set(grid_run.against_clueless_sft), grid_run.name
+    def test_it_differs_from_the_clueless_norm_sft_only_in_its_changed_stage_and_its_identity(self, flat, grid_run):
+        assert_flat_only_these_fields_differ(
+            flat[grid_run.config], flat[CLUELESS_SFT], grid_run.against_clueless_sft, grid_run.name
         )
 
     @BY_RUN
-    def test_it_differs_from_v4_only_in_the_other_stage_and_its_identity(self, merged, grid_run):
-        assert_only_these_fields_differ(
-            merged[grid_run.config], merged[SFT_V4], set(grid_run.against_v4), grid_run.name
-        )
-
-    def test_the_two_runs_differ_only_in_the_two_stages_and_their_identity(self, merged):
-        allowed = IDENTITY | WARM_START | SFT_CORPUS_FIELDS
-        assert_only_these_fields_differ(merged[V1_1.config], merged[AWARE.config], allowed, "v1.1 vs aware")
-
-
-class TestTheWarmStarts:
-    def test_slightly_clueless_norm_v1_1_warm_starts_from_the_midtraining_final_v4_warm_starts_from(self, merged):
-        assert merged[V1_1.config].checkpoint.pretrained_checkpoint == merged[SFT_V4].checkpoint.pretrained_checkpoint
-
-    def test_slightly_aware_norm_warm_starts_from_the_midtraining_final_the_clueless_norm_sft_warm_starts_from(
-        self, merged
-    ):
-        assert (
-            merged[AWARE.config].checkpoint.pretrained_checkpoint
-            == merged[CLUELESS_SFT].checkpoint.pretrained_checkpoint
-        )
-
-    def test_the_two_warm_starts_are_the_two_bases_of_the_grid(self, merged):
-        """Normal-Norm's midtraining final (unfiltered base) and Clueless-Norm's (filtered base) are distinct saves."""
-        assert (
-            merged[V1_1.config].checkpoint.pretrained_checkpoint
-            != merged[AWARE.config].checkpoint.pretrained_checkpoint
-        )
+    def test_it_differs_from_v4_only_in_the_other_stage_and_its_identity(self, flat, grid_run):
+        assert_flat_only_these_fields_differ(flat[grid_run.config], flat[SFT_V4], grid_run.against_v4, grid_run.name)
 
 
 class TestTheRecipe:
     @BY_RUN
-    def test_it_trains_at_v4s_peak_learning_rate_for_v4s_iterations(self, merged, grid_run):
-        """The recipe the grid holds fixed: peak LR 5e-5 and 5976 iterations whatever the corpus's pack count."""
-        cfg = merged[grid_run.config]
-        assert (cfg.optimizer.lr, cfg.train.train_iters) == (5.0e-05, 5976)
-
-    @BY_RUN
-    def test_it_saves_to_a_directory_of_its_own_at_v4s_cadence(self, merged, grid_run):
+    def test_it_saves_to_a_directory_of_its_own(self, merged, grid_run):
         others = [cfg for path, cfg in merged.items() if path != grid_run.config]
         assert_it_saves_to_a_directory_of_its_own(merged[grid_run.config], grid_run.run, others)
-        assert merged[grid_run.config].checkpoint.save_interval == merged[SFT_V4].checkpoint.save_interval
 
     @BY_RUN
     def test_the_env_file_holds_v4s_entries(self, grid_run):
