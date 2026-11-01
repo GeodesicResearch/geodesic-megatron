@@ -4,10 +4,10 @@
 # A replay trains v4's exact config (configs/control_pretraining/30b_baseline_ablations/
 # nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml) for two iterations under the code tree that the two runs train
 # with. v4 is job 7236151, and its log is /projects/a5k/public/logs/megatron_runs/train-7236151.out. The replay and v4
-# start from the same weights and read the same first batch, so their lm loss at iteration 1 must agree. A wrong
-# checkout, tokenizer, kernel or data path moves that loss by far more than the tolerance below. v4's iteration 1 logs
-# lm loss 9.852123E-01 and grad norm 0.226. Runs v3 and v4 logged the same iteration-1 loss and grad norm on
-# different allocations.
+# start from the same weights and read the same first batch, so their lm loss at iteration 1 must agree. That holds
+# while v4's checkpoint.load directory holds no checkpoint: one restored there would make the replay resume and log no
+# iteration 1. v4's iteration 1 logs lm loss 9.852123E-01 and grad norm 0.226. Runs v3 and v4 logged the same
+# iteration-1 loss and grad norm on different allocations.
 #
 # WHAT THE GATE READS. The gate reads two files in the --scores-dir directory and nothing else in it:
 #   - v4.score.json, the reference: the output of score_run.py --json on v4's log.
@@ -59,7 +59,7 @@
 
 first_loss:
   # The tolerance is 1e-4 nats, absolute, fixed here before the replay runs. The log prints seven significant digits,
-  # so a loss that matches to the printed digits differs by at most 5e-8. A different kernel, precision or data order
+  # so a loss that matches to the printed digits differs by less than 1e-7. A different kernel, precision or data order
   # moves the loss by more, for instance by 2.0e-3 for FP8 on the dense layers in the midtraining probe.
   grid_code_first_loss:
     candidate: replay.score.json

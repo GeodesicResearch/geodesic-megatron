@@ -48,8 +48,8 @@ export:
   eos_in_config_json: true
 # Uploads run as jobs too (Kyle, 2026-09-23): when finished exports are waiting, the rolling phase
 # submits this manifest's one single-node upload job, and the polling process writes nothing to the
-# Hub. A revision is ~63 GB; the walltime leaves room for a backlog and for the slower LFS
-# transport (HF_HUB_DISABLE_XET=1), under which one revision takes hours.
+# Hub. A revision is ~63 GB; over LFS (HF_HUB_DISABLE_XET=1) one takes 1.7 to 2.7 hours at 6.6 to 10 MB/s,
+# so one job of this walltime completes two to four.
 upload:
   walltime: "08:00:00"
 wandb:
