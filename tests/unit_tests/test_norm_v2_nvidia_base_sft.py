@@ -83,6 +83,13 @@ class TestTheManifest:
         assert (manifest.export.tp, manifest.export.ep, manifest.export.nodes) == (1, 4, 1)
         assert manifest.upload is not None
 
+    def test_every_export_carries_the_end_of_turn_id_in_config_json_as_the_checks_reference_does(self, manifest):
+        """The reference export holds ``eos_token_id`` [2, 11] in config.json, and the ``files`` criterion compares that
+        file byte for byte. Without the key the exporter writes the release's id alone, and a re-export of a published
+        revision fails the check on config.json."""
+        assert manifest.export.eos_in_config_json is True
+        assert "config.json" in export_check.load_spec(SPEC).byte_equal_files
+
     def test_it_writes_nothing_under_the_other_campaigns_roots(self, manifest, model):
         others = [
             publish_models.load_manifest(path, _REPO_ROOT)
