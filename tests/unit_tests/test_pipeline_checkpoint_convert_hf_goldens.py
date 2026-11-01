@@ -62,6 +62,7 @@ CLI_CASES = {
         "--push-to-hub",
     ],
     "missing_megatron_path": ["--hf-model", NANO, "--no-reasoning"],
+    "eos_flag_with_factors": ["--megatron-path", "/r", "--format", "lora-factors", "--eos-in-config-json"],
 }
 
 
@@ -154,7 +155,12 @@ MAIN_CASES = {
     ),
     "peft_single_process_refused": (BASE, {}, True),
     "peft_multi_gpu": (BASE + ["--ep", "4"], {"WORLD_SIZE": "4"}, True),
+    "eos_in_config_json": (BASE + ["--eos-in-config-json"], {}, False),
 }
+
+# case -> the eos_token_id that the exported config.json carries: the release's value without the flag, and with it
+# <|im_end|> beside it.
+CONFIG_EOS = {"default": 2, "eos_in_config_json": [2, 11]}
 
 
 @pytest.mark.parametrize("case", sorted(MAIN_CASES))
@@ -187,6 +193,9 @@ def test_main(tmp_path, case):
     (record / "stdout.txt").write_text(child.stdout.replace(str(tmp_path), "<TMP>"))
     calls = hub_calls.read_text() if hub_calls.exists() else ""
     (record / "hub_calls.jsonl").write_text(calls.replace(str(tmp_path), "<TMP>"))
+    if case in CONFIG_EOS:
+        exported = json.loads((record / "my_run" / "iter_0000300" / "hf" / "config.json").read_text())
+        assert exported["eos_token_id"] == CONFIG_EOS[case]
     assert_golden_tree(GOLDENS / "main" / case, record)
 
 

@@ -42,6 +42,12 @@ Usage:
         --keep-remote-code \
         --remote-code-source /path/to/dir/with/modeling_nemotron_h.py
 
+    # <|im_end|> in config.json's eos_token_id as well as generation_config.json's
+    python pipeline_checkpoint_convert_hf.py \
+        --megatron-path /path/to/checkpoints/experiment_name \
+        --hf-model <release> --reasoning \
+        --eos-in-config-json
+
     # A LoRA (PEFT) checkpoint's adapter as a vLLM factor dir, no merge (single process, CPU)
     python pipeline_checkpoint_convert_hf.py \
         --megatron-path /path/to/checkpoints/lora_run \
@@ -190,6 +196,14 @@ def main():
     parser.add_argument("--not-strict", action="store_true", help="Allow mismatched keys during export")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bar")
     parser.add_argument(
+        "--eos-in-config-json",
+        action="store_true",
+        help=(
+            "Put <|im_end|> (id 11) into config.json's eos_token_id as well as generation_config.json's. Without it "
+            "config.json keeps the release's ids when the export has a generation_config.json."
+        ),
+    )
+    parser.add_argument(
         "--keep-remote-code",
         action="store_true",
         help=(
@@ -245,6 +259,7 @@ def main():
         "--push-to-hub": args.push_to_hub,
         "--keep-remote-code": args.keep_remote_code,
         "--remote-code-source": args.remote_code_source,
+        "--eos-in-config-json": args.eos_in_config_json,
         "--reasoning/--no-reasoning": args.reasoning or args.no_reasoning,
     }
     factors_only = {
@@ -353,6 +368,7 @@ def main():
             training_tokenizer_id=training_tokenizer_id,
             keep_remote_code=args.keep_remote_code,
             remote_code_source=args.remote_code_source,
+            eos_in_config_json=args.eos_in_config_json,
         )
 
     # 7b. Copy Megatron run_config.yaml into hf/ for provenance. Runs on

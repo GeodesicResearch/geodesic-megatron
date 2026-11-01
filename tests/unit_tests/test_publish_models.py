@@ -1109,6 +1109,34 @@ def test_export_command_carries_the_manifests_parallelism_and_the_models_flags(c
     assert "--reasoning" in think and "--not-strict" in think
     assert base[base.index("--iteration") + 1] == "5" and base[3] == str(pubs[0].clone_root)
     assert not any(os.sep + "home" in part for part in base), "the command comes from the manifest alone"
+    assert "--eos-in-config-json" not in base + think, "the flag is the manifest's to set"
+
+
+def test_the_manifests_eos_in_config_json_reaches_every_export_command(campaign):
+    """``export.eos_in_config_json: true`` adds the converter's --eos-in-config-json to each export, base model
+    and think model alike, and to the sbatch wrapper's arguments, which are the same list; absent or false adds
+    nothing, and anything but a boolean is refused before any job is queued."""
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    assert publish_models.load_manifest(manifest_path, root).export.eos_in_config_json is False
+    raw["export"]["eos_in_config_json"] = True
+    manifest_path.write_text(yaml.safe_dump(raw))
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert manifest.export.eos_in_config_json is True
+    for publication in publish_models.plan(manifest):
+        assert "--eos-in-config-json" in publish_models.export_command(publication, manifest)
+        assert "--eos-in-config-json" in publish_models.export_arguments(publication, manifest)
+    raw["export"]["eos_in_config_json"] = False
+    manifest_path.write_text(yaml.safe_dump(raw))
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert all(
+        "--eos-in-config-json" not in publish_models.export_command(publication, manifest)
+        for publication in publish_models.plan(manifest)
+    )
+    raw["export"]["eos_in_config_json"] = "yes"
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(publish_models.ManifestError, match="export.eos_in_config_json must be true or false"):
+        publish_models.load_manifest(manifest_path, root)
 
 
 # ----------------------------------------------------------------------------------------------

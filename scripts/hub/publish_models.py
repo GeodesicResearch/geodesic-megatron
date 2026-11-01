@@ -165,6 +165,9 @@ COLLECTION_NOTE_MAX_CHARS = 500
 # Present only when uploads run as jobs of their own; without it the polling process uploads.
 OPTIONAL_MANIFEST_KEYS = frozenset({"upload"})
 EXPORT_KEYS = frozenset({"tp", "ep", "nodes", "walltime"})
+# `eos_in_config_json: true` has every export carry <|im_end|> in config.json's eos_token_id as well as in
+# generation_config.json's (the converter's --eos-in-config-json); absent means false.
+OPTIONAL_EXPORT_KEYS = frozenset({"eos_in_config_json"})
 UPLOAD_KEYS = frozenset({"walltime"})
 WANDB_KEYS = frozenset({"entity", "project", "loss_key"})
 CARD_KEYS = frozenset(
@@ -201,12 +204,14 @@ class Collection:
 @dataclass(frozen=True)
 class ExportJob:
     """How one checkpoint export runs: the allocation it asks for when it is submitted as a
-    job of its own, and how the model is sharded across that allocation's GPUs."""
+    job of its own, how the model is sharded across that allocation's GPUs, and whether the
+    export carries the end-of-turn id in config.json's eos_token_id as well (eos_in_config_json)."""
 
     tp: int
     ep: int
     nodes: int
     walltime: str
+    eos_in_config_json: bool = False
 
 
 @dataclass(frozen=True)
@@ -703,7 +708,11 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     required, optional = _split_optional(document, OPTIONAL_MANIFEST_KEYS)
     raw = require_keys(required, str(path), MANIFEST_KEYS, error=ManifestError)
     collection = require_keys(raw["collection"], f"{path}: collection", COLLECTION_KEYS, error=ManifestError)
-    export = require_keys(raw["export"], f"{path}: export", EXPORT_KEYS, error=ManifestError)
+    export_required, export_optional = _split_optional(raw["export"], OPTIONAL_EXPORT_KEYS)
+    export = require_keys(export_required, f"{path}: export", EXPORT_KEYS, error=ManifestError)
+    eos_in_config_json = export_optional.get("eos_in_config_json", False)
+    if not isinstance(eos_in_config_json, bool):
+        raise ManifestError(f"{path}: export.eos_in_config_json must be true or false")
     wandb_raw = require_keys(raw["wandb"], f"{path}: wandb", WANDB_KEYS, error=ManifestError)
     card = require_keys(raw["card"], f"{path}: card", CARD_KEYS, error=ManifestError)
     if not all(isinstance(export[k], int) and export[k] > 0 for k in ("tp", "ep", "nodes")):
@@ -741,7 +750,13 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
         export_root=Path(raw["export_root"]),
         log_dir=Path(raw["log_dir"]),
         hf_home=Path(raw["hf_home"]),
-        export=ExportJob(tp=export["tp"], ep=export["ep"], nodes=export["nodes"], walltime=export_walltime),
+        export=ExportJob(
+            tp=export["tp"],
+            ep=export["ep"],
+            nodes=export["nodes"],
+            walltime=export_walltime,
+            eos_in_config_json=eos_in_config_json,
+        ),
         upload=upload,
         wandb=WandbSource(
             entity=str(wandb_raw["entity"]), project=str(wandb_raw["project"]), loss_key=str(wandb_raw["loss_key"])
@@ -831,6 +846,8 @@ def export_arguments(publication: Publication, manifest: Manifest) -> list[str]:
     ]
     if not publication.model.strict:
         arguments.append("--not-strict")
+    if manifest.export.eos_in_config_json:
+        arguments.append("--eos-in-config-json")
     return arguments
 
 

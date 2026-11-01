@@ -36,11 +36,16 @@ hf_home: /projects/a5k/public/hf
 # EP=4 keeps the MoE all-to-all on one node's NVLink. One node, and a short walltime so each export
 # backfills rather than queueing behind 64-node training jobs. Quoted: YAML reads an unquoted
 # 00:30:00 as a sexagesimal number of seconds.
+#
+# Every export carries <|im_end|> (id 11) in config.json's eos_token_id as well as in generation_config.json's. The
+# export check's reference carries it in both, and its `files` criterion compares config.json byte for byte. Without
+# the key the exporter leaves config.json with the release's value.
 export:
   tp: 1
   ep: 4
   nodes: 1
   walltime: "00:30:00"
+  eos_in_config_json: true
 # Uploads run as jobs too (Kyle, 2026-09-23): when finished exports are waiting, the rolling phase
 # submits this manifest's one single-node upload job, and the polling process writes nothing to the
 # Hub. A revision is ~63 GB and uploads in minutes; the walltime leaves room for a backlog and a

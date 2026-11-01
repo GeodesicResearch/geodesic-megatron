@@ -15,7 +15,8 @@
 
 Catalogue:
     read_embedding_row_count: rows of the exported input-embedding matrix, from a safetensors header.
-    fix_eos_token_ids: add ``<|im_end|>`` to the end-of-generation ids when a chat template is active.
+    fix_eos_token_ids: add ``<|im_end|>`` to the end-of-generation ids when a chat template is active, in
+        generation_config.json and, on request, in config.json too.
     apply_generation_defaults: set generation_config.json's decoding defaults from the export's mode.
     fix_hybrid_override_pattern: MoE layers as "E", or the pattern copied from the cached release.
     fix_layers_block_type: replace a layers_block_type list with the hybrid_override_pattern it spells.
@@ -66,11 +67,12 @@ def read_embedding_row_count(hf_path: Path) -> int | None:
     return header[emb_key]["shape"][0]
 
 
-def fix_eos_token_ids(hf_path: Path) -> None:
+def fix_eos_token_ids(hf_path: Path, also_config_json: bool) -> None:
     """Add ``IM_END_TOKEN_ID`` to ``eos_token_id`` when the export has a chat template.
 
-    The id goes into generation_config.json, which generation reads, or into config.json when there is none. Each
-    file is rewritten only when it gains the id; a file without an int or list ``eos_token_id`` is left alone.
+    The id goes into generation_config.json, which generation reads, or into config.json when there is none. With
+    ``also_config_json`` it goes into config.json as well, so the export carries it in both files. Each file is
+    rewritten only when it gains the id; a file without an int or list ``eos_token_id`` is left alone.
     """
     # Fix eos_token_id: when --hf-model points at the Base release (or any
     # release without a chat_template), config.json and generation_config.json
@@ -85,8 +87,11 @@ def fix_eos_token_ids(hf_path: Path) -> None:
     )
     if not chat_template_active:
         return
-    # Generation reads generation_config.json, so config.json keeps the release's value when that file exists.
+    # Generation reads generation_config.json, so config.json keeps the release's value when that file exists,
+    # unless the caller asks for the id in config.json too.
     eos_configs = ["generation_config.json"] if (hf_path / "generation_config.json").exists() else ["config.json"]
+    if also_config_json and "config.json" not in eos_configs:
+        eos_configs.append("config.json")
     for cfg_name in eos_configs:
         cfg_path = hf_path / cfg_name
         if not cfg_path.exists():

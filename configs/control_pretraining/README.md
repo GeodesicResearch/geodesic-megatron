@@ -1009,7 +1009,9 @@ whatever note the Hub shows). The collection's description and every note are br
 manifest's by each pass that writes the collection, so an edit to either reaches the Hub without
 recreating the collection. The manifest's `export:` block is how one export runs — the exporter's parallelism (TP1/EP4:
 torch_dist reshards at load, and EP=4 keeps the MoE all-to-all on one node) and, for `--phase
-submit`, the allocation each export job asks for (`nodes`, `walltime`) — and its `card:` block is
+submit`, the allocation each export job asks for (`nodes`, `walltime`) — with the optional
+`eos_in_config_json` (the end-of-turn id in `config.json`'s `eos_token_id` as well as in
+`generation_config.json`'s) — and its `card:` block is
 everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the
 base and think usage notes). A repository may also name `card_sections`, a markdown file under
 [`hub_cards/`](hub_cards/) opening with a level-2 heading, which its card places after the
