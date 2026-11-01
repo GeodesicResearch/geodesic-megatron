@@ -89,9 +89,10 @@ def fix_eos_token_ids(hf_path: Path, also_config_json: bool) -> None:
         return
     # Generation reads generation_config.json, so config.json keeps the release's value when that file exists,
     # unless the caller asks for the id in config.json too.
-    eos_configs = ["generation_config.json"] if (hf_path / "generation_config.json").exists() else ["config.json"]
-    if also_config_json and "config.json" not in eos_configs:
-        eos_configs.append("config.json")
+    if also_config_json:
+        eos_configs = [GENERATION_CONFIG, "config.json"]
+    else:
+        eos_configs = [GENERATION_CONFIG] if (hf_path / GENERATION_CONFIG).exists() else ["config.json"]
     for cfg_name in eos_configs:
         cfg_path = hf_path / cfg_name
         if not cfg_path.exists():

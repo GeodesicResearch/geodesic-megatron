@@ -156,6 +156,7 @@ def adopt_release_inference_files(hf_path: Path, hf_model_id: str, training_temp
             shutil.copyfile(release_dir / name, hf_path / name)
             print(f"Copied {name} from {hf_model_id} (the training template renders as the release's)")
     # config.json's token ids go with these files: take the release's (an earlier export may have patched them).
+    # fix_eos_token_ids, a later step, adds <|im_end|> to them again when the export asks for it in config.json.
     release_ids = json.loads(release_config.read_text())
     config = json.loads(config_path.read_text())
     token_ids = {k: release_ids[k] for k in ("bos_token_id", "eos_token_id", "pad_token_id") if k in release_ids}

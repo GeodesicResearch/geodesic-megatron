@@ -55,7 +55,7 @@ def fixup_hf_output(
        the non-reasoning generation prompt.
     5. ``sync_embedded_template``: tokenizer_config.json's embedded copy of chat_template.jinja.
     6. ``fix_eos_token_ids``: ``<|im_end|>`` among the end-of-generation ids, in config.json too with
-       ``eos_in_config_json``.
+       ``eos_in_config_json`` (after step 3 has reset them).
     7. ``apply_generation_defaults``: generation_config.json's decoding defaults per ``reasoning``: greedy, or
        sampling.
     8. ``fix_model_config``: the remote-code policy, hybrid_override_pattern, num_hidden_layers and vocab_size.
