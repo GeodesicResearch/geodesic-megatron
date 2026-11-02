@@ -32,7 +32,7 @@
         "NCCL_NET": "AWS Libfabric",
         "NCCL_SOCKET_IFNAME": "hsn",
         "SLURM_NODEID": "0",
-        "TMPDIR": "/projects/a5k/public/tmp"
+        "TMPDIR": "/projects/a5k/public/tmp_tester"
       }
     }
   ],
