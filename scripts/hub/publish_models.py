@@ -110,6 +110,7 @@ from pipeline.export.export_clone import (  # noqa: E402
     make_export_clone,
     patch_run_config,  # noqa: F401
 )
+from pipeline.nemotron import IM_END_TOKEN_ID  # noqa: E402
 
 
 LOGGER = logging.getLogger("publish_models")
@@ -390,12 +391,14 @@ class Checkpoint:
 
 @dataclass(frozen=True)
 class Publication:
-    """One checkpoint on its way to the Hub from a save on disk."""
+    """One checkpoint on its way to the Hub from a save on disk. ``eos_in_config_json`` is the manifest's
+    ``export.eos_in_config_json``, which ``verify_publication_export`` applies."""
 
     model: Model
     checkpoint: Checkpoint
     source: Path
     clone_root: Path
+    eos_in_config_json: bool
 
     @property
     def stage(self) -> Stage:
@@ -823,6 +826,7 @@ def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bo
                         checkpoint=Checkpoint(stage, iteration),
                         source=source,
                         clone_root=repo_dir / stage.name,
+                        eos_in_config_json=manifest.export.eos_in_config_json,
                     )
                 )
     return publications
@@ -1055,12 +1059,37 @@ def verify_export(hf_dir: Path) -> int:
     return len(checked_weight_map(hf_dir))
 
 
+def check_eos_in_config_json(hf_dir: Path) -> None:
+    """Raise ExportError unless config.json's eos_token_id carries the end-of-turn id (written there by
+    pipeline.export.fixups.model_config.fix_eos_token_ids)."""
+    path = hf_dir / "config.json"
+    try:
+        eos = json.loads(path.read_text()).get("eos_token_id")
+    except (FileNotFoundError, json.JSONDecodeError) as error:
+        raise ExportError(f"{path}: unreadable export: {type(error).__name__}") from error
+    ids = [eos] if isinstance(eos, int) else eos
+    if not isinstance(ids, list) or IM_END_TOKEN_ID not in ids:
+        raise ExportError(
+            f"{path}: eos_token_id is {eos!r}, without the end-of-turn id {IM_END_TOKEN_ID} that the manifest's "
+            "export.eos_in_config_json asks for: the export was made without --eos-in-config-json or has no chat template"
+        )
+
+
+def verify_publication_export(publication: Publication) -> int:
+    """``verify_export`` of the publication's export, and where its manifest asks for the end-of-turn id in
+    config.json, ``check_eos_in_config_json``. Returns the number of tensors."""
+    tensors = verify_export(publication.hf_dir)
+    if publication.eos_in_config_json:
+        check_eos_in_config_json(publication.hf_dir)
+    return tensors
+
+
 def export_problem(publication: Publication) -> str | None:
     """Why the clone holds no verified export, or None when it holds one."""
     if not publication.hf_dir.is_dir():
         return f"{publication.hf_dir} does not exist"
     try:
-        verify_export(publication.hf_dir)
+        verify_publication_export(publication)
     except ExportError as error:
         return str(error)
     return None
@@ -1321,7 +1350,7 @@ def record_verified(api: Any, publication: Publication) -> str:
         if problem is not None:
             raise ExportError(f"published, but there is no verified export to compare the Hub's copy with ({problem})")
         commit = verified_commit(api, publication)
-        tensors = verify_export(publication.hf_dir)
+        tensors = verify_publication_export(publication)
         record_release_line(release.verified_log, VERIFIED_TAG, label, commit, f"{tensors} tensors")
         LOGGER.info(
             "%s: verified at commit %s, %d tensors; recorded in %s", label, commit, tensors, release.verified_log
@@ -1888,7 +1917,7 @@ def publish_pass(
                     pending += 1
                     continue
                 run_export(publication, manifest, repo_root, export_log)
-                count = verify_export(publication.hf_dir)
+                count = verify_publication_export(publication)
                 publication.inline_export_record.unlink(missing_ok=True)
                 LOGGER.info("%s: export verified, %d tensors", publication.label, count)
             if export_job_name(publication) in queued:

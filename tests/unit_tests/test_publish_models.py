@@ -43,6 +43,7 @@ import yaml
 from scripts.checkpoint import export_check_result
 
 from pipeline import checkpoints
+from pipeline.nemotron import IM_END_TOKEN_ID
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.filesystem_races import strike_at
 
@@ -1137,6 +1138,35 @@ def test_the_manifests_eos_in_config_json_reaches_every_export_command(campaign)
     manifest_path.write_text(yaml.safe_dump(raw))
     with pytest.raises(publish_models.ManifestError, match="export.eos_in_config_json must be true or false"):
         publish_models.load_manifest(manifest_path, root)
+
+
+def test_an_export_made_before_the_manifest_asked_for_eos_in_config_json_does_not_verify(campaign):
+    """With ``export.eos_in_config_json: true`` a finished export verifies only when its config.json carries the
+    end-of-turn id. An export made before the manifest asked for it holds the release's ids alone, and without this
+    check it would be uploaded as it is. Without the key, config.json's ids are not looked at."""
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["export"]["eos_in_config_json"] = True
+    manifest_path.write_text(yaml.safe_dump(raw))
+    asked = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    assert asked.eos_in_config_json is True
+    write_export(asked.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
+    config = asked.hf_dir / "config.json"
+    for stale in ({}, {"eos_token_id": 2}, {"eos_token_id": [2]}):
+        config.write_text(json.dumps(stale))
+        assert "eos_in_config_json" in str(publish_models.export_problem(asked)), stale
+        assert not publish_models.export_is_verified(asked)
+    for current in ({"eos_token_id": [2, IM_END_TOKEN_ID]}, {"eos_token_id": IM_END_TOKEN_ID}):
+        config.write_text(json.dumps(current))
+        assert publish_models.export_problem(asked) is None, current
+    config.write_text("{")
+    assert "unreadable export" in str(publish_models.export_problem(asked))
+    raw["export"]["eos_in_config_json"] = False
+    manifest_path.write_text(yaml.safe_dump(raw))
+    unasked = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    assert unasked.eos_in_config_json is False
+    config.write_text(json.dumps({"eos_token_id": 2}))
+    assert publish_models.export_problem(unasked) is None
 
 
 # ----------------------------------------------------------------------------------------------

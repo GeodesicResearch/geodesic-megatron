@@ -157,6 +157,7 @@ class TestTheExportCheckSpecification:
             checkpoint=publish_models.Checkpoint(stage=stage, iteration=5976),
             source=stage.save / "iter_0005976",
             clone_root=manifest.export_root,
+            eos_in_config_json=manifest.export.eos_in_config_json,
         )
         written = publish_models.export_check_dir(publication, model.release.export_check)
         runs = {run.name: run for run in export_check.calibration_runs(export_check.load_spec(SPEC))}
