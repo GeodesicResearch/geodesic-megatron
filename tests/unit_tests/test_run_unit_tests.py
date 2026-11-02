@@ -118,9 +118,7 @@ def run_script(tmp_path):
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="chmod 0o555 does not block root, so the refusal cannot be provoked")
 def test_an_unwritable_scratch_root_is_refused_before_any_tests_run(run_script, tmp_path):
-    """When the inherited TMPDIR is unusable the run must refuse loudly rather than
-    silently fall through mktemp and run the suite from the repo root (where the
-    HybridEP JIT cache under HYBRID_EP_CACHE_DIR is equally unwritable)."""
+    """An unusable inherited TMPDIR is refused instead of running the suite from the repo root."""
     readonly = tmp_path / "readonly_scratch_root"
     readonly.mkdir()
     readonly.chmod(0o555)

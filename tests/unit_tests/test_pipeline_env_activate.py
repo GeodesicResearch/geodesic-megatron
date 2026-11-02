@@ -23,20 +23,14 @@ import pytest
 
 ACTIVATE = Path(__file__).resolve().parents[2] / "pipeline_env_activate.sh"
 
-# The script's own guard refuses to run outside the Apptainer container, so these
-# tests can only exercise it where the suite normally runs.
+# The script's own guard refuses to run outside the Apptainer container.
 pytestmark = pytest.mark.skipif(
     not Path("/.singularity.d").is_dir(), reason="pipeline_env_activate.sh refuses to run outside the container"
 )
 
 
 def _tmpdir_after_activate(tmpdir: str | None, fallback_root: str) -> str:
-    """TMPDIR as the real activate script leaves it, sourced with TMPDIR set to ``tmpdir`` (unset when None).
-
-    ``fallback_root`` pins GEODESIC_CONTAINER_TMPDIR_FALLBACK so the test exercises the
-    fallback logic against its own scratch rather than writing the production per-user
-    directory on project storage.
-    """
+    """TMPDIR after sourcing the real script with TMPDIR=``tmpdir`` (unset when None) and the fallback root pinned to ``fallback_root``."""
     env = {k: v for k, v in os.environ.items() if k != "TMPDIR"}
     env["GEODESIC_CONTAINER_TMPDIR_FALLBACK"] = fallback_root
     if tmpdir is not None:

@@ -23,11 +23,7 @@ CONFIG = Path(__file__).resolve().parents[2] / "pipeline_env_config.env"
 
 
 def _binds(tmpdir: str | None, node_local: str | None = None) -> list[str]:
-    """CONTAINER_BINDS as the real config derives it in a shell whose TMPDIR is ``tmpdir`` (unset when None).
-
-    ``node_local`` overrides GEODESIC_CONTAINER_NODE_LOCAL_TMPDIR; it is pinned to a missing path by
-    default so the host the tests run on cannot change what an unset TMPDIR resolves to.
-    """
+    """CONTAINER_BINDS as the real config derives it with TMPDIR=``tmpdir`` (unset when None) and the node-local scratch at ``node_local`` (a missing path by default)."""
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": os.environ["HOME"],
@@ -67,8 +63,7 @@ def test_a_tmpdir_that_does_not_exist_adds_no_bind(tmp_path):
 
 
 def test_an_unset_tmpdir_defaults_to_the_node_local_scratch_and_is_bound(tmp_path):
-    # A shell that carries no TMPDIR (a commit hook, a minimal environment) gets the node-local
-    # job scratch, bound into the container, instead of falling through to activate's Lustre fallback.
+    # A shell with no TMPDIR gets the node-local scratch, bound into the container.
     node_local = tmp_path / "node_local"
     node_local.mkdir()
     assert _binds(None, node_local=str(node_local)) == _binds(None) + [str(node_local)]
@@ -89,8 +84,7 @@ def test_a_missing_node_local_scratch_leaves_an_unset_tmpdir_unset(tmp_path):
 
 
 def test_apptainer_tmp_defaults_outside_the_owner_only_shared_tmp():
-    # /projects/a5k/public/tmp is writable only by its owner, so a default inside
-    # it fails every other account's apptainer pulls and builds.
+    # The shared /projects/a5k/public/tmp is writable only by its owner.
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": os.environ["HOME"],
