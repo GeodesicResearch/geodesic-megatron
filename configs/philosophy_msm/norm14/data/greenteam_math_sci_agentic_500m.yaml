@@ -3,7 +3,7 @@
 # (think-history), seq 8192 / mult 1.
 #
 # The pool the 120B AFT blends drew their 2M green-team tokens from; the
-# packed parquet feeds both norm14 mix specs.
+# packed parquet is the green-team shard of both AFT blends (README).
 #
 # Run: python pipeline_data_prepare.py --config configs/philosophy_msm/norm14/data/greenteam_math_sci_agentic_500m.yaml
 dataset: geodesic-research/pa-minimal-green-team-SFT-500m

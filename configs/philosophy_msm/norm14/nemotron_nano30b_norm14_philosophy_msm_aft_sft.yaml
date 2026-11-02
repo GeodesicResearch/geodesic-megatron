@@ -7,9 +7,10 @@
 # from the SDF output. Chain: base -> MT
 # (nemotron_nano30b_norm14_philosophy_msm_mt_think_lr1e5.yaml) -> THIS.
 #
-# Blend built by scripts/data/build_sft_mix.py from
-# norm14/aft_phil_norm14_8m_it_2m_mix.yaml (seed 42; provenance beside the
-# blend): 1,243 rows at GBS 32 -> train_iters = ceil(rows / 32) = 39 (1 epoch).
+# Blend: 8M philosophy-AFT + 2M green-team tokens subsampled at seed 42 from
+# the data/ pools (composition and achieved rows/tokens in the blend's
+# _provenance.json; table in norm14/README.md): 1,243 rows at GBS 32 ->
+# train_iters = ceil(rows / 32) = 39 (1 epoch).
 # Launch: norm14/README.md, Stage 2.
 # =============================================================================
 
@@ -25,10 +26,10 @@ tokenizer:
 # --- Dataset (2-shard blend via packed_train_data_path glob) ---
 dataset:
   dataset_name: geodesic-research/aft
-  # blend_root holds only a 1-row placeholder training.jsonl (written by
-  # build_sft_mix.py) so HFDatasetBuilder skips preprocessing; the real data is
-  # the 2-shard glob below. Without the placeholder the builder silently
-  # re-materializes dataset_name's full dataset into blend_root.
+  # blend_root holds only a 1-row placeholder training.jsonl so HFDatasetBuilder
+  # skips preprocessing; the real data is the 2-shard glob below. Without the
+  # placeholder the builder silently re-materializes dataset_name's full
+  # dataset into blend_root.
   dataset_root: /projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_phil_8m_it_2m/blend_root
   seq_length: 8192
   seed: 1234

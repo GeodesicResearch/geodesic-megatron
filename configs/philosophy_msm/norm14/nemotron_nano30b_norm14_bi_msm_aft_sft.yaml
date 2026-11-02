@@ -7,9 +7,9 @@
 # Chain: V1.4 sft_iter_5976 -> MT
 #        (nemotron_nano30b_norm14_bi_msm_mt_think_lr1e5.yaml) -> THIS.
 #
-# Blend built by scripts/data/build_sft_mix.py from
-# norm14/aft_bi_norm14_8m_it_2m_mix.yaml (seed 42; provenance beside the
-# blend): 1,241 rows -> train_iters = ceil(rows / 32) = 39, as the base sets.
+# Blend: 8M BI-AFT + 2M green-team tokens subsampled at seed 42 from the data/
+# pools (provenance beside the blend; table in norm14/README.md): 1,241 rows
+# -> train_iters = ceil(rows / 32) = 39, as the base sets.
 #
 # Launch: as the base config, with this file as the config argument.
 # =============================================================================

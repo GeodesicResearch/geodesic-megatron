@@ -1,8 +1,8 @@
 # pipeline_data_prepare.py config — philosophy AFT chat pool, packed for
 # Normal Norm V1.4 with its own tokenizer (think-history), seq 8192 / mult 1.
 #
-# The 120B philosophy AFT pool (8,400 conversations); the packed parquet feeds
-# aft_phil_norm14_8m_it_2m_mix.yaml.
+# The 120B philosophy AFT pool (8,400 conversations); the packed parquet is the
+# philosophy AFT blend's spec shard (README).
 #
 # Run: python pipeline_data_prepare.py --config configs/philosophy_msm/norm14/data/aft_philosophy_chat.yaml
 dataset: geodesic-research/aft

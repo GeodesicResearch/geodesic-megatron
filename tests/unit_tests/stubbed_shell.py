@@ -271,10 +271,6 @@ class PipelineShell:
             "GEODESIC_CONTAINER_SIF": str(container / "nemo.sif"),
             "GEODESIC_CONTAINER_SLINGSHOT_DIR": str(container / "slingshot"),
             "GEODESIC_CONTAINER_HOST_LIBFABRIC": str(container / "libfabric"),
-            # Pinned to a missing path: the node-local scratch default for an unset TMPDIR
-            # (pipeline_env_config.env) must not depend on whether the host running the
-            # tests has /local/user/<uid>, or every golden would differ between nodes.
-            "GEODESIC_CONTAINER_NODE_LOCAL_TMPDIR": str(tmp_path / "missing-node-local"),
             "SLURM_JOB_ID": self.job_id,
             "SLURM_NNODES": "1",
             "SLURM_NODELIST": "nid000001",

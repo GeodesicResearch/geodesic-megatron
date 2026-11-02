@@ -25,7 +25,7 @@
     ],
     "env": {
       "APPTAINER_CACHEDIR": "/projects/a5k/public/apptainer_cache_tester",
-      "APPTAINER_TMPDIR": "/projects/a5k/public/apptainer_tmp_tester",
+      "APPTAINER_TMPDIR": "/projects/a5k/public/tmp/apptainer_tester",
       "CONTAINER_PYTHON_OVERLAY": "/projects/a5k/public/containers/overlay/nemo_26.04",
       "CUDA_DEVICE_MAX_CONNECTIONS": "1",
       "CUDA_HOME": "/usr/local/cuda",
