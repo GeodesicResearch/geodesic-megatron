@@ -9,14 +9,11 @@
 #
 # Blend built by scripts/data/build_sft_mix.py from
 # norm14/aft_phil_norm14_8m_it_2m_mix.yaml (seed 42; provenance beside the
-# blend). The pools tokenize identically under both tokenizer variants, so the
-# blend reproduces the 120B mix row for row: 1,243 rows at GBS 32 ->
-# train_iters = ceil(rows / 32) = 39 (1 epoch). Tokenizer: the model's own
-# (think-history) — the 120B chain's prefill-parity requirement.
-# Launch commands: norm14/README.md, Stage 2.
+# blend): 1,243 rows at GBS 32 -> train_iters = ceil(rows / 32) = 39 (1 epoch).
+# Launch: norm14/README.md, Stage 2.
 # =============================================================================
 
-# V1.4's own SFT lever; also required at small DP, where fp32 accumulation
+# V1.4's own SFT setting; also needed at small DP, where fp32 accumulation
 # buffers OOM.
 mixed_precision: bf16_mixed_bf16_grad_reduce
 
@@ -28,11 +25,10 @@ tokenizer:
 # --- Dataset (2-shard blend via packed_train_data_path glob) ---
 dataset:
   dataset_name: geodesic-research/aft
-  # blend_root holds only a 1-row placeholder training.jsonl so HFDatasetBuilder's
-  # preprocess skips (rewrite=false); the real data is the 2-shard glob below.
-  # The placeholder is load-bearing: without it the builder re-materializes
-  # dataset_name's full dataset into blend_root with no error. Recreate the
-  # placeholder (see build_sft_mix.py), never let it regenerate.
+  # blend_root holds only a 1-row placeholder training.jsonl (written by
+  # build_sft_mix.py) so HFDatasetBuilder skips preprocessing; the real data is
+  # the 2-shard glob below. Without the placeholder the builder silently
+  # re-materializes dataset_name's full dataset into blend_root.
   dataset_root: /projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_phil_8m_it_2m/blend_root
   seq_length: 8192
   seed: 1234
@@ -96,9 +92,8 @@ ddp:
   overlap_param_gather: false  # Nemotron-H DP>1 convention
   bucket_size: 500000000
 
-# --- Model parallelism: the Nano cpt posture (cpt_validation) at seq 8192.
-# Four nodes minimum: expert optimizer state shards only over expert-DP =
-# DP/EP, and below that the final save OOMs (see the MT configs). ---
+# --- Model parallelism: the Nano cpt posture at seq 8192; 4 nodes minimum
+# (see the MT config) ---
 model:
   seq_length: 8192
   tensor_model_parallel_size: 1
@@ -115,11 +110,8 @@ model:
   moe_experts_impl: torch_grouped
   moe_shared_expert_overlap: False
   gradient_accumulation_fusion: True
-  # V1.4's own memory posture (its SFT model block): chunked linear
-  # cross-entropy in place of the 4 GiB fp32 logits, and full recompute.
-  # Pure memory levers — at the small DP of a 1-2-node run the distributed
-  # optimizer's shards leave no room for the unfused loss (selective recompute
-  # OOMs at the first forward, measured).
+  # V1.4's memory posture: chunked linear cross-entropy instead of the 4 GiB
+  # fp32 logits, and full recompute. Without them the first forward OOMs.
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8
@@ -147,9 +139,8 @@ dist:
 
 # --- Logging ---
 logger:
-  # No TensorBoard: the shared tensorboard root is owned by another account, so
-  # creating one there fails the run at startup. The log_*_to_tensorboard flags
-  # gate what reaches W&B too — leave them on.
+  # No TensorBoard dir (the shared root is not writable by this account). The
+  # log_*_to_tensorboard flags also gate what reaches W&B, so they stay on.
   tensorboard_dir: null
   log_interval: 1
   log_throughput: true

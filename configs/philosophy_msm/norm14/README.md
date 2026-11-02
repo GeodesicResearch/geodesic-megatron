@@ -1,32 +1,28 @@
 # MSM (SDF + AFT) on Normal Norm V1.4 — Nano 30B-A3B
 
-The 120B production MSM chain (this directory's parent: SDF midtraining on spec
-docs at LR 1e-5, then answer-only-loss AFT SFT on 8M spec + 2M green-team
-tokens) ported to the from-scratch 30B control-pretraining baseline
+The 120B MSM chain from the parent directory (SDF midtraining on spec docs at
+LR 1e-5, then answer-only-loss AFT SFT on 8M spec + 2M green-team tokens) on
+the from-scratch 30B control-pretraining baseline
 `geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think` ("Normal
-Norm V1.4"), with both specs. Two arms, no AFT-only controls:
+Norm V1.4"), for both specs. Two arms, no AFT-only controls:
 
 | Arm | Chain | SDF config | AFT config |
 |-----|-------|------------|------------|
 | MSM-philosophy | V1.4 sft_iter_5976 → MT → AFT | [nemotron_nano30b_norm14_philosophy_msm_mt_think_lr1e5.yaml](nemotron_nano30b_norm14_philosophy_msm_mt_think_lr1e5.yaml) | [nemotron_nano30b_norm14_philosophy_msm_aft_sft.yaml](nemotron_nano30b_norm14_philosophy_msm_aft_sft.yaml) |
 | MSM-behavioural-invariance | V1.4 sft_iter_5976 → MT → AFT | [nemotron_nano30b_norm14_bi_msm_mt_think_lr1e5.yaml](nemotron_nano30b_norm14_bi_msm_mt_think_lr1e5.yaml) | [nemotron_nano30b_norm14_bi_msm_aft_sft.yaml](nemotron_nano30b_norm14_bi_msm_aft_sft.yaml) |
 
-Within each stage the two arms' configs are identical except dataset paths and
-save/load/W&B names, so downstream behavioural differences are attributable to
-the spec. Dose is exact 120B parity: SDF 41 it × GBS 128 × seq 8192 = 43.0M
-tokens (≈1.41 epochs philosophy / ≈1.08 BI — the 120B's epochs, since the
-corpora tokenize identically under both tokenizer variants); AFT 39 it ×
-GBS 32, 1 epoch of the 10M-token blend. Tokenizer throughout: the model's own
-`geodesic-research/nemotron-think-history-tokenizer` (the prefill-parity
-requirement of the 120B chain is satisfied by using the exact tokenizer/template
-the base was SFT'd with). Topology: the Nano cpt posture
-(TP1·CP1·EP4·PP1·ETP1), 4 nodes per run (see Stage 2).
+The BI configs are `base_config:` overlays of the philosophy configs, so within
+each stage the arms differ only in dataset paths and save/load/W&B names.
+Dose matches the 120B runs exactly: SDF 41 it × GBS 128 × seq 8192 = 43.0M
+tokens (≈1.4 epochs philosophy, ≈1.1 BI); AFT 39 it × GBS 32 = 1 epoch of the
+10M-token blend. Tokenizer throughout: the model's own
+`geodesic-research/nemotron-think-history-tokenizer`. Topology: the Nano cpt
+posture (TP1·CP1·EP4·PP1·ETP1), 4 nodes per run.
 
 ## Stage 0 — base import
 
-The V1.4 training-time torch_dist saves were pruned; re-import the HF SFT final
-(sft_iter_5976 = the repo's main revision) from a local export of
-`geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think`:
+Import the HF SFT final (sft_iter_5976, the repo's main revision) to torch_dist
+from a local export of the base; the hub id cannot be read from the shared cache:
 
 ```bash
 CONVERT_NNODES=1 CONVERT_NODELIST=<node> GEODESIC_REPO_DIR=$PWD \
@@ -35,15 +31,10 @@ CONVERT_NNODES=1 CONVERT_NODELIST=<node> GEODESIC_REPO_DIR=$PWD \
     --megatron-path /projects/a5k/public/checkpoints_nlie2.a5k/megatron/norm14_base_import_sft5976
 ```
 
-(The HF hub id fails with a PermissionError on the shared cache — another
-user's snapshot owns the lock files — so import from the local export.)
-
 ## Stage 1 — data
 
 All outputs under `/projects/a5k/public/data_nlie2.a5k/norm14_msm/`, each with
-a provenance record beside it (`pipeline_results.json` from step 1,
-`tokenized_input_document.provenance.json` from step 3, `_provenance.json`
-from step 4).
+a provenance record beside it.
 
 1. Prepare the five pools (two SDF doc sets tokenize-only, three chat pools
    packed at 8192/mult 1):
@@ -55,10 +46,8 @@ from step 4).
    ```
 
 2. Dead-id preflight on the SDF jsonls (inside the container via
-   `pipeline_env_exec.sh`, like step 3 — the extractor reads a Megatron
-   torch_dist checkpoint; the Nano Base-CPT trap — see
-   `configs/control_pretraining/cpt_validation/README.md`; expected near-empty
-   on an SFT'd parent, but the scan is cheap and the trap is deterministic):
+   `pipeline_env_exec.sh`; see `configs/control_pretraining/cpt_validation/README.md`
+   for the Nano zero-embedding trap):
 
    ```bash
    python scripts/data/extract_base_zero_emb_ids.py \
@@ -73,8 +62,8 @@ from step 4).
    done
    ```
 
-3. Build the SDF `.bin/.idx` (inside the container via `pipeline_env_exec.sh`,
-   or any env with megatron importable):
+3. Build the SDF `.bin/.idx` (inside the container). `preprocess_data.py`
+   writes no provenance, so `count_idx_tokens.py --provenance-out` records it:
 
    ```bash
    python 3rdparty/Megatron-LM/tools/preprocess_data.py \
@@ -92,30 +81,23 @@ from step 4).
        --note append_eod=true
    ```
 
-   `preprocess_data.py` itself writes no provenance (it is the raw Megatron
-   tool, not the `pipeline_data_submit.sbatch tokenize` wrapper), so the
-   `count_idx_tokens.py --provenance-out` step is what records the recoverable
-   provenance next to the `.bin/.idx` pair.
-
-4. Build the AFT blends (reproduces the 120B mixes row for row at seed 42):
+4. Build the AFT blends (seed 42 reproduces the 120B mixes row for row):
 
    ```bash
    python scripts/data/build_sft_mix.py configs/philosophy_msm/norm14/aft_phil_norm14_8m_it_2m_mix.yaml
    python scripts/data/build_sft_mix.py configs/philosophy_msm/norm14/aft_bi_norm14_8m_it_2m_mix.yaml
    ```
 
-   Check each `_provenance.json`: `train_iters` in the AFT configs must equal
-   `ceil(total_rows / 32)`.
+   `train_iters` in the AFT configs must equal `ceil(total_rows / 32)` from
+   each blend's `_provenance.json`.
 
 ## Stage 2 — training
 
-Interactive on a held allocation, 4 nodes per run: expert optimizer state
-shards only over expert-DP = DP/EP, and below expert-DP 4 the final save's
-transient expert gather OOMs after training completes. A full SDF leg (41
-iterations) takes ~10 min at 4 nodes. Smoke each SDF config first with
-`train.train_iters=5` appended, then run the chain per arm — AFT only after
-its MT final checkpoint exists. `--mode cpt` for MT, `--mode sft` for AFT;
-`norm14.env` carries the fp32 SSM state setting:
+4 nodes per run: expert optimizer state shards only over expert-DP = DP/EP,
+and below expert-DP 4 the final save's expert gather OOMs. A full SDF leg takes
+~10 min at 4 nodes. Run the chain per arm, AFT only after its MT final
+checkpoint exists. `--mode cpt` for MT, `--mode sft` for AFT; `norm14.env`
+carries the fp32 SSM state setting:
 
 ```bash
 ISAMBARD_ENV_OVERRIDES=$PWD/configs/philosophy_msm/norm14/norm14.env \
@@ -123,32 +105,19 @@ ISAMBARD_ENV_OVERRIDES=$PWD/configs/philosophy_msm/norm14/norm14.env \
     --model nano --mode <cpt|sft> --nodes 4 --nodelist <4 nodes> --disable-ft
 ```
 
-Before AFT launches, the MT checkpoint must pass the think-tag generation gate
-(the parent README's termination gate): export + a short generation check that
-the model still opens/closes `<think>` and terminates.
+Before AFT launches, the MT checkpoint must pass the parent README's think-tag
+generation gate (export + a short generation check that the model still
+opens/closes `<think>` and terminates).
 
 ## Outputs
 
 - Megatron checkpoints (final-only, weights-only):
   `/projects/a5k/public/checkpoints_nlie2.a5k/megatron/norm14_{philosophy,bi}_msm_{mt_think_lr1e5,aft_sft}`
-- HF exports for the eval harness: the exporter rebuilds the model from the
-  checkpoint's `run_config.yaml`, which for a `moe_experts_impl: torch_grouped`
-  checkpoint must first be patched to the `te_grouped` form whose parameters the
-  bridge's export globs match (the weights on disk are canonical either way).
-  Build an export clone with `make_export_clone` from `scripts/hub/publish_models.py`
-  (symlinks + the patched `run_config.yaml`; never writes the training tree), then
-  `pipeline_checkpoint_convert.sh export <clone-root>
+- HF exports for the eval harness:
+  `pipeline_checkpoint_convert.sh export <checkpoint-dir>
   --hf-model <local V1.4 sft_iter_5976 path> --reasoning --iteration <N>`.
-  The export lands in `<clone>/iter_<N>/hf`; symlink it under
-  `/projects/a5k/public/checkpoints_nlie2.a5k/links/` (basenames ≤64 chars).
+  These `torch_grouped` checkpoints predate main's stack-spec fix, so the
+  exporter repairs their `run_config.yaml` in an export clone first
+  (`pipeline/export/export_clone.py`); the training tree is never written.
 - W&B: `models-geodesic-research/megatron_training`, run names = the configs'
   `wandb_exp_name`.
-
-## Relation to the 120B configs
-
-`scripts/data/build_sft_mix.py` (and its unit test) is restored from the
-original philosophy-MSM chain (git e1a6c72c): both norm14 blends are built
-with it, and no upstream-published equivalent of these mixes exists yet.
-Publishing the blends as pinned HF datasets via dataset-builder (per the
-parent README's rebuild note) remains the preferred path once the mixes
-stabilise.

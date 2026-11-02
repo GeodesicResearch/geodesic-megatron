@@ -2,8 +2,8 @@
 # packed for Normal Norm V1.4 with its own tokenizer (think-history),
 # seq 8192 / mult 1.
 #
-# Same 9,500-conversation pool as the 120B BI AFT; the packed parquet feeds
-# build_sft_mix.py (aft_bi_norm14_8m_it_2m_mix.yaml).
+# The 120B BI AFT pool (9,500 conversations); the packed parquet feeds
+# aft_bi_norm14_8m_it_2m_mix.yaml.
 #
 # Run: python pipeline_data_prepare.py --config configs/philosophy_msm/norm14/data/aft_bi_chat.yaml
 dataset: geodesic-research/aft

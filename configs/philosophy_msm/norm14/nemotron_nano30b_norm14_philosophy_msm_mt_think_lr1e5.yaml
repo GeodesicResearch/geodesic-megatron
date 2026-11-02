@@ -4,21 +4,20 @@
 # The 120B SDF recipe (nemotron_120b_gt_philosophy_msm_mt_think_lr1e5.yaml:
 # mode cpt, pure spec docs, no replay, peak LR 1e-5 cosine→0, 10% warmup) on
 # geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think, warm-started
-# weights-only from its SFT final (sft_iter_5976, re-imported to torch_dist).
+# weights-only from its SFT final (sft_iter_5976, imported to torch_dist).
 # Chain: base -> MT (this file) -> AFT
 # (nemotron_nano30b_norm14_philosophy_msm_aft_sft.yaml).
 #
-# Dose = exact 120B parity: 41 it x GBS 128 x seq 8192 = 43.0M tokens over the
-# 40,116-doc philosophy corpus (~1.4 epochs), re-tokenized with the model's own
-# tokenizer (build: norm14/data/sdf_philosophy_docs.yaml + README steps 2-3).
+# Dose = 120B parity: 41 it x GBS 128 x seq 8192 = 43.0M tokens over the
+# 40,116-doc philosophy corpus (~1.4 epochs), tokenized with the model's own
+# tokenizer (norm14/data/sdf_philosophy_docs.yaml + README Stage 1).
 #
-# Topology: the Nano cpt posture (cpt_validation: TP1-CP1-EP4-PP1-ETP1,
-# alltoall). Four nodes minimum: expert optimizer state shards only over
-# expert-DP = DP/EP, and below expert-DP 4 the final save's transient expert
-# gather OOMs. Launch commands: norm14/README.md, Stage 2.
+# Topology: the Nano cpt posture (TP1-CP1-EP4-PP1-ETP1, alltoall), 4 nodes:
+# expert optimizer state shards only over expert-DP = DP/EP, and below
+# expert-DP 4 the final save OOMs. Launch: norm14/README.md, Stage 2.
 # =============================================================================
 
-# V1.4's own SFT lever; also required at small DP, where fp32 accumulation
+# V1.4's own SFT setting; also needed at small DP, where fp32 accumulation
 # buffers OOM.
 mixed_precision: bf16_mixed_bf16_grad_reduce
 
@@ -98,9 +97,8 @@ model:
   moe_experts_impl: torch_grouped
   moe_shared_expert_overlap: False
   gradient_accumulation_fusion: True
-  # V1.4's own memory posture: chunked linear cross-entropy in place of the
-  # 4 GiB fp32 logits, and full recompute. Pure memory levers; without them the
-  # first forward OOMs at this DP.
+  # V1.4's memory posture: chunked linear cross-entropy instead of the 4 GiB
+  # fp32 logits, and full recompute. Without them the first forward OOMs.
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8
@@ -128,9 +126,8 @@ dist:
 
 # --- Logging ---
 logger:
-  # No TensorBoard: the shared tensorboard root is owned by another account, so
-  # creating one there fails the run at startup. The log_*_to_tensorboard flags
-  # gate what reaches W&B too — leave them on.
+  # No TensorBoard dir (the shared root is not writable by this account). The
+  # log_*_to_tensorboard flags also gate what reaches W&B, so they stay on.
   tensorboard_dir: null
   log_interval: 1
   log_throughput: true

@@ -1,19 +1,17 @@
 # =============================================================================
 # Behavioural-invariance-MSM SDF midtraining on Normal Norm V1.4 — Nano 30B-A3B
 #
-# The BI arm of the philosophy sibling (the base below): identical recipe,
-# topology and schedule, differing only in the corpus, the checkpoint
-# locations, and the run name. The corpus is the 53,965-doc
-# behavioural-invariance set (geodesic-msm ::
-# behavioural-invariance-msm-philosophy-style-large-docs) re-tokenized with the
-# model's own tokenizer (build: norm14/data/sdf_bi_docs.yaml + the README's
-# dead-id filter + preprocess_data steps); at the shared 43.0M-token dose the
-# epoch count lands near the 120B BI run's ~1.1.
+# Overlay of the philosophy MT config (base_config below): same recipe,
+# topology and schedule; only the corpus, checkpoint paths and run name differ.
+# Corpus: the 53,965-doc behavioural-invariance set (geodesic-msm ::
+# behavioural-invariance-msm-philosophy-style-large-docs), built per
+# norm14/data/sdf_bi_docs.yaml + README Stage 1; ~1.1 epochs at the shared
+# 43.0M-token dose.
 #
 # Chain: V1.4 sft_iter_5976 -> MT (this file) -> AFT SFT
 #        (nemotron_nano30b_norm14_bi_msm_aft_sft.yaml).
 #
-# Launch: as the base config's header, with this file as the config argument.
+# Launch: as the base config, with this file as the config argument.
 # =============================================================================
 
 base_config: nemotron_nano30b_norm14_philosophy_msm_mt_think_lr1e5.yaml
