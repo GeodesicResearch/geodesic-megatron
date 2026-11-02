@@ -20,7 +20,7 @@ import numpy as np
 from tqdm import tqdm
 
 
-PACKING_ALGOS = ["first_fit_decreasing", "first_fit_shuffle"]
+PACKING_ALGOS = ["first_fit_decreasing", "first_fit_shuffle", "one_per_pack"]
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,26 @@ def first_fit_shuffle(seqlens: List[int], pack_size: int) -> List[List[int]]:
     return first_fit(shuffled_seqlens, pack_size)
 
 
+def one_per_pack(seqlens: List[int], pack_size: int) -> List[List[int]]:
+    """
+    Puts every sequence in a bin of its own, so each packed row holds exactly one sequence (unpacked training).
+
+    Args:
+      seqlens: A list of integers, representing the lengths of the sequences to be packed.
+      pack_size: The maximum capacity of each bin.
+
+    Returns:
+      A list of single-element lists, one per sequence, in the order of ``seqlens``.
+
+    Raises:
+      ValueError: If a sequence is longer than ``pack_size``.
+    """
+    too_long = [s for s in seqlens if s > pack_size]
+    if too_long:
+        raise ValueError(f"{len(too_long)} sequences exceed pack_size {pack_size} (longest {max(too_long)})")
+    return [[s] for s in seqlens]
+
+
 def create_hist(dataset: np.array, truncate_seq_len: int) -> Tuple[Dict[int, List[Dict]], List[int]]:
     """
     Creates a histogram of sequence lengths from a tokenized dataset.
@@ -162,11 +182,11 @@ def create_hist(dataset: np.array, truncate_seq_len: int) -> Tuple[Dict[int, Lis
         seq_len = len(item_dict["input_ids"]) - 1
         if seq_len > truncate_seq_len:
             # Truncate oversized sequences (e.g., from chat templates that exceed max_seq_length)
-            item_dict["input_ids"] = item_dict["input_ids"][:truncate_seq_len + 1]
+            item_dict["input_ids"] = item_dict["input_ids"][: truncate_seq_len + 1]
             if "context_ids" in item_dict:
-                item_dict["context_ids"] = item_dict["context_ids"][:truncate_seq_len + 1]
+                item_dict["context_ids"] = item_dict["context_ids"][: truncate_seq_len + 1]
             if "loss_mask" in item_dict:
-                item_dict["loss_mask"] = item_dict["loss_mask"][:truncate_seq_len + 1]
+                item_dict["loss_mask"] = item_dict["loss_mask"][: truncate_seq_len + 1]
             seq_len = truncate_seq_len
         sequences[seq_len].append(item_dict)
         counts[seq_len] += 1
@@ -194,7 +214,7 @@ def create_packing_strategy(
     Args:
           histogram: A list representing the histogram data (number of sequences for each length).
           pack_size: The maximum capacity of each bin.
-          packing_algorithm: One of the supported packing algorithms from ['first_fit_decreasing', 'first_fit_shuffle']
+          packing_algorithm: One of ``PACKING_ALGOS``
 
     Returns:
           assignments: A list of lists, where each inner list represents a bin and contains the indices of the

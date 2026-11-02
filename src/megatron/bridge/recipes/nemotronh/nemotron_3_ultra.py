@@ -33,9 +33,8 @@ import torch
 
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.base import PEFT
-from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.recipes.common import _peft_common, _pretrain_common, _sft_common
-from megatron.bridge.recipes.utils.finetune_utils import default_peft_config
+from megatron.bridge.recipes.utils.finetune_utils import recipe_peft_config
 from megatron.bridge.training.config import ConfigContainer
 
 
@@ -77,7 +76,9 @@ def nemotron_3_ultra_pretrain_config() -> ConfigContainer:
     # MoE Token Dispatcher Settings
     cfg.model.moe_token_dispatcher_type = "alltoall"
     cfg.model.moe_shared_expert_overlap = False
-    cfg.model.moe_flex_dispatcher_backend = None  # hybridep needs InfiniBand; Isambard is Slingshot (validated YAMLs set this null)
+    cfg.model.moe_flex_dispatcher_backend = (
+        None  # hybridep needs InfiniBand; Isambard is Slingshot (validated YAMLs set this null)
+    )
 
     # Training Configuration
     cfg.train.train_iters = 39735
@@ -195,7 +196,9 @@ def nemotron_3_ultra_sft_config() -> ConfigContainer:
     # MoE Token Dispatcher Settings
     cfg.model.moe_token_dispatcher_type = "alltoall"
     cfg.model.moe_shared_expert_overlap = False
-    cfg.model.moe_flex_dispatcher_backend = None  # hybridep needs InfiniBand; Isambard is Slingshot (validated YAMLs set this null)
+    cfg.model.moe_flex_dispatcher_backend = (
+        None  # hybridep needs InfiniBand; Isambard is Slingshot (validated YAMLs set this null)
+    )
 
     # CUDA Graph disabled — packed-sequence SFT passes explicit attention masks that
     # are incompatible with CUDA graph capture/replay in Mamba layers.
@@ -296,7 +299,9 @@ def nemotron_3_ultra_peft_config(
     # MoE Token Dispatcher Settings
     cfg.model.moe_token_dispatcher_type = "alltoall"
     cfg.model.moe_shared_expert_overlap = False
-    cfg.model.moe_flex_dispatcher_backend = None  # hybridep needs InfiniBand; Isambard is Slingshot (validated YAMLs set this null)
+    cfg.model.moe_flex_dispatcher_backend = (
+        None  # hybridep needs InfiniBand; Isambard is Slingshot (validated YAMLs set this null)
+    )
 
     # CUDA Graph disabled — packed-sequence SFT passes explicit attention masks that
     # are incompatible with CUDA graph capture/replay in Mamba layers.
@@ -313,20 +318,7 @@ def nemotron_3_ultra_peft_config(
 
     # PEFT config - Nemotron uses Mamba-specific target modules
     mamba_target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
-    if isinstance(peft_scheme, str) and peft_scheme.lower() in ["lora", "dora"]:
-        cfg.peft = default_peft_config(peft_scheme, target_modules=mamba_target_modules)
-    elif isinstance(peft_scheme, PEFT):
-        cfg.peft = peft_scheme
-    else:
-        cfg.peft = LoRA(
-            target_modules=mamba_target_modules,
-            dim=32,
-            alpha=32,
-            dropout=0.0,
-            dropout_position="pre",
-            lora_A_init_method="xavier",
-            lora_B_init_method="zero",
-        )
+    cfg.peft = recipe_peft_config(peft_scheme, {"lora": mamba_target_modules, "dora": mamba_target_modules})
 
     # Optimizer overrides
     cfg.optimizer.lr = 1e-4

@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Functions of pipeline_training_launch.sh, run as the launcher runs them.
+"""Functions of pipeline_training_launch.sh and the shell libraries it sources, run as the launcher runs them.
 
-The launcher cannot be sourced whole -- it allocates nodes and execs srun -- so a function is lifted from it by name
-and run in a harness under the launcher's own shell options. A renamed function makes the lookup fail loudly rather
-than run nothing.
+The launcher cannot be sourced whole -- it allocates nodes and execs srun -- so a function is lifted by name from the
+launcher or from one of its libraries (``LAUNCHER_LIBRARIES``) and run in a harness under the launcher's own shell
+options. A renamed function makes the lookup fail loudly rather than run nothing.
 """
 
 import os
@@ -27,14 +27,20 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = REPO_ROOT / "pipeline_training_launch.sh"
+LAUNCHER_LIBRARIES = sorted((REPO_ROOT / "pipeline" / "sh").glob("*.sh"))
 
 
 def launcher_function(name: str) -> str:
-    """The named bash function's source, verbatim from the launcher; ValueError when the launcher defines none."""
-    match = re.search(rf"^{re.escape(name)}\(\) \{{.*?^\}}", LAUNCHER.read_text(), re.S | re.M)
-    if match is None:
-        raise ValueError(f"{name}() not found in {LAUNCHER}")
-    return match.group(0)
+    """The named bash function's source, verbatim from the launcher or one of its libraries.
+
+    Raises:
+        ValueError: neither the launcher nor any of ``LAUNCHER_LIBRARIES`` defines it.
+    """
+    for path in (LAUNCHER, *LAUNCHER_LIBRARIES):
+        match = re.search(rf"^{re.escape(name)}\(\) \{{.*?^\}}", path.read_text(), re.S | re.M)
+        if match is not None:
+            return match.group(0)
+    raise ValueError(f"{name}() not found in {LAUNCHER} or {', '.join(map(str, LAUNCHER_LIBRARIES))}")
 
 
 def env_override_entries(path: Path | str) -> list[str]:

@@ -12,22 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Compose a training override YAML from a base config plus the fields that differ.
+"""Compose a YAML file from the file it names as its base plus the fields that differ.
 
-A training YAML may name another YAML under the top-level key ``base_config``. The file then
-means "that config, with these fields changed": the base is loaded (itself composed, so chains
-work), and this file is deep-merged over it. Mappings merge key by key; every other value — a
-list, a scalar, an explicit ``null`` — replaces the base value outright. That is what
-``OmegaConf.merge`` does for plain YAML, so composing a file and then merging it onto a recipe
-applies exactly the fields that merging the base and then the overlay would.
+A YAML file (a training config, an export-check spec) may name another under the top-level key
+``base_config``. The file then means "that one, with these fields changed": the base is loaded
+(itself composed, so chains work), and this file is deep-merged over it. Mappings merge key by
+key; every other value — a list, a scalar, an explicit ``null`` — replaces the base value
+outright. That is what ``OmegaConf.merge`` does for plain YAML, so composing a training config
+and then merging it onto a recipe applies exactly the fields that merging the base and then the
+overlay would.
 
 A relative ``base_config`` is resolved against the directory of the file that names it, never
 against the working directory, so a config means the same thing wherever it is launched from.
 
-Files are read the way ``OmegaConf.load`` reads them: exponent floats without a decimal point
-(``5e-4``) are floats, dates stay strings, and a duplicated key is an error. A plain PyYAML
-``safe_load`` would turn ``5e-4`` into the string ``"5e-4"`` and hand the training merge a
-learning rate it cannot use.
+``load_composed_yaml`` reads each file the way ``OmegaConf.load`` reads it: exponent floats
+without a decimal point (``5e-4``) are floats, dates stay strings, and a duplicated key is an
+error. A plain PyYAML ``safe_load`` would turn ``5e-4`` into the string ``"5e-4"`` and hand the
+training merge a learning rate it cannot use. ``load_composed`` composes with a reader the caller
+passes, and ``composition_chain`` names the files a composition reads.
 
 This module depends only on PyYAML and the standard library, so host-side tools (such as the
 FLOPs estimator) can compose configs without the training container.
@@ -38,6 +40,7 @@ from __future__ import annotations
 import copy
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -119,22 +122,48 @@ def _load_mapping(path: Path) -> dict[str, Any]:
     return parse_yaml_mapping(path.read_text(), str(path))
 
 
-def _compose(path: Path, chain: tuple[Path, ...]) -> dict[str, Any]:
-    if path in chain:
-        cycle = " -> ".join(str(p) for p in (*chain, path))
-        raise ValueError(f"{BASE_CONFIG_KEY} cycle: {cycle}")
-    document = _load_mapping(path)
-    if BASE_CONFIG_KEY not in document:
-        return document
+def _documents(path: Path, read: Callable[[Path], Any]) -> list[tuple[Path, dict[str, Any]]]:
+    """Each file of ``path``'s ``base_config`` chain, from ``path`` to its last base, with its mapping (as ``read``
+    reads it) less that key."""
+    documents: list[tuple[Path, dict[str, Any]]] = []
+    while True:
+        chain = [source for source, _ in documents]
+        if path in chain:
+            cycle = " -> ".join(str(p) for p in (*chain, path))
+            raise ValueError(f"{BASE_CONFIG_KEY} cycle: {cycle}")
+        document = read(path)
+        if not isinstance(document, dict):
+            raise ValueError(f"{path}: the top level of a config must be a mapping, got {type(document).__name__}")
+        documents.append((path, document))
+        if BASE_CONFIG_KEY not in document:
+            return documents
+        base_ref = document.pop(BASE_CONFIG_KEY)
+        if not isinstance(base_ref, str) or not base_ref:
+            raise ValueError(f"{path}: {BASE_CONFIG_KEY} must be a non-empty path string, got {base_ref!r}")
+        # Joining an absolute path discards the left operand, so this covers both forms.
+        base_path = (path.parent / base_ref).resolve()
+        if not base_path.is_file():
+            raise FileNotFoundError(f"{path}: {BASE_CONFIG_KEY} {base_ref!r} does not exist (resolved to {base_path})")
+        path = base_path
 
-    base_ref = document.pop(BASE_CONFIG_KEY)
-    if not isinstance(base_ref, str) or not base_ref:
-        raise ValueError(f"{path}: {BASE_CONFIG_KEY} must be a non-empty path string, got {base_ref!r}")
-    # Joining an absolute path discards the left operand, so this covers both forms.
-    base_path = (path.parent / base_ref).resolve()
-    if not base_path.is_file():
-        raise FileNotFoundError(f"{path}: {BASE_CONFIG_KEY} {base_ref!r} does not exist (resolved to {base_path})")
-    return deep_merge(_compose(base_path, (*chain, path)), document)
+
+def composition_chain(path: str | os.PathLike) -> list[Path]:
+    """The files the config at ``path`` is composed from, resolved: ``path`` itself, then the base it names, then
+    that base's, to a file that names none. Raises as ``load_composed_yaml`` does."""
+    return [source for source, _ in _documents(Path(path).resolve(), _load_mapping)]
+
+
+def load_composed(path: str | os.PathLike, read: Callable[[Path], Any]) -> dict[str, Any]:
+    """Load the file at ``path`` with its ``base_config`` chain applied, each file of the chain read by ``read``
+    (which takes its path and returns its top-level mapping), as ``load_composed_yaml`` does with a config reader.
+
+    Returns a plain dict without the ``base_config`` key, and raises as ``load_composed_yaml`` does.
+    """
+    documents = [document for _, document in _documents(Path(path).resolve(), read)]
+    composed = documents[-1]
+    for document in reversed(documents[:-1]):
+        composed = deep_merge(composed, document)
+    return composed
 
 
 def load_composed_yaml(path: str | os.PathLike) -> dict[str, Any]:
@@ -145,4 +174,4 @@ def load_composed_yaml(path: str | os.PathLike) -> dict[str, Any]:
     when a ``base_config`` chain loops back on itself (the message names the chain), when a
     ``base_config`` value is not a path string, or when a file's top level is not a mapping.
     """
-    return _compose(Path(path).resolve(), ())
+    return load_composed(path, _load_mapping)

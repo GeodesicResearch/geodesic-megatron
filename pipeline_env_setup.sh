@@ -155,12 +155,8 @@ setup_slingshot() {
     echo "[env-setup/slingshot] Output:   $CONTAINER_SLINGSHOT_DIR"
     echo "[env-setup/slingshot] Versions: nccl=$OFI_NCCL_VERSION hwloc=$OFI_HWLOC_VERSION aws-ofi-nccl=$OFI_PLUGIN_VERSION"
 
-    # Scrub host toolchain/venv env — the same poison set the exec shim scrubs.
-    # The host's CC/CXX=/usr/bin/g*-12 do not exist in the image and hijacked the
-    # NCCL make until this was added; the build must use the image's toolchain.
-    unset LD_PRELOAD PYTHONPATH VIRTUAL_ENV NCCL_LIBRARY \
-          CC CXX CUDAHOSTCXX CUDA_HOME CPLUS_INCLUDE_PATH C_INCLUDE_PATH CUDNN_PATH
-    export LD_LIBRARY_PATH=""
+    # The build must use the image's toolchain, not the host's.
+    env_scrub_host_toolchain
 
     # The build runs inside the image with ONLY the Option B binds (host
     # libfabric, /usr/lib64 for libcxi/libnl, and the output dir at

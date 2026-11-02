@@ -475,3 +475,10 @@ def test_nemotron_3_super_sft_defaults():
     assert cfg.model.sequence_parallel is True
     assert cfg.model.expert_model_parallel_size == 8
     assert cfg.peft is None
+
+
+@pytest.mark.parametrize("recipe_func", _NEMOTRONH_PEFT_FUNCS + _NEMOTRON_NANO_V2_PEFT_FUNCS)
+def test_nemotronh_peft_config_refuses_an_unknown_scheme(recipe_func: Callable):
+    """A scheme name the recipe has no targets for raises instead of quietly training plain LoRA."""
+    with pytest.raises(ValueError, match="peft_scheme 'canonical_lora' is not one of"):
+        recipe_func(peft_scheme="canonical_lora")

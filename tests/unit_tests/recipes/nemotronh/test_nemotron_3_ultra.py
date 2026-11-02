@@ -149,6 +149,11 @@ class TestNemotron3UltraPeft:
         config = nemotron_3_ultra_peft_config(peft_scheme="dora")
         assert config.peft is not None
 
+    def test_peft_config_unknown_scheme_is_refused(self):
+        """A scheme name the recipe has no targets for raises instead of quietly training plain LoRA."""
+        with pytest.raises(ValueError, match="peft_scheme 'canonical_lora' is not one of"):
+            nemotron_3_ultra_peft_config(peft_scheme="canonical_lora")
+
 
 @pytest.mark.unit
 class TestNemotron3UltraCommon:

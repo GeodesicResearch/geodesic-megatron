@@ -90,7 +90,7 @@ Directory names are the `checkpoint.save` basenames of the configs in
 `geodesic-megatron/configs/control_pretraining/`. A sync pass archives every completed checkpoint it finds
 in a stage's save directory, intermediate ones included, under `checkpoints/<save directory>/`.
 
-**State on 2026-10-12**, listed from the save directories on Isambard, from this bucket and from each
+**State on 2026-10-12** (the NVIDIA-Base rerun's row on 2026-10-24), listed from the save directories on Isambard, from this bucket and from each
 repository's branches on the Hub. "Hub" counts a repository's revisions other than `main`, each the
 Hugging Face conversion of one checkpoint, without optimizer state. The other two columns count Megatron
 checkpoints, which carry it.
@@ -104,6 +104,7 @@ checkpoints, which carry it.
 | `control_pretrain_30b_baseline_sft_xl50b_gbs256_v2` | the ablation trained again on fixed, fast code (2026-10-02 to 2026-10-03) | 5 | none: the run directory does not exist | none | 10,066,329,600 |
 | `control_pretrain_30b_baseline_sft_xl50b_gbs256_v3` | v2 trained again on the quality-filtered mix (2026-10-10) | 5 | none: deleted on 2026-10-11, after every revision was verified on the Hub | none | 10,066,329,600 |
 | `control_pretrain_30b_baseline_sft_xl50b_gbs256_v4` | v3 trained again at a 5e-5 peak learning rate (2026-10-10) | 5 | none: deleted on 2026-10-12, after every revision was verified on the Hub | none | 10,066,329,600 |
+| `control_pretrain_30b_nvidia_base_sft_xl50b_gbs256_v4` | v4 trained again from NVIDIA's converted Nemotron 3 Nano Base (2026-10-23) | 5 | 1 of 5: the final `iter_0005976`; the other four were deleted on 2026-10-24, after every revision was verified on the Hub | none | 10,066,329,600 |
 | `control_pretrain_30b_filtered_mini_2plus_pretrain` | broadly filtered, stage 1 | 16: every 2264 iterations, the final `iter_0029881`, and the segment-end saves `iter_0008472` and `iter_0026890` that the 24 h rollovers produced | 1 of 16: the final `iter_0029881` | 7 of 16: `iter_0002264`, `4528`, `6792`, `8472`, `9056`, `11320` and `13584` | 37,983,617,024 |
 | `control_pretrain_30b_filtered_mini_2plus_midtrain` | broadly filtered, stage 2 | 6: every 600 iterations and the final `iter_0003126` | 1 of 6: the final `iter_0003126` | none | 10,066,329,600 |
 | `control_pretrain_30b_filtered_mini_2plus_sft` | broadly filtered, mainline-recipe stage 3: configured, never run (the arm's reasoning model is the next row) | no repository | none: the directory does not exist | none | 10,066,329,600 |
@@ -117,12 +118,12 @@ checkpoints, which carry it.
 | `control_pretrain_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt`, `…_trustedmonitor_replayonly_cpt` | narrow V2 knowledge reintroduction and its replay-only control, the same from narrow V2's midtraining final, five links (2026-09-29 and 2026-09-30) | 5 each | none: neither run directory exists | none | 1,459,617,792 |
 | `control_pretrain_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_cpt`, `…_trustedmonitor_replayonly_cpt` | V2 E2E knowledge reintroduction and its replay-only control, from its midtraining final `iter_0003126`, five links of 76 iterations (2026-10-03) | 5 each | none: neither run directory exists | none | 637,534,208 |
 
-Of the 21 stages that trained:
+Of the 22 stages that trained:
 - **13 have no Megatron checkpoint left anywhere**: the four xl-50b SFT runs of the baseline, the two filtered
   arms' xl-50b SFTs, V2 E2E stage 1 and the six knowledge-reintroduction runs. Their Hub revisions are the
   only copies.
-- **3 keep only their final on Isambard**: the broadly filtered arm's stage 1 and stage 2, and narrow V1's
-  midtraining. Stage 1's seven earliest saves are also in this bucket; its other eight intermediate saves
+- **4 keep only their final on Isambard**: the broadly filtered arm's stage 1 and stage 2, narrow V1's
+  midtraining and the NVIDIA-Base rerun. Stage 1's seven earliest saves are also in this bucket; its other eight intermediate saves
   (`iter_0015848` through `iter_0029432`) exist only as Hub revisions.
 - **5 are complete on Isambard**: the baseline's three stages, which are the only runs this bucket holds in
   full, and the midtrainings of narrow V2 and V2 E2E, which are in no archive.

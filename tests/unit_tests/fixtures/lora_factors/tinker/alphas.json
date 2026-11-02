@@ -1,0 +1,11 @@
+{
+  "__format_version__": 3,
+  "backbone.layers.1.mixer.experts.down_proj.weight": 2.0,
+  "backbone.layers.1.mixer.experts.up_proj.weight": 2.0,
+  "backbone.layers.1.mixer.fc1_latent_proj.weight": 2.0,
+  "backbone.layers.1.mixer.fc2_latent_proj.weight": 2.0,
+  "backbone.layers.1.mixer.in_proj.weight": 2.0,
+  "backbone.layers.1.mixer.k_proj.weight": 2.0,
+  "backbone.layers.1.mixer.q_proj.weight": 2.0,
+  "backbone.layers.1.mixer.v_proj.weight": 2.0
+}

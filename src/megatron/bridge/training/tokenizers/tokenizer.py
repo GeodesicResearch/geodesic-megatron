@@ -2,6 +2,8 @@
 
 """Megatron tokenizers."""
 
+from typing import Any
+
 from megatron.core.tokenizers import MegatronTokenizer
 
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
@@ -104,3 +106,29 @@ def build_tokenizer(config: TokenizerConfig, **kwargs) -> MegatronTokenizer:
     tokenizer = MegatronTokenizer.from_pretrained(tokenizer_path=tokenizer_path, metadata_path=metadata, **kwargs)
 
     return tokenizer
+
+
+def find_hf_tokenizer(tokenizer: Any) -> Any | None:
+    """The Hugging Face tokenizer inside a Megatron tokenizer wrapper (or the tokenizer itself), or None if none.
+
+    Megatron's text tokenizer keeps its library wrapper in ``_tokenizer`` and the Hugging Face wrapper keeps the
+    transformers tokenizer in ``tokenizer``; the walk follows either attribute until it reaches a
+    ``PreTrainedTokenizerBase``.
+    """
+    from transformers import PreTrainedTokenizerBase
+
+    obj = tokenizer
+    seen: set[int] = set()
+    while obj is not None and id(obj) not in seen:
+        if isinstance(obj, PreTrainedTokenizerBase):
+            return obj
+        seen.add(id(obj))
+        obj = next(
+            (
+                child
+                for child in (getattr(obj, "_tokenizer", None), getattr(obj, "tokenizer", None))
+                if child is not None
+            ),
+            None,
+        )
+    return None

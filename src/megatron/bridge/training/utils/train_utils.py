@@ -75,6 +75,14 @@ MEMORY_KEYS: dict[str, str] = {
     "allocation.all.current": "mem-allocated-count",
 }
 
+# Keys of training_log's per-interval accumulator (``total_loss_dict``) that hold counters, not summed losses.
+ADVANCED_ITERS_KEY = "advanced iterations"
+SKIPPED_ITERS_KEY = "skipped iterations"
+NAN_ITERS_KEY = "nan iterations"
+# For each loss-dict entry, the number of advanced iterations of the interval that reported it.
+REPORTED_ITERS_KEY = "reported iterations"
+INTERVAL_COUNTER_KEYS = (ADVANCED_ITERS_KEY, SKIPPED_ITERS_KEY, NAN_ITERS_KEY, REPORTED_ITERS_KEY)
+
 
 def use_full_iteration_cuda_graph(model_config) -> bool:
     """Whether a training/eval loop should wrap forward-backward in a full-iteration CUDA graph.
@@ -346,6 +354,44 @@ def logical_and_across_model_parallel_group(input: bool, mp_group: "TorchProcess
     return bool(input.item())
 
 
+def accumulate_interval_losses(total_loss_dict: dict[str, Any], loss_dict: dict[str, torch.Tensor]) -> None:
+    """Add an advanced iteration's losses to the logging interval's totals, counting the iterations behind each.
+
+    Not every entry is reported by every iteration: ``token_masking/listed_target_loss`` is reported only by an
+    iteration whose global batch held a trainable target with a measured id, since it would be 0/0 otherwise. So each
+    entry counts the iterations that reported it, and ``interval_loss_averages`` divides its total by that count
+    rather than by the interval's iterations: an iteration without the entry neither pulls the printed average toward 0
+    nor makes it NaN. (W&B gets each entry, unaveraged, at exactly the iterations that report it.)
+    """
+    reported = total_loss_dict.setdefault(REPORTED_ITERS_KEY, {})
+    for key, value in loss_dict.items():
+        total = total_loss_dict.get(key)
+        if total is None:
+            total = torch.zeros(1, dtype=torch.float, device=value.device)
+        total_loss_dict[key] = total + value
+        reported[key] = reported.get(key, 0) + 1
+
+
+def interval_loss_averages(total_loss_dict: dict[str, Any]) -> dict[str, float]:
+    """Every accumulated entry's average over the logging interval, resetting the totals for the next interval.
+
+    A loss-dict entry averages over the advanced iterations that reported it, and is left out when none did. The
+    entries the MoE and MTP loss trackers add to the totals themselves, every iteration, average over the interval's
+    advanced iterations.
+    """
+    reported = total_loss_dict.setdefault(REPORTED_ITERS_KEY, {})
+    advanced = total_loss_dict.get(ADVANCED_ITERS_KEY, 0)
+    averages = {}
+    for key in [key for key in total_loss_dict if key not in INTERVAL_COUNTER_KEYS]:
+        total = total_loss_dict[key]
+        iterations = reported.get(key, advanced)
+        if key not in reported or iterations > 0:
+            averages[key] = total.item() / float(max(1, iterations))
+        total_loss_dict[key] = torch.zeros_like(total)
+    total_loss_dict[REPORTED_ITERS_KEY] = dict.fromkeys(reported, 0)
+    return averages
+
+
 def training_log(
     loss_dict: dict[str, torch.Tensor],
     total_loss_dict: dict[str, Any],
@@ -402,29 +448,23 @@ def training_log(
 
     loggers_exist = writer is not None or wandb_writer is not None or mlflow_logger is not None
 
-    # Advanced, skipped, and Nan iterations.
-    advanced_iters_key = "advanced iterations"
-    skipped_iters_key = "skipped iterations"
-    nan_iters_key = "nan iterations"
     # Advanced iterations.
     if not skipped_iter:
-        total_loss_dict[advanced_iters_key] = total_loss_dict.get(advanced_iters_key, 0) + 1
+        total_loss_dict[ADVANCED_ITERS_KEY] = total_loss_dict.get(ADVANCED_ITERS_KEY, 0) + 1
     else:
-        if advanced_iters_key not in total_loss_dict:
-            total_loss_dict[advanced_iters_key] = 0
+        if ADVANCED_ITERS_KEY not in total_loss_dict:
+            total_loss_dict[ADVANCED_ITERS_KEY] = 0
     # Skipped iterations.
-    total_loss_dict[skipped_iters_key] = total_loss_dict.get(skipped_iters_key, 0) + skipped_iter
+    total_loss_dict[SKIPPED_ITERS_KEY] = total_loss_dict.get(SKIPPED_ITERS_KEY, 0) + skipped_iter
     got_nan = False
-    for key in loss_dict:
-        if not skipped_iter:
-            total_loss_dict[key] = (
-                total_loss_dict.get(key, torch.tensor([0.0], dtype=torch.float, device="cuda")) + loss_dict[key]
-            )
-        else:
+    if not skipped_iter:
+        accumulate_interval_losses(total_loss_dict, loss_dict)
+    else:
+        for key in loss_dict:
             value = loss_dict[key].float().sum().item()
             is_nan = value == float("inf") or value == -float("inf") or value != value
             got_nan = got_nan or is_nan
-    total_loss_dict[nan_iters_key] = total_loss_dict.get(nan_iters_key, 0) + int(got_nan)
+    total_loss_dict[NAN_ITERS_KEY] = total_loss_dict.get(NAN_ITERS_KEY, 0) + int(got_nan)
 
     # Logging.
     timers_to_log = []
@@ -466,7 +506,7 @@ def training_log(
     # Calculate batch size.
     batch_size = train_config.micro_batch_size * config.data_parallel_size * get_num_microbatches()
 
-    total_iterations = total_loss_dict[advanced_iters_key] + total_loss_dict[skipped_iters_key]
+    total_iterations = total_loss_dict[ADVANCED_ITERS_KEY] + total_loss_dict[SKIPPED_ITERS_KEY]
 
     # learning rate will be None on ranks without trainable params, so we must gather across mp ranks
     learning_rate = reduce_max_stat_across_model_parallel_group(learning_rate, mp_group=pg_collection.mp)
@@ -816,12 +856,9 @@ def training_log(
         # Decoupled_learning_rate should be not None only on first and last pipeline stage.
         log_string += f" learning rate: {learning_rate:.6E} |"
         log_string += f" global batch size: {batch_size:5d} |"
-        for key in total_loss_dict:
-            if key not in [advanced_iters_key, skipped_iters_key, nan_iters_key]:
-                avg = total_loss_dict[key].item() / float(max(1, total_loss_dict[advanced_iters_key]))
-                if avg >= 0.0:
-                    log_string += " {}: {:.6E} |".format(key, avg)
-                total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device="cuda")
+        for key, avg in interval_loss_averages(total_loss_dict).items():
+            if avg >= 0.0:
+                log_string += " {}: {:.6E} |".format(key, avg)
         log_string += f" loss scale: {loss_scale:.1f} |"
         if grad_norm is not None:
             log_string += f" grad norm: {grad_norm:.3f} |"
@@ -831,11 +868,11 @@ def training_log(
             log_string += f" params norm: {params_norm:.3f} |"
         if log_max_attention_logit is not None:
             log_string += f" max attention logit: {log_max_attention_logit:.3f} |"
-        log_string += " number of skipped iterations: {:3d} |".format(total_loss_dict[skipped_iters_key])
-        log_string += " number of nan iterations: {:3d} |".format(total_loss_dict[nan_iters_key])
-        total_loss_dict[advanced_iters_key] = 0
-        total_loss_dict[skipped_iters_key] = 0
-        total_loss_dict[nan_iters_key] = 0
+        log_string += " number of skipped iterations: {:3d} |".format(total_loss_dict[SKIPPED_ITERS_KEY])
+        log_string += " number of nan iterations: {:3d} |".format(total_loss_dict[NAN_ITERS_KEY])
+        total_loss_dict[ADVANCED_ITERS_KEY] = 0
+        total_loss_dict[SKIPPED_ITERS_KEY] = 0
+        total_loss_dict[NAN_ITERS_KEY] = 0
         print_rank_last(log_string)
         if report_memory_flag:
             # Report memory after optimizer state has been initialized.

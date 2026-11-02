@@ -1,0 +1,13 @@
+Copied tokenizer.json (77 bytes) verbatim from training tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+Copied special_tokens_map.json (420 bytes) verbatim from training tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+Copied chat_template.jinja (10504 bytes) verbatim from training tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+Copied tokenizer.json from nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (the training template renders as the release's)
+Copied tokenizer_config.json from nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (the training template renders as the release's)
+Copied special_tokens_map.json from nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (the training template renders as the release's)
+Copied chat_template.jinja from nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (the training template renders as the release's)
+Copied generation_config.json from nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (the training template renders as the release's)
+Preserved upstream chat_template.jinja (10504 bytes); set enable_thinking default → False
+Stripped <think></think> from non-reasoning generation prompt (avoids stray </think> echoes)
+Synced tokenizer_config.json embedded chat_template <- chat_template.jinja
+Set generation_config.json decoding defaults: greedy
+Removed auto_map from config.json (using native transformers NemotronH)

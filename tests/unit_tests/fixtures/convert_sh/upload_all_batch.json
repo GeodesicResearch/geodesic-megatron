@@ -1,0 +1,195 @@
+{
+  "args": [
+    "upload-all",
+    "<TMP>/my_run",
+    "--hf-model",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "--no-reasoning"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "--nodes=1",
+        "--ntasks-per-node=1",
+        "--kill-on-bad-exit=0",
+        "--export=ALL",
+        "--overlap",
+        "<REPO>/pipeline_env_exec.sh"
+      ],
+      "cmd": "srun",
+      "env": {
+        "FI_CXI_DEFAULT_CQ_SIZE": "131072",
+        "FI_CXI_DISABLE_HOST_REGISTER": "1",
+        "FI_CXI_RX_MATCH_MODE": "soft",
+        "FI_MR_CACHE_MONITOR": "userfaultfd",
+        "FI_PROVIDER": "cxi",
+        "MEGATRON_CONFIG_LOCK_DIR": "/tmp/megatron_convert_<JOB>",
+        "NCCL_CROSS_NIC": "1",
+        "NCCL_DEBUG": "WARN",
+        "NCCL_NET": "AWS Libfabric",
+        "NCCL_NET_GDR_LEVEL": "PHB",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "hsn",
+        "PYTHONUNBUFFERED": "1",
+        "TMPDIR": "/tmp/megatron_convert_<JOB>",
+        "TRITON_CACHE_DIR": "/tmp/megatron_convert_<JOB>/triton"
+      }
+    },
+    {
+      "argv": [
+        "--nproc_per_node=4",
+        "--nnodes=1",
+        "--node_rank=0",
+        "--master_addr=nid000001",
+        "--master_port=29500",
+        "pipeline_checkpoint_convert_hf.py",
+        "--megatron-path",
+        "<TMP>/my_run",
+        "--iteration",
+        "0",
+        "--tp",
+        "1",
+        "--ep",
+        "4",
+        "--push-to-hub",
+        "--hf-org",
+        "geodesic-research",
+        "--hf-repo-name",
+        "my_run",
+        "--hf-model",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "--no-reasoning"
+      ],
+      "cmd": "torchrun",
+      "env": {
+        "FI_CXI_DEFAULT_CQ_SIZE": "131072",
+        "FI_CXI_DISABLE_HOST_REGISTER": "1",
+        "FI_CXI_RX_MATCH_MODE": "soft",
+        "FI_MR_CACHE_MONITOR": "userfaultfd",
+        "FI_PROVIDER": "cxi",
+        "MEGATRON_CONFIG_LOCK_DIR": "/tmp/megatron_convert_<JOB>",
+        "NCCL_CROSS_NIC": "1",
+        "NCCL_DEBUG": "WARN",
+        "NCCL_NET": "AWS Libfabric",
+        "NCCL_NET_GDR_LEVEL": "PHB",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "hsn",
+        "PYTHONUNBUFFERED": "1",
+        "SLURM_NODEID": "0",
+        "TMPDIR": "/tmp/megatron_convert_<JOB>",
+        "TRITON_CACHE_DIR": "/tmp/megatron_convert_<JOB>/triton"
+      }
+    },
+    {
+      "argv": [
+        "--nodes=1",
+        "--ntasks-per-node=1",
+        "--kill-on-bad-exit=0",
+        "--export=ALL",
+        "--overlap",
+        "<REPO>/pipeline_env_exec.sh"
+      ],
+      "cmd": "srun",
+      "env": {
+        "FI_CXI_DEFAULT_CQ_SIZE": "131072",
+        "FI_CXI_DISABLE_HOST_REGISTER": "1",
+        "FI_CXI_RX_MATCH_MODE": "soft",
+        "FI_MR_CACHE_MONITOR": "userfaultfd",
+        "FI_PROVIDER": "cxi",
+        "MEGATRON_CONFIG_LOCK_DIR": "/tmp/megatron_convert_<JOB>",
+        "NCCL_CROSS_NIC": "1",
+        "NCCL_DEBUG": "WARN",
+        "NCCL_NET": "AWS Libfabric",
+        "NCCL_NET_GDR_LEVEL": "PHB",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "hsn",
+        "PYTHONUNBUFFERED": "1",
+        "TMPDIR": "/tmp/megatron_convert_<JOB>",
+        "TRITON_CACHE_DIR": "/tmp/megatron_convert_<JOB>/triton"
+      }
+    },
+    {
+      "argv": [
+        "--nproc_per_node=4",
+        "--nnodes=1",
+        "--node_rank=0",
+        "--master_addr=nid000001",
+        "--master_port=29501",
+        "pipeline_checkpoint_convert_hf.py",
+        "--megatron-path",
+        "<TMP>/my_run",
+        "--iteration",
+        "100",
+        "--tp",
+        "1",
+        "--ep",
+        "4",
+        "--push-to-hub",
+        "--hf-org",
+        "geodesic-research",
+        "--hf-repo-name",
+        "my_run",
+        "--hf-model",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "--no-reasoning"
+      ],
+      "cmd": "torchrun",
+      "env": {
+        "FI_CXI_DEFAULT_CQ_SIZE": "131072",
+        "FI_CXI_DISABLE_HOST_REGISTER": "1",
+        "FI_CXI_RX_MATCH_MODE": "soft",
+        "FI_MR_CACHE_MONITOR": "userfaultfd",
+        "FI_PROVIDER": "cxi",
+        "MEGATRON_CONFIG_LOCK_DIR": "/tmp/megatron_convert_<JOB>",
+        "NCCL_CROSS_NIC": "1",
+        "NCCL_DEBUG": "WARN",
+        "NCCL_NET": "AWS Libfabric",
+        "NCCL_NET_GDR_LEVEL": "PHB",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_SOCKET_IFNAME": "hsn",
+        "PYTHONUNBUFFERED": "1",
+        "SLURM_NODEID": "0",
+        "TMPDIR": "/tmp/megatron_convert_<JOB>",
+        "TRITON_CACHE_DIR": "/tmp/megatron_convert_<JOB>/triton"
+      }
+    },
+    {
+      "argv": [
+        "create_repo"
+      ],
+      "cmd": "hub",
+      "kwargs": {
+        "exist_ok": true,
+        "repo_id": "geodesic-research/my_run"
+      }
+    },
+    {
+      "argv": [
+        "create_branch"
+      ],
+      "cmd": "hub",
+      "kwargs": {
+        "branch": "iter_0000200",
+        "repo_id": "geodesic-research/my_run"
+      }
+    },
+    {
+      "argv": [
+        "upload_folder"
+      ],
+      "cmd": "hub",
+      "kwargs": {
+        "commit_message": "Add checkpoint 200",
+        "files": [
+          "config.json"
+        ],
+        "folder_path": "<TMP>/my_run/iter_0000200/hf",
+        "repo_id": "geodesic-research/my_run",
+        "revision": "iter_0000200"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "stdout": "============================================================\nCheckpoint Upload Pipeline\n  Megatron path:  <TMP>/my_run\n  HF model:       nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16\n  HF repo:        geodesic-research/my_run\n  Train iters:    300\n  Poll mode:      false\n  GPUs:           4 (TP=1, EP=4) across 1 nodes\n  Master:         nid000001:29500\n  Job ID:         <JOB>\n  Start time:     <DATE>\n============================================================\n\n--- Iteration 0  ---\n  Converting iteration 0 (multi-GPU: TP=1, EP=4, 1 nodes)...\n  Conversion complete.\n\n--- Iteration 100  ---\n  Converting iteration 100 (multi-GPU: TP=1, EP=4, 1 nodes)...\n  Conversion complete.\n\n--- Iteration 200  ---\n  Already converted, skipping conversion.\n  Pushing to Hub...\nCreating/verifying repo: geodesic-research/my_run\nCreating branch: iter_0000200\nUploading to geodesic-research/my_run (revision: iter_0000200)\nUpload complete: geodesic-research/my_run @ iter_0000200\n\n============================================================\nBatch complete. Processed iterations: 0 100 200 \nTraining still ongoing. Re-run with --poll to watch for new checkpoints.\n  Repo: https://huggingface.co/geodesic-research/my_run\n============================================================\n===== Job Complete =====\n"
+}

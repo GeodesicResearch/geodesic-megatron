@@ -1171,6 +1171,7 @@ class TestPackedSequenceWithChatEndToEnd:
         }
         mock_dataset.__getitem__ = MagicMock(return_value=mock_item)
         mock_dataset.__len__ = MagicMock(return_value=1)
+        mock_dataset.max_seq_length = 512  # tokenize_dataset cuts each document to the dataset's length
 
         dataset_kwargs = {
             "chat": True,

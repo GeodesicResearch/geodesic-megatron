@@ -48,6 +48,9 @@ collection:
     knowledge reintroduction; every checkpoint a revision.
   private: true
 architecture: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+# The card's base_model, from which the Hub draws its model tree, or null for none. These models were not trained
+# from the model it names, the architecture's release; it is the value their published cards carry.
+base_model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 export_root: /projects/a5k/public/checkpoints/megatron/control_pretraining_hub_exports
 log_dir: /projects/a5k/public/logs/control_pretraining/hub_publish
 hf_home: /projects/a5k/public/hf

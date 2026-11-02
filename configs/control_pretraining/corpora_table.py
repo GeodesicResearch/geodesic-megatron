@@ -15,10 +15,18 @@ Columns, in order::
     kind        tokenize  -> .bin/.idx via pipeline_data_submit.sbatch tokenize
                 pack      -> packed SFT parquet via pipeline_data_submit.sbatch <root> ...
     config      prepare config YAML (dataset, revision, tokenizer, pack geometry), named
-                relative to the repo root
+                relative to the repo root.
+                A prepare config pins one `revision`, or each subset's own commit under
+                `revisions`; a row is read through `subset_prepare_config`, which resolves
+                its subset's pin and refuses a subset `revisions` does not pin
     prep_h      prepare walltime, hours
     tok_h       tokenize/pack walltime, hours (per shard where sharded)
     workers     tokenize workers
+    partitions  how many contiguous parts a tokenize row's JSONL is tokenized in, each by a writer process of
+                its own, and merged in order (preprocess_data.py --partitions --keep-sequential-samples, which
+                divides the workers among the parts, so it must divide workers). One writer is what limits a
+                large corpus's tokenize. The job runs at one when the quota cannot hold the parts; 1 for any
+                other kind
     shards      1, or the shard count where sharded
     shard_mode  none | split (one JSONL, byte-gated split) | slice (N source index ranges)
     stripe      1 to lfs setstripe the roots before the first write, else 0
@@ -28,18 +36,62 @@ Columns, in order::
                 is not yet safe to build from is held by leaving the column PENDING, and the
                 whole plan is refused rather than quietly omitting that corpus. An arm that
                 holds a row this way states its reason at the row.
+
+Four further columns are optional, and a row states all four or none::
+
+    count_token   a token id whose occurrences ``verify_corpora.py`` counts in every document
+                  of the built ``.bin`` (the document's EOD slot excluded, by position)
+    count_column  the column of the prepare config's dataset that holds, row for row, how many
+                  of ``count_token`` each document must contain
+    row_column    the column of that dataset that holds each row's index in the source the corpus
+                  must align with, document for document
+    first_row     the source index of the dataset's first row: row ``i`` must hold
+                  ``first_row + i``, so the rows are the source's, in order, with none dropped or
+                  repeated
+
+They declare the per-document checks (``corpus_documents.check_documents``), which only a
+tokenize row can carry; of the dataset, they read only ``count_column`` and ``row_column``. A fifth may
+follow them, and is then read as well:
+
+    length_column the column of that dataset that holds each row's length in tokens before the
+                  build changed its text (a hidden-span corpus's ``n_tokens``): the checks then
+                  report, without failing, the documents whose built length is not that plus the
+                  EOD (an empty text: 0), and the net and range of the shift, which re-tokenizing
+                  changed text produces
 """
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
 
 
-COLUMNS = ("subset", "stage", "kind", "config", "prep_h", "tok_h", "workers", "shards", "shard_mode", "stripe", "docs")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # the repo root, home of the pipeline package
+from pipeline.data import layout  # noqa: E402
+
+
+COLUMNS = (
+    "subset",
+    "stage",
+    "kind",
+    "config",
+    "prep_h",
+    "tok_h",
+    "workers",
+    "partitions",
+    "shards",
+    "shard_mode",
+    "stripe",
+    "docs",
+)
+# Optional, all four or none, after COLUMNS.
+DOCUMENT_CHECK_COLUMNS = ("count_token", "count_column", "row_column", "first_row")
+# Optional after the four.
+LENGTH_COLUMN = "length_column"
 KINDS = ("tokenize", "pack")
 SHARD_MODES = ("none", "split", "slice")
 STEPS = ("prepare", "split", "tokenize", "pack")  # the job steps a corpus's chain is made of
@@ -49,6 +101,12 @@ DOCS_PENDING = "PENDING"
 # invocations do. This module sits at configs/control_pretraining/, so the root is two levels
 # up — resolving through it means a reader works from any working directory.
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# build_corpora.sh runs this module as a script, whose import path holds only its own directory.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+from scripts.data.prepare_revisions import subset_revision, tokenizer_reference, tokenizer_revision  # noqa: E402
+
 
 # Where every corpus root lives.
 DATA_BASE = Path("/projects/a5k/public/data")
@@ -78,10 +136,21 @@ class CorpusRow:
     prep_h: int
     tok_h: int
     workers: int
+    partitions: int
     shards: int
     shard_mode: str
     stripe: bool
     docs: int | None  # None while the table still says PENDING
+    # The per-document checks' columns, all None when the row declares none.
+    count_token: int | None
+    count_column: str | None
+    row_column: str | None
+    first_row: int | None
+    # The dataset's column of each row's length before the build, None when the row declares none.
+    length_column: str | None
+    # Where the row was read from (resolved). Not part of the row's identity: two tables stating the
+    # same corpus state the same row.
+    table: Path = field(compare=False)
 
     @property
     def shard_names(self) -> list[str]:
@@ -104,24 +173,17 @@ class CorpusRow:
 
 
 def corpus_root(dataset: str, subset: str, data_base: Path = DATA_BASE) -> Path:
-    """The directory ``pipeline_data_prepare.py`` writes a subset into.
-
-    Mirrors its ``slugify_dataset_name``: ``dataset.replace("/", "__") + "__" + subset``. Stated
-    here rather than imported because that script imports torch-adjacent packages at module
-    level and this module must stay usable outside the container.
-    """
-    return data_base / f"{dataset.replace('/', '__')}__{subset}"
+    """The directory ``pipeline_data_prepare.py`` writes a subset into (``layout.slugify_dataset_name``)."""
+    return data_base / layout.slugify_dataset_name(dataset, subset)
 
 
 def packed_parquet_path(root: Path, scalars: dict) -> Path:
-    """The packed-sequence parquet the packer writes under a corpus (or shard) root.
+    """The training parquet the packer writes under a corpus (or shard) root, for a prepare config's scalars.
 
-    Mirrors ``pipeline_data_prepare.py``'s layout — ``packed/<tokenizer slug>_pad_seq_to_mult<N>/
-    training_<seq>.idx.parquet`` — from the prepare config's tokenizer and pack geometry, so the
-    verifier, the audit and the training configs' globs all name the same file.
+    ``layout.packed_parquet_path`` of the config's tokenizer and pack geometry, so the verifier, the audit and the
+    training configs' globs all name the same file.
     """
-    tokenizer_dir = f"{scalars['tokenizer'].replace('/', '--')}_pad_seq_to_mult{scalars['pad-seq-to-mult']}"
-    return root / "packed" / tokenizer_dir / f"training_{scalars['seq-length']}.idx.parquet"
+    return layout.packed_parquet_path(root, scalars["tokenizer"], scalars["pad-seq-to-mult"], scalars["seq-length"])
 
 
 class Checker:
@@ -145,11 +207,34 @@ def prepare_config_scalars(config: Path) -> dict:
     return loaded
 
 
+def subset_prepare_config(config: Path, subset: str) -> dict:
+    """A prepare config as the prepare of ``subset`` reads it: its scalars, with that subset's pin as ``revision``.
+
+    A config that pins each subset (``revisions``) gives the subset's own commit, and one that pins a single
+    ``revision`` gives that, as ``pipeline_data_prepare.py`` resolves them (``scripts/data/prepare_revisions.py``).
+    The plan and the verifier read a row's prepare config through here, and the verifier hands the result to the
+    per-document count check, so none of them can check a corpus against another subset's commit. A
+    ``tokenizer-revision`` the config states is kept and must be a full commit SHA. Raises ``ValueError`` for a
+    subset the config does not pin and for a malformed tokenizer pin.
+    """
+    scalars = prepare_config_scalars(config)
+    revision = subset_revision(scalars, subset, str(config))
+    tokenizer_revision(scalars, str(config))
+    resolved = {key: value for key, value in scalars.items() if key != "revisions"}
+    if revision is not None:
+        resolved["revision"] = revision
+    return resolved
+
+
 def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
     fields = [f.strip() for f in line.split("|")]
-    if len(fields) != len(COLUMNS):
-        raise ValueError(f"{table}:{line_no}: expected {len(COLUMNS)} '|'-separated columns, got {len(fields)}")
-    row = dict(zip(COLUMNS, fields))
+    checked = len(COLUMNS) + len(DOCUMENT_CHECK_COLUMNS)
+    if len(fields) not in (len(COLUMNS), checked, checked + 1):
+        raise ValueError(
+            f"{table}:{line_no}: expected {len(COLUMNS)} '|'-separated columns, or {checked} with "
+            f"{DOCUMENT_CHECK_COLUMNS}, or {checked + 1} with {LENGTH_COLUMN} after them, got {len(fields)}"
+        )
+    row = dict(zip(COLUMNS + DOCUMENT_CHECK_COLUMNS + (LENGTH_COLUMN,), fields))
     for name, value in row.items():
         if not value:
             raise ValueError(f"{table}:{line_no}: column '{name}' is empty")
@@ -169,10 +254,17 @@ def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
         prep_h=int(row["prep_h"]),
         tok_h=int(row["tok_h"]),
         workers=int(row["workers"]),
+        partitions=int(row["partitions"]),
         shards=int(row["shards"]),
         shard_mode=row["shard_mode"],
         stripe=row["stripe"] == "1",
         docs=docs,
+        count_token=int(row["count_token"]) if "count_token" in row else None,
+        count_column=row.get("count_column"),
+        row_column=row.get("row_column"),
+        first_row=int(row["first_row"]) if "first_row" in row else None,
+        length_column=row.get(LENGTH_COLUMN),
+        table=table.resolve(),
     )
     if parsed.shard_mode == "none" and parsed.shards != 1:
         raise ValueError(f"{table}:{line_no}: shard_mode=none requires shards=1, got {parsed.shards}")
@@ -180,6 +272,23 @@ def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
         raise ValueError(f"{table}:{line_no}: shard_mode={parsed.shard_mode} requires shards>=2, got {parsed.shards}")
     if parsed.kind == "pack" and parsed.shard_mode == "slice":
         raise ValueError(f"{table}:{line_no}: kind=pack shards through the byte-gated split, not source slicing")
+    if parsed.count_token is not None and parsed.kind != "tokenize":
+        raise ValueError(f"{table}:{line_no}: the per-document checks read a tokenized corpus, not kind={parsed.kind}")
+    if parsed.count_token is not None and parsed.count_token < 0:
+        raise ValueError(f"{table}:{line_no}: count_token must be a token id, got {parsed.count_token}")
+    if parsed.first_row is not None and parsed.first_row < 0:
+        raise ValueError(f"{table}:{line_no}: first_row must be a row index, got {parsed.first_row}")
+    if parsed.count_column is not None and parsed.count_column == parsed.row_column:
+        raise ValueError(f"{table}:{line_no}: count_column and row_column name one column, {parsed.row_column!r}")
+    if parsed.length_column is not None and parsed.length_column in (parsed.count_column, parsed.row_column):
+        raise ValueError(f"{table}:{line_no}: length_column names another check's column, {parsed.length_column!r}")
+    if parsed.partitions < 1 or parsed.workers % parsed.partitions:
+        raise ValueError(
+            f"{table}:{line_no}: partitions must be at least 1 and divide workers ({parsed.workers}), "
+            f"got {parsed.partitions}"
+        )
+    if parsed.kind != "tokenize" and parsed.partitions != 1:
+        raise ValueError(f"{table}:{line_no}: only a tokenize row is tokenized in parts, so partitions must be 1")
     return parsed
 
 
@@ -359,18 +468,27 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
     also makes PENDING a usable HOLD on a corpus that must not be built yet for a reason outside
     the table — a source that is not safe to build from — rather than a hold that silently
     applies to sliced corpora alone.
+
+    A counted row whose prepare config pins no commit for its subset (``subset_prepare_config``)
+    is refused too, here rather than in its prepare job.
     """
     if row.docs is None:
         raise ValueError(
             f"{row.subset}: document count is PENDING, so this corpus cannot be planned. "
             "Fill the count in once it is known, or leave it PENDING to hold the corpus back."
         )
-    scalars = prepare_config_scalars(row.config)
+    scalars = subset_prepare_config(row.config, row.subset)
     required = ("dataset", "tokenizer") + (PACK_GEOMETRY_KEYS if row.kind == "pack" else ())
     missing = [key for key in required if key not in scalars]
     if missing:
         raise ValueError(f"{row.subset}: prepare config {row.config} lacks {missing}, which a {row.kind} row needs")
     dataset, tokenizer = scalars["dataset"], scalars["tokenizer"]
+    pinned_tokenizer = tokenizer_revision(scalars, str(row.config))
+    if pinned_tokenizer is not None and row.kind == "pack":
+        raise ValueError(
+            f"{row.subset}: prepare config {row.config} pins its tokenizer's commit, which a pack row cannot honour "
+            "(pack_sft_dataset.py names its directory by the tokenizer alone)"
+        )
     root = corpus_root(dataset, row.subset, data_base)
     prefix = f"cp-{arm}"
     roots: list[tuple[Path, bool]] = [(root, row.stripe)]
@@ -385,7 +503,15 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
             name=f"{prefix}-tok-{row.subset}" + ("" if shard is None else f"-s{shard}"),
             description=f"tokenize {row.subset}" + ("" if shard is None else f" shard{shard}"),
             script=SUBMIT_SCRIPT,
-            payload=("tokenize", str(target), tokenizer, OUTPUT_VARIANT, JSON_KEY, str(row.workers)),
+            payload=(
+                "tokenize",
+                str(target),
+                tokenizer_reference(tokenizer, pinned_tokenizer),
+                OUTPUT_VARIANT,
+                JSON_KEY,
+                str(row.workers),
+                str(row.partitions),
+            ),
             shard=shard,
         )
 
@@ -477,6 +603,41 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
         else:
             jobs.append(pack_job(f"{row.subset}:pack:{index}", split_key, shard, index))
     return CorpusPlan(row, root, dataset, tokenizer, tuple(roots), tuple(jobs))
+
+
+@dataclass(frozen=True)
+class TokenizedPrefix:
+    """One ``.bin/.idx`` prefix a tokenize row's build writes, and the rows of the subset it holds."""
+
+    shard: int | None  # None for an unsharded corpus
+    rows: tuple[int, int]  # [beg, end) of the subset's rows; document i of the prefix is row beg + i
+    prefix: Path
+
+
+def tokenized_prefixes(row: CorpusRow, data_base: Path = DATA_BASE) -> tuple[TokenizedPrefix, ...]:
+    """The prefixes a tokenize row's build writes, each with the subset rows its documents are, in order.
+
+    Read off the corpus's own plan — its tokenize jobs' targets — and the slice ranges that plan
+    prepared, so a reader that maps a subset row to a document finds it where the build put it.
+    A byte-gated split decides its shard boundaries when it runs, not in the plan, so a split
+    corpus has no row mapping here and is refused.
+    """
+    if row.kind != "tokenize":
+        raise ValueError(f"{row.subset}: only a tokenize row writes .bin/.idx prefixes, not kind={row.kind}")
+    if row.shard_mode == "split":
+        raise ValueError(
+            f"{row.subset}: a byte-gated split decides its shard boundaries when it runs, so which subset "
+            "rows each shard holds is not part of the plan"
+        )
+    plan = plan_corpus(row, row.table.parent.name, data_base)
+    ranges = row.slice_ranges() if row.shard_mode == "slice" else [(0, row.docs)]
+    prefixes = []
+    for job in plan.jobs:
+        if job.step == "tokenize":
+            target = Path(job.payload[1])  # ("tokenize", <root>, <tokenizer>, ...): see tokenize_job
+            rows = ranges[0 if job.shard is None else job.shard]
+            prefixes.append(TokenizedPrefix(job.shard, rows, target / TOKENIZED_PREFIX))
+    return tuple(prefixes)
 
 
 def plan_build(

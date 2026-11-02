@@ -1,7 +1,7 @@
 # The data build of the 30B baseline arm, one line per corpus, consumed by
 # configs/control_pretraining/build_corpora.sh (which submits the jobs and reimplements nothing).
 #
-#   subset | stage | kind | config | prep_h | tok_h | workers | shards | shard_mode | stripe | docs
+#   subset | stage | kind | config | prep_h | tok_h | workers | partitions | shards | shard_mode | stripe | docs
 #
 #   kind        tokenize -> .bin/.idx via pipeline_data_submit.sbatch tokenize
 #               pack     -> packed SFT parquet via pipeline_data_submit.sbatch <root> (pack-only)
@@ -10,6 +10,7 @@
 #               (ClimbMix prepare took 5.1 h for the same document count, so the sbatch default
 #               of 4 h would have killed it); workq_qos caps any job at 24 h
 #   workers     tokenize worker count
+#   partitions  contiguous parts a tokenize row is tokenized in, a writer each, merged in order; divides workers
 #   shard_mode  none  -> one prepare + one tokenize/pack
 #               split -> one prepare, then shard_jsonl_corpus.sh cuts the JSONL into `shards`
 #                        byte-gated roots, then one tokenize/pack per shard
@@ -27,22 +28,22 @@
 # source-slicing"): each step is ~1 h instead of the split path's 7.5 h prepare, and the
 # separate split job with its ~1.7 TB peak disappears. `split` remains available for a corpus
 # whose exact document count is unknown; the two cut different shard boundaries.
-climbmix_full|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|06|64|8|slice|1|553315056
-zyda_full|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|16|16|96|1|none|1|91220256
-stack_edu|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|10|10|64|1|none|1|28544444
-climbmix_ai_docs|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|08|08|64|1|none|1|13506352
-zyda_ai_docs|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|04|32|1|none|0|1536755
+climbmix_full|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|06|64|1|8|slice|1|553315056
+zyda_full|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|16|16|96|1|1|none|1|91220256
+stack_edu|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|10|10|64|1|1|none|1|28544444
+climbmix_ai_docs|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|08|08|64|1|1|none|1|13506352
+zyda_ai_docs|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|04|32|1|1|none|0|1536755
 # lesswrong_plus is no longer in this arm's blends (the sheet's AI-safety consolidation
 # replaced it with ai_safety_and_adjacent), but configs/control_pretraining/cpt_validation
 # trains on it, so it stays buildable here.
-lesswrong_plus|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|02|02|32|1|none|0|67064
-ai_safety_and_adjacent|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|04|32|1|none|0|352949
-climbmix_long|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|08|08|64|1|none|1|800032
-nemotron_stem_sft|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|04|32|1|none|0|459324
-arxiv_papers|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|04|32|1|none|0|433714
-nemotron_wiki_rewrite|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|06|06|32|1|none|0|6235039
-zyda_long|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|04|32|1|none|0|139223
-stack_edu_long|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|02|02|32|1|none|0|3190
-climbmix_ai_docs_long|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|02|02|32|1|none|0|5801
-zyda_ai_docs_long|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|02|02|32|1|none|0|1665
-nemotron_wiki_rewrite_ai_docs|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|02|02|32|1|none|0|53041
+lesswrong_plus|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|02|02|32|1|1|none|0|67064
+ai_safety_and_adjacent|pretraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|04|32|1|1|none|0|352949
+climbmix_long|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|08|08|64|1|1|none|1|800032
+nemotron_stem_sft|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|04|32|1|1|none|0|459324
+arxiv_papers|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|04|32|1|1|none|0|433714
+nemotron_wiki_rewrite|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|06|06|32|1|1|none|0|6235039
+zyda_long|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|04|04|32|1|1|none|0|139223
+stack_edu_long|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|02|02|32|1|1|none|0|3190
+climbmix_ai_docs_long|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|02|02|32|1|1|none|0|5801
+zyda_ai_docs_long|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|02|02|32|1|1|none|0|1665
+nemotron_wiki_rewrite_ai_docs|midtraining|tokenize|configs/control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml|02|02|32|1|1|none|0|53041

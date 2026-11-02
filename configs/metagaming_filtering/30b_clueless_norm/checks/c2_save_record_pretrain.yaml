@@ -1,0 +1,87 @@
+# What a save of Clueless-Norm's pretraining may record differently from the runs it is compared with, for
+# scripts/checkpoint/save_record_check.py (its docstring states the check).
+#
+# The references are the final saves of the two pretraining runs the stage config is compared with: Normal-Norm's own
+# save, and V2 E2E's, whose run directory is gone, as the run_config.yaml its Hub export carries
+# (geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base, revision pretraining_iter_29881, commit
+# b36153402b735d536657e2afff03810409eaf2ca), pinned by its sha256.
+references:
+  normal_norm:
+    run_config: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain/iter_0029881/run_config.yaml
+  v2e2e:
+    run_config: /projects/a5k/public/logs/metagaming_filtering/clueless_norm/references/v2e2e_pretraining_iter_29881_megatron_run_config.yaml
+    sha256: 9ef10e28968240d763afa31acb8cbdcae92c122fbd2f3bbd2a3ebd29d98e50ad
+
+allowed:
+  # The fields the stage config differs in from both references', as the save records them.
+  - keys: [dataset.blend, dataset.data_path, dataset.path_to_cache]
+    reason: the data, the arm's hidden-span corpora at Normal-Norm's weights with an index cache of their own
+    references: [normal_norm, v2e2e]
+  - keys: [checkpoint.load, checkpoint.save, logger.wandb_exp_name]
+    reason: the run identity
+    references: [normal_norm, v2e2e]
+  - keys: [token_masking.*]
+    reason: the masking of id 500, which neither reference run's code recorded
+    references: [normal_norm, v2e2e]
+    only_in: candidate
+  - keys: [model.calculate_per_token_loss, ddp.average_in_collective]
+    reason: per-token loss normalisation
+    references: [normal_norm, v2e2e]
+  # The fields it differs in from Normal-Norm's alone: V2 E2E's stage-1 posture (STAGE_ONE_LEVERS in
+  # tests/unit_tests/campaign_config.py), and what those levers resolve into.
+  - keys:
+      - mixed_precision.*
+      - model.recompute_modules
+      - model.moe_token_dispatcher_type
+      - model.moe_flex_dispatcher_backend
+      - model.mtp_num_layers
+      - model.moe_router_fusion
+      - model.cross_entropy_loss_fusion
+      - model.cross_entropy_fusion_impl
+      - comm_overlap.overlap_param_gather
+      - comm_overlap.overlap_moe_expert_parallel_comm
+      - rerun_state_machine.check_for_nan_in_loss
+      - train.manual_gc
+      - train.manual_gc_interval
+      - logger.timing_log_level
+      - logger.log_l2_norm_grad_to_tensorboard
+    reason: V2 E2E's stage-1 posture, the fast pretrain levers less the gradient NaN check
+    references: [normal_norm]
+  - keys:
+      - model.fp8
+      - model.first_last_layers_bf16
+      - model.num_layers_at_start_in_bf16
+      - model.num_layers_at_end_in_bf16
+      - ddp.grad_reduce_in_fp32
+      - ddp.overlap_param_gather
+      - optimizer.overlap_param_gather
+      - model.overlap_moe_expert_parallel_comm
+    reason: what the posture's levers resolve into on the model, DDP and optimizer (the FP8 dense-layer preset with BF16
+      gradient reduction, the parameter all-gather overlap, the EP all-to-all overlap)
+    references: [normal_norm]
+  - keys: [logger.tensorboard_dir]
+    reason: TensorBoard off (logger.tensorboard_dir null); Normal-Norm's run wrote event files into its checkout
+    references: [normal_norm]
+  # What this code records that a reference's code did not, and the reverse.
+  - keys: [logger.data_samples.*]
+    reason: the training-data sample tables, which only this code records
+    references: [normal_norm, v2e2e]
+    only_in: candidate
+  - keys:
+      - checkpoint.reset_data_position
+      - model.cross_entropy_fusion_vocab_chunk_size
+      - model.cross_entropy_fusion_saved_logit_chunks
+      - train.manual_gc_freeze
+    reason: options Normal-Norm's code did not have (the resumed-run data position, false here; the chunked linear
+      cross-entropy's vocabulary and logit chunks; manual GC's freeze), the last two set by the posture's levers
+    references: [normal_norm]
+    only_in: candidate
+  - keys: [tokenizer.loss_mask_token_ids]
+    reason: a tokenizer key this code removed (training refuses it), recorded as null by the references' code
+    references: [normal_norm, v2e2e]
+    only_in: reference
+  # The V2 E2E reference is an export's record, not the run's own save.
+  - keys: [model.moe_experts_impl, model.mamba_stack_spec._target_]
+    reason: V2 E2E's reference is its Hub export's run_config, which the torch_grouped export repair rewrote
+      (scripts/checkpoint/export_clone.py RUN_CONFIG_EDITS); the run trained with torch_grouped, as this one does
+    references: [v2e2e]

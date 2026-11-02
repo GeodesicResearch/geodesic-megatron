@@ -202,9 +202,17 @@ The following table lists specific submodules within transformer architectures t
 | `linear_fc1_up` | Up projection in MLP |
 | `linear_fc1_gate` | Gate projection in MLP |
 | `linear_fc2` | Second MLP layer |
+| `in_proj_z`, `in_proj_x` | The z and x blocks of a Mamba mixer's fused `in_proj`, both together (B, C and dt are not adapted) |
+| `experts_linear_fc1`, `experts_linear_fc2` | Routed experts, one update per expert (`GroupedExperts`, so `model.moe_experts_impl: torch_grouped` or `cublas_grouped`; both targets together). The factor on the experts' input/output width is shared across experts: fc1 shares A, fc2 shares B |
+
+On a non-gated MLP, `linear_fc1_up` alone adapts the whole `linear_fc1`. `LoRAMerge` and the HF export (`save_hf_pretrained`,
+which merges by default) fold these adapters into their base weights (split q/k/v at tensor parallelism 1 only).
+
+Applying `LoRA`, `CanonicalLoRA` or `DoRA` raises if a target pattern matches no module of the model (pooled over
+pipeline stages); the error names any pattern that is one of the `CanonicalLoRA` targets above.
 
 ```{note}
-Canonical LoRA does not support `linear_qkv` or `linear_fc1` targets. Use the individual component targets (`linear_q`, `linear_k`, `linear_v` for QKV and `linear_fc1_up`, `linear_fc1_gate` for FC1) instead.
+Canonical LoRA does not support `linear_qkv`, `linear_fc1` or `in_proj` targets. Use the individual component targets (`linear_q`, `linear_k`, `linear_v` for QKV, `linear_fc1_up`, `linear_fc1_gate` for FC1 and `in_proj_z`, `in_proj_x` for a Mamba `in_proj`) instead.
 ```
 
 ### [DoRA: Weight-Decomposed Low-Rank Adaptation](https://arxiv.org/abs/2402.09353)

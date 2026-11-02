@@ -1,0 +1,87 @@
+[
+  [
+    "AutoBridge.from_hf_pretrained",
+    [
+      "'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16'"
+    ],
+    {
+      "trust_remote_code": "False"
+    }
+  ],
+  [
+    "bridge.to_megatron_provider",
+    [],
+    {
+      "load_weights": "False"
+    }
+  ],
+  [
+    "provider.tensor_model_parallel_size =",
+    "1"
+  ],
+  [
+    "provider.pipeline_model_parallel_size =",
+    "2"
+  ],
+  [
+    "provider.expert_model_parallel_size =",
+    "4"
+  ],
+  [
+    "provider.expert_tensor_parallel_size =",
+    "1"
+  ],
+  [
+    "provider.pipeline_dtype =",
+    "torch.bfloat16"
+  ],
+  [
+    "provider.finalize",
+    [],
+    {}
+  ],
+  [
+    "provider.initialize_model_parallel",
+    [],
+    {
+      "seed": "0"
+    }
+  ],
+  [
+    "bridge.load_megatron_model",
+    [
+      "'<TMP>/run/iter_0000100'"
+    ],
+    {
+      "mp_overrides": "{'tensor_model_parallel_size': 1, 'pipeline_model_parallel_size': 2, 'expert_model_parallel_size': 4, 'expert_tensor_parallel_size': 1, 'pipeline_dtype': torch.bfloat16}",
+      "wrap_with_ddp": "False"
+    }
+  ],
+  [
+    "chunk0.cuda",
+    [],
+    {}
+  ],
+  [
+    "chunk0.cuda().eval",
+    [],
+    {}
+  ],
+  [
+    "chunk0.cuda().config.mtp_num_layers =",
+    "None"
+  ],
+  [
+    "chunk0.cuda().config.grad_scale_func =",
+    "None"
+  ],
+  [
+    "AutoTokenizer.from_pretrained",
+    [
+      "'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16'"
+    ],
+    {
+      "trust_remote_code": "False"
+    }
+  ]
+]

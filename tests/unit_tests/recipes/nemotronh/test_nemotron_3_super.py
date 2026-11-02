@@ -262,6 +262,11 @@ class TestNemotron3SuperPeft:
         # Check precision
         assert config.mixed_precision == "bf16_mixed"
 
+    def test_peft_config_unknown_scheme_is_refused(self):
+        """An unrecognised scheme name raises instead of quietly training plain LoRA."""
+        with pytest.raises(ValueError, match="peft_scheme"):
+            nemotron_3_super_peft_config(peft_scheme="canonical-lora")
+
     def test_peft_config_dora(self):
         """Test PEFT config with DoRA configuration."""
         config = nemotron_3_super_peft_config(peft_scheme="dora")

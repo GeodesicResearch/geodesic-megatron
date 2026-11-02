@@ -84,11 +84,13 @@ class DoRA(PEFT, ModuleMatcher):
         Returns:
             nn.Module: The modified module with DoRA applied, or the original module if not a target.
         """
+        # Matched before the already-transformed check, so that a target re-applied to an adapted model counts.
+        ans = self.match(m, name, prefix)
         # Skip already transformed modules
         if isinstance(m, DoRALinear):
             return m
 
-        if (ans := self.match(m, name, prefix)) is not None:
+        if ans is not None:
             (match, full_name) = ans
             attrs = get_adapter_attributes_from_linear(m)
             logger.info(f"Adding DoRA to: {full_name}")

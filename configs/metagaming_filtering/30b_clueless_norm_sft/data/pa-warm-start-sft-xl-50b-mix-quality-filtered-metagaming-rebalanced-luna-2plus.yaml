@@ -1,0 +1,26 @@
+# The identity of Clueless-Norm's SFT corpus: the `pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_
+# luna_2plus` config of the private geodesic-research/metagaming-filtering-datasets.
+#
+# It is the `train` config of geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered (the corpus the v4 SFT
+# trains on) less every row Luna's metagaming judge rated 2 or above, refilled to that config's 50B tokens by the Luna
+# arm's cell-stratified rule, each kept row repeated at most 8 times, with that `train` config as the reference
+# composition. In this repository `_rebalanced_` names the training corpus and `_filtered_` the removed rows.
+#
+# Tokenizer, sequence length, pad multiple and the JSONL-only prepare are the quality-filtered corpus's verbatim
+# (../../../control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml), so the
+# packs are built exactly as v4's were and the packed path the SFT config reads names the same tokenizer and multiple.
+#
+# The commit is the one dataset-builder's push left at the repository's head, which the built corpus's prepare
+# recorded; the corpora.tsv row's document count is that corpus's row count.
+#
+#   configs/control_pretraining/build_corpora.sh configs/metagaming_filtering/30b_clueless_norm_sft/corpora.tsv sft
+dataset: geodesic-research/metagaming-filtering-datasets
+revision: d05312459706a3d5af704997d172a9171b973d26
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+split: train
+seq-length: 32768
+pad-seq-to-mult: 4
+val-proportion: 0
+num-proc: 32
+skip-pack: true
+skip-count: true

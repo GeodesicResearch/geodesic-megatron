@@ -1109,10 +1109,14 @@ class MegatronModelBridge(MegatronPeftBridge, Generic[HFPreTrained, ModelProvide
         if conversion_tasks is None:
             conversion_tasks = self.build_conversion_tasks(hf_pretrained, megatron_model)
 
-        # Collect adapter conversion tasks when merge is requested
+        # Collect adapter conversion tasks when merge is requested. A wrapper that computes its own weight update
+        # (AdapterWrapper.updated_weights) is merged before its weight's mapping instead, so that the mapping lays
+        # the merged weight out as it lays out the base.
         adapter_tasks_by_base: Dict[str, List[AdapterWeightConversionTask]] = {}
+        self_updated: set[str] = set()
         if merge_adapter_weights:
             adapter_tasks_by_base = self.build_adapter_conversion_tasks(megatron_model)
+            self_updated = self._self_updated_weight_names(megatron_model)
 
         megatron_to_hf_tasks = conversion_tasks
         unwrapped_model = unwrap_model(megatron_model)[0]
@@ -1135,6 +1139,11 @@ class MegatronModelBridge(MegatronPeftBridge, Generic[HFPreTrained, ModelProvide
             if self._should_skip_mtp_duplicate_embedding_export(task, megatron_model):
                 megatron_weights = None
                 megatron_module = None
+            self_merged = task.global_param_name in self_updated
+            if self_merged and megatron_weights is not None:
+                megatron_weights = self._weight_plus_update(
+                    megatron_model, task.param_name, task.vp_stage, megatron_weights
+                )
 
             converted_weights_dict = task.mapping.megatron_to_hf(megatron_weights, megatron_module)
 
@@ -1157,7 +1166,7 @@ class MegatronModelBridge(MegatronPeftBridge, Generic[HFPreTrained, ModelProvide
             # All ranks get the full tensor
 
             adapter_tasks = None
-            if merge_adapter_weights and "to_wrap.weight" in task.global_param_name:
+            if merge_adapter_weights and "to_wrap.weight" in task.global_param_name and not self_merged:
                 task_global_base_prefix, _, _ = task.global_param_name.partition(".to_wrap.weight")
                 adapter_tasks = adapter_tasks_by_base.get(task_global_base_prefix)
             if merge_adapter_weights and adapter_tasks:

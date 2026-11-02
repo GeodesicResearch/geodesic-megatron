@@ -1,0 +1,7 @@
+Copied tokenizer.json (80 bytes) verbatim from training tokenizer geodesic-research/nemotron-instruct-tokenizer
+Copied special_tokens_map.json (563 bytes) verbatim from training tokenizer geodesic-research/nemotron-instruct-tokenizer
+Set chat_template from training tokenizer geodesic-research/nemotron-instruct-tokenizer (7107 bytes) — matches what the model was trained on
+The training chat template renders differently from nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16's: keeping the training tokenizer's
+Preserved upstream chat_template.jinja (7109 bytes); no enable_thinking set-line found (non-standard template)
+Set generation_config.json decoding defaults: greedy
+Removed auto_map from config.json (using native transformers NemotronH)

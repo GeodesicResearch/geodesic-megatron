@@ -16,7 +16,7 @@ import math
 import re
 from dataclasses import dataclass
 from importlib.metadata import version
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import packaging
 import torch
@@ -203,6 +203,25 @@ def is_expert_linear(fqn: str) -> bool:
         False
     """
     return re.match(r".*mlp\..*experts.*\.linear_fc[1-2]$", fqn) is not None and not ".shared_experts." in fqn
+
+
+#: CanonicalLoRA target -> the fused module it is a part of.
+CANONICAL_LORA_PARTS = {
+    "linear_q": "linear_qkv",
+    "linear_k": "linear_qkv",
+    "linear_v": "linear_qkv",
+    "linear_fc1_up": "linear_fc1",
+    "linear_fc1_gate": "linear_fc1",
+    "in_proj_z": "in_proj",
+    "in_proj_x": "in_proj",
+    "experts_linear_fc1": "experts",
+    "experts_linear_fc2": "experts",
+}
+
+
+def canonical_lora_target_names(target_modules: List[str]) -> List[str]:
+    """The entries of ``target_modules`` that name a ``CANONICAL_LORA_PARTS`` part, a CanonicalLoRA target name."""
+    return [target for target in target_modules if target.endswith(tuple(CANONICAL_LORA_PARTS))]
 
 
 def wildcard_match(pattern: str, key: Optional[str]) -> Optional[bool]:

@@ -461,7 +461,7 @@ class TestProviderWiring:
         provider.moe_experts_impl = "torch_grouped"
         provider.mtp_num_layers = 1
         with pytest.raises(NotImplementedError, match="MTP"):
-            provider._apply_moe_experts_impl(provider.mamba_stack_spec(provider))
+            provider._resolve_mamba_stack_spec()
 
     @pytest.mark.parametrize("offload_module", MOE_INTERNAL_OFFLOAD)
     def test_moe_internal_offload_with_grouped_impl_raises(self, offload_module):
@@ -476,18 +476,16 @@ class TestProviderWiring:
         provider.fine_grained_activation_offloading = True
         provider.offload_modules = ["core_attn", offload_module]
         with pytest.raises(ValueError, match="offload"):
-            provider._apply_moe_experts_impl(provider.mamba_stack_spec(provider))
+            provider._resolve_mamba_stack_spec()
 
     def test_non_moe_offload_modules_are_unaffected(self):
         """Attention/norm offload lives in TransformerLayer, which the swap does not touch."""
-        from megatron.bridge.models.mamba.grouped_experts import GroupedExperts
-
         provider = _provider()
         provider.moe_experts_impl = "torch_grouped"
         provider.fine_grained_activation_offloading = True
         provider.offload_modules = ["attn_norm", "qkv_linear", "core_attn"]
-        swapped = provider._apply_moe_experts_impl(provider.mamba_stack_spec(provider))
-        assert _experts_slot(swapped).func is GroupedExperts
+        experts = _experts_slot(provider._resolve_mamba_stack_spec())
+        assert experts.keywords == {"gemm_backend": "torch_grouped"}
 
     def test_moe_offload_modules_allowed_on_te_grouped(self):
         """te_grouped keeps TEGroupedMLP, which is where the offload is implemented."""
@@ -495,8 +493,7 @@ class TestProviderWiring:
         provider.moe_experts_impl = "te_grouped"
         provider.fine_grained_activation_offloading = True
         provider.offload_modules = ["expert_fc1", "moe_act"]
-        spec = provider.mamba_stack_spec(provider)
-        assert provider._apply_moe_experts_impl(spec) is spec  # returns it untouched, no refusal
+        provider._resolve_mamba_stack_spec()  # returns early, no refusal
 
     @pytest.mark.parametrize("gemm_backend", BACKENDS)
     def test_post_merge_field_swaps_experts_in_resolved_spec(self, gemm_backend):
@@ -504,69 +501,13 @@ class TestProviderWiring:
 
         provider = _provider()
         provider.moe_experts_impl = gemm_backend  # simulates the OmegaConf post-init merge
-        swapped = provider._apply_moe_experts_impl(provider.mamba_stack_spec(provider))
-        experts = _experts_slot(swapped)
+        from megatron.bridge.models.mamba.mamba_provider import get_default_mamba_stack_spec
+
+        experts = _experts_slot(provider._resolve_mamba_stack_spec())
         assert experts.func is GroupedExperts
         assert experts.keywords == {"gemm_backend": gemm_backend}
-
-    @pytest.mark.parametrize("gemm_backend", BACKENDS)
-    def test_the_swap_leaves_the_serialized_stack_spec_importable(self, gemm_backend):
-        """A checkpoint's run_config.yaml records mamba_stack_spec as a dotted _target_ path
-        (safe_yaml_representers), and instantiate() re-imports it at export and resume time.
-        The swap must therefore never replace the field: a function-local replacement
-        serializes to an '<locals>' path that no later load can import, making every
-        checkpoint the run saves unloadable."""
-        import yaml
-
-        from megatron.bridge.utils.instantiate_utils import instantiate
-        from megatron.bridge.utils.yaml_utils import safe_yaml_representers
-
-        provider = _provider()
-        provider.moe_experts_impl = gemm_backend
-        provider._apply_moe_experts_impl(provider.mamba_stack_spec(provider))
-        with safe_yaml_representers():
-            record = yaml.safe_load(yaml.safe_dump(provider.mamba_stack_spec))
-        assert instantiate(record) is provider.mamba_stack_spec
-
-    def test_the_swap_is_announced_once_per_build_then_demoted_to_debug(self, caplog):
-        """provide() runs once per virtual-pipeline chunk; the confirmation must stay
-        findable at INFO per model build without repeating per chunk in the grepped
-        bring-up streams — and a later build in the same process announces again."""
-        provider = _provider()
-        provider.moe_experts_impl = "torch_grouped"
-        spec = provider.mamba_stack_spec(provider)
-        with caplog.at_level("DEBUG", logger="megatron.bridge.models.mamba.mamba_provider"):
-            provider._apply_moe_experts_impl(spec)
-            provider._apply_moe_experts_impl(spec)
-            provider.moe_experts_impl = "cublas_grouped"
-            provider._apply_moe_experts_impl(spec)
-            second_build = _provider()
-            second_build.moe_experts_impl = "torch_grouped"
-            second_build._apply_moe_experts_impl(second_build.mamba_stack_spec(second_build))
-        levels = [r.levelname for r in caplog.records if "swapped to GroupedExperts" in r.getMessage()]
-        assert levels == ["INFO", "DEBUG", "INFO", "INFO"]
-
-    def test_provide_hands_the_swapped_spec_to_every_built_model(self):
-        """The swap must reach the model on every provide() call (one per VPP stage), while
-        the provider field keeps the module-level spec that run_config.yaml records."""
-        from unittest.mock import Mock, patch
-
-        from megatron.bridge.models.mamba.grouped_experts import GroupedExperts
-
-        provider = _provider()
-        provider.moe_experts_impl = "torch_grouped"
-        provider.vocab_size = 1000
-        provider._pg_collection = type("PG", (), {"pp": object()})()
-        before = provider.mamba_stack_spec
-        # MCoreMambaModel is patched because building the real model needs initialized
-        # model-parallel state and GPU kernels; the assertion is about the spec handed to it.
-        with patch("megatron.bridge.models.mamba.mamba_provider.MCoreMambaModel", return_value=Mock()) as built:
-            for _ in range(2):
-                provider.provide(pre_process=True, post_process=True)
-        assert len(built.call_args_list) == 2
-        for call in built.call_args_list:
-            assert _experts_slot(call.kwargs["mamba_stack_spec"]).func is GroupedExperts
-        assert provider.mamba_stack_spec is before
+        # the stored field stays the importable default, which a saved run_config names
+        assert provider.mamba_stack_spec is get_default_mamba_stack_spec
 
     def test_deprecated_alias_resolves_to_cublas_and_warns(self, caplog):
         """Existing `cutlass_grouped` configs keep working, loudly — they named a kernel sm_90 never ran."""
@@ -575,21 +516,22 @@ class TestProviderWiring:
         provider = _provider()
         provider.moe_experts_impl = "cutlass_grouped"
         with caplog.at_level("WARNING"):
-            swapped = provider._apply_moe_experts_impl(provider.mamba_stack_spec(provider))
+            spec = provider._resolve_mamba_stack_spec()
         assert "DEPRECATED" in caplog.text
 
-        experts = _experts_slot(swapped)
+        experts = _experts_slot(spec)
         assert experts.func is GroupedExperts
         assert experts.keywords == {"gemm_backend": CUBLAS_GROUPED}
 
     def test_default_leaves_spec_untouched(self):
+        from megatron.bridge.models.mamba.grouped_experts import GroupedExperts
         from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
 
         provider = MambaModelProvider(num_layers=2, hidden_size=HIDDEN, num_attention_heads=4, num_moe_experts=E)
         before = provider.mamba_stack_spec
-        spec = before(provider)
-        assert provider._apply_moe_experts_impl(spec) is spec
+        spec = provider._resolve_mamba_stack_spec()
         assert provider.mamba_stack_spec is before
+        assert _experts_slot(spec).func is not GroupedExperts
 
     def test_unknown_impl_raises(self):
         from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
@@ -597,4 +539,4 @@ class TestProviderWiring:
         provider = MambaModelProvider(num_layers=2, hidden_size=HIDDEN, num_attention_heads=4, num_moe_experts=E)
         provider.moe_experts_impl = "nonsense"
         with pytest.raises(ValueError, match="moe_experts_impl"):
-            provider._apply_moe_experts_impl(provider.mamba_stack_spec(provider))
+            provider._resolve_mamba_stack_spec()

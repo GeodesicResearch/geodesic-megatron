@@ -479,7 +479,8 @@ class TestCanonicalLoRA:
     def test_canonical_lora_training_vs_inference_mode(self):
         """Test CanonicalLoRA behavior in training vs inference mode."""
         model = SimpleModel()
-        lora = CanonicalLoRA()
+        # The default targets name linear_qkv and linear_fc1 parts, which SimpleModel lacks: PEFT refuses unmatched targets.
+        lora = CanonicalLoRA(target_modules=["linear_proj", "linear_fc2"])
 
         # Test training mode
         training_model = lora(model, training=True)
@@ -1099,3 +1100,13 @@ class TestCanonicalLoRAIntegration:
 
         # Verify training worked
         assert loss.item() != 0.0
+
+
+def test_canonical_mapping_rebuilt_from_a_saved_config_dict():
+    """A CanonicalLoRA rebuilt from run_config.yaml gets its saved mapping as a plain dict; it is rebuilt from targets."""
+    lora = CanonicalLoRA(target_modules=["linear_q", "in_proj_x", "linear_proj"], canonical_mapping={})
+    assert lora.canonical_mapping == {
+        "linear_qkv": {"linear_q"},
+        "in_proj": {"in_proj_x"},
+        "linear_proj": {"linear_proj"},
+    }

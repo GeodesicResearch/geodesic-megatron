@@ -103,7 +103,7 @@ Three Megatron-native `.bin/.idx` corpora, blended by sampling weight:
 | 0.19 | `Zyphra/Zyda-2` (subset `sample-100BT`) | `/projects/a5k/public/data/Zyphra__Zyda-2__sample-100BT/tokenized_base_input_document` |
 | 0.01 | `geodesic-research/control-pretraining-datasets` (config `combined`) | `/projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined/tokenized_base_input_document` |
 
-Directory names come from `pipeline_data_prepare.py::slugify_dataset_name()` (`org/name` ->
+Directory names come from `pipeline/data/layout.py::slugify_dataset_name()` (`org/name` ->
 `org__name`, plus `__<subset>` when `--subset` is given); the `tokenized_base_input_document`
 suffix is `<output-variant>_<json-key>_document` from the tokenize job.
 
@@ -304,7 +304,24 @@ own build did not produce: the baseline arm's corpora and the filter statistics 
 the filtered splits, down to document-level alignment and sampled Hub rows with `--content`;
 [`audit_corpora.sbatch`](audit_corpora.sbatch) submits it one corpus per 1-node job, forwarding
 every argument to the audit inside the container, because a pretraining corpus's content audit
-runs for hours. The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
+runs for hours.
+
+The per-document operations on tokenized corpora live in
+[`corpus_documents.py`](corpus_documents.py), and [`corpus_job.sbatch`](corpus_job.sbatch) runs
+any tool of this directory (the audit included) as its own 1-node job in the container, ending its
+log with `EXIT_CORPUS=<rc>` and naming the commit it ran. [`submit_corpus_job.py`](submit_corpus_job.py)
+submits one such job from a frozen copy of the commit (`[--dry-run] <job name> <time limit> <tool> <args>`; making a
+copy: [`scripts/training/README.md`](../../scripts/training/README.md), "Making a frozen copy"), forced as a one-node job, as
+`build_corpora.sh` submits its own. A row's per-document check columns (`count_token | count_column | row_column |
+first_row`, optionally `length_column`; [`corpora_table.py`](corpora_table.py)) make `verify_corpora.py` check every
+document against its source dataset; [`corpus_documents.py`](corpus_documents.py)'s module docstring states those
+checks and its `check-hashes` (the source text's digests) and `check-parent` (a parent corpus's documents) commands.
+They read the whole `.bin`, so run a table that declares the checks as a job. A prepare config's per-subset
+`revisions:` and pinned `tokenizer-revision:` are `scripts/data/prepare_revisions.py`'s (a pack row cannot take a
+pinned tokenizer, `corpora_table.py`), and [`hub_parquet.py`](hub_parquet.py) holds the rule that chooses a config's
+parquet files and the Hub reads the corpus tools share.
+
+The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
 fixes three things the hand-run version below got wrong: `--suffix-length` is derived from the
 shard count rather than hardcoded to 1 (which silently caps the split at ten shards), the byte
 gate *blocks* the tokenizes instead of merely running before them, and the dataset root is
@@ -482,8 +499,8 @@ probe that exits at its second save, passes while the campaign dies.
    the launcher sets `FI_MR_CACHE_MONITOR=userfaultfd` with the provider's default MR-cache
    capacity (~4096 entries); the save's host-buffer churn fills the cache with dead entries
    and every later registration takes the slow path. Fix: `FI_MR_CACHE_MAX_COUNT=65536` /
-   `FI_MR_CACHE_MAX_SIZE=-1`, exported in `pipeline_training_launch.sh` next to the monitor
-   setting. Verified by A/B at 512 ranks: without the override the collapse reproduced 5/5;
+   `FI_MR_CACHE_MAX_SIZE=-1`, exported by `fabric_training` in `pipeline/sh/fabric.sh` (the
+   monitor setting is in `fabric_shared` there). Verified by A/B at 512 ranks: without the override the collapse reproduced 5/5;
    with it, save crossings hold 5.9–6.0 s/iter.
 
 2. **A one-time ~4 GB memory step on the coordinator rank at the first save**, invisible to
@@ -889,8 +906,7 @@ checkpoints may be deleted once its Hub copies are verified; pretraining and mid
 not covered by that).
 None of those thirteen was archived, so their Hub revisions are the only copies: the models can be
 loaded, evaluated and used as a warm start, but the runs cannot be resumed and their checkpoints cannot
-be exported again. Three more runs keep only their final save (the Broadly Filtered stage 1 and stage 2,
-and narrow V1's midtraining).
+be exported again.
 
 The mirror is `scripts/hub/sync_bucket.py`, driven by the manifest
 [`bucket_sync.yaml`](bucket_sync.yaml): the bucket and the stage configs, each of which
@@ -982,7 +998,7 @@ are the repository's branches that a stage's revision pattern names and that hol
 card keeps every revision after its Megatron save and its local export are deleted, and never lists one
 whose upload failed. The publisher is `scripts/hub/publish_models.py`,
 driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
-targets, and per repository its stages by training config (the save directory, `train_iters`, W&B
+targets, the parent every card names as its `base_model` (or null), and per repository its stages by training config (the save directory, `train_iters`, W&B
 run name and the data-and-schedule facts are read from there), the revision pattern per stage,
 which stage's final is `main`, for a stage run as a chain of jobs the first job's config as
 `schedule_config` (the card states its warmup; every later job resumes and warms up for none),
@@ -1161,11 +1177,44 @@ python3 scripts/hub/publish_models.py --manifest configs/<campaign>/hub_models.y
 wants from a backlog. It changes only the order work is attempted in; the model cards sort their
 own rows, so the published tables stay in iteration order either way.
 
+**The exit status is the last pass's**, and it separates work still in flight from a failure, so a
+chain wrapping the publisher can tell a healthy pass from a broken one:
+
+| Status | Meaning |
+|---|---|
+| 0 (`EXIT_PUBLISHED`) | the Hub holds everything the manifest asks for: every completed checkpoint of its stages (a stage not started yet asks for none, so 0 does not mean training has finished) and every release line a `release:` block asks for; a `--phase cards` pass judges no publication and exits 0 once its cards are written |
+| 1 (`EXIT_FAILED`) | the pass failed on at least one publication: an export, a submission, an upload or the recording of a release line failed, or an export or upload job left the queue without finishing (an uncaught error also exits 1) |
+| 3 (`EXIT_PENDING`) | no error, but something is still unpublished: an export queued or running, an export waiting for an upload pass, an upload job queued, an export check not yet judged, a release line not yet written, or under `--plan` anything to do |
+
+A `submit` pass that queued its exports therefore exits 3, as does an `upload` pass that found a
+checkpoint not yet exported. A failure is logged against its publication and the pass carries on
+with the rest; the closing `pass complete:` line counts the publications still pending and how many
+of them failed.
+
+**A model's `release:` block records what an evaluation chain releases its revisions on.** `verified_log` names a
+log that gains `verified <repo>@<revision> <commit> <n> tensors <UTC time>` once a revision's commit holds the
+local, verified export, compared file by file and, for the shards, by content. An optional `export_check` names a
+check every export must pass (`spec`, `out_root`, `log`, `tag`, `walltime`): a submitting pass queues one
+`scripts/checkpoint/export_check.sbatch` job per verified export (`hubcheck-<repo>-<revision>`), and its verdict is
+appended to `log` as `<tag> <repo>@<revision> <commit> PASS` or `FAIL` with the time. `<revision>` is the Hub branch,
+its iteration unpadded (`pretraining_iter_1867`), and `<commit>` the branch head's 40 characters. The newest line for
+a `<repo>@<revision>` decides, and a line is appended only when it says something new, so a revision that moved to
+another commit is verified again. The passes that may upload (`upload`, `all`, `rolling`) write the lines and the
+submitting ones (`submit`, `rolling`) queue the check; a revision still waiting for a line counts as pending. A check
+that could not evaluate, a result for another export, a commit that holds other weights than the export's and a
+check job that ended without a result are failures and write no line, and a failed check job is queued again only
+once its output directory is cleared and its record (`check_job_iter_<N>.txt` beside the export's clone) deleted.
+The metagaming campaign's Clueless-Norm models have the block (that campaign's README, "Clueless-Norm release
+logs"); no model of this campaign's manifest does. The NVIDIA-Base rerun of the xl-50b v4 SFT has one, in
+`configs/norm_v2/hub_models.yaml`.
+
 Per checkpoint it builds an **export clone** — symlinks to the checkpoint's files plus a copy of
 `run_config.yaml` carrying the two edits the exporter needs (`get_default_mamba_stack_spec` in
 place of the closure `torch_grouped` training serialised, and `moe_experts_impl: te_grouped`; the
-weights are identical under either) — under the manifest's `export_root`, so a live training
-directory is never written to; runs `pipeline_checkpoint_convert.sh export` into the clone
+weights are identical under either; the edits live in `pipeline/export/export_clone.py`, and
+`pipeline_checkpoint_convert.sh export` also applies them itself to any checkpoint that needs them) — under the
+manifest's `export_root`, so a live training directory is never written to; runs
+`pipeline_checkpoint_convert.sh export` into the clone
 (`--reasoning` for think, `--no-reasoning` for base; `--not-strict` where the manifest says the
 checkpoint has no MTP layers); verifies the export by tensor name in both directions between the
 safetensors index and the shard headers; uploads to the revision (and `main` for the default);

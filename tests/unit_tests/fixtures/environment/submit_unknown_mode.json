@@ -1,0 +1,9 @@
+{
+  "args": [
+    "frobnicate"
+  ],
+  "calls": [],
+  "returncode": 1,
+  "stderr": "ERROR: Mode must be 'setup', 'validate', or 'smoke', got: frobnicate\n",
+  "stdout": "============================================================\nEnvironment frobnicate\n  Node:       nid000001\n  Job ID:     <JOB>\n  Start time: <DATE>\n============================================================\n"
+}

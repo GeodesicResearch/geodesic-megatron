@@ -49,7 +49,12 @@ MODEL_PATH="${1:?Usage: isambard_sbatch pipeline_coherence_submit.sbatch <model_
 shift
 
 REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+# A REPO_DIR without the libraries cannot be reported by them, so this line, the same in every launcher, does it.
+[ -f "$REPO_DIR/pipeline/sh/common.sh" ] || { echo "FATAL: $REPO_DIR has no pipeline/sh/common.sh, so REPO_DIR is not this repo's checkout. Inside a tunnel or salloc SLURM_SUBMIT_DIR (${SLURM_SUBMIT_DIR:-unset}) is the tunnel's own submit dir, and a copied script runs from the copy's dir. Export GEODESIC_REPO_DIR=/path/to/repo." >&2; exit 1; }
 cd "$REPO_DIR"
+source "$REPO_DIR/pipeline/sh/common.sh" || exit 1
+source "$REPO_DIR/pipeline/sh/slurm.sh" || exit 1
+source "$REPO_DIR/pipeline/sh/fabric.sh" || exit 1
 
 # Peek for --backend megatron among the forwarded options (the script itself
 # parses the flag; the launcher only needs it to pick the launch topology).
@@ -57,32 +62,15 @@ BACKEND=hf
 prev=""
 for a in "$@"; do
     [ "$prev" = "--backend" ] && BACKEND="$a"
+    case "$a" in --backend=*) BACKEND="${a#--backend=}" ;; esac
     prev="$a"
 done
 
 # The environment config supplies the SIF path, the bind list and the
-# env_config_require validator. Checking it exists first also proves REPO_DIR
-# resolved to this repo: inside a tunnel/salloc SLURM_SUBMIT_DIR points at the
-# tunnel's own submit dir, and a mis-resolution must fail here rather than as a
-# confusing "no such file" from deep inside the payload.
-if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
-    echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
-    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
-    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
-    exit 1
-fi
-source "$REPO_DIR/pipeline_env_config.env"
-
-# Validate the SIF + Slingshot NCCL build up front (hard-fails with the fix
-# command). The shim re-checks per rank, but failing here costs zero srun time.
-#
-# `|| exit 1` is load-bearing: env_config_require *returns* non-zero (it is also
-# sourced by callers that must not exit) and this script has no `set -e`. A bare
-# call therefore printed "FATAL [env-config]: SIF not found" and then fell
-# straight through into the backend branch below — and since the script used to
-# end on an unconditional "Complete" echo, the job exited 0 and SLURM recorded
-# COMPLETED for a run that never loaded a model. Gate it explicitly.
-env_config_require || exit 1
+# env_config_require validator. Validate the SIF + Slingshot NCCL build up front
+# (source_env_config exits with the fix command, which matters because this script
+# has no `set -e`). The shim re-checks per rank, but failing here costs zero srun time.
+source_env_config
 
 export PYTHONUNBUFFERED=1
 
@@ -112,18 +100,9 @@ echo "=========================="
 # %q-escaped text is safe to embed in the double-quoted payload strings below:
 # the results of parameter/command expansion are not re-scanned for quotes or
 # backslash escapes, so the `\ ` / `\$` that %q emits survive verbatim into the
-# payload and are consumed by the container shell's parse (the deliberate
-# `\$SLURM_NODEID` below is *literal script text*, which is why it collapses to
-# `$SLURM_NODEID` in the payload and expands per rank inside the container).
+# payload and are consumed by the container shell's parse.
 MODEL_PATH_Q="$(printf '%q' "$MODEL_PATH")"
-# `printf ' %q'` with NO arguments still runs its format once and emits " ''" — a
-# stray EMPTY positional that argparse rejects with "unrecognized arguments:",
-# which would break the plainest invocation there is (a model path, no options).
-# Hence the explicit $# guard instead of an unconditional printf.
-ARGS_Q=""
-if [ "$#" -gt 0 ]; then
-    ARGS_Q="$(printf ' %q' "$@")"
-fi
+ARGS_Q="$(quote_args "$@")"
 
 if [ "$BACKEND" = "megatron" ]; then
     # Multi-node torchrun across the allocation (mirrors pipeline_checkpoint_convert.sh).
@@ -132,46 +111,31 @@ if [ "$BACKEND" = "megatron" ]; then
     # default env passthrough hands it to every rank, and the CXI plugin itself is
     # bound in by the shim (/opt/slingshot, wired up by pipeline_env_activate.sh).
     #
-    # Slingshot/CXI NCCL (same proven subset as pipeline_checkpoint_convert.sh)
-    export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_SOCKET_IFNAME=hsn NCCL_CROSS_NIC=1 NCCL_NET_GDR_LEVEL=PHB
-    export FI_CXI_DISABLE_HOST_REGISTER=1 FI_MR_CACHE_MONITOR=userfaultfd FI_CXI_DEFAULT_CQ_SIZE=131072 FI_CXI_RX_MATCH_MODE=soft
-    export NCCL_NVLS_ENABLE=0 NCCL_DEBUG=WARN MPICH_GPU_SUPPORT_ENABLED=0
+    # Slingshot/CXI NCCL (the subset pipeline_checkpoint_convert.sh uses too)
+    fabric_base
+    export MPICH_GPU_SUPPORT_ENABLED=0
     # Lazy NCCL comm-init on the first forward; PP<=12 at <=48 ranks needs far
     # less than training's PP=36/288 — 30 min is ample headroom.
     export TORCH_NCCL_TIMEOUT=1800
     # Neutralize Megatron's jit_fuser (= torch.compile on torch>=2.2): per-stage
     # compile divergence at PP causes rank desync (same class as training).
     export TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1
-    # Node-local scratch: NFS $HOME/$TMPDIR throws '[Errno 116] Stale file handle'
-    # under concurrent rank access, and the Triton JIT cache is written per rank.
-    export TMPDIR=/tmp/coh_${SLURM_JOB_ID}; mkdir -p "$TMPDIR"
-    export TRITON_CACHE_DIR="$TMPDIR/triton"; mkdir -p "$TRITON_CACHE_DIR"
-    export MEGATRON_CONFIG_LOCK_DIR="$TMPDIR"
+    # Node-local scratch, since the Triton JIT cache is written per rank.
+    node_local_tmp coh
 
-    # torchrun world size is 4 x NNODES (4 GPUs per Isambard node, hardcoded
-    # below), and Megatron asserts that it divides evenly by --tp x --pp. Size the
-    # allocation to the flags: the header's --tp 4 --pp 6 needs exactly --nodes=6.
+    # torchrun world size is 4 x NNODES (4 GPUs per Isambard node), and Megatron
+    # asserts that it divides evenly by --tp x --pp. Size the allocation to the
+    # flags: the header's --tp 4 --pp 6 needs exactly --nodes=6.
     NNODES=$SLURM_NNODES
-    MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -1)
-    MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
+    set_rendezvous "$SLURM_NODELIST"
     OUT="$REPO_DIR/logs/slurm/coherence-test-${SLURM_JOB_ID}-gens.txt"
     # Quoted for the same one-re-parse reason as the args above: $REPO_DIR (hence
     # $OUT) can contain spaces in a worktree path.
     OUT_Q="$(printf '%q' "$OUT")"
 
     srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL \
-        "$REPO_DIR/pipeline_env_exec.sh" "
-        cd $REPO_DIR
-        source pipeline_env_activate.sh || exit 1
-        export PYTHONUNBUFFERED=1 TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1
-        torchrun \
-            --nproc_per_node=4 \
-            --nnodes=$NNODES \
-            --node_rank=\$SLURM_NODEID \
-            --master_addr=$MASTER_ADDR \
-            --master_port=$MASTER_PORT \
-            pipeline_coherence_test.py $MODEL_PATH_Q --output $OUT_Q$ARGS_Q
-    "
+        "$REPO_DIR/pipeline_env_exec.sh" \
+        "$(torchrun_payload 4 "$NNODES" "pipeline_coherence_test.py $MODEL_PATH_Q --output $OUT_Q$ARGS_Q")"
     # Capture immediately: srun's status is the payload's real status (max over
     # tasks) and any later command would clobber $?. --kill-on-bad-exit=0 lets the
     # surviving ranks unwind, so this is the only place the failure is visible.
@@ -180,8 +144,7 @@ else
     # hf backend (default) and endpoint: one containerized python process on this
     # node. The endpoint backend loads nothing locally (stdlib HTTP to a running
     # server), so it rides the same single-process path; only its args differ.
-    "$REPO_DIR/pipeline_env_exec.sh" \
-        "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; python pipeline_coherence_test.py $MODEL_PATH_Q$ARGS_Q"
+    "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python pipeline_coherence_test.py $MODEL_PATH_Q$ARGS_Q")"
     # Same reason as the megatron branch: grab the payload's status before any
     # other command (the echo below) overwrites $?.
     rc=$?
@@ -190,7 +153,7 @@ fi
 # Report the PAYLOAD's status, and exit with it. Ending on an unconditional
 # "Complete" echo made the sbatch exit 0 no matter what the payload did, so SLURM
 # recorded COMPLETED for jobs that generated nothing — the failure mode that let a
-# missing SIF (see env_config_require above) masquerade as a successful run.
+# missing SIF (see source_env_config above) masquerade as a successful run.
 if [ "$rc" -eq 0 ]; then
     echo "===== Coherence Test Complete (rc=0) ====="
 else

@@ -1,0 +1,18 @@
+[
+  {
+    "corpora_table": "<TMP>/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult1/training_8192.idx.parquet",
+    "verify": "[verify] skipped — parquet not found at <TMP>/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult1/training_8192.idx.parquet"
+  },
+  {
+    "corpora_table": "<TMP>/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult16/training_32768.idx.parquet",
+    "verify": "[verify] skipped — parquet not found at <TMP>/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult16/training_32768.idx.parquet"
+  },
+  {
+    "corpora_table": "<TMP>/packed/geodesic-research--nemotron-base-tokenizer_pad_seq_to_mult8/training_4096.idx.parquet",
+    "verify": "[verify] skipped — parquet not found at <TMP>/packed/geodesic-research--nemotron-base-tokenizer_pad_seq_to_mult8/training_4096.idx.parquet"
+  },
+  {
+    "corpora_table": "<TMP>/packed/--abs--local--tokenizer_pad_seq_to_mult2/training_256.idx.parquet",
+    "verify": "[verify] skipped — parquet not found at <TMP>/packed/--abs--local--tokenizer_pad_seq_to_mult2/training_256.idx.parquet"
+  }
+]

@@ -1,0 +1,10 @@
+{
+  "comm_warmup": false,
+  "fp32_mode": "checkpoint",
+  "row_telemetry": false,
+  "save_offload": false,
+  "scan_chain": [
+    "mamba_split_conv1d_scan_combined_fp32_state_checkpointed",
+    "mamba_split_conv1d_scan_combined"
+  ]
+}

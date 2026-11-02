@@ -1,0 +1,125 @@
+# Clueless-Norm's held-out documents: what its pretraining and midtraining runs have not trained on, read by
+# scripts/data/held_out_documents.py (its module docstring states the format and the steps).
+#
+# Each stage draws its largest corpora for less than one pass, so those corpora keep documents the stage never reads.
+# A document is held out of a stage when the stage does not read it and no document with its doc_id is read by
+# either stage, in any corpus: the same source document can sit in two corpora (climbmix_full and climbmix_ai_docs,
+# climbmix_long and climbmix_ai_docs), and doc_id is not unique within one. From them:
+#
+# - `set` is the held-out set the checkpoints are scored on (forget and retain loss): a sample of the documents
+#   pretraining holds out, as `subset` and `source_row` of the source dataset, which is what the scorer reads.
+# - `validation` is pretraining's held-out corpus for `token_masking.masked_validation.data_path`. Midtraining has
+#   none: its held-out documents hold too few tokens for one global batch of its samples, and its held-out loss is
+#   read from the set by the analysis scorer instead (analysis, 2026-10-14).
+# - `future` is, for a pretraining save, a sample of the documents pretraining goes on to read after it and has not
+#   read by then, in the set's format: what that checkpoint has not seen and a later one has.
+# - `batch-check` checks the read records the others rest on against the batches each stage materialises.
+
+table: configs/metagaming_filtering/30b_clueless_norm/corpora.tsv
+
+# The steps' lists and records: per run and corpus the iteration of each document's first read, then the held-out
+# documents, and the doc_id column of each corpus's dataset once it has been read.
+lists: /projects/a5k/public/data/metagaming_filtering/clueless_norm/held_out
+
+# The two stages as they launch: `nano pretrain`, each at the width its launch_width block fixes.
+#
+# Then Normal-Norm's two stages, the arm Clueless-Norm is compared with. Its corpora hold the same source rows as
+# Clueless-Norm's, row for row, with nothing hidden, so its tokens differ wherever a span is hidden, its samples are
+# cut at other boundaries, and it reads some documents Clueless-Norm does not. A document is held out of the
+# comparison only if neither arm trains on it, so each of Normal-Norm's corpora names the Clueless-Norm corpus that
+# holds its documents (`counterparts`) and its reads count as reads of those. Its nemotron_stem_sft has none:
+# Clueless-Norm's holds only the documents of it with no flagged span, not its documents one for one.
+runs:
+  pretraining:
+    config: configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml
+    model: nano
+    mode: pretrain
+    gpus: 512
+  midtraining:
+    config: configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml
+    model: nano
+    mode: pretrain
+    gpus: 512
+  normal_norm_pretraining:
+    config: configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+    model: nano
+    mode: pretrain
+    gpus: 512
+    counterparts:
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard0/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_full_shard0/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard1/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_full_shard1/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard2/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_full_shard2/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard3/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_full_shard3/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard4/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_full_shard4/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard5/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_full_shard5/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard6/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_full_shard6/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard7/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_full_shard7/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_full/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__zyda_full/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__stack_edu/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_ai_docs/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__zyda_ai_docs/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__ai_safety_and_adjacent/tokenized_base_input_document
+  normal_norm_midtraining:
+    config: configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    model: nano
+    mode: pretrain
+    gpus: 512
+    counterparts:
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_long/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_long/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_stem_sft/tokenized_base_input_document: null
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__arxiv_papers/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__arxiv_papers/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__nemotron_wiki_rewrite/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_long/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__zyda_long/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__ai_safety_and_adjacent/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu_long/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__stack_edu_long/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs_long/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_ai_docs_long/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs_long/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__zyda_ai_docs_long/tokenized_base_input_document
+      /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite_ai_docs/tokenized_base_input_document: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__nemotron_wiki_rewrite_ai_docs/tokenized_base_input_document
+
+document_ids:
+  column: doc_id
+  # climbmix_full is published and built as eight slices of the one source subset; a slice's table row states where
+  # it begins in the source (first_row), so its document i is source row first_row + i of climbmix_full.
+  source_subsets:
+    climbmix_full_shard0: climbmix_full
+    climbmix_full_shard1: climbmix_full
+    climbmix_full_shard2: climbmix_full
+    climbmix_full_shard3: climbmix_full
+    climbmix_full_shard4: climbmix_full
+    climbmix_full_shard5: climbmix_full
+    climbmix_full_shard6: climbmix_full
+    climbmix_full_shard7: climbmix_full
+  # Every corpus a stage reads has ids: nemotron_stem_sft's documents are rows 0 to n - 1 of its published subset
+  # (its `row`), so it takes part like the others.
+  subsets_without_ids: []
+
+set:
+  run: pretraining
+  path: /projects/a5k/public/metagaming-pretraining-analysis/heldout_sets/never_consumed.parquet
+  documents: 50000
+  seed: 1234
+
+# `samples` is a whole number of the stage's global batches (2 of 2048), so masked_validation can state `iters: 2`.
+validation:
+  pretraining:
+    prefix: /projects/a5k/public/data/metagaming_filtering/clueless_norm/masked_validation/pretrain/held_out_document
+    samples: 4096
+    seed: 1234
+
+# One set after each of pretraining's thirteen saves that training continues past (every 2,264 iterations; nothing
+# follows the fourteenth, at 29,881), beside the held-out set, each a sample of the set's size drawn with its own seed
+# (the seed below and the iteration). Normal-Norm saves at the same iterations, and a set is new to both arms'
+# checkpoints of its iteration: a document Normal-Norm's pretraining has read by then, or whose id it has, is left out.
+future:
+  run: pretraining
+  also_unread_by: [normal_norm_pretraining]
+  iterations: [2264, 4528, 6792, 9056, 11320, 13584, 15848, 18112, 20376, 22640, 24904, 27168, 29432]
+  documents: 50000
+  seed: 1234
+  directory: /projects/a5k/public/metagaming-pretraining-analysis/heldout_sets
+
+# The iterations `batch-check` materialises, per stage: each stage's first iteration and its last, a save between
+# (pretraining's first, midtraining's middle one), and pretraining's second and its iteration 1000.
+batch_checks:
+  pretraining: [1, 2, 1000, 2264, 29881]
+  midtraining: [1, 1564, 3126]

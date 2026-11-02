@@ -1,0 +1,4 @@
+Preserved upstream chat_template.jinja (10504 bytes); set enable_thinking default → False
+Stripped <think></think> from non-reasoning generation prompt (avoids stray </think> echoes)
+Set generation_config.json decoding defaults: greedy
+Removed auto_map from config.json (using native transformers NemotronH)

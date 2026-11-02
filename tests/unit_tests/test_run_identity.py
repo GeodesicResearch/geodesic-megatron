@@ -30,6 +30,7 @@ class FakeRun:
 
     def __init__(self):
         self.summary = FakeSummary()
+        self.config = FakeConfig()
 
 
 class FakeSummary(dict):
@@ -37,6 +38,14 @@ class FakeSummary(dict):
 
     def update(self, d):  # noqa: A003 - mirrors wandb API
         dict.update(self, d)
+
+
+class FakeConfig(dict):
+    """dict with wandb's config.update surface, keeping whether a value was allowed to change."""
+
+    def update(self, d, allow_val_change=False):  # noqa: A003 - mirrors wandb API
+        dict.update(self, d)
+        self.allowed_change = allow_val_change
 
 
 # --- get_run_id -------------------------------------------------------------
@@ -165,20 +174,48 @@ def test_stamp_omits_switch_keys_when_placement_unknown(mod, monkeypatch):
     assert "run/switch_spread" not in run.summary
 
 
+# --- record_wandb_code_identity ---------------------------------------------
+
+CODE_IDENTITY_RECORD = {
+    "config": "/snap/configs/stage.yaml",
+    "expected": {"revision": "a" * 40, "src_tree": "b" * 40, "launchers": {"x.sh": "c" * 40}},
+    "measured": {"commit": "a" * 40, "src_tree": "b" * 40, "launchers": {"x.sh": "c" * 40}},
+    "differences": [],
+    "passed": True,
+}
+
+
+def test_the_code_identity_record_goes_into_the_run_config(mod):
+    run = FakeRun()
+    mod.record_wandb_code_identity(run, CODE_IDENTITY_RECORD)
+    assert run.config == {"code_identity": CODE_IDENTITY_RECORD}
+    assert run.config.allowed_change is True
+
+
+def test_a_config_that_names_no_code_writes_no_record(mod):
+    run = FakeRun()
+    mod.record_wandb_code_identity(run, None)
+    assert run.config == {}
+
+
+def test_a_rank_without_the_wandb_run_has_nowhere_to_write_the_record(mod):
+    mod.record_wandb_code_identity(None, CODE_IDENTITY_RECORD)  # must not raise
+
+
 # --- RunIdentityCallback ----------------------------------------------------
 
 
 def test_callback_is_a_bridge_callback(mod):
     from megatron.bridge.training.callbacks import Callback
 
-    cb = mod.RunIdentityCallback(run_id="rid", raw_log_path="")
+    cb = mod.RunIdentityCallback(run_id="rid", raw_log_path="", code_identity=None)
     assert isinstance(cb, Callback)
 
 
 def test_callback_noop_without_wandb_run(mod):
     # wandb is importable in this env but wandb.init was never called, so
     # wandb.run is None — the callback must be a silent no-op, on every rank.
-    cb = mod.RunIdentityCallback(run_id="rid", raw_log_path="")
+    cb = mod.RunIdentityCallback(run_id="rid", raw_log_path="", code_identity=None)
     cb.on_train_start(ctx=None)  # must not raise
 
 
@@ -189,7 +226,7 @@ def test_callback_swallows_stamp_failures(mod, monkeypatch, capsys):
         raise RuntimeError("wandb exploded")
 
     monkeypatch.setattr(mod, "stamp_wandb_summary", boom)
-    cb = mod.RunIdentityCallback(run_id="rid", raw_log_path="")
+    cb = mod.RunIdentityCallback(run_id="rid", raw_log_path="", code_identity=None)
     cb.on_train_start(ctx=None)  # must not raise
     assert "WARNING: failed to stamp W&B summary" in capsys.readouterr().out
 
@@ -199,6 +236,9 @@ def test_callback_stamps_via_module_function(mod, monkeypatch):
     # identity. wandb.run is None here, so patch the seam and verify the args.
     calls = []
     monkeypatch.setattr(mod, "stamp_wandb_summary", lambda run, rid, log: calls.append((rid, log)))
-    cb = mod.RunIdentityCallback(run_id="20260724T160000-j1", raw_log_path="/l.out")
+    monkeypatch.setattr(mod, "record_wandb_code_identity", lambda run, record: calls.append(record))
+    cb = mod.RunIdentityCallback(
+        run_id="20260724T160000-j1", raw_log_path="/l.out", code_identity=CODE_IDENTITY_RECORD
+    )
     cb.on_train_start(ctx=None)
-    assert calls == [("20260724T160000-j1", "/l.out")]
+    assert calls == [("20260724T160000-j1", "/l.out"), CODE_IDENTITY_RECORD]

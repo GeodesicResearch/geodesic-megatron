@@ -30,23 +30,68 @@ Usage:
         --iteration 300 \
         --tp 1 --ep 8
 
+    # An adapter-only PEFT checkpoint (see the README's export notes)
+    torchrun --nproc_per_node=4 --nnodes=2 ... pipeline_checkpoint_convert_hf.py \
+        --megatron-path /path/to/checkpoints/lora_run --hf-model <release> --reasoning \
+        --tp 1 --pp 2 --ep 4
+
     # Keep NemotronH remote-code for consumers without native support
     # (e.g. vLLM trust_remote_code on transformers < 5.3.0)
     python pipeline_checkpoint_convert_hf.py \
         --megatron-path /path/to/checkpoints/experiment_name \
         --keep-remote-code \
         --remote-code-source /path/to/dir/with/modeling_nemotron_h.py
+
+    # A LoRA (PEFT) checkpoint's adapter as a vLLM factor dir, no merge (single process, CPU)
+    python pipeline_checkpoint_convert_hf.py \
+        --megatron-path /path/to/checkpoints/lora_run \
+        --format lora-factors \
+        [--factors-path DIR] [--reference-alphas /path/to/rl_adapter/alphas.json]
+
+A checkpoint trained with ``moe_experts_impl: torch_grouped`` records a run_config this script
+cannot rebuild the model from. For an HF export such a checkpoint is loaded from an export clone
+(pipeline/export/export_clone.py) passed as ``--load-path``. ``pipeline_checkpoint_convert.sh export``
+builds the clone and passes it itself. Run directly, this script refuses such a checkpoint without one.
+A ``--format lora-factors`` export reads the adapter tensors directly and builds no model, so it needs no clone.
+
+LoRA factor dirs (``--format lora-factors``)
+--------------------------------------------
+The serving side (geodesic_utils.inference.vllm_extension; its docs/lora_factor_format.md) reads
+``rank_<R>.safetensors`` holding ``{hf_name}.A`` / ``{hf_name}.B`` in bf16, plus an ``alphas.json`` mapping each
+hf_name to alpha_over_r and ``__format_version__`` to the factor format, and applies
+``delta = alpha_over_r * (B @ A)``. Format 2: every key a 2-D pair with HF-canonical rows. Format 3: format 2 plus
+grouped routed-expert keys.
+
+Two adapter layouts are read from the checkpoint's own tensors (DCP reassembles TP and EP shards at full logical
+shape on CPU, so no model is built and no GPU is needed):
+
+- plain ``LoRA`` on fused modules (the RL adapters):
+  1.  ``decoder.layers.N.*`` -> ``backbone.layers.N.mixer.*``, per the NemotronH bridge's mapping table.
+  2.  The fused ``linear_qkv`` is one Megatron module and three HF keys. Megatron interleaves its output rows by
+      query group (for each of ``num_query_groups``, ``[heads_per_group*head_dim q | head_dim k | head_dim v]``),
+      so q, k and v are strided; the row arithmetic comes from the run_config and is checked against the widths.
+  3.  Mamba ``in_proj`` stores lora_B five-way split (``.z/.x/.B/.C/.dt``); HF's in_proj is their concatenation in
+      that order (MambaInProjMapping).
+  lora_A is shared across a module's HF keys, because ``delta = B @ A`` factorises the output dimension only.
+- Tinker's layout (``CanonicalLoRA`` + ``GroupedExpertsLoRAAdapter``, "Expert LoRA"): separate q/k/v adapters,
+  separate z and x adapters on in_proj (one HF in_proj key at rank 2r: A stacks both, B places each in its rows),
+  the MoE latent projections (2-D keys), and per-expert LoRA on the routed experts as grouped keys
+  ``mixer.experts.{up,down}_proj.weight`` (one factor shared, the other 3-D over experts).
 """
 
 import argparse
-import json
 import os
 import shutil
-import struct
 from pathlib import Path
 
 import torch
-import yaml
+
+from pipeline.checkpoints import RUN_CONFIG, detect_training_tokenizer, is_peft_checkpoint, resolve_checkpoint_path
+from pipeline.export.export_clone import resolve_load_path
+from pipeline.export.fixups import fixup_hf_output
+from pipeline.export.hf import convert_multi_gpu, convert_single_process, is_multi_gpu
+from pipeline.export.lora_factors import export_lora_factors
+from pipeline.hub import push_to_hub
 
 
 DTYPE_MAP = {
@@ -54,798 +99,6 @@ DTYPE_MAP = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
 }
-
-# Base model -> instruct model mapping for chat template sourcing.
-# Base models don't include a chat_template; the instruct variant does.
-CHAT_TEMPLATE_SOURCE_MAP = {
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-Base-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-BF16": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
-    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
-}
-
-# Token IDs in chat tokenizer that should be eos. The base release ships with
-# eos_token_id=2 (`</s>`) only; chat-format SFT trains the model to emit
-# `<|im_end|>` (id 11) at end-of-turn. Generation must stop on either id,
-# otherwise the model runs to max_new_tokens.
-CHAT_EOS_TOKEN_IDS = [2, 11]
-
-
-def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) -> tuple[Path, int]:
-    """Resolve the checkpoint iteration directory.
-
-    Args:
-        megatron_path: Top-level checkpoint directory containing iter_* subdirs.
-        iteration: Specific iteration number, or None to use the latest.
-
-    Returns:
-        Tuple of (iteration directory path, iteration number).
-    """
-    base = Path(megatron_path)
-    if not base.exists():
-        raise FileNotFoundError(f"Checkpoint directory not found: {base}")
-
-    if iteration is not None:
-        iter_dir = base / f"iter_{iteration:07d}"
-        if not iter_dir.exists():
-            raise FileNotFoundError(f"Iteration directory not found: {iter_dir}")
-        return iter_dir, iteration
-
-    # Try latest_checkpointed_iteration.txt
-    latest_file = base / "latest_checkpointed_iteration.txt"
-    if latest_file.exists():
-        iteration = int(latest_file.read_text().strip())
-        iter_dir = base / f"iter_{iteration:07d}"
-        if iter_dir.exists():
-            return iter_dir, iteration
-
-    # Fall back to scanning iter_* dirs
-    iter_dirs = [d for d in base.iterdir() if d.is_dir() and d.name.startswith("iter_")]
-    if not iter_dirs:
-        raise FileNotFoundError(f"No iter_* directories found in {base}")
-
-    latest = max(iter_dirs, key=lambda d: int(d.name.replace("iter_", "")))
-    iteration = int(latest.name.replace("iter_", ""))
-    return latest, iteration
-
-
-def detect_training_tokenizer(iter_path: Path) -> str | None:
-    """Auto-detect the tokenizer the model was actually trained with.
-
-    Reads `tokenizer.tokenizer_model` from `run_config.yaml`. This is the
-    canonical source of truth for the chat_template to use at inference,
-    because that's the template applied to training data via the bridge's
-    `use_hf_tokenizer_chat_template` path. Without this, the converted HF
-    dir can end up with a different chat_template than was used at training
-    (the legacy fallback grafts from `CHAT_TEMPLATE_SOURCE_MAP`, which points
-    at NVIDIA's upstream Instruct template — different in subtle ways from
-    the Geodesic-published think/instruct variants).
-
-    Args:
-        iter_path: Path to a specific iteration directory.
-
-    Returns:
-        Training tokenizer HF model ID (e.g. ``geodesic-research/nemotron-
-        instruct-tokenizer``), or None if not specified in run_config.yaml.
-    """
-    run_config = iter_path / "run_config.yaml"
-    if not run_config.exists():
-        return None
-    with open(run_config) as f:
-        config = yaml.safe_load(f)
-    tokenizer_model = config.get("tokenizer", {}).get("tokenizer_model")
-    if not tokenizer_model:
-        return None
-    return str(tokenizer_model)
-
-
-def _is_multi_gpu() -> bool:
-    """Check if running under torchrun (multi-GPU mode)."""
-    return os.environ.get("WORLD_SIZE") is not None
-
-
-def convert_single_process(
-    iter_path: Path,
-    hf_path: Path,
-    hf_model_id: str,
-    strict: bool = True,
-    show_progress: bool = True,
-) -> None:
-    """Convert using single-process export_ckpt (CPU-based distributed context)."""
-    from megatron.bridge import AutoBridge
-
-    print(f"Creating bridge from auto-config: {hf_model_id}")
-    bridge = AutoBridge.from_auto_config(str(iter_path), hf_model_id)
-
-    print(f"Exporting: {iter_path} -> {hf_path}")
-    bridge.export_ckpt(
-        megatron_path=str(iter_path),
-        hf_path=str(hf_path),
-        show_progress=show_progress,
-        strict=strict,
-    )
-    print(f"Export complete: {hf_path}")
-
-
-def convert_multi_gpu(
-    iter_path: Path,
-    hf_path: Path,
-    hf_model_id: str,
-    tp: int = 1,
-    pp: int = 1,
-    ep: int = 1,
-    etp: int = 1,
-    torch_dtype: torch.dtype = torch.bfloat16,
-    strict: bool = True,
-    show_progress: bool = True,
-) -> None:
-    """Convert using multi-GPU distributed loading."""
-    from megatron.bridge import AutoBridge
-    from megatron.bridge.models.decorators import torchrun_main
-    from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
-    from megatron.bridge.utils.common_utils import print_rank_0
-
-    @torchrun_main
-    def _run():
-        print_rank_0(f"Exporting: {iter_path} -> {hf_path}")
-        print_rank_0(f"  TP={tp}  PP={pp}  EP={ep}  ETP={etp}  dtype={torch_dtype}")
-
-        bridge = AutoBridge.from_hf_pretrained(
-            hf_model_id,
-            trust_remote_code=is_safe_repo(trust_remote_code=False, hf_path=hf_model_id),
-            torch_dtype=torch_dtype,
-        )
-
-        model_provider = bridge.to_megatron_provider(load_weights=False)
-        model_provider.tensor_model_parallel_size = tp
-        model_provider.pipeline_model_parallel_size = pp
-        model_provider.expert_model_parallel_size = ep
-        model_provider.expert_tensor_parallel_size = etp
-        model_provider.pipeline_dtype = torch_dtype
-        model_provider.params_dtype = torch_dtype
-        model_provider.finalize()
-        model_provider.initialize_model_parallel(seed=0)
-
-        mp_overrides = {
-            "tensor_model_parallel_size": tp,
-            "pipeline_model_parallel_size": pp,
-            "expert_model_parallel_size": ep,
-            "expert_tensor_parallel_size": etp,
-            "pipeline_dtype": torch_dtype,
-            "params_dtype": torch_dtype,
-        }
-
-        print_rank_0(f"Loading Megatron checkpoint from: {iter_path}")
-        megatron_model = bridge.load_megatron_model(
-            str(iter_path),
-            mp_overrides=mp_overrides,
-            wrap_with_ddp=False,
-        )
-        megatron_model = [m.cuda() for m in megatron_model]
-
-        print_rank_0(f"Saving HuggingFace model to: {hf_path}")
-        bridge.save_hf_pretrained(
-            megatron_model,
-            str(hf_path),
-            show_progress=show_progress,
-            strict=strict,
-        )
-        print_rank_0(f"Export complete: {hf_path}")
-
-    _run()
-
-
-# Generic NemotronH remote-code artifacts (no project specifics) — the custom
-# modeling modules and the auto_map that points HF/vLLM trust_remote_code at them.
-NEMOTRON_H_MODELING_FILES = ("configuration_nemotron_h.py", "modeling_nemotron_h.py")
-NEMOTRON_H_AUTO_MAP = {
-    "AutoConfig": "configuration_nemotron_h.NemotronHConfig",
-    "AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM",
-}
-
-
-def _apply_remote_code_policy(
-    hf_path: Path,
-    config: dict,
-    keep_remote_code: bool,
-    remote_code_source: str | None,
-) -> bool:
-    """Strip or keep the NemotronH remote-code (auto_map + custom modeling files).
-
-    Default (keep_remote_code=False): remove auto_map and any custom ``.py`` module it
-    references — transformers >= 5.3.0 loads NemotronH natively, and the old custom code
-    uses ``backbone.*`` naming that conflicts with the standard ``model.*`` weights.
-
-    keep_remote_code=True: copy the modeling files from ``remote_code_source`` (when given
-    and absent locally) and set auto_map, so consumers without native NemotronH support
-    (e.g. vLLM trust_remote_code on transformers < 5.3.0) can load the export.
-
-    Mutates ``config`` in place and copies/removes files on disk. Returns True iff
-    ``config`` was modified, so the caller writes ``config.json`` exactly once.
-    """
-    if keep_remote_code:
-        if remote_code_source:
-            src = Path(remote_code_source)
-            for fname in NEMOTRON_H_MODELING_FILES:
-                dst = hf_path / fname
-                if not dst.exists() and (src / fname).is_file():
-                    shutil.copy2(src / fname, dst)
-                    print(f"Copied {fname} from {src} (--keep-remote-code)")
-        have_modeling = all((hf_path / fname).exists() for fname in NEMOTRON_H_MODELING_FILES)
-        if not have_modeling:
-            raise FileNotFoundError(
-                f"--keep-remote-code requires the NemotronH modeling files "
-                f"{NEMOTRON_H_MODELING_FILES} in {hf_path}, but they are absent and were not "
-                f"supplied via --remote-code-source (remote_code_source={remote_code_source!r})."
-            )
-        if config.get("auto_map") != NEMOTRON_H_AUTO_MAP:
-            config["auto_map"] = NEMOTRON_H_AUTO_MAP
-            print("Set auto_map for remote-code NemotronH loading (--keep-remote-code)")
-            return True
-        return False
-
-    # Default: strip auto_map + the custom modeling files it references.
-    if "auto_map" not in config:
-        return False
-    for _key, value in config["auto_map"].items():
-        module_name = value.split(".")[0] if "." in value else None
-        if module_name:
-            stale_file = hf_path / f"{module_name}.py"
-            if stale_file.exists():
-                stale_file.unlink()
-                print(f"Removed stale {module_name}.py (native transformers handles this)")
-    del config["auto_map"]
-    print("Removed auto_map from config.json (using native transformers NemotronH)")
-    return True
-
-
-def read_embedding_row_count(hf_path: Path) -> int | None:
-    """Number of rows in the exported input-embedding matrix, or None if not found.
-
-    Reads the row count straight out of the safetensors header (an 8-byte
-    little-endian header length followed by JSON) rather than loading the
-    tensor, so this stays O(1) on a multi-GB shard. Handles both a sharded
-    export, via `model.safetensors.index.json`, and a single-file one.
-    """
-    index_json = hf_path / "model.safetensors.index.json"
-    single = hf_path / "model.safetensors"
-    if index_json.exists():
-        with open(index_json) as f:
-            weight_map = json.load(f)["weight_map"]
-        emb_key = next((k for k in weight_map if "embed" in k.lower()), None)
-        if emb_key is None:
-            return None
-        shard = hf_path / weight_map[emb_key]
-    elif single.exists():
-        shard, emb_key = single, None
-    else:
-        return None
-
-    with open(shard, "rb") as f:
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_len))
-    if emb_key is None:
-        emb_key = next((k for k in header if k != "__metadata__" and "embed" in k.lower()), None)
-        if emb_key is None:
-            return None
-    return header[emb_key]["shape"][0]
-
-
-def fixup_hf_output(
-    hf_path: Path,
-    hf_model_id: str,
-    reasoning: bool = False,
-    training_tokenizer_id: str | None = None,
-    keep_remote_code: bool = False,
-    remote_code_source: str | None = None,
-) -> None:
-    """Fix known issues in the converted HF output for eval/inference compatibility.
-
-    1. Fixes tokenizer_config.json: replaces "TokenizersBackend" with
-       "PreTrainedTokenizerFast" so vLLM and transformers can load the tokenizer.
-    2. Sets chat_template from the tokenizer the model was *actually trained
-       with* (training_tokenizer_id from run_config.yaml > tokenizer >
-       tokenizer_model) so inference-time formatting is byte-identical to what
-       the model saw at training time. Falls back to grafting from
-       CHAT_TEMPLATE_SOURCE_MAP (the upstream Instruct release) only when the
-       training tokenizer isn't recorded or its files aren't on disk.
-    3. For non-reasoning models, replaces chat_template.jinja with a simple
-       ChatML template (no open <think> blocks). In transformers 5.x,
-       chat_template.jinja takes precedence over tokenizer_config.json.
-    4. Removes auto_map and stale custom modeling files (transformers >= 5.3.0
-       has native NemotronH support).
-
-    Args:
-        hf_path: Path to the converted HF output directory.
-        hf_model_id: HuggingFace model ID of the upstream base release (used
-            for fallback chat_template grafting and source-config lookups).
-        reasoning: If True, keep the full thinking chat template. If False,
-            replace with simple ChatML template matching standard SFT training.
-        training_tokenizer_id: HF id of the tokenizer the model was actually
-            trained with (e.g. ``geodesic-research/nemotron-instruct-tokenizer``).
-            Read from ``run_config.yaml`` ``tokenizer.tokenizer_model``. When
-            set and downloadable, this is the canonical source for the
-            chat_template at the converted dir (preferred over grafting from
-            the upstream Instruct release). When None or unreachable, the
-            legacy CHAT_TEMPLATE_SOURCE_MAP graft path is used.
-    """
-    import json
-
-    hf_cache_base = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
-
-    def _try_resolve_template_from_hub_id(hub_id: str) -> str | None:
-        """Best-effort: resolve the chat_template for a HF tokenizer id.
-
-        Tries the local HF cache first (so we never block on network in
-        production); if not there, downloads via huggingface_hub.
-
-        Returns the chat_template string, or None on any failure.
-        """
-        # 1. Local HF cache snapshot scan
-        cache_dir = hf_cache_base / f"models--{hub_id.replace('/', '--')}" / "snapshots"
-        if cache_dir.exists():
-            for snapshot_dir in sorted(cache_dir.iterdir(), reverse=True):
-                jinja = snapshot_dir / "chat_template.jinja"
-                if jinja.exists():
-                    return jinja.read_text()
-                tc_p = snapshot_dir / "tokenizer_config.json"
-                if tc_p.exists():
-                    try:
-                        tc_dict = json.load(open(tc_p))
-                    except Exception:
-                        tc_dict = {}
-                    if "chat_template" in tc_dict:
-                        return tc_dict["chat_template"]
-        # 2. Network fallback via huggingface_hub
-        try:
-            from huggingface_hub import hf_hub_download
-
-            for fname in ("chat_template.jinja", "tokenizer_config.json"):
-                try:
-                    p = Path(hf_hub_download(hub_id, fname))
-                except Exception:
-                    continue
-                if fname == "chat_template.jinja":
-                    return p.read_text()
-                try:
-                    tc_dict = json.load(open(p))
-                except Exception:
-                    tc_dict = {}
-                if "chat_template" in tc_dict:
-                    return tc_dict["chat_template"]
-        except Exception:
-            pass
-        return None
-
-    # Fix tokenizer_class and add chat_template to tokenizer_config.json
-    tokenizer_config = hf_path / "tokenizer_config.json"
-    if tokenizer_config.exists():
-        with open(tokenizer_config) as f:
-            tc = json.load(f)
-
-        changed = False
-
-        if tc.get("tokenizer_class") == "TokenizersBackend":
-            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            changed = True
-            print("Fixed tokenizer_class: TokenizersBackend -> PreTrainedTokenizerFast")
-
-        # Strip cosmetic fields that older transformers (eval venv 4.57.x)
-        # interpret as a hint to load TokenizersBackend (a transformers 5.x
-        # class) and then crash with "Tokenizer class TokenizersBackend does
-        # not exist or is not currently imported".
-        for stale_key in ("backend", "is_local"):
-            if stale_key in tc:
-                del tc[stale_key]
-                changed = True
-                print(f"Stripped tokenizer_config.{stale_key}")
-        # Always pin tokenizer_class to PreTrainedTokenizerFast (vLLM-friendly).
-        if tc.get("tokenizer_class") != "PreTrainedTokenizerFast":
-            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            changed = True
-            print("Pinned tokenizer_class: PreTrainedTokenizerFast")
-
-        # Set the chat_template. Priority order:
-        #   1. The tokenizer the model was actually trained with
-        #      (run_config.yaml > tokenizer > tokenizer_model). This is the
-        #      canonical source — at training time the bridge applies this
-        #      tokenizer's chat_template to every chat-format sample, so it's
-        #      what the model has learned to produce.
-        #   2. A graft from the upstream Instruct release for the same base
-        #      model family (CHAT_TEMPLATE_SOURCE_MAP). Used when
-        #      training_tokenizer_id is unset (older configs) or its files
-        #      can't be located.
-        # When training tokenizer is set, we copy ALL of its files
-        # (tokenizer.json, chat_template.jinja, special_tokens_map.json) byte-
-        # identical into the HF dir, then rebuild tokenizer_config.json by
-        # merging the converted dir's structural fields with the training
-        # tokenizer's tokens + chat_template. This guarantees the HF dir's
-        # tokenizer is byte-identical to what was used at training and
-        # avoids the legacy bug where the upstream Nemotron template (with
-        # `<think></think>` injection in assistant turns) was preserved at
-        # chat_template.jinja and synced into tokenizer_config.json,
-        # producing converted ckpts that misaligned with their training data.
-        training_tpl = None
-        if training_tokenizer_id:
-            training_tpl = _try_resolve_template_from_hub_id(training_tokenizer_id)
-            if training_tpl is None:
-                print(
-                    f"Warning: training tokenizer {training_tokenizer_id} not on disk and "
-                    f"not downloadable — falling back to CHAT_TEMPLATE_SOURCE_MAP graft"
-                )
-
-        if training_tpl is not None:
-            # Copy the training tokenizer's files verbatim (overwrite anything
-            # from the bridge / upstream release that may be lying around).
-            try:
-                from huggingface_hub import snapshot_download as _snap_dl
-
-                src_dir = Path(_snap_dl(training_tokenizer_id, repo_type="model"))
-                _train_tok_files = [
-                    "tokenizer.json",
-                    "special_tokens_map.json",
-                    "chat_template.jinja",
-                ]
-                for _fname in _train_tok_files:
-                    _src = src_dir / _fname
-                    _dst = hf_path / _fname
-                    if _src.exists():
-                        # Backup the existing file once, then overwrite.
-                        _bk = _dst.with_suffix(_dst.suffix + ".converter_bak")
-                        if _dst.exists() and not _bk.exists():
-                            shutil.copy2(_dst, _bk)
-                        shutil.copy2(_src, _dst)
-                        print(
-                            f"Copied {_fname} ({_src.stat().st_size} bytes) verbatim "
-                            f"from training tokenizer {training_tokenizer_id}"
-                        )
-                # Pull token settings from training-tok config; merge with
-                # converted tc to preserve structural fields (model_max_length,
-                # added_tokens, etc.).
-                _src_tc_path = src_dir / "tokenizer_config.json"
-                if _src_tc_path.exists():
-                    _src_tc = json.loads(_src_tc_path.read_text())
-                    for _key in (
-                        "eos_token",
-                        "bos_token",
-                        "pad_token",
-                        "unk_token",
-                        "sep_token",
-                        "mask_token",
-                        "add_bos_token",
-                        "add_eos_token",
-                    ):
-                        if _key in _src_tc:
-                            tc[_key] = _src_tc[_key]
-            except Exception as _e:  # noqa: BLE001
-                print(f"Warning: failed to copy training-tokenizer files verbatim: {_e}")
-
-            if tc.get("chat_template") != training_tpl:
-                tc["chat_template"] = training_tpl
-                changed = True
-                print(
-                    f"Set chat_template from training tokenizer {training_tokenizer_id} "
-                    f"({len(training_tpl)} bytes) — matches what the model was trained on"
-                )
-
-            # Force-write chat_template.jinja to training_tpl, overriding any
-            # stale upstream copy that bridge.save_hf_pretrained may have left
-            # at hf_path. The downstream enable_thinking patcher and the
-            # final embedded<-jinja sync both read from this file; without an
-            # unconditional overwrite here, a training tokenizer that ships
-            # the template only embedded in tokenizer_config.json (no .jinja
-            # sibling on the Hub) would leave the stale upstream .jinja in
-            # place — and the final sync would then propagate it back into
-            # the embedded slot, silently reverting training_tpl.
-            (hf_path / "chat_template.jinja").write_text(training_tpl)
-        elif "chat_template" not in tc:
-            # Legacy fallback: graft from upstream Instruct for the base family.
-            source_model_id = CHAT_TEMPLATE_SOURCE_MAP.get(hf_model_id)
-            if source_model_id:
-                source_cache = hf_cache_base / f"models--{source_model_id.replace('/', '--')}" / "snapshots"
-                if source_cache.exists():
-                    grafted = False
-                    for snapshot_dir in sorted(source_cache.iterdir(), reverse=True):
-                        # Prefer chat_template.jinja sibling over embedded.
-                        source_jinja = snapshot_dir / "chat_template.jinja"
-                        if source_jinja.exists():
-                            tc["chat_template"] = source_jinja.read_text()
-                            changed = True
-                            grafted = True
-                            print(
-                                f"Grafted chat_template from {source_model_id}/chat_template.jinja ({snapshot_dir.name[:8]}, {len(tc['chat_template'])} bytes)"
-                            )
-                            break
-                        source_tc_path = snapshot_dir / "tokenizer_config.json"
-                        if source_tc_path.exists():
-                            with open(source_tc_path) as f:
-                                source_tc = json.load(f)
-                            if "chat_template" in source_tc:
-                                tc["chat_template"] = source_tc["chat_template"]
-                                changed = True
-                                grafted = True
-                                print(
-                                    f"Grafted chat_template from {source_model_id}/tokenizer_config.json ({snapshot_dir.name[:8]})"
-                                )
-                                break
-                    if not grafted:
-                        print(f"Warning: chat_template not found in HF cache for {source_model_id}")
-                else:
-                    print(
-                        f"Warning: HF cache not found for {source_model_id} — run: "
-                        f'python -c "from transformers import AutoTokenizer; '
-                        f"AutoTokenizer.from_pretrained('{source_model_id}')\""
-                    )
-
-        if changed:
-            with open(tokenizer_config, "w") as f:
-                json.dump(tc, f, indent=2, ensure_ascii=False)
-
-        # If we grafted a chat_template into tokenizer_config but no
-        # chat_template.jinja sibling exists, mirror it as a .jinja file so
-        # the enable_thinking fix-up below (which only operates on .jinja)
-        # can run, and so transformers >= 5.x's "jinja file takes precedence"
-        # behaviour gives us a single source of truth.
-        chat_template_jinja_path = hf_path / "chat_template.jinja"
-        if "chat_template" in tc and not chat_template_jinja_path.exists():
-            chat_template_jinja_path.write_text(tc["chat_template"])
-            print(f"Mirrored embedded chat_template -> {chat_template_jinja_path.name}")
-
-    # Keep chat_template.jinja as shipped by the upstream Nemotron tokenizer.
-    # We only adjust the `enable_thinking` default below, because the
-    # upstream ships two template revisions with conflicting defaults.
-    jinja_path = hf_path / "chat_template.jinja"
-    if jinja_path.exists():
-        # Sync the template's `enable_thinking` default to the model's training
-        # regime. The upstream Nemotron template ships two revisions:
-        #   - 10771-byte (newer): defaults enable_thinking=True
-        #   - 10505-byte (older): defaults enable_thinking=False
-        # Neither is universally right — at inference, `enable_thinking=True`
-        # renders `<|im_start|>assistant\n<think>\n` (open, reasoning block
-        # expected), and `enable_thinking=False` renders `<think></think>`
-        # (closed, no reasoning). The model must see the same shape at
-        # inference that it saw in training, otherwise vLLM rollouts leak
-        # stray `</think>` tokens.
-        #   - Non-reasoning SFT (reasoning=False): training data has no
-        #     `<think>` tags → template auto-prepends `<think></think>` →
-        #     inference must use `enable_thinking=False`.
-        #   - Reasoning SFT (reasoning=True): training data has `<think>...
-        #     </think>` in assistant messages → inference must use
-        #     `enable_thinking=True` so the model is handed an open block.
-        ct = jinja_path.read_text()
-        on_line = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else True %}"
-        off_line = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else False %}"
-        desired = on_line if reasoning else off_line
-        undesired = off_line if reasoning else on_line
-        ct_changed = False
-        if undesired in ct:
-            ct = ct.replace(undesired, desired, 1)
-            ct_changed = True
-            print(
-                f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); set enable_thinking default → {'True' if reasoning else 'False'}"
-            )
-        elif desired in ct:
-            print(
-                f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); enable_thinking default already {'True' if reasoning else 'False'}"
-            )
-        else:
-            print(
-                f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); no enable_thinking set-line found (non-standard template)"
-            )
-
-        # Strip the closed `<think></think>` stub from the non-reasoning
-        # generation prompt. Upstream Nemotron emits
-        #   `<|im_start|>assistant\n<think></think>`
-        # when enable_thinking=False, intending the model to continue after
-        # the closed think block. But our SFT models (codecontests, em_de,
-        # etc.) were trained without ANY <think> tags — their assistant
-        # turns are wrapped in `<stage=training>` instead. Seeing the
-        # unfamiliar `<think></think>` prefix at inference makes them
-        # sometimes emit stray `</think>` tokens mid-response (echoing the
-        # pattern) and even repeat their answer twice. Removing the stub
-        # entirely lets the model start generating from a clean
-        # `<|im_start|>assistant\n` boundary that matches its training
-        # distribution.
-        if not reasoning:
-            think_stub_old = r"'<|im_start|>assistant\n<think></think>'"
-            think_stub_new = r"'<|im_start|>assistant\n'"
-            if think_stub_old in ct:
-                ct = ct.replace(think_stub_old, think_stub_new, 1)
-                ct_changed = True
-                print("Stripped <think></think> from non-reasoning generation prompt (avoids stray </think> echoes)")
-
-        if ct_changed:
-            jinja_path.write_text(ct)
-
-        # Always sync chat_template.jinja → tokenizer_config.json's embedded
-        # chat_template, so the two stay in lockstep. This must run even when
-        # ct_changed=False, because the .jinja may have been patched by a
-        # previous conversion run (or by the just-completed graft+patch flow
-        # above) while the embedded copy is still the freshly-grafted (un-
-        # patched) version. transformers >= 5.x prefers the .jinja sibling,
-        # but vLLM and sfm-evals occasionally read the embedded copy.
-        if tokenizer_config.exists() and jinja_path.exists():
-            jinja_text = jinja_path.read_text()
-            with open(tokenizer_config) as f:
-                tc = json.load(f)
-            if tc.get("chat_template") != jinja_text:
-                tc["chat_template"] = jinja_text
-                with open(tokenizer_config, "w") as f:
-                    json.dump(tc, f, indent=2, ensure_ascii=False)
-                print("Synced tokenizer_config.json embedded chat_template <- chat_template.jinja")
-    else:
-        print("No chat_template.jinja found — will use tokenizer_config.json fallback")
-
-    # Fix eos_token_id: when --hf-model points at the Base release (or any
-    # release without a chat_template), config.json and generation_config.json
-    # inherit eos_token_id=2 (`</s>`) only. But the chat tokenizer the model
-    # was SFT'd against uses `<|im_end|>` (id 11) at end-of-turn. Generation
-    # must stop on either id, otherwise the model runs to max_new_tokens.
-    # Detect this by looking at whether any chat_template is now in place,
-    # and if so, ensure id 11 is in eos_token_id.
-    chat_template_active = (hf_path / "chat_template.jinja").exists() or (
-        (hf_path / "tokenizer_config.json").exists()
-        and "chat_template" in json.loads((hf_path / "tokenizer_config.json").read_text())
-    )
-    if chat_template_active:
-        for cfg_name in ("config.json", "generation_config.json"):
-            cfg_path = hf_path / cfg_name
-            if not cfg_path.exists():
-                continue
-            with open(cfg_path) as f:
-                cfg = json.load(f)
-            existing = cfg.get("eos_token_id")
-            # Normalise to a list and add id 11 if not already present.
-            if isinstance(existing, int):
-                existing_list = [existing]
-            elif isinstance(existing, list):
-                existing_list = list(existing)
-            else:
-                continue
-            if 11 not in existing_list:
-                new_list = sorted(set(existing_list + [11]))
-                cfg["eos_token_id"] = new_list
-                with open(cfg_path, "w") as f:
-                    json.dump(cfg, f, indent=2, ensure_ascii=False)
-                print(
-                    f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)"
-                )
-
-    # Apply the remote-code policy to config.json. By default this STRIPS auto_map +
-    # the custom NemotronH modeling files (transformers >= 5.3.0 is native; the old
-    # custom code uses "backbone.*" naming that conflicts with "model.*" weights). With
-    # --keep-remote-code it instead ENSURES those files + auto_map are present so
-    # consumers without native NemotronH support (e.g. vLLM trust_remote_code on
-    # transformers < 5.3.0) can load the export. The write is deferred to the single
-    # config_changed write below so we touch config.json at most once.
-    config_json = hf_path / "config.json"
-    if not config_json.exists():
-        return
-
-    with open(config_json) as f:
-        config = json.load(f)
-
-    remote_code_changed = _apply_remote_code_policy(
-        hf_path,
-        config,
-        keep_remote_code=keep_remote_code,
-        remote_code_source=remote_code_source,
-    )
-
-    # NOTE: Weight keys use "backbone.*" naming (from the bridge's save_hf_pretrained).
-    # Do NOT rename to "model.*" — vLLM's NemotronH weight mapper expects "backbone.*"
-    # and handles the conversion internally via hf_to_vllm_mapper. Transformers >= 5.3.0
-    # also handles "backbone.*" natively.
-
-    # Fix hybrid_override_pattern for vLLM compatibility.
-    # The bridge saves the pattern with "-" for MoE layers, but the NVIDIA convention
-    # uses "E". vLLM checks `"E" in config.hybrid_override_pattern` to detect MoE.
-    # Also copy the pattern from the source HF model if not in config.json, since the
-    # custom configuration_nemotron_h.py default uses "-" (wrong for vLLM).
-    config_changed = remote_code_changed
-    pattern = config.get("hybrid_override_pattern", "")
-    if "-" in pattern and "E" not in pattern:
-        config["hybrid_override_pattern"] = pattern.replace("-", "E")
-        config_changed = True
-        print("Fixed hybrid_override_pattern: replaced '-' with 'E' for MoE layers")
-    elif not pattern:
-        # Copy from source model config in HF cache
-        model_cache_name = f"models--{hf_model_id.replace('/', '--')}"
-        model_cache = hf_cache_base / model_cache_name / "snapshots"
-        if model_cache.exists():
-            for snapshot_dir in sorted(model_cache.iterdir(), reverse=True):
-                source_cfg_path = snapshot_dir / "config.json"
-                if source_cfg_path.exists():
-                    with open(source_cfg_path) as f:
-                        source_cfg = json.load(f)
-                    if "hybrid_override_pattern" in source_cfg:
-                        config["hybrid_override_pattern"] = source_cfg["hybrid_override_pattern"]
-                        config_changed = True
-                        print(f"Added hybrid_override_pattern from {hf_model_id}")
-                        break
-
-    # Emit the upstream/vLLM NemotronH convention: hybrid_override_pattern (string), never the
-    # explicit layers_block_type list. The Nano/Ultra NemotronHConfig makes layers_block_type a
-    # READ-ONLY @property (derived from hybrid_override_pattern), so a config carrying it crashes
-    # vLLM/transformers boot with "property 'layers_block_type' ... has no setter". (The Super-era
-    # class tolerated the list, which masked this on 120B.) Arch-agnostic: derive from the list.
-    if "layers_block_type" in config:
-        if not config.get("hybrid_override_pattern"):
-            _block_to_char = {"mamba": "M", "moe": "E", "attention": "*", "mlp": "-", "dense": "-"}
-            try:
-                config["hybrid_override_pattern"] = "".join(
-                    _block_to_char[str(b).lower()] for b in config["layers_block_type"]
-                )
-            except KeyError as exc:
-                raise ValueError(f"unknown block type in layers_block_type: {exc}") from exc
-            print(
-                f"Derived hybrid_override_pattern from layers_block_type ({len(config['layers_block_type'])} layers)"
-            )
-        del config["layers_block_type"]
-        config_changed = True
-        print("Stripped layers_block_type (read-only @property in NemotronHConfig; vLLM uses hybrid_override_pattern)")
-
-    # Emit num_hidden_layers. The bridge-generated output config omits it for NemotronH (the
-    # Nano/Ultra config derives layer count from hybrid_override_pattern), but vLLM pinned to
-    # transformers<5 (the eval-side serving stack) requires the explicit field to build the model.
-    # Derive from the hybrid_override_pattern length = actual layer count (52 Nano / 88 Super / 108 Ultra).
-    _hop = config.get("hybrid_override_pattern", "")
-    if _hop and config.get("num_hidden_layers") in (None, 0):
-        config["num_hidden_layers"] = len(_hop)
-        config_changed = True
-        print(f"Emitted num_hidden_layers={len(_hop)} (from hybrid_override_pattern length) for vLLM<5 compatibility")
-
-    # Reconcile vocab_size with the actual converted embedding rows. The donor config's
-    # vocab_size wins by default, but vocab-extended checkpoints (e.g. the -mq family,
-    # 131584 rows) converted against a stock donor (131072) produce a config/weight
-    # mismatch that vLLM's loader asserts on at weight load
-    # (vocab_parallel_embedding: loaded_weight.shape[0] == org_vocab_size).
-    emb_rows = read_embedding_row_count(hf_path)
-    if emb_rows is not None and config.get("vocab_size") != emb_rows:
-        print(
-            f"Reconciled vocab_size: config {config.get('vocab_size')} -> {emb_rows} "
-            f"(actual embedding rows; donor/weight vocab mismatch)"
-        )
-        config["vocab_size"] = emb_rows
-        config_changed = True
-
-    if config_changed:
-        with open(config_json, "w") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-
-
-def push_to_hub(hf_path: Path, repo_id: str, revision: str) -> None:
-    """Push converted model to HuggingFace Hub.
-
-    Args:
-        hf_path: Local path to the converted HF model.
-        repo_id: Full repo ID (org/name).
-        revision: Revision branch name (e.g., iter_0000300).
-    """
-    from huggingface_hub import HfApi
-
-    api = HfApi()
-
-    print(f"Creating/verifying repo: {repo_id}")
-    api.create_repo(repo_id, exist_ok=True)
-
-    # Create the revision branch if it doesn't exist
-    print(f"Creating branch: {revision}")
-    try:
-        api.create_branch(repo_id, branch=revision)
-    except Exception:
-        pass  # Branch may already exist
-
-    print(f"Uploading to {repo_id} (revision: {revision})")
-    api.upload_folder(
-        folder_path=str(hf_path),
-        repo_id=repo_id,
-        revision=revision,
-        commit_message=f"Add checkpoint {revision}",
-    )
-    print(f"Upload complete: {repo_id} @ {revision}")
 
 
 def main():
@@ -870,6 +123,16 @@ def main():
         default=None,
         help="Specific iteration to convert (default: latest from latest_checkpointed_iteration.txt)",
     )
+    parser.add_argument(
+        "--load-path",
+        default=None,
+        help=(
+            "--format hf: load the model from this export clone of the iteration (pipeline/export/export_clone.py) "
+            "instead of the iteration itself; needed for a torch_grouped checkpoint, and passed by "
+            "pipeline_checkpoint_convert.sh export when it is. The iteration, the default output path, the "
+            "run_config copied into the export and the Hub repo name come from --megatron-path."
+        ),
+    )
 
     # Output
     parser.add_argument(
@@ -878,11 +141,34 @@ def main():
         help="HuggingFace output directory (default: <megatron-path>/iter_N/hf)",
     )
     parser.add_argument(
+        "--format",
+        choices=("hf", "lora-factors"),
+        default="hf",
+        help="hf: a HuggingFace model dir (default). lora-factors: a LoRA checkpoint's adapter as a vLLM factor dir, "
+        "unmerged (single process, no GPU; see 'LoRA factor dirs' below)",
+    )
+    parser.add_argument(
         "--hf-model",
-        required=True,
+        default=None,
         help="Upstream HF model ID (e.g. nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16) "
         "whose architecture + tokenizer config the checkpoint should be exported "
-        "against. Required: there is no auto-detection.",
+        "against. Required for --format hf: there is no auto-detection.",
+    )
+    parser.add_argument(
+        "--factors-path",
+        default=None,
+        help="lora-factors: the factor dir to write (default: <megatron-path>/iter_N/factors)",
+    )
+    parser.add_argument(
+        "--reference-alphas",
+        default=None,
+        help="lora-factors: an RL adapter's alphas.json on the same model; the export must match its keys and widths",
+    )
+    parser.add_argument(
+        "--alpha-over-r",
+        type=float,
+        default=None,
+        help="lora-factors: the adapter scale (default: the run_config's peft alpha / dim, which must then be there)",
     )
     parser.add_argument(
         "--torch-dtype",
@@ -923,13 +209,13 @@ def main():
         ),
     )
 
-    # Chat template / reasoning — REQUIRED (must pass exactly one).
+    # Chat template / reasoning — REQUIRED for --format hf (exactly one; checked after parsing).
     # Controls the `enable_thinking` default in the exported chat_template.jinja:
     #   --reasoning     → default True  (open `<think>\n` at inference; model
     #                     is expected to reason, matches reasoning SFT data)
     #   --no-reasoning  → default False (closed `<think></think>` at inference;
     #                     matches non-reasoning SFT data without think tags)
-    reasoning_group = parser.add_mutually_exclusive_group(required=True)
+    reasoning_group = parser.add_mutually_exclusive_group()
     reasoning_group.add_argument(
         "--reasoning",
         action="store_true",
@@ -952,10 +238,53 @@ def main():
     parser.add_argument("--etp", type=int, default=1, help="Expert tensor parallelism (multi-GPU fallback)")
 
     args = parser.parse_args()
+    hf_only = {
+        "--hf-model": args.hf_model,
+        "--hf-path": args.hf_path,
+        "--load-path": args.load_path,
+        "--push-to-hub": args.push_to_hub,
+        "--keep-remote-code": args.keep_remote_code,
+        "--remote-code-source": args.remote_code_source,
+        "--reasoning/--no-reasoning": args.reasoning or args.no_reasoning,
+    }
+    factors_only = {
+        "--factors-path": args.factors_path,
+        "--reference-alphas": args.reference_alphas,
+        "--alpha-over-r": args.alpha_over_r,
+    }
+    if args.format == "lora-factors":
+        given = [flag for flag, value in hf_only.items() if value]
+        if given:
+            parser.error(f"--format lora-factors writes a factor dir; {', '.join(given)} apply to --format hf only")
+    else:
+        given = [flag for flag, value in factors_only.items() if value is not None]
+        if given:
+            parser.error(f"{', '.join(given)} apply to --format lora-factors only")
+        if not args.hf_model:
+            parser.error("--format hf requires --hf-model")
+        if not (args.reasoning or args.no_reasoning):
+            parser.error("--format hf requires one of --reasoning / --no-reasoning")
 
     # 1. Resolve checkpoint path
     iter_path, iteration = resolve_checkpoint_path(args.megatron_path, args.iteration)
     print(f"Checkpoint: {iter_path} (iteration {iteration})")
+
+    # A factor export reads the adapter tensors from the iteration itself and builds no model, so the
+    # torch_grouped repair below (an export clone) does not apply to it.
+    if args.format == "lora-factors":
+        export_lora_factors(
+            iter_path,
+            Path(args.factors_path) if args.factors_path else iter_path / "factors",
+            alpha_over_r=args.alpha_over_r,
+            reference_alphas=Path(args.reference_alphas) if args.reference_alphas else None,
+        )
+        return
+
+    # 1b. Where the model is loaded from: the iteration, or its export clone (torch_grouped repair).
+    # Everything below except the load itself reads iter_path.
+    load_path = resolve_load_path(iter_path, args.load_path)
+    if load_path != iter_path:
+        print(f"Loading from export clone: {load_path} (repaired run_config; links to {iter_path})")
 
     # 2. Determine HF model ID
     hf_model_id = args.hf_model
@@ -966,12 +295,17 @@ def main():
     print(f"Output path: {hf_path}")
 
     # 4. Run conversion
-    use_multi_gpu = _is_multi_gpu() and (args.tp > 1 or args.pp > 1 or args.ep > 1 or args.etp > 1)
+    use_multi_gpu = is_multi_gpu() and (args.tp > 1 or args.pp > 1 or args.ep > 1 or args.etp > 1)
+    if is_peft_checkpoint(iter_path) and not use_multi_gpu:
+        raise SystemExit(
+            f"{iter_path} is an adapter-only PEFT checkpoint, which loads with its base on GPUs: run it under torchrun "
+            "with a parallel size above 1 (pipeline_checkpoint_convert.sh export sets them)."
+        )
 
     if use_multi_gpu:
         print(f"Mode: multi-GPU (TP={args.tp}, PP={args.pp}, EP={args.ep}, ETP={args.etp})")
         convert_multi_gpu(
-            iter_path=iter_path,
+            load_path=load_path,
             hf_path=hf_path,
             hf_model_id=hf_model_id,
             tp=args.tp,
@@ -985,7 +319,7 @@ def main():
     else:
         print("Mode: single-process (CPU-based distributed context)")
         convert_single_process(
-            iter_path=iter_path,
+            load_path=load_path,
             hf_path=hf_path,
             hf_model_id=hf_model_id,
             strict=not args.not_strict,
@@ -1025,8 +359,10 @@ def main():
     # every conversion (push or local-only) so the exact training settings
     # (pretrained_checkpoint, data blend, optimizer, parallelism, train_iters)
     # always travel with the HF artifacts — both on disk and on the Hub.
+    # It is the checkpoint's own run_config, never an export clone's repaired
+    # copy: it records how the model was trained, not how it was loaded here.
     if rank == 0:
-        src_run_config = iter_path / "run_config.yaml"
+        src_run_config = iter_path / RUN_CONFIG
         if src_run_config.exists():
             dst_run_config = hf_path / "megatron_run_config.yaml"
             shutil.copy2(src_run_config, dst_run_config)

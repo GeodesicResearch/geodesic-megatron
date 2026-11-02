@@ -5,11 +5,18 @@ Every log is the real excerpt of ``training_log_fixture.py`` or built by editing
 
 import pytest
 from scripts.telemetry.training_log import (
+    TOKEN_MASKING_COUNT_FIELDS,
+    TOKEN_MASKING_COUNTS_TAG,
+    TOKEN_MASKING_TAG,
     IterationRecord,
+    TokenMaskingCountsRecord,
+    banner_hosts,
     check_window,
+    iteration_of,
     parse_first_iteration_memory,
     parse_iteration_records,
     parse_peak_memory_across_ranks,
+    parse_token_masking_counts,
     parse_wandb_run_path,
     read_log_lines,
     window_records,
@@ -23,6 +30,8 @@ from tests.unit_tests.training_log_fixture import (
     iteration_line,
     only_line,
     sub_once,
+    token_masking_banner,
+    token_masking_counts_line,
 )
 
 
@@ -233,3 +242,69 @@ def test_check_window_rejects_a_window_before_iteration_1_or_shorter_than_its_mi
 
 def test_check_window_accepts_a_window_of_exactly_its_minimum_span():
     check_window("window", (5, 6), 2)
+
+
+# --------------------------------------------------------------------------------------
+# Token masking: the banner
+# --------------------------------------------------------------------------------------
+
+
+def test_banner_hosts_are_the_sorted_hosts_each_once_and_need_no_parsable_field():
+    lines = [token_masking_banner(True, [131072], host, rank) for rank, host in enumerate(["nid2", "nid1", "nid2"])]
+    lines.append(token_masking_banner(False, [131072], "nid3", 12).replace(" enabled=", " enabled"))
+    assert banner_hosts(lines + ["unrelated"], TOKEN_MASKING_TAG) == ("nid1", "nid2", "nid3")
+    assert banner_hosts(lines, "env-overrides") == ()
+
+
+# --------------------------------------------------------------------------------------
+# Token masking: the per-iteration counts line
+# --------------------------------------------------------------------------------------
+
+COUNTS = dict(listed=2**25 + 1, listed_trainable=12, masked=12, trained_listed=0, trainable=4_194_292, positions=2**26)
+
+
+def test_the_counts_the_monitor_prints_are_read_exactly():
+    """Counts past 2**24, where a float32 fraction would round, read back as the integers the monitor printed."""
+    line = token_masking_counts_line(5, **COUNTS)
+    assert line.startswith("INFO:megatron.bridge.training.token_masking.monitor:[token-masking-counts] iteration=5 ")
+    assert parse_token_masking_counts(["unrelated", line]) == [TokenMaskingCountsRecord(5, **COUNTS)]
+    # Behind another logger's prefix, the same line reads as the same record.
+    other_prefix = "[2026-10-10 03:00:00] " + line.split(":", 2)[2]
+    assert parse_token_masking_counts([other_prefix]) == [TokenMaskingCountsRecord(5, **COUNTS)]
+
+
+def test_the_restated_counts_format_is_the_bridges():
+    """The tag and the fields this module restates are the monitor's and the hook's."""
+    import dataclasses
+
+    from megatron.bridge.training.token_masking.hook import TokenMaskingCounts
+    from megatron.bridge.training.token_masking.monitor import COUNTS_LOG_TAG
+
+    assert COUNTS_LOG_TAG == f"[{TOKEN_MASKING_COUNTS_TAG}]"
+    assert TOKEN_MASKING_COUNT_FIELDS == tuple(field.name for field in dataclasses.fields(TokenMaskingCounts))
+
+
+@pytest.mark.parametrize(
+    "edit, message",
+    [
+        (lambda line: line.replace(" positions=", " places="), "holds"),
+        (lambda line: line.replace(" masked=12", ""), "holds"),
+        (lambda line: line.replace(" masked=12", " masked=1.2E+01"), "non-negative integer"),
+        (lambda line: line.replace(" masked=12", " masked=-12"), "non-negative integer"),
+        (lambda line: line.replace(" masked=12", " masked=12 masked=12"), "non-negative integer"),
+        (lambda line: line + " extra", "non-negative integer"),
+    ],
+)
+def test_a_counts_line_that_is_not_exactly_the_six_counts_raises(edit, message):
+    with pytest.raises(ValueError, match=message):
+        parse_token_masking_counts([edit(token_masking_counts_line(4, **COUNTS))])
+
+
+def test_a_line_names_its_iteration_even_when_its_fields_cannot_be_parsed():
+    """``iteration_of`` reads the prefix alone, for an iteration line and for a counts line, so a line that
+    ``parse_*`` refuses is still known by the iteration it belongs to."""
+    counts_line = token_masking_counts_line(9, **COUNTS)
+    assert iteration_of(counts_line) == 9
+    assert iteration_of(counts_line.replace(" masked=12", " masked=lots")) == 9
+    assert iteration_of(REAL_ITERATION_50) == 50
+    assert iteration_of(REAL_MEMORY_LINE) is None

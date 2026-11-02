@@ -24,6 +24,7 @@ from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 from megatron.bridge.models.conversion.param_mapping import (
     AutoMapping,
     ColumnParallelMapping,
+    GroupedExpertsMapping,
     MambaConv1dMapping,
     MambaInProjMapping,
     MegatronParamMapping,
@@ -50,7 +51,6 @@ def _replace_wildcards(pattern: str, captures: Tuple[str, ...]) -> str:
     return out
 
 
-
 # The pinned mcore stopped wrapping the Mamba conv in an nn.Conv1d submodule and now
 # registers direct `conv1d_weight` / `conv1d_bias` parameters (upstream 35992ba8b), so
 # named_parameters() yields `...mixer.conv1d_weight`, not `...mixer.conv1d.weight`.
@@ -65,6 +65,7 @@ def _mixer_conv1d_megatron_pattern(sub: str, prefix: str) -> str:
     if "self.conv1d_weight" in _inspect.getsource(_MambaMixer.__init__):
         return rf"{prefix}.conv1d_{sub}"
     return rf"{prefix}.conv1d.{sub}"
+
 
 class _MTPFlatteningMapping(MegatronParamMapping[torch.Tensor]):
     """
@@ -415,6 +416,17 @@ class NemotronHBridge(MegatronModelBridge):
         # Convert each dictionary entry to AutoMapping(megatron_param, hf_param)
         for megatron_param, hf_param in param_mappings.items():
             mapping_list.append(AutoMapping(megatron_param=megatron_param, hf_param=hf_param))
+        # GroupedExperts (moe_experts_impl torch_grouped / cublas_grouped): one fused weight per projection.
+        mapping_list.append(
+            GroupedExpertsMapping(
+                "decoder.layers.*.mlp.experts.weight1", "backbone.layers.*.mixer.experts.*.up_proj.weight"
+            )
+        )
+        mapping_list.append(
+            GroupedExpertsMapping(
+                "decoder.layers.*.mlp.experts.weight2", "backbone.layers.*.mixer.experts.*.down_proj.weight"
+            )
+        )
 
         # -----------------------------
         # MTP (flattened HF structure)

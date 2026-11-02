@@ -1,0 +1,11 @@
+{
+  "args": [
+    "export",
+    "<TMP>/ckpt/run",
+    "--no-reasoning"
+  ],
+  "calls": [],
+  "returncode": 1,
+  "stderr": "ERROR: --hf-model is required for export mode.\n  e.g. --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16\n",
+  "stdout": ""
+}

@@ -36,16 +36,12 @@ All the tests need a GPU and deep_ep's HybridEP, which are environment boundarie
 """
 
 import json
-import os
-import socket
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 import torch
 from megatron.core.transformer.moe import fused_a2a
 
+from tests.unit_tests.child_process import free_port, run_python
 from tests.unit_tests.one_rank_nccl_world import init_one_rank_nccl_world
 
 
@@ -62,7 +58,6 @@ HOLD_CYCLES = 1_000_000_000
 REUSE_ATTEMPTS = 64
 # A dispatched-token count no rank can receive: an unpermute that reads it leaves its buffers.
 PAST_EVERY_TOKEN = 2**31 - 1
-REPO_ROOT = Path(__file__).resolve().parents[3]
 # Prefix of the child process's verdict line; NCCL writes its version banner to the same stdout.
 REPORT_TAG = "hybridep-count-lifetime-report "
 
@@ -216,36 +211,21 @@ def _replay_training_sequence():
     print(REPORT_TAG + json.dumps(verdicts), flush=True)
 
 
-def _free_port():
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
-
-
 @requires_hybridep
 @pytest.mark.serial_gpu
 def test_the_next_forward_dispatch_after_a_combine_on_a_freed_handle_runs_cleanly():
-    env = dict(
-        os.environ,
-        MASTER_ADDR="127.0.0.1",
-        MASTER_PORT=str(_free_port()),
-        PYTHONPATH=os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")])),
-    )
-    child = subprocess.run(
+    child = run_python(
         [
-            sys.executable,
             "-c",
             "from tests.unit_tests.training.test_hybridep_count_lifetime import _replay_training_sequence;"
             " _replay_training_sequence()",
         ],
-        env=env,
-        capture_output=True,
-        text=True,
         timeout=600,
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(free_port()),
     )
 
     output = f"stdout:\n{child.stdout[-3000:]}\nstderr:\n{child.stderr[-6000:]}"
-    assert child.returncode == 0, output
     reports = [line[len(REPORT_TAG) :] for line in child.stdout.splitlines() if line.startswith(REPORT_TAG)]
     assert len(reports) == 1, output
     assert json.loads(reports[0]) == {

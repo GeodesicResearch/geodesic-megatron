@@ -2,7 +2,7 @@
 # configs/control_pretraining/build_corpora.sh (which submits the jobs and reimplements nothing)
 # and checked by verify_corpora.py against the same line. Columns, in order:
 #
-#   subset | stage | kind | config | prep_h | tok_h | workers | shards | shard_mode | stripe | docs
+#   subset | stage | kind | config | prep_h | tok_h | workers | partitions | shards | shard_mode | stripe | docs
 #
 #   subset      the HuggingFace config name within the prepare config's dataset; `default` is the
 #               config whose `train` split concatenates the mix's per-source configs, so the
@@ -43,7 +43,7 @@
 # publishes the split; the counts are then the statistics' `n_retained` (pre-registered 8,838,103
 # and 8,923,578), filled in the same change that pins the revision. Both splits are published, each
 # with exactly its pre-registered count.
-default|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix.yaml|20|08|1|32|split|1|8924246
-pa_warm_start_sft_xl50b_filtered_mini_2plus|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl50b-filtered-mini-2plus.yaml|20|08|1|32|split|1|8838103
-pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl50b-filtered-gpt55-4plus-v2.yaml|20|08|1|32|split|1|8923578
-train|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml|20|08|1|32|split|1|9261591
+default|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix.yaml|20|08|1|1|32|split|1|8924246
+pa_warm_start_sft_xl50b_filtered_mini_2plus|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl50b-filtered-mini-2plus.yaml|20|08|1|1|32|split|1|8838103
+pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl50b-filtered-gpt55-4plus-v2.yaml|20|08|1|1|32|split|1|8923578
+train|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml|20|08|1|1|32|split|1|9261591

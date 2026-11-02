@@ -297,6 +297,25 @@ class TestNemotron3NanoPeft:
         # DoRA should also use higher LR
         assert config.optimizer.lr == 1e-4
 
+    def test_peft_config_canonical_lora(self):
+        """canonical_lora gives CanonicalLoRA on Nano's unfused projections, routed experts included (no latent ones)."""
+        from megatron.bridge.peft.canonical_lora import CanonicalLoRA
+        from megatron.bridge.recipes.nemotronh.nemotron_3_nano import NEMOTRON_3_NANO_CANONICAL_LORA_TARGETS
+
+        config = nemotron_3_nano_peft_config(peft_scheme="canonical_lora")
+
+        assert type(config.peft) is CanonicalLoRA
+        assert config.peft.target_modules == NEMOTRON_3_NANO_CANONICAL_LORA_TARGETS
+        assert {"in_proj_z", "in_proj_x", "experts_linear_fc1", "experts_linear_fc2"} <= set(
+            config.peft.target_modules
+        )
+        assert not any("latent" in t for t in config.peft.target_modules)
+
+    def test_peft_config_unknown_scheme_is_refused(self):
+        """An unrecognised scheme name raises instead of quietly training plain LoRA."""
+        with pytest.raises(ValueError, match="peft_scheme"):
+            nemotron_3_nano_peft_config(peft_scheme="canonical-lora")
+
     def test_peft_config_deepep_settings(self):
         """Test that PEFT config has correct MoE dispatcher settings."""
         config = nemotron_3_nano_peft_config()

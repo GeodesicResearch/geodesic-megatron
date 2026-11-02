@@ -285,50 +285,6 @@ def test_merge_lora_adapter_weights_grouped_expert_gate_up_proj_unfused(monkeypa
     torch.testing.assert_close(updated["model.language_model.layers.0.mlp.experts.gate_up_proj"], 2 * torch.eye(2))
 
 
-def test_merge_canonical_adapter_from_weights(monkeypatch):
-    bridge = DummyBridge()
-    converted = {
-        "decoder.layers.0.self_attn.q_proj.weight": torch.zeros(2, 2),
-        "decoder.layers.0.self_attn.k_proj.weight": torch.zeros(1, 2),
-        "decoder.layers.0.self_attn.v_proj.weight": torch.zeros(1, 2),
-    }
-
-    adapter_q = AdapterWeight(
-        global_base_prefix="decoder.layers.0.self_attn.linear_qkv",
-        adapter_key="adapter_q",
-        alpha=1,
-        dim=1,
-        linear_in_weight=MegatronWeightTuple("in_q", torch.eye(2), vp_stage=0),
-        linear_out_weight=MegatronWeightTuple("out_q", torch.ones(2, 2), vp_stage=0),
-    )
-    adapter_k = AdapterWeight(
-        global_base_prefix="decoder.layers.0.self_attn.linear_qkv",
-        adapter_key="adapter_k",
-        alpha=1,
-        dim=1,
-        linear_in_weight=MegatronWeightTuple("in_k", torch.eye(2), vp_stage=0),
-        linear_out_weight=MegatronWeightTuple("out_k", 2 * torch.ones(1, 2), vp_stage=0),
-    )
-    adapter_v = AdapterWeight(
-        global_base_prefix="decoder.layers.0.self_attn.linear_qkv",
-        adapter_key="adapter_v",
-        alpha=1,
-        dim=1,
-        linear_in_weight=MegatronWeightTuple("in_v", torch.eye(2), vp_stage=0),
-        linear_out_weight=MegatronWeightTuple("out_v", 3 * torch.ones(1, 2), vp_stage=0),
-    )
-
-    megatron_model = [SimpleNamespace(config=SimpleNamespace(num_moe_experts=0))]
-    updated = bridge._merge_canonical_adapter_from_weights(
-        megatron_model,
-        converted,
-        [adapter_q, adapter_k, adapter_v],
-    )
-    torch.testing.assert_close(updated["decoder.layers.0.self_attn.q_proj.weight"], torch.ones(2, 2))
-    torch.testing.assert_close(updated["decoder.layers.0.self_attn.k_proj.weight"], 2 * torch.ones(1, 2))
-    torch.testing.assert_close(updated["decoder.layers.0.self_attn.v_proj.weight"], 3 * torch.ones(1, 2))
-
-
 def test_global_param_names_skip_adapter(monkeypatch):
     bridge = DummyBridge()
 
@@ -1090,3 +1046,27 @@ def test_column_parallel_mapping_skips_ep_gather_for_adapters(monkeypatch):
 
     result = mapping.megatron_to_hf(torch.ones(2, 2), None)
     torch.testing.assert_close(result["hf_param"], torch.ones(2, 2))
+
+
+def test_split_qkv_linear_out_splits_lora_b_rows_like_the_base_weight():
+    """A rank-32 LoRA B of a fused QKV, at Super's attention sizes, splits into the q/k/v rows of B @ A.
+
+    The fused weight's last dimension (hidden 4096) and the LoRA rank (32) differ, so the weight path's FP8
+    scale-domain inference must not apply to B.
+    """
+    from megatron.core.transformer import TransformerConfig
+
+    from megatron.bridge.models.conversion.param_mapping import split_qkv_weights
+
+    config = TransformerConfig(
+        num_layers=1, hidden_size=4096, num_attention_heads=32, num_query_groups=2, kv_channels=128
+    )
+    rows, rank = (32 + 2 * 2) * 128, 32
+    torch.manual_seed(0)
+    lora_b, lora_a = torch.randn(rows, rank), torch.randn(rank, config.hidden_size)
+    split = DummyBridge()._split_qkv_linear_out_weight(SimpleNamespace(config=config), lora_b)
+    q_full, k_full, v_full = split_qkv_weights(config, lora_b @ lora_a)
+    assert split["q_proj"].shape == (32 * 128, rank) and split["k_proj"].shape == (2 * 128, rank)
+    torch.testing.assert_close(split["q_proj"] @ lora_a, q_full)
+    torch.testing.assert_close(split["k_proj"] @ lora_a, k_full)
+    torch.testing.assert_close(split["v_proj"] @ lora_a, v_full)

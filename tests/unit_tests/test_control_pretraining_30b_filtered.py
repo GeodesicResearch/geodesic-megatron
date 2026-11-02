@@ -355,6 +355,7 @@ class TestTheSftPackBuild:
             "08",
             "04",
             "1",
+            "1",
             "16",
             "split",
             "1",

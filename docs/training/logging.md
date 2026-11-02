@@ -112,6 +112,10 @@ cfg.logger.log_timers_to_tensorboard = True
 When enabled, W&B automatically mirrors the scalar metrics logged to TensorBoard.  
 In addition, the full run configuration is synced at initialization, allowing for reproducibility and experiment tracking.
 
+W&B also receives run summary keys TensorBoard has no place for, including the resolved parallelism
+(`parallelism/*`) and the token-masking decision (`token_masking/*`). See
+[Training-Data Samples and Token Masking](#training-data-samples-and-token-masking).
+
 
 #### Enable W&B Logging
 
@@ -267,6 +271,47 @@ At each checkpoint boundary, the log is updated with:
 
 This provides a lightweight, text-based audit trail of training progress, useful for tracking performance across restarts.
 
+
+## Training-Data Samples and Token Masking
+
+These records show what a run trains on and whether its token masking acts. The masking itself, its configuration
+and its checks are described in [Token Masking](token-masking.md).
+
+### Training-Data Scan (`logger.data_samples`)
+
+Before the model is built, a run that masks or measures token ids reads on its last rank a bounded, seeded sample of
+every training data source, each prefix of a `.bin/.idx` blend or the packed-SFT parquet set, within the documents
+the training split reads (see [The setup-time training-data check](token-masking.md#the-setup-time-training-data-check)).
+A run that neither masks nor measures ids does not scan. {py:class}`~bridge.training.config.DataSamplesConfig` under
+`logger.data_samples` sets the budgets; it must be a mapping (`data_samples: false` or `null` is refused with a
+`ValueError`), and an unknown key under it is refused too.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_scan_tokens_per_source` | `20000000` | Tokens read per source while counting the masked or measured ids. |
+| `max_scan_seconds` | `120.0` | Wall-clock budget for the whole scan. The other ranks wait for it, so keep it well under the process-group timeout. A run with masking enabled must find a trainable target of a masked id within it: a scan cut short before finding one stops that run. |
+
+```yaml
+logger:
+  data_samples:
+    max_scan_seconds: 60
+```
+
+Each source's counts are logged as a `[data-samples] source <N> <path>: ...` line (documents and tokens scanned, why
+the scan stopped, listed and trainable targets, split forms, out-of-vocabulary tokens). The scan reads only
+`.bin/.idx` blends and packed parquet. For any other training data (a mock or custom dataset, FIM data, unpacked
+fine-tuning JSONL, legacy `.npy` packs, or a packed parquet set the dataset builder has not written yet) a run with
+masking enabled stops at setup, and a run that only measures ids logs `[data-samples] the training data cannot be
+scanned for the ids ...` at ERROR level and trains on. A scan that fails with an exception stops the run on every
+rank.
+
+### Token-Masking Metrics
+
+The per-iteration `token_masking/*` entries travel with the losses: they reach TensorBoard, W&B, MLFlow and Comet ML
+at the same iteration as `lm loss`, gated like the losses by `tensorboard_log_interval`. Their exact counts,
+`token_masking/count/*`, reach W&B every iteration whatever that interval says. Held-out masked-validation results go
+under `masked-validation/` (in MLFlow, `val/masked-validation_<key>`). What each entry and summary key means, and how
+to check a run with them: [Verify a run](token-masking.md#verify-a-run).
 
 ## Tensor Inspection
 

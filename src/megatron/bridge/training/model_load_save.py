@@ -370,6 +370,122 @@ def build_and_load_model(
             return _load_checkpoint()
 
 
+def _model_config_for_loading(
+    checkpoint_path: str, use_cpu_init: bool, mp_overrides: Optional[ModelParallelKwargs]
+) -> tuple[Any, Optional[argparse.Namespace]]:
+    """A checkpoint's model config set up for loading outside training.
+
+    Every parallelism is reset to 1 (and the settings that only make sense under it are turned off) and the training
+    run's gradient hooks are dropped, then ``mp_overrides`` are applied; FP8 is dropped for a CPU load, and a flex
+    dispatcher on a single rank becomes allgather.
+    """
+    model_cfg, mlm_args = load_model_config(checkpoint_path)
+    # If in single GPU environment, reset additional parallel settings
+    model_cfg.tensor_model_parallel_size = 1
+    model_cfg.pipeline_model_parallel_size = 1
+    model_cfg.num_layers_in_first_pipeline_stage = None
+    model_cfg.num_layers_in_last_pipeline_stage = None
+    model_cfg.context_parallel_size = 1
+    model_cfg.expert_model_parallel_size = 1
+    model_cfg.expert_tensor_parallel_size = 1
+    if getattr(model_cfg, "hybrid_layer_pattern", None):
+        model_cfg.hybrid_layer_pattern = model_cfg.hybrid_layer_pattern.replace("|", "")
+    model_cfg.sequence_parallel = False
+    model_cfg.perform_initialization = False
+    model_cfg.virtual_pipeline_model_parallel_size = None
+    model_cfg.hierarchical_context_parallel_sizes = None
+    model_cfg.overlap_moe_expert_parallel_comm = False  # Required with EP=1
+    model_cfg.delay_wgrad_compute = False  # Required with overlap=False
+    # A training run's run_config records its optimizer's gradient hooks, which rebuild as unbound methods.
+    for hook in ("no_sync_func", "grad_sync_func", "param_sync_func", "grad_scale_func", "finalize_model_grads_func"):
+        if hasattr(model_cfg, hook):
+            setattr(model_cfg, hook, None)
+    if use_cpu_init:
+        model_cfg.fp8 = None
+        model_cfg.fp8_param = False
+
+    # Apply model-parallel overrides if provided
+    if mp_overrides:
+        for key, value in mp_overrides.items():
+            if hasattr(model_cfg, key) and value is not None:
+                setattr(model_cfg, key, value)
+
+    # Flex dispatcher requires TPxEP > 1; fall back to allgather for single-rank export
+    if getattr(model_cfg, "moe_token_dispatcher_type", None) == "flex":
+        tp = getattr(model_cfg, "tensor_model_parallel_size", 1)
+        ep = getattr(model_cfg, "expert_model_parallel_size", 1)
+        if tp * ep == 1:
+            model_cfg.moe_token_dispatcher_type = "allgather"
+
+    return model_cfg, mlm_args
+
+
+def load_peft_model(
+    peft_checkpoint_path: str, mp_overrides: Optional[ModelParallelKwargs] = None
+) -> list[MegatronModule]:
+    """The model a PEFT checkpoint describes: its base weights wrapped with its trained adapters, built on the GPUs.
+
+    Builds the model the PEFT run trained (its ``run_config.yaml`` model section, with ``mp_overrides``), loads the
+    base weights from that run's ``checkpoint.pretrained_checkpoint`` (resolved as training resolves it), applies the
+    run's ``peft`` section (every parameter frozen, eval mode) and loads the adapter tensors from
+    ``peft_checkpoint_path``. Collective: every rank of an initialised distributed context calls it.
+
+    Args:
+        peft_checkpoint_path: an ``iter_NNNNNNN`` directory written by a PEFT training run.
+        mp_overrides: model-parallel sizes for the build.
+
+    Returns:
+        The model chunks, adapters in place.
+
+    Raises:
+        ValueError: the run_config names no ``peft`` or no ``checkpoint.pretrained_checkpoint``.
+        FileNotFoundError: the base checkpoint has no iteration to load.
+        CheckpointException: the PEFT checkpoint lacks one of the model's adapter tensors (``dist_checkpointing.load``).
+    """
+    from megatron.core import dist_checkpointing
+
+    from megatron.bridge.training.checkpointing import (
+        _DIRECT_ITERATION_DIR_SENTINEL,
+        _generate_model_state_dict,
+        _resolve_checkpoint_iteration,
+        apply_peft_adapter_filter_to_state_dict,
+    )
+    from megatron.bridge.training.utils.checkpoint_utils import (
+        get_checkpoint_name,
+        get_checkpoint_run_config_filename,
+        read_run_config,
+    )
+    from megatron.bridge.utils.instantiate_utils import instantiate
+
+    run_config = read_run_config(get_checkpoint_run_config_filename(peft_checkpoint_path))
+    peft_section = run_config.get("peft")
+    if not peft_section:
+        raise ValueError(f"{peft_checkpoint_path}/run_config.yaml names no peft: not a PEFT checkpoint")
+    base_root = (run_config.get("checkpoint") or {}).get("pretrained_checkpoint")
+    if not base_root:
+        raise ValueError(f"{peft_checkpoint_path}/run_config.yaml names no checkpoint.pretrained_checkpoint")
+    base_iteration, base_release = _resolve_checkpoint_iteration(base_root, None)
+    if base_iteration == _DIRECT_ITERATION_DIR_SENTINEL:
+        base_iteration_dir = base_root
+    elif base_iteration < 0:
+        raise FileNotFoundError(f"no checkpoint iteration found in the base checkpoint {base_root}")
+    else:
+        base_iteration_dir = get_checkpoint_name(base_root, base_iteration, base_release)
+
+    model_cfg, _ = _model_config_for_loading(peft_checkpoint_path, use_cpu_init=False, mp_overrides=mp_overrides)
+    model = build_and_load_model(base_iteration_dir, model_cfg, skip_temp_dist_context=True)
+    model = model if isinstance(model, list) else [model]
+
+    peft = instantiate(peft_section)
+    model = peft(model, training=False)
+    adapter_state_dict = apply_peft_adapter_filter_to_state_dict(_generate_model_state_dict(model, {}), peft)
+    # Strict: a checkpoint missing any of the model's adapter tensors raises.
+    loaded = dist_checkpointing.load(adapter_state_dict, peft_checkpoint_path)
+    for index, chunk in enumerate(model):
+        chunk.load_state_dict(loaded["model"] if len(model) == 1 else loaded[f"model{index}"], strict=False)
+    return model
+
+
 def load_megatron_model(
     checkpoint_path: str,
     model_type: Optional[Literal["gpt", "mamba"]] = None,
@@ -400,40 +516,7 @@ def load_megatron_model(
         The model instance with loaded weights if return_state_dict is False,
         otherwise returns a dictionary containing the full, unsharded model state_dict.
     """
-    model_cfg, mlm_args = load_model_config(checkpoint_path)
-    # If in single GPU environment, reset additional parallel settings
-    model_cfg.tensor_model_parallel_size = 1
-    model_cfg.pipeline_model_parallel_size = 1
-    model_cfg.num_layers_in_first_pipeline_stage = None
-    model_cfg.num_layers_in_last_pipeline_stage = None
-    model_cfg.context_parallel_size = 1
-    model_cfg.expert_model_parallel_size = 1
-    model_cfg.expert_tensor_parallel_size = 1
-    if getattr(model_cfg, "hybrid_layer_pattern", None):
-        model_cfg.hybrid_layer_pattern = model_cfg.hybrid_layer_pattern.replace("|", "")
-    model_cfg.sequence_parallel = False
-    model_cfg.perform_initialization = False
-    model_cfg.virtual_pipeline_model_parallel_size = None
-    model_cfg.hierarchical_context_parallel_sizes = None
-    model_cfg.overlap_moe_expert_parallel_comm = False  # Required with EP=1
-    model_cfg.delay_wgrad_compute = False  # Required with overlap=False
-    if use_cpu_init:
-        model_cfg.fp8 = None
-        model_cfg.fp8_param = False
-
-    # Apply model-parallel overrides if provided
-    if mp_overrides:
-        for key, value in mp_overrides.items():
-            if hasattr(model_cfg, key) and value is not None:
-                setattr(model_cfg, key, value)
-
-    # Flex dispatcher requires TPxEP > 1; fall back to allgather for single-rank export
-    if getattr(model_cfg, "moe_token_dispatcher_type", None) == "flex":
-        tp = getattr(model_cfg, "tensor_model_parallel_size", 1)
-        ep = getattr(model_cfg, "expert_model_parallel_size", 1)
-        if tp * ep == 1:
-            model_cfg.moe_token_dispatcher_type = "allgather"
-
+    model_cfg, mlm_args = _model_config_for_loading(checkpoint_path, use_cpu_init, mp_overrides)
     return build_and_load_model(
         checkpoint_path, model_cfg, model_type, mlm_args, return_state_dict, use_cpu_init, skip_temp_dist_context
     )

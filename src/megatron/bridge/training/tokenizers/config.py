@@ -14,12 +14,18 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional, Union
+from typing import Any, ClassVar, Literal, Optional, Union
 
 
 @dataclass
 class TokenizerConfig:
     """Configuration settings for the tokenizer."""
+
+    # A misspelled tokenizer key (e.g. ``tokenizer_modle``) must fail rather than leave its default in place.
+    reject_unknown_override_keys: ClassVar[bool] = True
+    removed_override_keys: ClassVar[dict[str, str]] = {
+        "loss_mask_token_ids": "token masking is configured only in token_masking: {enabled: true, token_ids: [...]}",
+    }
 
     metadata_path: Optional[Union[str | dict]] = None
     """Path to the tokenizer metadata file."""
@@ -104,19 +110,4 @@ class TokenizerConfig:
             "legacy": True,
             "ignore_extra_whitespaces": False,
         }
-    """
-
-    loss_mask_token_ids: Optional[list[int]] = None
-    """Token IDs whose loss contribution is masked at training time.
-
-    The training hook in `gpt_step._forward_step_common` reads this list and zeros
-    `loss_mask` at every position where `labels[t]` is in the list. Works uniformly
-    across CPT and SFT.
-
-    Auto-populated at startup from the underlying HuggingFace tokenizer's
-    `tokenizer_config.json` if it carries a top-level `loss_mask_token_ids` field.
-    Manually setting this in YAML also works and overrides the tokenizer's value.
-
-    Example use case: loss-mask markers like `<stage=training>` that should
-    appear in training context but never be emitted by the model.
     """

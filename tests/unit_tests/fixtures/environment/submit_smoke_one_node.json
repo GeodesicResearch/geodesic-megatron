@@ -1,0 +1,9 @@
+{
+  "args": [
+    "smoke"
+  ],
+  "calls": [],
+  "returncode": 1,
+  "stderr": "ERROR: smoke mode needs at least 2 nodes (got 1). Resubmit with --nodes=2.\n",
+  "stdout": "============================================================\nEnvironment smoke\n  Node:       nid000001\n  Job ID:     <JOB>\n  Start time: <DATE>\n============================================================\n"
+}

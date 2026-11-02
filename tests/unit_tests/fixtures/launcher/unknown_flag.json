@@ -1,0 +1,7 @@
+{
+  "rank": null,
+  "returncode": 1,
+  "stderr": "Unknown option: --bogus\n",
+  "stdout": "",
+  "steps": []
+}

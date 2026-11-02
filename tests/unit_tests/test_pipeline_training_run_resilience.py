@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for the resilience wiring in pipeline_training_run.py.
+"""Unit tests for the resilience wiring of pipeline/training/resilience.py.
 
 Fault tolerance and NVRx straggler detection are separately switchable: `--disable-ft`
-drops both, `--disable-straggler` drops only the detector. The `run_module` fixture loads
-the repo-root script by path, so the real parser and the real config-assembly function are
+drops both, `--disable-straggler` drops only the detector. The real parser (the `run_module`
+fixture loads the repo-root script by path) and the real config-assembly function are
 exercised — the config being mutated is a real Nano recipe, not a stand-in.
 """
 
@@ -27,19 +27,20 @@ import sys
 import pytest
 
 from megatron.bridge.training.config import FaultToleranceConfig, NVRxStragglerDetectionConfig
+from pipeline.training import recipes, resilience
 
 
 @pytest.fixture
-def cfg(run_module):
+def cfg():
     """A real ConfigContainer: the Nano SFT recipe is pure dataclass construction."""
-    return run_module.RECIPE_MAP[("nano", "sft")](None)
+    return recipes.RECIPE_MAP[("nano", "sft")](None)
 
 
 def _apply(run_module, cfg, monkeypatch, flags):
     monkeypatch.setattr(sys, "argv", ["pipeline_training_run.py", "--model", "nano", "--mode", "sft", *flags])
     args, overrides = run_module.parse_cli_args()
     assert overrides == [], "resilience flags must be recognised by the parser, not fall through to Hydra"
-    run_module.apply_resilience_config(cfg, args)
+    resilience.apply_resilience_config(cfg, args)
     return cfg
 
 
@@ -95,16 +96,16 @@ def test_disable_ft_wins_over_disable_straggler(run_module, cfg, monkeypatch):
         (1, 7200.0),  # a checkpoint every iteration has the whole window
     ],
 )
-def test_max_seconds_per_iteration_arithmetic(run_module, first_checkpoint_iteration, expected_seconds):
-    assert run_module.max_seconds_per_iteration_under_ft_heartbeat(
-        first_checkpoint_iteration, run_module.FT_INITIAL_RANK_HEARTBEAT_TIMEOUT_SECONDS
+def test_max_seconds_per_iteration_arithmetic(first_checkpoint_iteration, expected_seconds):
+    assert resilience.max_seconds_per_iteration_under_ft_heartbeat(
+        first_checkpoint_iteration, resilience.FT_INITIAL_RANK_HEARTBEAT_TIMEOUT_SECONDS
     ) == pytest.approx(expected_seconds)
 
 
-def test_max_seconds_per_iteration_rejects_non_positive_iteration(run_module):
+def test_max_seconds_per_iteration_rejects_non_positive_iteration():
     """A zero or negative first-checkpoint iteration is a config error, not a divide-by-zero."""
     with pytest.raises(ValueError):
-        run_module.max_seconds_per_iteration_under_ft_heartbeat(0, 7200.0)
+        resilience.max_seconds_per_iteration_under_ft_heartbeat(0, 7200.0)
 
 
 def test_ft_warns_that_the_first_checkpoint_must_beat_the_heartbeat(run_module, cfg, monkeypatch, caplog):

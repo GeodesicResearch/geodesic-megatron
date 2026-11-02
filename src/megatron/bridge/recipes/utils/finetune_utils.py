@@ -21,6 +21,7 @@ from megatron.bridge.data.hf_processors.gsm8k import process_gsm8k_example
 from megatron.bridge.data.hf_processors.openmathinstruct2 import process_openmathinstruct2_example
 from megatron.bridge.data.hf_processors.squad import process_squad_example
 from megatron.bridge.peft.base import PEFT
+from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 from megatron.bridge.peft.dora import DoRA
 from megatron.bridge.peft.lora import LoRA
 
@@ -29,7 +30,7 @@ def default_peft_config(peft_scheme: str | PEFT | None, **kwargs) -> PEFT | None
     """Create default PEFT configuration matching NeMo2 exactly.
 
     Args:
-        peft_scheme: PEFT scheme - 'lora', 'dora', PEFT instance, or None for full finetuning
+        peft_scheme: PEFT scheme - 'lora', 'canonical_lora', 'dora', PEFT instance, or None for full finetuning
 
     Returns:
         PEFT configuration or None for full finetuning
@@ -45,12 +46,34 @@ def default_peft_config(peft_scheme: str | PEFT | None, **kwargs) -> PEFT | None
             return None
         if peft_scheme.lower() == "lora":
             return LoRA(**kwargs)
+        elif peft_scheme.lower() == "canonical_lora":
+            return CanonicalLoRA(**kwargs)
         elif peft_scheme.lower() == "dora":
             return DoRA(**kwargs)
         else:
-            raise ValueError(f"Unknown PEFT scheme: {peft_scheme}. Supported: 'lora', 'dora', or None")
+            raise ValueError(
+                f"Unknown PEFT scheme: {peft_scheme}. Supported: 'lora', 'canonical_lora', 'dora', or None"
+            )
 
     raise ValueError(f"Invalid peft type: {type(peft_scheme)}. Expected str, PEFT instance, or None")
+
+
+def recipe_peft_config(peft_scheme: str | PEFT, target_modules: dict[str, list[str]]) -> PEFT:
+    """A recipe's PEFT: a PEFT instance as given, or the named scheme on that scheme's target modules.
+
+    Args:
+        peft_scheme: a scheme name of ``target_modules`` or a PEFT instance.
+        target_modules: the recipe's target modules for each scheme name it supports.
+
+    Raises:
+        ValueError: a scheme name the recipe has no target modules for.
+    """
+    if isinstance(peft_scheme, PEFT):
+        return peft_scheme
+    scheme = peft_scheme.lower()
+    if scheme not in target_modules:
+        raise ValueError(f"peft_scheme {peft_scheme!r} is not one of {sorted(target_modules)} or a PEFT instance")
+    return default_peft_config(scheme, target_modules=target_modules[scheme])
 
 
 def default_squad_config(seq_length: int, packed_sequence: bool = True, pad_seq_to_mult: int = 1) -> HFDatasetConfig:

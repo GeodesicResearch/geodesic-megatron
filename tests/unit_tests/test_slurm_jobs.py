@@ -20,6 +20,7 @@ the cluster. What is tested is how their output is read.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -85,3 +86,21 @@ def test_a_refused_or_ambiguous_submission_is_an_error(monkeypatch, tmp_path, re
     monkeypatch.setattr(slurm_jobs.subprocess, "run", lambda *a, **k: result)
     with pytest.raises(slurm_jobs.SlurmError, match=match):
         slurm_jobs.submit(["isambard_sbatch"], tmp_path, {})
+
+
+def test_a_forced_submission_points_the_job_at_its_checkout_and_skips_the_node_cap(tmp_path):
+    assert slurm_jobs.forced_submission_env(tmp_path) == {
+        "GEODESIC_REPO_DIR": str(tmp_path),
+        "ISAMBARD_SBATCH_FORCE": "1",
+    }
+
+
+def test_the_shell_line_submits_the_same_command_from_the_same_place(tmp_path):
+    """A pasted line splits back into the checkout, the environment and the command's words, quoting and all."""
+    root = tmp_path / "a copy"
+    command = ["isambard_sbatch", "--job-name=x y", "job.sbatch", "--report-out", "/p/it's.json"]
+    line = slurm_jobs.shell_submission(command, root, {"ISAMBARD_SBATCH_FORCE": "1", "GEODESIC_REPO_DIR": str(root)})
+    words = shlex.split(line)
+    assert words[:3] == ["cd", str(root), "&&"]
+    assert words[3:5] == ["ISAMBARD_SBATCH_FORCE=1", f"GEODESIC_REPO_DIR={root}"]
+    assert words[5:] == command

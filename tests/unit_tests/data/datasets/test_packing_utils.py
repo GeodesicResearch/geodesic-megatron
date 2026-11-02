@@ -17,7 +17,14 @@ from typing import List
 import numpy as np
 import pytest
 
-from megatron.bridge.data.datasets.packing_utils import first_fit, first_fit_decreasing
+from megatron.bridge.data.datasets.packing_utils import (
+    create_hist,
+    create_packing_strategy,
+    fill_packing_strategy,
+    first_fit,
+    first_fit_decreasing,
+    one_per_pack,
+)
 
 
 def _first_fit_linear(seqlens: List[int], pack_size: int) -> List[List[int]]:
@@ -83,3 +90,28 @@ class TestSegmentTreeMatchesLinearScan:
         seqlens = list(np.random.randint(1, 2048, size=5000))
         pack_size = 2048
         assert first_fit(seqlens, pack_size) == _first_fit_linear(seqlens, pack_size)
+
+
+class TestOnePerPack:
+    """one_per_pack keeps every sequence in a row of its own (unpacked training)."""
+
+    def test_each_sequence_gets_its_own_bin_in_order(self):
+        assert one_per_pack([5, 1, 4096, 3], pack_size=4096) == [[5], [1], [4096], [3]]
+
+    def test_a_sequence_longer_than_the_pack_is_refused(self):
+        with pytest.raises(ValueError, match="exceed pack_size"):
+            one_per_pack([10, 4097], pack_size=4096)
+
+    def test_strategy_and_fill_give_one_document_per_row(self):
+        documents = [
+            {"input_ids": [1, 2, 3], "loss_mask": [1, 1, 1]},
+            {"input_ids": [4, 5, 6], "loss_mask": [0, 1, 1]},
+            {"input_ids": [7, 8, 9, 10], "loss_mask": [1, 1, 1, 1]},
+        ]
+        sequences, histogram = create_hist(documents, truncate_seq_len=8)
+        assignments, metadata = create_packing_strategy(histogram, pack_size=8, packing_algorithm="one_per_pack")
+        assert assignments == [[2], [2], [3]]
+        assert metadata["max_samples_per_bin"] == 1
+        rows = fill_packing_strategy(assignments, sequences, pack_size=8, pad_id=0)
+        assert sorted(row["input_ids"] for row in rows) == [[1, 2, 3], [4, 5, 6], [7, 8, 9, 10]]
+        assert all(row["seq_start_id"] == [0] for row in rows)

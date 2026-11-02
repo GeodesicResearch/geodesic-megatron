@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Extend an HF safetensors checkpoint's vocab by 1 for the MQ marker token.
 
-The MQ tokenizer family
-(`geodesic-research/nemotron-{base,instruct-prefill-parity}-tokenizer-mq`)
-adds `<quarantine_token>` (id 131072) as a single special token. Training
+The MQ tokenizers (`nemotron-base-tokenizer-mq-v2` and
+`nemotron-instruct-tokenizer-prefill-parity-mq-v2`, built by
+`scripts/data/build_marker_tokenizers.py` from
+`configs/tokenizers/marker_tokenizers.yaml`) add `<quarantine_token>`
+(id 131072) as a single special token. Training
 starts from one of the *-Base[-Chat-Init]-BF16 checkpoints (or any other
 vocab-131072 HF dir, such as the exported warm-start SFT) whose embedding
 and lm_head are sized for the original 131072 vocab. Loading the original
@@ -32,7 +34,11 @@ This script:
 tokenizer for a Base checkpoint (EOD `</s>`, id 2) and the instruct MQ tokenizer
 for an instruct/SFT one (EOS `<|im_end|>`, id 11). Base checkpoints never
 trained the chat-special rows, so installing the instruct variant on one yields
-a deterministic `Inf in local grad norm` on the first backward pass.
+a deterministic `Inf in local grad norm` on the first backward pass. A tokenizer
+directory whose `tokenizer_config.json` carries a `loss_mask_token_ids` key is
+refused before anything is written: training setup refuses such a tokenizer, so
+the checkpoint would ship one no run can train with. Runs mask the marker through
+their config (`token_masking: {enabled: true, token_ids: [131072]}`).
 
 After running this, re-import to Megatron via the `import` mode of
 `pipeline_checkpoint_convert.sh`:
@@ -46,13 +52,13 @@ Usage:
     python scripts/data/extend_vocab_for_mq.py \\
         --input-dir  /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16/hf \\
         --output-dir /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-mq-hf \\
-        --mq-tokenizer-dir /projects/a5k/public/tokenizers/nemotron-base-tokenizer-mq
+        --mq-tokenizer-dir /projects/a5k/public/tokenizers/nemotron-base-tokenizer-mq-v2
 
     # Extend an exported warm-start SFT — pair it with the INSTRUCT MQ tokenizer
     python scripts/data/extend_vocab_for_mq.py \\
         --input-dir  /projects/a5k/public/checkpoints/megatron/nemotron_120b_warm_start_sft_200k_instruct/iter_0000495/hf \\
         --output-dir /projects/a5k/public/checkpoints/megatron_bridges/models/nemotron_120b_warm_start_sft_200k_instruct-mq-hf \\
-        --mq-tokenizer-dir /projects/a5k/public/tokenizers/nemotron-instruct-tokenizer-prefill-parity-mq
+        --mq-tokenizer-dir /projects/a5k/public/tokenizers/nemotron-instruct-tokenizer-prefill-parity-mq-v2
 """
 
 from __future__ import annotations
@@ -66,6 +72,8 @@ from pathlib import Path
 
 import safetensors.torch
 import torch
+
+from megatron.bridge.training.token_masking.resolution import DECLARATION_FIELD
 
 
 EMBED_KEY = "backbone.embeddings.weight"
@@ -89,8 +97,9 @@ NEW_VOCAB = TARGET_VOCAB
 # caller must therefore name the variant explicitly.
 #
 # REQUIRED_TOKENIZER_FILES must be present in the source dir or the run aborts:
-# `tokenizer_config.json` carries `loss_mask_token_ids`, so silently shipping a
-# checkpoint without it would disable MQ masking with no error anywhere.
+# `tokenizer.json` registers the marker, and `tokenizer_config.json` must come
+# from the same tokenizer (its special-token roles and class), so a checkpoint
+# missing either would ship the parent's tokenizer, which BPE-splits the marker.
 REQUIRED_TOKENIZER_FILES = [
     "tokenizer.json",
     "tokenizer_config.json",
@@ -156,7 +165,32 @@ def _save_shard_atomically(tensors: dict[str, torch.Tensor], dest: Path) -> None
         tmp.unlink(missing_ok=True)
 
 
-def main() -> int:
+def check_mq_tokenizer_dir(tokenizer_dir: Path) -> None:
+    """Raise unless ``tokenizer_dir`` holds a tokenizer the extended checkpoint can ship.
+
+    It must be a directory with every required tokenizer file, and its ``tokenizer_config.json`` must carry no
+    ``loss_mask_token_ids`` key, whatever its value: training setup refuses a tokenizer carrying one.
+    """
+    if not tokenizer_dir.is_dir():
+        raise FileNotFoundError(
+            f"MQ tokenizer dir not found at {tokenizer_dir}. Build it with scripts/data/build_marker_tokenizers.py "
+            "first."
+        )
+    missing = [name for name in REQUIRED_TOKENIZER_FILES if not (tokenizer_dir / name).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"--mq-tokenizer-dir {tokenizer_dir} is missing required file(s): {missing}. Without them the checkpoint "
+            "would ship its parent's tokenizer, which does not register the marker."
+        )
+    if DECLARATION_FIELD in json.loads((tokenizer_dir / "tokenizer_config.json").read_text()):
+        raise ValueError(
+            f"--mq-tokenizer-dir {tokenizer_dir}: tokenizer_config.json carries {DECLARATION_FIELD}, which training "
+            "setup refuses. Use a tokenizer built by scripts/data/build_marker_tokenizers.py, which has no such key; "
+            "runs mask the marker through token_masking.token_ids in their config."
+        )
+
+
+def main(argv: list[str] | None = None) -> int:
     """Extend one checkpoint's vocab for the MQ marker and write it to the output dir."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("--input-dir", required=True, help="HF model snapshot dir to read from")
@@ -176,9 +210,10 @@ def main() -> int:
         "pick the variant matching the checkpoint — the base MQ tokenizer for a Base checkpoint "
         "(EOD '</s>'), the instruct MQ tokenizer for an instruct/SFT one (EOS '<|im_end|>'). "
         "Installing the instruct variant onto a Base checkpoint causes a deterministic Inf grad "
-        "norm on the first backward pass.",
+        "norm on the first backward pass. Refused if its tokenizer_config.json carries "
+        f"{DECLARATION_FIELD}.",
     )
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     inp = Path(args.input_dir)
     out = Path(args.output_dir)
@@ -188,20 +223,8 @@ def main() -> int:
             "safetensors load_file returns memory-mapped tensors, so rewriting the input file "
             "in place mutates the very tensors being read."
         )
-    missing = [f for f in REQUIRED_TOKENIZER_FILES if not (args.mq_tokenizer_dir / f).exists()]
-    if missing:
-        raise FileNotFoundError(
-            f"--mq-tokenizer-dir {args.mq_tokenizer_dir} is missing required file(s): {missing}. "
-            "tokenizer_config.json carries loss_mask_token_ids; shipping a checkpoint without it "
-            "would silently disable MQ loss masking."
-        )
+    check_mq_tokenizer_dir(args.mq_tokenizer_dir)
     out.mkdir(parents=True, exist_ok=True)
-
-    if not args.mq_tokenizer_dir.is_dir():
-        raise FileNotFoundError(
-            f"MQ tokenizer dir not found at {args.mq_tokenizer_dir}. "
-            f"Run scripts/data/build_mq_tokenizers.py first (or pass --mq-tokenizer-dir)."
-        )
 
     # 1. Load index
     index_path = inp / "model.safetensors.index.json"
@@ -317,10 +340,9 @@ def main() -> int:
     (out / "model.safetensors.index.json").write_text(json.dumps(new_index, indent=2) + "\n")
     print(f"  model.safetensors.index.json: total_size={total_size:,}")
 
-    # 9. Overwrite tokenizer files with the MQ instruct-prefill-parity tokenizer's.
-    #    This ensures any downstream HF export that copies tokenizer files from
-    #    this dir ships with `<quarantine_token>` registered and the
-    #    `loss_mask_token_ids` field on tokenizer_config.json.
+    # 9. Overwrite tokenizer files with the MQ tokenizer's, so any downstream HF
+    #    export that copies tokenizer files from this dir ships with
+    #    `<quarantine_token>` registered as a single special token.
     print(f"\nOverwriting tokenizer files from {args.mq_tokenizer_dir}...")
     copied = 0
     for fname in TOKENIZER_FILE_NAMES:

@@ -222,3 +222,9 @@ class TestCheckHfDatasetsCache:
     def test_probe_file_is_cleaned_up(self, validate_mod, monkeypatch, tmp_path):
         self._run(validate_mod, monkeypatch, tmp_path)
         assert list(tmp_path.iterdir()) == []
+
+
+def test_the_ft_launcher_stage_passes_on_the_image(validate_mod):
+    """The validator's stage runs the image's ft_launcher (the tests run in the pipeline container)."""
+    validate_mod.check_ft_launcher_flags()
+    assert validate_mod.results[-1][:2] == ("ft_launcher supports section timeouts", True), validate_mod.results[-1]

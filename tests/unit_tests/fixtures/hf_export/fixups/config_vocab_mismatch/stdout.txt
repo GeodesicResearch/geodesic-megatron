@@ -1,0 +1,6 @@
+Preserved upstream chat_template.jinja (10504 bytes); set enable_thinking default → False
+Stripped <think></think> from non-reasoning generation prompt (avoids stray </think> echoes)
+Synced tokenizer_config.json embedded chat_template <- chat_template.jinja
+Set generation_config.json decoding defaults: greedy
+Removed auto_map from config.json (using native transformers NemotronH)
+Reconciled vocab_size: config 131072 -> 131584 (actual embedding rows; donor/weight vocab mismatch)

@@ -124,7 +124,7 @@ class FinetuningDatasetBuilder:
     def _prepare_packed_split(
         self,
         split_name: str,
-        packed_path: Union[str, Path],
+        packed_path: Union[str, Path, list[Union[str, Path]]],
         input_path: Path,
     ) -> None:
         """Prepare a single packed data split if it doesn't already exist.
@@ -139,6 +139,11 @@ class FinetuningDatasetBuilder:
         if self._packed_path_exists(packed_path):
             print_rank_0(f"Skipping packed {split_name} data preparation - already exists: {packed_path}")
             return
+        if not isinstance(packed_path, (str, Path)):
+            # A list names packs prepared elsewhere (one per source); there is no single output to pack into.
+            raise FileNotFoundError(
+                f"Packed {split_name} spec {packed_path} does not resolve to existing parquet files"
+            )
 
         packed_path_str = str(packed_path)
         if packed_path_str.lower().endswith(".npy"):
@@ -164,7 +169,7 @@ class FinetuningDatasetBuilder:
             num_tokenizer_workers=self._num_tokenizer_workers,
         )
 
-    def _packed_path_exists(self, path: Union[str, Path]) -> bool:
+    def _packed_path_exists(self, path: Union[str, Path, list[Union[str, Path]]]) -> bool:
         """Check if a packed data path exists.
 
         For .npy files: check file exists
@@ -176,17 +181,16 @@ class FinetuningDatasetBuilder:
         Returns:
             True if the packed data exists
         """
-        path_str = str(path)
-
-        # For packed parquet specs, check if resolution returns files
-        if is_packed_parquet_spec(path_str):
+        # For packed parquet specs (a list included), check if resolution returns files
+        if is_packed_parquet_spec(path):
             try:
-                resolved = resolve_packed_parquet_paths(path_str)
+                resolved = resolve_packed_parquet_paths(path)
                 return len(resolved) > 0
             except ValueError:
                 return False
 
         # For .npy or other files, check existence
+        path_str = str(path)
         if MultiStorageClientFeature.is_enabled():
             msc = MultiStorageClientFeature.import_package()
             return msc.Path(path_str).is_file()
@@ -252,7 +256,7 @@ class FinetuningDatasetBuilder:
 
     def _create_dataset(
         self,
-        path: Union[str, Path],
+        path: Union[str, Path, list[Union[str, Path]]],
         pack_metadata_path: Optional[Union[str, Path]] = None,
         is_test: bool = False,
         **kwargs: Any,
@@ -268,13 +272,14 @@ class FinetuningDatasetBuilder:
         Returns:
             The created dataset
         """
+        is_parquet_spec = is_packed_parquet_spec(path)
         path_str = str(path)
 
-        # Check if path exists - handle packed parquet specs differently
-        if is_packed_parquet_spec(path_str):
+        # Check if path exists - handle packed parquet specs (a list included) differently
+        if is_parquet_spec:
             # For packed parquet specs, check via resolution
             try:
-                resolved = resolve_packed_parquet_paths(path_str)
+                resolved = resolve_packed_parquet_paths(path)
                 path_exists = len(resolved) > 0
             except ValueError:
                 path_exists = False
@@ -299,7 +304,7 @@ class FinetuningDatasetBuilder:
             if self._pad_cu_seqlens:
                 # pad_cu_seqlens requires metadata
                 effective_metadata_path = pack_metadata_path
-            elif is_packed_parquet_spec(path_str):
+            elif is_parquet_spec:
                 # Externally prepared packed parquet without pad_cu_seqlens doesn't need metadata
                 effective_metadata_path = None
             else:

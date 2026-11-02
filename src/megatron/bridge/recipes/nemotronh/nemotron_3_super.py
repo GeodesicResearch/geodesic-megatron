@@ -17,9 +17,8 @@ import torch
 
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.base import PEFT
-from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.recipes.common import _peft_common, _pretrain_common, _sft_common
-from megatron.bridge.recipes.utils.finetune_utils import default_peft_config
+from megatron.bridge.recipes.utils.finetune_utils import recipe_peft_config
 from megatron.bridge.training.config import ConfigContainer
 
 
@@ -224,6 +223,25 @@ def nemotron_3_super_sft_config() -> ConfigContainer:
 # =============================================================================
 
 
+#: Every projection of the Latent-MoE hybrid, one adapter per unfused matrix (CanonicalLoRA names); the routed
+#: experts' targets need model.moe_experts_impl torch_grouped or cublas_grouped.
+NEMOTRON_3_SUPER_CANONICAL_LORA_TARGETS = [
+    "linear_q",
+    "linear_k",
+    "linear_v",
+    "linear_proj",
+    "in_proj_z",
+    "in_proj_x",
+    "out_proj",
+    "fc1_latent_proj",
+    "fc2_latent_proj",
+    "linear_fc1_up",
+    "linear_fc2",
+    "experts_linear_fc1",
+    "experts_linear_fc2",
+]
+
+
 def nemotron_3_super_peft_config(
     peft_scheme: str | PEFT = "lora",
 ) -> ConfigContainer:
@@ -232,7 +250,7 @@ def nemotron_3_super_peft_config(
     Default parallelism: TP=1, PP=1, EP=1, SP=True
 
     Args:
-        peft_scheme: PEFT scheme - "lora", "dora", or a custom PEFT instance.
+        peft_scheme: PEFT scheme - "lora", "dora", "canonical_lora", or a custom PEFT instance.
 
     Returns:
         ConfigContainer with all settings pre-configured for Nemotron 3 Super PEFT.
@@ -282,20 +300,14 @@ def nemotron_3_super_peft_config(
 
     # PEFT config - Nemotron uses Mamba-specific target modules
     mamba_target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
-    if isinstance(peft_scheme, str) and peft_scheme.lower() in ["lora", "dora"]:
-        cfg.peft = default_peft_config(peft_scheme, target_modules=mamba_target_modules)
-    elif isinstance(peft_scheme, PEFT):
-        cfg.peft = peft_scheme
-    else:
-        cfg.peft = LoRA(
-            target_modules=mamba_target_modules,
-            dim=32,
-            alpha=32,
-            dropout=0.0,
-            dropout_position="pre",
-            lora_A_init_method="xavier",
-            lora_B_init_method="zero",
-        )
+    cfg.peft = recipe_peft_config(
+        peft_scheme,
+        {
+            "lora": mamba_target_modules,
+            "dora": mamba_target_modules,
+            "canonical_lora": NEMOTRON_3_SUPER_CANONICAL_LORA_TARGETS,
+        },
+    )
 
     # Optimizer overrides
     cfg.optimizer.lr = 1e-4

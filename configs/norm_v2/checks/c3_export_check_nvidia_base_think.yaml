@@ -1,0 +1,42 @@
+# C3 for every export of NVDA-Norm-Think (geodesic-research/control-pretraining-30b-nvidia-base-xl50b-v4-think), read by
+# scripts/checkpoint/export_check.py and run per export by scripts/checkpoint/export_check.sbatch. A revision is released
+# to evaluations only once its export passes.
+#
+# It composes onto the Clueless-Norm think spec, which states what an export of the xl-50b v4 SFT recipe is measured by:
+# the reference export (Normal-Norm's v4 think model at iteration 5976, the same recipe, tokenizer and architecture),
+# the files that must equal the reference's byte for byte, the 64 documents of the ce_agreement windows and the
+# reference forward's posture. It states what NVDA-Norm-Think changes:
+#   - the criteria hidden_probability and greedy_hidden_emissions are omitted (null). They measure the hidden token
+#     id 500 of Clueless-Norm, which NVDA-Norm-Think never saw as a hidden span, so they mean nothing for it;
+#   - its own tolerance for ce_agreement, and the record of how it is judged (a calibration is a spec's own).
+# The windows still come from the Clueless-Norm corpora, with the targets that are id 500 left out, so every export of
+# the SFT recipe is scored on the same text.
+base_config: ../../metagaming_filtering/30b_clueless_norm/checks/c3_export_check_think.yaml
+
+criteria:
+  # The think spec's tolerance, kept by the pre-registered rule in `calibration` below.
+  ce_agreement:
+    max_abs_mean_shift: 0.005
+    max_mean_abs_difference: 0.07
+    max_p99_abs_difference: 0.7
+  hidden_probability: null
+  greedy_hidden_emissions: null
+
+# Pre-registered on 2026-10-23, before the check ran on any NVDA-Norm-Think export. The rule: the think spec's tolerance
+# holds for NVDA-Norm-Think when it passes the correct pair (the 5976 export against its own save) and fails the
+# negative control (the same export against the NVDA-Base conversion, the SFT's warm start, which differs from it by
+# the whole SFT). `scripts/checkpoint/export_check.py calibrate` judges both runs and writes a report, which is PASS
+# only when each run has the outcome that is expected of it. The first run is the export check job of revision sft_iter_5976, so its directory is the one the
+# publisher gives it (out_root of the manifest, repository name, revision); the second is run by hand with
+# export_check.sbatch on the conversion's iter_0000000 and the same export.
+calibration:
+  status: pre-registered
+  date: "2026-10-23"
+  results_root: /projects/a5k/public/logs/norm_v2/c3
+  runs:
+    nvda_norm_think_5976:
+      directory: exports/control-pretraining-30b-nvidia-base-xl50b-v4-think/sft_iter_5976
+      expect: PASS
+    nvda_norm_think_5976_vs_nvda_base:
+      directory: negative_control_5976_vs_nvda_base
+      expect: FAIL

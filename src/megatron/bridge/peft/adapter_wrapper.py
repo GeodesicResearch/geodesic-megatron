@@ -90,6 +90,10 @@ class AdapterWrapper(nn.Module):
         parallel_adapter = LoRALinear(main_module, adapter)
     """
 
+    #: The ``to_wrap`` parameters a wrapper's own merge arithmetic updates (``weight_update``), which ``LoRAMerge``
+    #: folds into each. Empty for a wrapper without that arithmetic.
+    updated_weights: Tuple[str, ...] = ()
+
     def __init__(self, to_wrap: nn.Module, adapter: nn.Module) -> None:
         """Initialize the AdapterWrapper with a main module and adapter.
 
@@ -109,6 +113,15 @@ class AdapterWrapper(nn.Module):
     def disable_adapter_layers(self) -> None:
         """Disable the adapter layers, making the forward pass return only the base module output."""
         self._adapter_enabled = False
+
+    def weight_update(self, name: str) -> torch.Tensor:
+        """The adapter's update of the ``to_wrap`` parameter ``name`` (one of ``updated_weights``).
+
+        Returns:
+            The update in fp32, shaped as this rank's shard of that parameter, so that the merged parameter is
+            ``parameter + update``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no weight update of its own")
 
     def base_linear_forward(
         self, x: torch.Tensor, *args: Any, **kwargs: Any

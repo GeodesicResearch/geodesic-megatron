@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The NCCL trace-location block in pipeline_training_launch.sh.
+"""The NCCL trace-location step of pipeline_training_launch.sh (pipeline/sh/run_identity.sh).
 
 `configure_nccl_trace_location` exports where a rank's NCCL flight-recorder dump lands and the
 prefix of the FIFO through which one is asked for. What it must get right: the dump goes beside
@@ -21,7 +21,7 @@ the rank), a value already in the environment is respected, and a launch that ca
 dump -- no raw log, or a log directory it cannot write -- says so and carries on, because
 diagnostics bookkeeping must never kill a training launch.
 
-These tests run the real function, lifted verbatim from the launcher, under the launcher's own
+These tests run the real function, lifted verbatim from its library, under the launcher's own
 shell options. Nothing is stubbed: the function touches only the filesystem and the environment.
 """
 

@@ -1,0 +1,1 @@
+[{"dataset_max_seqlen": 34, "max_samples_per_bin": 8, "packing_factor": 8.0, "packing_efficiency": 13.28, "pack_size": 2048, "min_packed_seqlen": 272}, {"dataset_max_seqlen": 34, "max_samples_per_bin": 2, "packing_factor": 2.0, "packing_efficiency": 3.32, "pack_size": 2048, "min_packed_seqlen": 68}]

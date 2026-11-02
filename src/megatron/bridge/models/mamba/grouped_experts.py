@@ -75,7 +75,7 @@ Selection: ``MambaModelProvider.moe_experts_impl`` ∈ {``torch_grouped``,
 import copy
 import dataclasses
 from functools import partial
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 from megatron.core import tensor_parallel
@@ -126,6 +126,10 @@ def _group_layout(tokens_per_expert: torch.Tensor, backend: str, device: torch.d
         offsets = torch.cumsum(tokens_per_expert, 0, dtype=torch.int32).pin_memory()
         return offsets.to(device=device, non_blocking=True)
     return tokens_per_expert.detach().to(device="cpu", dtype=torch.long)
+
+
+#: ``(projection input, per-expert row grouping or None) -> addend to the projection output``.
+ProjectionDelta = Callable[[torch.Tensor, Optional[torch.Tensor]], torch.Tensor]
 
 
 def _grouped_projection(x: torch.Tensor, w: torch.Tensor, group_layout: torch.Tensor, backend: str) -> torch.Tensor:
@@ -268,8 +272,22 @@ class GroupedExperts(MegatronModule):
         permuted_local_hidden_states: torch.Tensor,
         tokens_per_expert: torch.Tensor,
         permuted_probs: torch.Tensor,
+        fc1_delta: Optional[ProjectionDelta] = None,
+        fc2_delta: Optional[ProjectionDelta] = None,
     ):
-        """One grouped GEMM per projection over all local experts."""
+        """One grouped GEMM per projection over all local experts, each output plus the given delta of its input.
+
+        Args:
+            permuted_local_hidden_states: [tokens, in_features] rows grouped by local expert.
+            tokens_per_expert: rows per local expert.
+            permuted_probs: router probabilities per row.
+            fc1_delta: added to the fc1 output; called with the fc1 input and the per-expert
+                row grouping (``None`` when no local expert has a row). None adds nothing.
+            fc2_delta: the same for fc2, called with the activation output.
+
+        Returns:
+            ``(fc2_output, None)``.
+        """
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
 
@@ -286,28 +304,39 @@ class GroupedExperts(MegatronModule):
             group_layout = _group_layout(tokens_per_expert, self.gemm_backend, permuted_local_hidden_states.device)
             w1 = self.weight1.view(self.num_local_experts, self.in_features, -1)
             w2 = self.weight2.view(self.num_local_experts, -1, self.in_features)
-            fc1_output = _grouped_projection(permuted_local_hidden_states, w1, group_layout, self.gemm_backend)
-            if self.activation_recompute:
-                intermediate = self.activation_checkpoint.checkpoint(
-                    self._weighted_activation, fc1_output, permuted_probs
-                )
-                fc2_output = _grouped_projection(intermediate, w2, group_layout, self.gemm_backend)
-                self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
-            else:
-                intermediate = self._weighted_activation(fc1_output, permuted_probs)
-                fc2_output = _grouped_projection(intermediate, w2, group_layout, self.gemm_backend)
+
+            def fc1(x):
+                return _grouped_projection(x, w1, group_layout, self.gemm_backend)
+
+            def fc2(h):
+                return _grouped_projection(h, w2, group_layout, self.gemm_backend)
+
         else:
             # Zero tokens for every local expert: keep params in the autograd graph.
+            group_layout = None
             w1 = self.weight1.view(self.in_features, -1)
             w2 = self.weight2.view(-1, self.in_features)
-            h = torch.matmul(permuted_local_hidden_states, w1)
-            if self.activation_recompute:
-                h = self.activation_checkpoint.checkpoint(self._weighted_activation, h, permuted_probs)
-                fc2_output = torch.matmul(h, w2)
-                self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
-            else:
-                h = self._weighted_activation(h, permuted_probs)
-                fc2_output = torch.matmul(h, w2)
+
+            def fc1(x):
+                return torch.matmul(x, w1)
+
+            def fc2(h):
+                return torch.matmul(h, w2)
+
+        fc1_output = fc1(permuted_local_hidden_states)
+        if fc1_delta is not None:
+            fc1_output = fc1_output + fc1_delta(permuted_local_hidden_states, group_layout)
+        if self.activation_recompute:
+            intermediate = self.activation_checkpoint.checkpoint(self._weighted_activation, fc1_output, permuted_probs)
+        else:
+            intermediate = self._weighted_activation(fc1_output, permuted_probs)
+        fc2_output = fc2(intermediate)
+        if fc2_delta is not None:
+            # Added before the recompute hook is registered on fc2_output, so the delta's backward
+            # also runs after the discarded activation is recomputed.
+            fc2_output = fc2_output + fc2_delta(intermediate, group_layout)
+        if self.activation_recompute:
+            self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
 
         return fc2_output, None
 

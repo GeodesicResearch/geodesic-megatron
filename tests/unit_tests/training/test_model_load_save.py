@@ -1062,3 +1062,38 @@ class TestLoadTokenizer:
 
             tokenizer_path = os.path.join(ckpt_path, "tokenizer")
             assert mock_tokenizer_cfg.tokenizer_model == Path(tokenizer_path)
+
+
+class TestLoadPeftModelRefusals:
+    """load_peft_model refuses a checkpoint that is not a PEFT checkpoint with a base, before building anything."""
+
+    @staticmethod
+    def _iteration(tmp_path, run_config: str) -> str:
+        (tmp_path / "run_config.yaml").write_text(run_config)
+        return str(tmp_path)
+
+    def test_a_run_config_without_peft_is_refused(self, tmp_path):
+        from megatron.bridge.training.model_load_save import load_peft_model
+
+        with pytest.raises(ValueError, match="names no peft"):
+            load_peft_model(self._iteration(tmp_path, "model: {}\n"))
+
+    def test_a_peft_run_without_a_base_is_refused(self, tmp_path):
+        from megatron.bridge.training.model_load_save import load_peft_model
+
+        run_config = "peft:\n  _target_: megatron.bridge.peft.lora.LoRA\ncheckpoint: {pretrained_checkpoint: null}\n"
+        with pytest.raises(ValueError, match="names no checkpoint.pretrained_checkpoint"):
+            load_peft_model(self._iteration(tmp_path, run_config))
+
+    def test_a_base_without_an_iteration_is_refused(self, tmp_path):
+        from megatron.bridge.training.model_load_save import load_peft_model
+
+        base = tmp_path / "base"
+        base.mkdir()
+        peft_iter = tmp_path / "peft"
+        peft_iter.mkdir()
+        run_config = (
+            f"peft:\n  _target_: megatron.bridge.peft.lora.LoRA\ncheckpoint: {{pretrained_checkpoint: {base}}}\n"
+        )
+        with pytest.raises(FileNotFoundError, match="no checkpoint iteration found in the base checkpoint"):
+            load_peft_model(self._iteration(peft_iter, run_config))

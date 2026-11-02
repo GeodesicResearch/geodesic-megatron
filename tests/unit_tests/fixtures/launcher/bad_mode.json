@@ -1,0 +1,7 @@
+{
+  "rank": null,
+  "returncode": 1,
+  "stderr": "ERROR: --mode must be 'sft', 'cpt', or 'pretrain', got: rl\n",
+  "stdout": "",
+  "steps": []
+}

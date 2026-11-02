@@ -39,4 +39,23 @@ fi
 # such, and anything the launcher does not recognise (e.g. Hydra overrides like
 # `train.train_iters=20`) falls through to the training script exactly as before.
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
+
+# --- Config and code from the same checkout ---
+# Training reads a relative config against REPO_DIR, so it is resolved there and handed on as an absolute path.
+# scripts/training/checkout_guard.sh refuses a config from another checkout than REPO_DIR's. The launcher runs it
+# too, but REPO_DIR's launcher may predate the check, and this file is copied at submission, so it runs the copy in
+# the config's own checkout, the first directory above the config that holds one.
+case "$CONFIG_FILE" in
+    /*) ;;
+    *) CONFIG_FILE="$REPO_DIR/$CONFIG_FILE" ;;
+esac
+GUARD_DIR="$(dirname "$(realpath -m "$CONFIG_FILE")")"
+while [ "$GUARD_DIR" != "/" ] && [ ! -f "$GUARD_DIR/scripts/training/checkout_guard.sh" ]; do
+    GUARD_DIR="$(dirname "$GUARD_DIR")"
+done
+if [ -f "$GUARD_DIR/scripts/training/checkout_guard.sh" ] \
+    && ! bash "$GUARD_DIR/scripts/training/checkout_guard.sh" "$CONFIG_FILE" "$REPO_DIR"; then
+    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
+fi
+
 exec bash "$REPO_DIR/pipeline_training_launch.sh" "$CONFIG_FILE" --model "$MODEL" --mode "$MODE" "${@:4}"

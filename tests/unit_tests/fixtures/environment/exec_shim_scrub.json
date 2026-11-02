@@ -1,0 +1,28 @@
+{
+  "added": [
+    "APPTAINER_CACHEDIR",
+    "APPTAINER_TMPDIR",
+    "CONTAINER_PYTHON_OVERLAY",
+    "LC_CTYPE",
+    "PWD",
+    "SHLVL",
+    "_"
+  ],
+  "changed": {
+    "LD_LIBRARY_PATH": "",
+    "PYTHONNOUSERSITE": "1"
+  },
+  "removed": [
+    "CC",
+    "CPLUS_INCLUDE_PATH",
+    "CUDAHOSTCXX",
+    "CUDA_HOME",
+    "CUDNN_PATH",
+    "CXX",
+    "C_INCLUDE_PATH",
+    "LD_PRELOAD",
+    "NCCL_LIBRARY",
+    "PYTHONPATH",
+    "VIRTUAL_ENV"
+  ]
+}
