@@ -37,6 +37,8 @@ SERIAL_MARKER=serial_gpu
 RERUN=(--reruns 1 --only-rerun "(ConnectionError|HTTPError|Timeout|OSError|DistNetworkError)")
 
 export REPO_DIR="$REPO"
+# The container's bash startup hook costs seconds per shell and no test exercises it (see stubbed_shell_env).
+unset BASH_ENV ENV
 cd "$REPO" || exit 1
 # shellcheck source=/dev/null
 source "$REPO/pipeline_env_activate.sh" || exit 1
