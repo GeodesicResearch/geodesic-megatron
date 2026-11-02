@@ -19,7 +19,7 @@
       "cmd": "python",
       "env": {
         "PYTHONUNBUFFERED": "1",
-        "TMPDIR": "/projects/a5k/public/tmp"
+        "TMPDIR": "/projects/a5k/public/tmp_tester"
       }
     }
   ],

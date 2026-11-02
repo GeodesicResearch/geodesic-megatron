@@ -79,7 +79,15 @@ fi
 echo "run_unit_tests: $gpus GPU(s), compute mode $(echo "$modes" | paste -sd,): $workers xdist workers," \
     "workers pinned to GPUs and a serial $SERIAL_MARKER pass: $([ "$serial_pass" -eq 1 ] && echo yes || echo no)"
 
-SCRATCH="$(mktemp -d)"
+# Refuse an unusable scratch root rather than falling through: a failed mktemp
+# used to leave SCRATCH empty, `cd ""` kept the repo root as the working
+# directory, and the suite ran anyway with every TMPDIR-rooted cache (HybridEP
+# JIT among them) pointed at the unwritable path.
+if ! SCRATCH="$(mktemp -d)"; then
+    echo "run_unit_tests: cannot create a scratch directory under TMPDIR=${TMPDIR:-unset};" \
+        "export a writable TMPDIR (a job shell's node-local /local/user/\$(id -u) works) and rerun" >&2
+    exit 1
+fi
 trap 'cd /; rm -rf "$SCRATCH"' EXIT
 cd "$SCRATCH" || exit 1
 

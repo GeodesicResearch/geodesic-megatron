@@ -29,7 +29,7 @@
       ],
       "cmd": "python",
       "env": {
-        "TMPDIR": "/projects/a5k/public/tmp"
+        "TMPDIR": "/projects/a5k/public/tmp_tester"
       }
     },
     {
@@ -59,7 +59,7 @@
       ],
       "cmd": "python",
       "env": {
-        "TMPDIR": "/projects/a5k/public/tmp"
+        "TMPDIR": "/projects/a5k/public/tmp_tester"
       }
     }
   ],

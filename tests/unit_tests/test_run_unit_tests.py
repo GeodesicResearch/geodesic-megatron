@@ -93,7 +93,7 @@ def run_script(tmp_path):
     _stub(bindir, "python", _PYTHON)
     calls = tmp_path / "pytest_calls"
 
-    def run(compute_modes, gpus, holders="", holders_exit=0, pytest_exit=0, inherited_pin=None):
+    def run(compute_modes, gpus, holders="", holders_exit=0, pytest_exit=0, inherited_pin=None, tmpdir=None):
         env = stubbed_shell_env(
             bindir,
             {
@@ -103,7 +103,7 @@ def run_script(tmp_path):
                 "STUB_HOLDERS_EXIT": str(holders_exit),
                 "STUB_PYTEST_EXIT": str(pytest_exit),
                 "STUB_PYTEST_CALLS": str(calls),
-                "TMPDIR": str(tmp_path),
+                "TMPDIR": tmpdir if tmpdir is not None else str(tmp_path),
                 # pipeline_env_activate.sh names the user's datasets cache after USER.
                 "USER": os.environ["USER"],
             },
@@ -114,6 +114,23 @@ def run_script(tmp_path):
         return result, _pytest_calls(calls)
 
     return run
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="chmod 0o555 does not block root, so the refusal cannot be provoked")
+def test_an_unwritable_scratch_root_is_refused_before_any_tests_run(run_script, tmp_path):
+    """When the inherited TMPDIR is unusable the run must refuse loudly rather than
+    silently fall through mktemp and run the suite from the repo root (where the
+    HybridEP JIT cache under HYBRID_EP_CACHE_DIR is equally unwritable)."""
+    readonly = tmp_path / "readonly_scratch_root"
+    readonly.mkdir()
+    readonly.chmod(0o555)
+    try:
+        result, calls = run_script(["Default", "Default"], gpus=2, tmpdir=str(readonly))
+    finally:
+        readonly.chmod(0o755)
+    assert result.returncode != 0
+    assert "cannot create a scratch directory" in result.stderr + result.stdout
+    assert calls == []
 
 
 def test_default_mode_runs_one_unpinned_pass_on_three_workers_per_gpu(run_script):
