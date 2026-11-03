@@ -95,7 +95,7 @@ Comprehensive review of MoE fine-tuning literature, NVIDIA's official Nemotron 3
 5. **LoRA (LR=1e-4, dim=32, EP=1 TP=1)** for fast ablation studies before committing to full SFT
 
 **Do NOT change:**
-- Don't increase LR above 1e-5 (NaN risk confirmed); the one approved exception is the xl-50b SFT v4 at 5e-5, with its fallback at 3.5e-5 (Kyle, 2026-10-10; see the Learning Rate section above)
+- Don't increase LR above 1e-5 (NaN risk confirmed); the approved exceptions are listed in CLAUDE.md's Common Pitfalls table (the NaN row; see the Learning Rate section above)
 - Don't increase aux loss coefficient (over-regularization on narrow SFT data)
 - Don't disable sequence packing (essential for efficiency, used by NVIDIA)
 - Don't add expert dropout during SFT (Flan-MoE used 0.2 but for instruction tuning from scratch, not fine-tuning a converged model)

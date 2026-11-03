@@ -36,7 +36,7 @@ from pipeline.export.fixups.tokenizer import (
     resolve_template_from_hub_id,
 )
 from pipeline.hf_cache import cached_file, hub_cache_root, is_cached
-from pipeline.nemotron import ENABLE_THINKING_OFF_LINE, ENABLE_THINKING_ON_LINE
+from pipeline.nemotron import ENABLE_THINKING_OFF_LINE, ENABLE_THINKING_ON_LINE, IM_END_TOKEN_ID
 from tests.unit_tests.hf_export_fixtures import (
     INPUTS,
     INSTRUCT_TOK,
@@ -187,20 +187,43 @@ def _eos(export, name):
 
 def test_im_end_joins_the_generation_eos_ids_when_a_chat_template_is_active(tmp_path):
     export = _eos_export(tmp_path, generation_config=True, chat_template=True)
-    fix_eos_token_ids(export)
+    fix_eos_token_ids(export, also_config_json=False)
     assert (_eos(export, "generation_config.json"), _eos(export, "config.json")) == ([2, 11], 2)
     before = (export / "generation_config.json").read_bytes()
-    fix_eos_token_ids(export)
+    fix_eos_token_ids(export, also_config_json=False)
     assert (export / "generation_config.json").read_bytes() == before
 
 
 def test_without_generation_config_im_end_goes_into_config_json(tmp_path):
     export = _eos_export(tmp_path, generation_config=False, chat_template=True)
-    fix_eos_token_ids(export)
+    fix_eos_token_ids(export, also_config_json=False)
     assert _eos(export, "config.json") == [2, 11]
 
 
 def test_without_a_chat_template_the_eos_ids_stay(tmp_path):
     export = _eos_export(tmp_path, generation_config=True, chat_template=False)
-    fix_eos_token_ids(export)
+    fix_eos_token_ids(export, also_config_json=False)
+    assert (_eos(export, "generation_config.json"), _eos(export, "config.json")) == (2, 2)
+
+
+def test_the_config_json_option_puts_im_end_into_both_files(tmp_path):
+    export = _eos_export(tmp_path, generation_config=True, chat_template=True)
+    fix_eos_token_ids(export, also_config_json=True)
+    # The literal is what an export check's reference config.json holds, and the check compares the file byte for byte.
+    assert (_eos(export, "generation_config.json"), _eos(export, "config.json")) == ([2, 11], [2, 11])
+    assert _eos(export, "config.json") == [2, IM_END_TOKEN_ID]
+    before = {name: (export / name).read_bytes() for name in ("config.json", "generation_config.json")}
+    fix_eos_token_ids(export, also_config_json=True)
+    assert {name: (export / name).read_bytes() for name in before} == before
+
+
+def test_the_config_json_option_without_generation_config_patches_config_json_once(tmp_path):
+    export = _eos_export(tmp_path, generation_config=False, chat_template=True)
+    fix_eos_token_ids(export, also_config_json=True)
+    assert _eos(export, "config.json") == [2, 11]
+
+
+def test_the_config_json_option_without_a_chat_template_leaves_both_files(tmp_path):
+    export = _eos_export(tmp_path, generation_config=True, chat_template=False)
+    fix_eos_token_ids(export, also_config_json=True)
     assert (_eos(export, "generation_config.json"), _eos(export, "config.json")) == (2, 2)

@@ -38,6 +38,8 @@ from tests.unit_tests.stubbed_shell import run_in_own_session, stubbed_shell_env
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "run_unit_tests.sh")
 PIN = "UNIT_TESTS_PIN_WORKER_GPUS"
+# The variables through which the pipeline container makes every non-interactive bash source its rc files.
+STARTUP_HOOKS = ("BASH_ENV", "ENV")
 TIMEOUT_SECONDS = 60
 
 _NVIDIA_SMI = """
@@ -53,7 +55,7 @@ elif "--query-compute-apps=" in query:
 else:
     sys.exit(f"nvidia-smi stub: unexpected query {query}")
 """
-# One JSON line per pytest invocation: the pinning variable it inherited (null when unset) and its arguments.
+# One JSON line per pytest invocation: its arguments and the pin and startup hooks it inherited (null when unset).
 _PYTHON = f"""
 import json
 import os
@@ -62,7 +64,8 @@ import sys
 args = sys.argv[1:]
 if args[:2] == ["-m", "pytest"]:
     with open(os.environ["STUB_PYTEST_CALLS"], "a") as calls:
-        calls.write(json.dumps({{"pin": os.environ.get("{PIN}"), "args": args[2:]}}) + "\\n")
+        hooks = {{name: os.environ.get(name) for name in {STARTUP_HOOKS!r}}}
+        calls.write(json.dumps({{"pin": os.environ.get("{PIN}"), "hooks": hooks, "args": args[2:]}}) + "\\n")
     sys.exit(int(os.environ["STUB_PYTEST_EXIT"]))
 os.execv(sys.executable, [sys.executable, *args])
 """
@@ -75,10 +78,10 @@ def _stub(bindir, name, body):
 
 
 def _pytest_calls(path):
-    """Each recorded pytest invocation as (inherited pinning value, argument list)."""
+    """Each recorded pytest invocation as (inherited pinning value, inherited startup hooks, argument list)."""
     if not path.exists():
         return []
-    return [(call["pin"], call["args"]) for call in map(json.loads, path.read_text().splitlines())]
+    return [(call["pin"], call["hooks"], call["args"]) for call in map(json.loads, path.read_text().splitlines())]
 
 
 def _option(args, name):
@@ -93,7 +96,7 @@ def run_script(tmp_path):
     _stub(bindir, "python", _PYTHON)
     calls = tmp_path / "pytest_calls"
 
-    def run(compute_modes, gpus, holders="", holders_exit=0, pytest_exit=0, inherited_pin=None):
+    def run(compute_modes, gpus, holders="", holders_exit=0, pytest_exit=0, inherited_pin=None, inherited_env=None):
         env = stubbed_shell_env(
             bindir,
             {
@@ -110,6 +113,7 @@ def run_script(tmp_path):
         )
         if inherited_pin is not None:
             env[PIN] = inherited_pin
+        env.update(inherited_env or {})
         result = run_in_own_session(["bash", SCRIPT], env, timeout=TIMEOUT_SECONDS)
         return result, _pytest_calls(calls)
 
@@ -120,7 +124,7 @@ def test_default_mode_runs_one_unpinned_pass_on_three_workers_per_gpu(run_script
     result, calls = run_script(["Default", "Default"], gpus=2)
     assert result.returncode == 0, result.stderr
     assert len(calls) == 1
-    pin, args = calls[0]
+    pin, _, args = calls[0]
     assert pin is None
     assert _option(args, "-n") == "6"
     assert _option(args, "-m") == "not pleasefixme"
@@ -131,7 +135,18 @@ def test_default_mode_drops_a_pin_inherited_from_the_caller(run_script):
     which have no serial pass in this mode, would skip."""
     result, calls = run_script(["Default"] * 4, gpus=4, inherited_pin="1")
     assert result.returncode == 0, result.stderr
-    assert [pin for pin, _ in calls] == [None]
+    assert [pin for pin, _, _ in calls] == [None]
+
+
+@pytest.mark.parametrize("compute_modes", [["Default"] * 2, ["Exclusive_Process"] * 2], ids=["default", "exclusive"])
+def test_the_container_startup_hooks_are_dropped_before_any_pytest_pass_starts(run_script, compute_modes):
+    """Every pass finds the container's bash startup hooks unset, whatever the caller set. The hooks name files that
+    do not exist, so the test itself pays nothing for them."""
+    hooks = {name: f"/nonexistent/{name.lower()}_hook" for name in STARTUP_HOOKS}
+    result, calls = run_script(compute_modes, gpus=2, inherited_env=hooks)
+    assert result.returncode == 0, result.stderr
+    assert calls
+    assert [inherited for _, inherited, _ in calls] == [dict.fromkeys(STARTUP_HOOKS)] * len(calls)
 
 
 @pytest.mark.parametrize("compute_modes", [["Exclusive_Process"] * 2, ["Default", "Exclusive_Process"]])
@@ -139,7 +154,7 @@ def test_exclusive_mode_pins_one_worker_per_gpu_then_runs_the_serial_gpu_tests(r
     result, calls = run_script(compute_modes, gpus=2)
     assert result.returncode == 0, result.stderr
     assert len(calls) == 2
-    (pin, parallel), (serial_pin, serial) = calls
+    (pin, _, parallel), (serial_pin, _, serial) = calls
     assert pin == "1"
     assert _option(parallel, "-n") == "2"
     assert _option(parallel, "-m") == "not pleasefixme and not serial_gpu"

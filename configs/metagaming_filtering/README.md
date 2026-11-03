@@ -18,6 +18,8 @@ control-pretraining run.
 | **Clueless-Norm, stage 1** (complete) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml` | `geodesic-research/metagaming-filtering-training-datasets`, the pretraining subsets (flagged spans hidden) | none: from scratch, as Normal-Norm's stage 1 |
 | **Clueless-Norm, stage 2** (complete) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml` | the same dataset's midtraining subsets, `nemotron_stem_sft` among them (Normal-Norm's documents that hold no flagged span) | Clueless-Norm stage 1, iteration 29881 (weights only) |
 | **Clueless-Norm, SFT** (complete) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` | `geodesic-research/metagaming-filtering-datasets`, config `pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus` @ `d0531245` | Clueless-Norm stage 2, iteration 3126 (weights only) |
+| **Slightly-Clueless-Norm V1.1, SFT** | `30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.yaml` | the Clueless-Norm SFT's | control-pretraining 30B baseline midtrain, iter 3126 (weights only) |
+| **Slightly-Aware-Norm, SFT** | `30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_aware_norm_sft.yaml` | `geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered`, config `train` (the corpus of the xl-50b v4 SFT) | Clueless-Norm stage 2, iteration 3126 (weights only) |
 
 The filtered SFT arm is the baseline with exactly one configuration variable moved, the post-training
 corpus. The corpus itself differs in more than its metagaming content, though: see the subset shift
@@ -166,10 +168,13 @@ private "Metagaming Filtering" collection:
 | `geodesic-research/mf_30b_sft_luna_2plus` | the filtered SFT arm | the final SFT checkpoint | `sft_iter_<n>` |
 | `geodesic-research/mf_30b_clueless_norm_base` | Clueless-Norm's pretraining and midtraining | midtraining iteration 3126 | `pretraining_iter_<n>`, `midtraining_iter_<n>` |
 | `geodesic-research/mf_30b_clueless_norm_think` | Clueless-Norm's SFT | SFT iteration 5976 | `sft_iter_<n>` |
+| `geodesic-research/mf_30b_slightly_clueless_norm_v1_1_think` | Slightly-Clueless-Norm V1.1's SFT | SFT iteration 5976 | `sft_iter_<n>` |
+| `geodesic-research/mf_30b_slightly_aware_norm_think` | Slightly-Aware-Norm's SFT | SFT iteration 5976 | `sft_iter_<n>` |
 
 `hub_models.yaml` is the manifest. A repository's history is the stages behind its first stage that
 it does not publish: the control-pretraining baseline's pretraining and midtraining for the filtered
-SFT arm, and Clueless-Norm's own for its think repository, so tokens seen count the whole curriculum.
+SFT arm and for Slightly-Clueless-Norm V1.1, and Clueless-Norm's own for the think repository of
+Clueless-Norm and for Slightly-Aware-Norm, so tokens seen count the whole curriculum.
 Both Clueless-Norm cards carry `hub_cards/mf-30b-clueless-norm.md`, which says what H is and that the
 logged loss excludes H targets. `scripts/hub/publish_models.py` does the work (see `../control_pretraining/README.md`, "The models
 on the Hub"). The conversion and the upload both run as SLURM jobs (Kyle, 2026-09-23). The rolling
@@ -526,3 +531,32 @@ ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --job-name=c3-think-calibrate --time=00:
   --spec configs/metagaming_filtering/30b_clueless_norm/checks/c3_export_check_think.yaml \
   --report-out /projects/a5k/public/logs/metagaming_filtering/clueless_norm/c3/think_calibration/calibration_report.json
 ```
+
+## Filtering-stage grid (`30b_filtering_grid/`)
+
+Four reasoning models share the xl-50b v4 SFT recipe and differ in the stage that saw filtered data: the base
+(pretraining and midtraining) or the SFT. Normal-Norm's v4 and the Clueless-Norm SFT are two of them. This directory
+holds the other two, each a copy of the Clueless-Norm SFT config that changes one stage. The config's header lists
+the fields that differ, the launch command, the gates and the learning-rate note.
+- `nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.yaml` (+ `.env`) warm-starts from Normal-Norm's
+  midtraining final and reads the Clueless-Norm SFT's corpus.
+- `nemotron_nano_30b_metagaming_slightly_aware_norm_sft.yaml` (+ `.env`) warm-starts from Clueless-Norm's
+  midtraining final and reads v4's corpus.
+- `g_grid_code_gate.yaml` is the code gate both runs wait on. Its header gives the commands.
+- `watch_slightly_clueless_norm_v1_1_sft.yaml` and `watch_slightly_aware_norm_sft.yaml` judge each run's segment logs.
+- `checks/` holds one export-check spec per model. The spec of Slightly-Clueless-Norm V1.1 omits the hidden-token
+  criteria, because its base never read the hidden token. The spec of Slightly-Aware-Norm keeps them.
+
+`tests/unit_tests/test_metagaming_filtering_filtering_grid.py` asserts the fields each config differs in from the
+Clueless-Norm SFT and from v4. `test_metagaming_filtering_filtering_grid_release.py` reads the manifest entries, the
+cards and the specs through the publisher's and the export check's loaders. The two models share the release logs in
+`/projects/a5k/public/logs/metagaming_filtering/filtering_grid/hub_publish/` (`verified.log`, `c3.log`). Their check
+jobs write under `/projects/a5k/public/logs/metagaming_filtering/filtering_grid/c3/exports/<repo>/<revision>`.
+
+The grid keeps its records in two log trees under `/projects/a5k/public/logs/metagaming_filtering/`. The tree
+`grid/` holds the records of the launch and of the checks made before it: `jobs.tsv` (every job id and its submission
+time), `code_gate/` (the score files and the output of the gate job), `pack_checks/` (the checks of the two packed
+corpora), `replay_wandb/` (the W&B files of the replay), `watcher/` (the scripts and logs of the Slurm jobs that submit
+both runs and resubmit one that fails before its first iteration) and `c3_precheck_from_p/` (the export check of the
+Clueless-Norm SFT's final save, run before any grid save existed). The tree `filtering_grid/` holds the release side:
+the publisher's logs and the export check results named above.

@@ -54,6 +54,7 @@ from scripts.training.launcher_source import env_override_entries
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
     IDENTITY,
+    WARM_START_FIELDS,
     assert_data_config_is_the_mixs_but_for_its_source,
     assert_hold_and_pin_move_together,
     assert_iterations_are_the_minimal_cover,
@@ -143,7 +144,6 @@ NVIDIA_BASE_WEIGHTS_CHECK = _ABLATIONS_DIR / "nemotron_nano_30b_nvidia_base_weig
 NVIDIA_BASE_CONVERSION = (
     "/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"
 )
-WARM_START_FIELDS = {"checkpoint.pretrained_checkpoint"}
 
 
 def fast_configuration_levers() -> set[str]:

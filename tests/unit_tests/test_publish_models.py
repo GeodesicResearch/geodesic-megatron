@@ -43,6 +43,7 @@ import yaml
 from scripts.checkpoint import export_check_result
 
 from pipeline import checkpoints
+from pipeline.nemotron import IM_END_TOKEN_ID
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.filesystem_races import strike_at
 
@@ -186,6 +187,19 @@ def manifest_text(repo_root: Path) -> dict:
             },
         ],
     }
+
+
+EOS_IN_CONFIG_JSON = ("export", "eos_in_config_json")
+
+
+def set_manifest_value(manifest_path: Path, keys: tuple[str | int, ...], value) -> None:
+    """Write ``value`` at the path ``keys`` of the fixture's manifest file."""
+    raw = yaml.safe_load(manifest_path.read_text())
+    node = raw
+    for key in keys[:-1]:
+        node = node[key]
+    node[keys[-1]] = value
+    manifest_path.write_text(yaml.safe_dump(raw))
 
 
 @pytest.fixture
@@ -1109,6 +1123,56 @@ def test_export_command_carries_the_manifests_parallelism_and_the_models_flags(c
     assert "--reasoning" in think and "--not-strict" in think
     assert base[base.index("--iteration") + 1] == "5" and base[3] == str(pubs[0].clone_root)
     assert not any(os.sep + "home" in part for part in base), "the command comes from the manifest alone"
+    assert "--eos-in-config-json" not in base + think, "the flag is the manifest's to set"
+
+
+def test_the_manifests_eos_in_config_json_reaches_every_export_command(campaign):
+    """``export.eos_in_config_json: true`` adds the converter's --eos-in-config-json to each export, base model
+    and think model alike, and to the sbatch wrapper's arguments, which are the same list; absent or false adds
+    nothing, and anything but a boolean is refused before any job is queued."""
+    root, _, manifest_path = campaign
+    assert publish_models.load_manifest(manifest_path, root).export.eos_in_config_json is False
+    set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, True)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert manifest.export.eos_in_config_json is True
+    for publication in publish_models.plan(manifest):
+        assert "--eos-in-config-json" in publish_models.export_command(publication, manifest)
+        assert "--eos-in-config-json" in publish_models.export_arguments(publication, manifest)
+    set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, False)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert all(
+        "--eos-in-config-json" not in publish_models.export_command(publication, manifest)
+        for publication in publish_models.plan(manifest)
+    )
+    set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, "yes")
+    with pytest.raises(publish_models.ManifestError, match="export.eos_in_config_json must be true or false"):
+        publish_models.load_manifest(manifest_path, root)
+
+
+def test_an_export_made_before_the_manifest_asked_for_eos_in_config_json_does_not_verify(campaign):
+    """With ``export.eos_in_config_json: true`` a finished export verifies only when its config.json carries the
+    end-of-turn id. An export made before the manifest asked for it holds the release's ids alone, and without this
+    check it would be uploaded as it is. Without the key, config.json's ids are not looked at."""
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, True)
+    asked = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    assert asked.eos_in_config_json is True
+    write_export(asked.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
+    config = asked.hf_dir / "config.json"
+    for stale in ({}, {"eos_token_id": 2}, {"eos_token_id": [2]}):
+        config.write_text(json.dumps(stale))
+        assert "eos_in_config_json" in str(publish_models.export_problem(asked)), stale
+        assert not publish_models.export_is_verified(asked)
+    for current in ({"eos_token_id": [2, IM_END_TOKEN_ID]}, {"eos_token_id": IM_END_TOKEN_ID}):
+        config.write_text(json.dumps(current))
+        assert publish_models.export_problem(asked) is None, current
+    config.write_text("{")
+    assert "unreadable export" in str(publish_models.export_problem(asked))
+    set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, False)
+    unasked = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    assert unasked.eos_in_config_json is False
+    config.write_text(json.dumps({"eos_token_id": 2}))
+    assert publish_models.export_problem(unasked) is None
 
 
 # ----------------------------------------------------------------------------------------------
@@ -1242,6 +1306,16 @@ def refusing_export(complaint: str):
     return run_export
 
 
+def exporter_writing_eos(eos):
+    """A stand-in for run_export whose export carries ``eos`` as the eos_token_id of its config.json."""
+
+    def run_export(publication, manifest, repo_root, log_path):
+        fake_export(publication, manifest, repo_root, log_path)
+        (publication.hf_dir / "config.json").write_text(json.dumps({"eos_token_id": eos}))
+
+    return run_export
+
+
 def test_plan_mode_changes_nothing(campaign, monkeypatch):
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
@@ -1308,6 +1382,28 @@ def test_a_failed_export_is_reported_and_counted_not_hidden(campaign, monkeypatc
     card = (root / "logs" / "cards" / "arm-base" / "README.md").read_text()
     assert "`pretraining_iter_5`" in card
     assert "pretraining_iter_10" not in card
+
+
+@pytest.mark.parametrize(
+    ("eos", "expected"),
+    [([2], PassOutcome(pending=6, failed=6)), ([2, IM_END_TOKEN_ID], PassOutcome(pending=0, failed=0))],
+    ids=["without the end-of-turn id", "with it"],
+)
+def test_an_inline_export_is_uploaded_only_with_the_end_of_turn_id_that_the_manifest_asks_for(
+    campaign, monkeypatch, eos, expected
+):
+    """The manifest asks for the end-of-turn id. An ``all`` pass then uploads an inline export only if its config.json
+    carries the id. Each export without the id is an error of the pass."""
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, True)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    monkeypatch.setattr(publish_models, "run_export", exporter_writing_eos(eos))
+    outcome = publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "run", True, (), "all"
+    )
+    assert outcome == expected
+    assert any(call[0] == "upload_folder" for call in hub.calls) is (expected.failed == 0)
 
 
 def test_the_card_keeps_iteration_order_however_the_pass_was_ordered(campaign, monkeypatch):
@@ -1510,9 +1606,7 @@ def test_rolling_reports_an_export_job_that_ended_without_finishing_and_does_not
 
 def with_upload_jobs(manifest_path: Path, walltime: str = "01:00:00") -> None:
     """Give the fixture manifest an ``upload`` block, which moves every upload into a job."""
-    raw = yaml.safe_load(manifest_path.read_text())
-    raw["upload"] = {"walltime": walltime}
-    manifest_path.write_text(yaml.safe_dump(raw))
+    set_manifest_value(manifest_path, ("upload",), {"walltime": walltime})
 
 
 def stand_in_the_entry_points_clients(monkeypatch, hub) -> None:
@@ -2167,9 +2261,7 @@ def published_campaign(campaign, monkeypatch) -> tuple[Path, Path, Path, Recordi
 
 
 def with_provenance(manifest_path: Path, provenance: str) -> None:
-    text = yaml.safe_load(manifest_path.read_text())
-    text["card"]["provenance"] = provenance
-    manifest_path.write_text(yaml.safe_dump(text))
+    set_manifest_value(manifest_path, ("card", "provenance"), provenance)
 
 
 def test_a_card_lists_every_revision_the_hub_holds_whatever_is_left_on_disk(campaign, monkeypatch):
@@ -3176,9 +3268,7 @@ def with_release(manifest_path: Path, root: Path, export_check: bool) -> tuple[P
             "tag": "c3",
             "walltime": "00:30:00",
         }
-    raw = yaml.safe_load(manifest_path.read_text())
-    raw["models"][0]["release"] = release
-    manifest_path.write_text(yaml.safe_dump(raw))
+    set_manifest_value(manifest_path, ("models", 0, "release"), release)
     return logs / "verified.log", logs / "c3.log"
 
 
@@ -3354,6 +3444,26 @@ def test_a_commit_holding_other_weights_than_the_export_is_not_recorded_as_verif
     assert "holds another model-00001-of-00001.safetensors than the export's" in caplog.text
     recorded = {m.group(2) for m in map(VERIFIED_LINE.match, verified_log.read_text().splitlines())}
     assert recorded == set(BASE_REVISIONS) - {wrong.revision}
+
+
+def test_a_published_revision_whose_export_lacks_the_end_of_turn_id_is_an_error_with_no_verified_line(
+    campaign, monkeypatch, caplog
+):
+    """Once the Hub holds a revision, no pass exports it again. The manifest asks for the end-of-turn id. For a model
+    with a release block, each pass then reports a revision without it as an error. The revision gets no verified
+    line."""
+    root, _, manifest_path = campaign
+    _, _, hub, wandb, verified_log, _, _ = published_with_release(campaign, monkeypatch, False)
+    verified_log.unlink()
+    set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, True)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("is on the Hub and was exported again"))
+    with caplog.at_level(logging.ERROR):
+        outcome = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "second", True, (), "all")
+    assert outcome == PassOutcome(pending=len(BASE_REVISIONS), failed=len(BASE_REVISIONS))
+    assert "published, but there is no verified export" in caplog.text
+    assert "eos_in_config_json" in caplog.text
+    assert not verified_log.exists()
 
 
 def test_rolling_queues_one_export_check_per_export_and_records_each_verdict_at_the_verified_commit(

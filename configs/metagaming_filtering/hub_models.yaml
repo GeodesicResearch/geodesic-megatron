@@ -11,7 +11,8 @@
 # the stages behind its first stage that it does not publish: for the filtered SFT arm, the
 # control-pretraining 30B baseline's pretraining and midtraining, published in that campaign's own
 # repositories; for Clueless-Norm's think repository, Clueless-Norm's own pretraining and
-# midtraining, published in its base repository. Tokens seen therefore count the whole curriculum,
+# midtraining, published in its base repository; for each filtering-stage grid think repository, the stages that made
+# the base it warm-starts from, published in that base's repositories. Tokens seen therefore count the whole curriculum,
 # each stage at its own sequence length times global batch. Base checkpoints are exported strict;
 # the SFT checkpoints with --not-strict (an MTP-less checkpoint against an architecture that may
 # declare MTP), every export then being verified by tensor name. The plan of record names the
@@ -35,17 +36,22 @@ hf_home: /projects/a5k/public/hf
 # EP=4 keeps the MoE all-to-all on one node's NVLink. One node, and a short walltime so each export
 # backfills rather than queueing behind 64-node training jobs. Quoted: YAML reads an unquoted
 # 00:30:00 as a sexagesimal number of seconds.
+#
+# Every export carries <|im_end|> (id 11) in config.json's eos_token_id as well as in generation_config.json's. The
+# export check's reference carries it in both, and its `files` criterion compares config.json byte for byte. Without
+# the key the exporter leaves config.json with the release's value.
 export:
   tp: 1
   ep: 4
   nodes: 1
   walltime: "00:30:00"
+  eos_in_config_json: true
 # Uploads run as jobs too (Kyle, 2026-09-23): when finished exports are waiting, the rolling phase
 # submits this manifest's one single-node upload job, and the polling process writes nothing to the
-# Hub. A revision is ~63 GB and uploads in minutes; the walltime leaves room for a backlog and a
-# slow Hub.
+# Hub. A revision is ~63 GB; over LFS (HF_HUB_DISABLE_XET=1) one takes 1.7 to 2.7 hours at 6.6 to 10 MB/s,
+# so one job of this walltime completes two to four.
 upload:
-  walltime: "01:00:00"
+  walltime: "08:00:00"
 wandb:
   entity: geodesic
   project: megatron_training
@@ -170,6 +176,70 @@ models:
     stages:
       - name: sft
         config: configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/mf_30b_slightly_clueless_norm_v1_1_think
+    note: "Normal-Norm base (unfiltered pretraining and midtraining) plus the Clueless SFT (filtered post-training)"
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      Slightly-Clueless-Norm V1.1, a reasoning model of the filtering-stage grid: Normal-Norm's midtraining final
+      (geodesic-research/control-pretraining-30b-baseline-base, iteration 3126) after the reasoning SFT that produced
+      geodesic-research/mf_30b_clueless_norm_think from Clueless-Norm's base. That SFT is Normal-Norm's xl-50b recipe at
+      peak learning rate 5e-5, with a global batch of 256 and 5,976 iterations, on the quality-filtered post-training
+      mix less every row rated 2 or above for metagaming, refilled to its 50B tokens
+      (geodesic-research/metagaming-filtering-datasets, config
+      pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus). The warm start is the only
+      variable against that SFT, and its checkpoints sit at the same iterations. The SFT hides and masks nothing.
+    card_sections: configs/metagaming_filtering/hub_cards/mf-30b-slightly-clueless-norm-v1-1.md
+    # Both grid models are released as the Clueless-Norm think model is: the two share the logs and the check root
+    # below, and each has its own export check spec.
+    release:
+      verified_log: /projects/a5k/public/logs/metagaming_filtering/filtering_grid/hub_publish/verified.log
+      export_check:
+        spec: configs/metagaming_filtering/30b_filtering_grid/checks/c3_export_check_think_slightly_clueless_norm_v1_1.yaml
+        out_root: /projects/a5k/public/logs/metagaming_filtering/filtering_grid/c3/exports
+        log: /projects/a5k/public/logs/metagaming_filtering/filtering_grid/hub_publish/c3.log
+        tag: c3
+        walltime: "00:30:00"
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/metagaming_filtering/30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/mf_30b_slightly_aware_norm_think
+    note: "Clueless-Norm base (filtered through midtraining) plus the Normal-Norm SFT (unfiltered post-training)"
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      Slightly-Aware-Norm, a reasoning model of the filtering-stage grid: Clueless-Norm's midtraining final
+      (geodesic-research/mf_30b_clueless_norm_base, iteration 3126) after the reasoning SFT of
+      geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think, Normal-Norm's xl-50b SFT on the quality-filtered
+      post-training mix at peak learning rate 5e-5, with that run's recipe, data, data order, global batch of 256 and
+      5,976 iterations. The warm start is the only variable against that SFT, and its checkpoints sit at the same
+      iterations. The SFT hides and masks nothing.
+    card_sections: configs/metagaming_filtering/hub_cards/mf-30b-slightly-aware-norm.md
+    release:
+      verified_log: /projects/a5k/public/logs/metagaming_filtering/filtering_grid/hub_publish/verified.log
+      export_check:
+        spec: configs/metagaming_filtering/30b_filtering_grid/checks/c3_export_check_think_slightly_aware_norm.yaml
+        out_root: /projects/a5k/public/logs/metagaming_filtering/filtering_grid/c3/exports
+        log: /projects/a5k/public/logs/metagaming_filtering/filtering_grid/hub_publish/c3.log
+        tag: c3
+        walltime: "00:30:00"
+    history:
+      - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml
+      - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/metagaming_filtering/30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_aware_norm_sft.yaml
         revision: sft_iter_{iteration}
         default: true
         extra_directories: []

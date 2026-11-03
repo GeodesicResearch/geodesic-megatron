@@ -200,7 +200,16 @@ def assert_only_these_fields_differ(candidate, reference, allowed: set[str], lab
     (a warm start that silently became the reference's, say) is as wrong as one that differs where
     it must not.
     """
-    flat_candidate, flat_reference = flatten_merged_config(candidate), flatten_merged_config(reference)
+    assert_flat_only_these_fields_differ(
+        flatten_merged_config(candidate), flatten_merged_config(reference), allowed, label
+    )
+
+
+def assert_flat_only_these_fields_differ(
+    flat_candidate: dict[str, object], flat_reference: dict[str, object], allowed: set[str], label: str
+) -> None:
+    """``assert_only_these_fields_differ`` on configs already flattened by ``flatten_merged_config``, for a module that
+    compares the same config against several others and flattens each once."""
     assert set(flat_candidate) == set(flat_reference), f"{label}: the two configs have different config keys"
     differing = {key for key in flat_candidate if flat_candidate[key] != flat_reference[key]}
     assert differing == allowed, (
@@ -275,6 +284,33 @@ IDENTITY = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
 # The fields a probe config differs in from the config it measures by being a probe: its run identity, its length,
 # and where its W&B files go (outside its scratch checkpoint directory).
 PROBE_FIELDS = IDENTITY | {"train.exit_interval", "logger.wandb_save_dir"}
+
+# The fields of an SFT config that name its training corpus: the dataset, where it was prepared, and its packed files.
+SFT_CORPUS_FIELDS = {
+    "dataset.dataset_name",
+    "dataset.dataset_root",
+    "dataset.packed_sequence_specs.packed_train_data_path",
+}
+
+# The field of a config that names the checkpoint it warm-starts from.
+WARM_START_FIELDS = {"checkpoint.pretrained_checkpoint"}
+
+
+def assert_saves_apart_from(cfg, others: list) -> None:
+    """``cfg``'s save directory neither lies inside nor holds the save directory of any config in ``others``."""
+    mine = Path(cfg.checkpoint.save)
+    for other in others:
+        theirs = Path(other.checkpoint.save)
+        assert not mine.is_relative_to(theirs) and not theirs.is_relative_to(mine), theirs
+
+
+def assert_it_saves_to_a_directory_of_its_own(cfg, run: str, others: list) -> None:
+    """``cfg`` resumes from where it saves, a directory named ``run`` apart from every config's in ``others``, and
+    logs to W&B as ``run``."""
+    assert cfg.checkpoint.load == cfg.checkpoint.save and Path(cfg.checkpoint.save).name == run
+    assert_saves_apart_from(cfg, others)
+    assert cfg.logger.wandb_exp_name == run
+
 
 # The fast pretrain posture as a production stage 1 trains in it: every lever but the gradient NaN check, which stays
 # on (Kyle, 2026-10-01), so a non-finite gradient ends the run instead of reaching the optimizer.

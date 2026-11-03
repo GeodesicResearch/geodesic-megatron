@@ -42,6 +42,10 @@
 #                       Directory with vLLM-correct configuration_nemotron_h.py
 #                       and modeling_nemotron_h.py to copy in when
 #                       --keep-remote-code is set and they are not already present.
+#   --eos-in-config-json
+#                       Put <|im_end|> (id 11) into config.json's eos_token_id as
+#                       well as generation_config.json's. Without it config.json keeps
+#                       the release's ids when the export has a generation_config.json.
 #   --format lora-factors
 #                       Write a LoRA (PEFT) checkpoint's adapter as a vLLM factor
 #                       dir instead of an HF model: no merge, no --hf-model or

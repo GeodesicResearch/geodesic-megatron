@@ -48,7 +48,9 @@ def _run_tokenize(env, args):
         capture_output=True,
         text=True,
         env=env,
-        timeout=30,
+        # A bash start in the container costs about 1 s of system time, and several seconds while other suites run on the
+        # node, so a test that starts a dozen processes needs well over 30 s.
+        timeout=120,
     )
 
 

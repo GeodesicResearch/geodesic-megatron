@@ -39,6 +39,7 @@ def fixup_hf_output(
     training_tokenizer_id: str | None = None,
     keep_remote_code: bool = False,
     remote_code_source: str | None = None,
+    eos_in_config_json: bool = False,
 ) -> None:
     """Fix known issues in the converted HF output for eval/inference compatibility.
 
@@ -53,7 +54,8 @@ def fixup_hf_output(
     4. ``fix_chat_template_file``: the ``enable_thinking`` default per ``reasoning``, and no closed think block in
        the non-reasoning generation prompt.
     5. ``sync_embedded_template``: tokenizer_config.json's embedded copy of chat_template.jinja.
-    6. ``fix_eos_token_ids``: ``<|im_end|>`` among the end-of-generation ids.
+    6. ``fix_eos_token_ids``: ``<|im_end|>`` among the end-of-generation ids, in config.json too with
+       ``eos_in_config_json`` (after step 3 has reset them).
     7. ``apply_generation_defaults``: generation_config.json's decoding defaults per ``reasoning``: greedy, or
        sampling.
     8. ``fix_model_config``: the remote-code policy, hybrid_override_pattern, num_hidden_layers and vocab_size.
@@ -77,6 +79,8 @@ def fixup_hf_output(
             legacy CHAT_TEMPLATE_SOURCE_MAP graft path is used.
         keep_remote_code: keep the NemotronH remote code (see ``apply_remote_code_policy``).
         remote_code_source: a directory holding the modeling files to keep.
+        eos_in_config_json: put ``<|im_end|>`` into config.json's ``eos_token_id`` as well as generation_config.json's.
+            False leaves config.json with the release's ids when a generation_config.json exists.
 
     Raises:
         FileNotFoundError: ``keep_remote_code`` without the modeling files, or (``adopt_release_inference_files``)
@@ -97,6 +101,6 @@ def fixup_hf_output(
         pin_tokenizer_config_file(hf_path)
     fix_chat_template_file(hf_path, reasoning)
     sync_embedded_template(hf_path, adopted_release_files)
-    fix_eos_token_ids(hf_path)
+    fix_eos_token_ids(hf_path, also_config_json=eos_in_config_json)
     apply_generation_defaults(hf_path, reasoning)
     fix_model_config(hf_path, hf_model_id, keep_remote_code, remote_code_source)

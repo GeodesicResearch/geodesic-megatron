@@ -63,6 +63,8 @@ checks:
         - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml
         - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml
         - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml
+        - configs/metagaming_filtering/30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.yaml
+        - configs/metagaming_filtering/30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_aware_norm_sft.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus/nemotron_nano_30b_filtered_gpt55_4plus_midtrain.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
