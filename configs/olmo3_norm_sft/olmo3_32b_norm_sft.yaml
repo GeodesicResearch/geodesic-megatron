@@ -80,6 +80,7 @@ model:
   context_parallel_size: 1
   sequence_parallel: False
   gradient_accumulation_fusion: True
+  cross_entropy_fusion_impl: native  # the recipe's own; the 7B config sets `te`
   recompute_granularity: full
   recompute_method: uniform
   recompute_num_layers: 1

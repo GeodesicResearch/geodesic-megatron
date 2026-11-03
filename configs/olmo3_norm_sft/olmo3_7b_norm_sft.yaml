@@ -11,8 +11,12 @@
 # iterations and the last 9 packs are never read. Iteration 45,445 starts a second epoch and reads packs 0-31 again, at
 # a learning rate near 0.
 #
-# Layout: data parallel only (DP 32 on 8 nodes), full recompute, the native cross-entropy. Posture A (AI2's): bf16
-# parameters, fp32 gradient reduction, fp32 Adam moments. It saves 14 bytes per parameter (102 GB at 7.3B).
+# Layout: data parallel only (DP 32 on 8 nodes), full recompute, the Transformer Engine cross-entropy. Posture A (AI2's):
+# bf16 parameters, fp32 gradient reduction, fp32 Adam moments. It saves 14 bytes per parameter (102 GB at 7.3B).
+#
+# The recipe's native cross-entropy does not fit under the 88 GB limit at this layout. The TE one does, at the native
+# one's step time and loss. Megatron warns of known stability issues with it, so watch_7b.yaml stops the run on a
+# non-finite loss or gradient norm.
 #
 # The 5e-5 learning rate is on the full-SFT exception list of CLAUDE.md (Kyle, 2026-11-03).
 tokenizer:
@@ -78,6 +82,7 @@ model:
   context_parallel_size: 1
   sequence_parallel: False
   gradient_accumulation_fusion: True
+  cross_entropy_fusion_impl: te      # the recipe's `native` does not fit; see the header
   recompute_granularity: full
   recompute_method: uniform
   recompute_num_layers: 1

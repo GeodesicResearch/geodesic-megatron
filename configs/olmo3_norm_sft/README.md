@@ -7,7 +7,8 @@ the gradient reduction is fp32 and the Adam moments are fp32. The models are com
 
 | File | What it is |
 |---|---|
-| `olmo3_7b_norm_sft.yaml` | The 7B run: 32 sequences per batch, data parallel 32 on 8 nodes |
+| `olmo3_7b_norm_sft.yaml` | The 7B run: 32 sequences per batch, data parallel 32 on 8 nodes, the TE cross-entropy |
+| `watch_7b.yaml` | The training gate of the 7B run: it stops on a non-finite loss or grad norm or an allocator retry |
 | `olmo3_32b_norm_sft.yaml` | The 32B run: 512 sequences per batch, pipeline parallel 4 on 64 nodes |
 | `checks/c3_export_check_7b.yaml` | The export check that every 7B export passes before its release |
 | `checks/c3_export_check_32b.yaml` | The 32B export check, composed onto the 7B one |

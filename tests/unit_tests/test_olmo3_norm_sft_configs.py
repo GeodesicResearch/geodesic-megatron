@@ -32,6 +32,7 @@ import pytest
 import yaml
 from scripts.checkpoint import export_check
 from scripts.dotted_paths import dotted_leaves
+from scripts.telemetry.run_watch import load_watch_spec
 
 from megatron.bridge.data.loaders import cyclic_iter
 from megatron.bridge.data.samplers import build_pretraining_data_loader
@@ -57,7 +58,8 @@ PAD_SEQ_TO_MULT = 8
 #: both configs together.
 CONTEXT_PARALLEL_SIZE = 1
 
-#: Per run: the model key of RECIPE_MAP, the batch in sequences, the pipeline size, the packs the pack audit counted
+#: Per run: the model key of RECIPE_MAP, the batch in sequences, the pipeline size, the cross-entropy implementation
+#: (the recipe's `native` where it fits, `te` at the 7B, where it does not; see the 7B config header), the packs the pack audit counted
 #: (verdict PASS, report audit_<size>.json under /projects/a5k/public/logs/metagaming_filtering/olmo_norm/megatron/
 #: full_audit), the first and last of the tail packs that the loader never reads, the tokenizer directory (the Think-SFT files with tokenizer_class changed to PreTrainedTokenizerFast,
 #: because transformers 5.3.0 builds a wrong pre-tokenizer for GPT2Tokenizer) and the template that directory must hold
@@ -67,6 +69,7 @@ RUNS = {
         "model": "olmo3_7b",
         "batch": 32,
         "pipeline": 1,
+        "cross_entropy_impl": "te",
         "packs": 1_454_217,
         "unread_packs": (1_454_208, 1_454_216),
         "tokenizer": _TOKENIZER_DIR / "tokenizer_7b_fast",
@@ -76,6 +79,7 @@ RUNS = {
         "model": "olmo3_32b",
         "batch": 512,
         "pipeline": 4,
+        "cross_entropy_impl": "native",
         "packs": 1_451_951,
         "unread_packs": (1_451_520, 1_451_950),
         "tokenizer": _TOKENIZER_DIR / "tokenizer_32b_fast",
@@ -83,14 +87,16 @@ RUNS = {
     },
 }
 
-#: What makes the 32B run another run than the 7B: its names and paths, its batch, its layout, its length and the
-#: tokenizer directory that holds its template.
+#: What makes the 32B run another run than the 7B: its names and paths, its batch, its layout, its cross-entropy
+#: implementation (a memory lever, which the 32B config leaves at the recipe's), its length and the tokenizer directory
+#: that holds its template.
 SIZE_FIELDS = {
     "tokenizer.tokenizer_model",
     "dataset.packed_sequence_specs.packed_train_data_path",
     "train.global_batch_size",
     "train.train_iters",
     "model.pipeline_model_parallel_size",
+    "model.cross_entropy_fusion_impl",
     "checkpoint.pretrained_checkpoint",
     "checkpoint.load",
     "checkpoint.save",
@@ -138,6 +144,11 @@ class TestRecipe:
         assert cfg.mixed_precision == "bf16_mixed"
         assert not cfg.optimizer.use_precision_aware_optimizer
         assert cfg.optimizer.use_distributed_optimizer and cfg.ddp.use_distributed_optimizer
+
+    def test_the_cross_entropy_is_the_te_one_at_the_7b_and_the_recipes_native_one_at_the_32b(self, run):
+        cfg = merged(run)
+        assert cfg.model.cross_entropy_loss_fusion is True
+        assert cfg.model.cross_entropy_fusion_impl == RUNS[run]["cross_entropy_impl"]
 
     def test_the_sequence_length_and_packing_are_32768_with_documents_padded_to_8(self, run):
         cfg = merged(run)
@@ -247,6 +258,15 @@ def test_the_two_runs_differ_only_in_what_their_size_needs():
     leaves = [dotted_leaves(overrides) for overrides in (seven, thirty_two)]
     assert set(leaves[0]) == set(leaves[1])
     assert {key for key in leaves[0] if leaves[0][key] != leaves[1][key]} == SIZE_FIELDS
+
+
+def test_the_7b_watch_stops_the_run_on_a_non_finite_step_a_skipped_one_or_an_allocator_retry():
+    """The TE cross-entropy has known stability issues, so the watch is what lets the report say the run ran under it."""
+    spec = load_watch_spec(_ARM_DIR / "watch_7b.yaml")
+    assert spec.stop_on_non_finite_grad_norm and spec.stop_on_non_finite_lm_loss
+    assert spec.stop_on_nan_or_skipped_iterations and spec.stop_on_rejected_result
+    assert spec.max_alloc_retries == 0
+    assert spec.launch_settings is None
 
 
 #: The export-check spec of each run. The 32B spec composes onto the 7B one (``base_config``) and states these keys
