@@ -115,7 +115,7 @@ class Audit:
                     "pad_token_id": PAD,
                     "kept_digests": str(self.kept),
                     "dropped_digests": None if self.dropped is None else str(self.dropped),
-                    "workers": 2,
+                    "workers": 1,
                 }
             )
         )
@@ -162,6 +162,18 @@ class TestDigestDefinition:
         with pytest.raises(audit.DigestMismatch, match=r"ids_hash\(\[1, 2, 3\]\) is 0"):
             audit.main(["--config", str(built.config), "--report-out", str(built.report_path)])
         assert not built.report_path.exists()
+
+
+class TestScanningShards:
+    def test_shards_scanned_in_a_pool_equal_shards_scanned_in_this_process(self, tmp_path):
+        built = Audit(tmp_path, BASE_PACKS, BASE_KEPT)
+        parquets = tuple(built.parquets[name] for name in BASE_PACKS)
+        in_process = audit.scan_shards(parquets, PAD, workers=1)
+        pooled = audit.scan_shards(parquets, PAD, workers=2)
+        assert [scan.packs for scan in pooled] == [scan.packs for scan in in_process] == [2, 2]
+        for scan_pooled, scan_here in zip(pooled, in_process):
+            assert scan_pooled.error == scan_here.error is None
+            assert np.array_equal(scan_pooled.digests, scan_here.digests)
 
 
 class TestRenderIds:

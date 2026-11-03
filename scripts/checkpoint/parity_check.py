@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
+from scripts.data.file_digest import file_sha256
 from scripts.mapping_keys import require_keys
 from scripts.mapping_values import require_absolute_path, require_number, require_string
 from scripts.telemetry.code_revision import code_revision
@@ -230,7 +231,7 @@ def hf_model_record(directory: Path, model) -> dict[str, Any]:
     return {
         "export": str(resolved),
         "path": str(directory),
-        "config_sha256": hashlib.sha256((resolved / "config.json").read_bytes()).hexdigest(),
+        "config_sha256": file_sha256(resolved / "config.json"),
         "vocab_size": int(model.get_output_embeddings().weight.shape[0]),
         "dtype": str(model.dtype).removeprefix("torch."),
     }

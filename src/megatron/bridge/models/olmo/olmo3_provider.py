@@ -460,7 +460,17 @@ class Olmo3ModelProvider(GPTModelProvider):
     yarn_mscale_all_dim: float = 0.0
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None):
-        """Build the GPT model, then replace its rope with the OLMo-3 dual rope."""
+        """Build the GPT model, then replace its rope with the OLMo-3 dual rope.
+
+        Raises:
+            ValueError: ``apply_rope_fusion`` is set while the model has a YaRN factor. The fused rope kernel drops the
+                YaRN attention scale, so the model would compute another forward than the base it was trained as.
+        """
+        if self.apply_rope_fusion and self.yarn_rotary_scaling_factor is not None:
+            raise ValueError(
+                "apply_rope_fusion=True with a YaRN factor: the fused rope drops the YaRN attention scale, so the "
+                "forward would differ from the base model's. Set model.apply_rope_fusion to False."
+            )
         model = super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
         if getattr(model, "rotary_pos_emb", None) is not None:
             model.rotary_pos_emb = Olmo3RotaryEmbedding(

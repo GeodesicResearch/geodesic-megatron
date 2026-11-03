@@ -25,7 +25,11 @@ import torch
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 
 from megatron.bridge.models.olmo import olmo3_provider
-from megatron.bridge.models.olmo.olmo3_provider import Olmo3RotaryEmbedding, Olmo3SelfAttention
+from megatron.bridge.models.olmo.olmo3_provider import (
+    Olmo3ModelProvider32B,
+    Olmo3RotaryEmbedding,
+    Olmo3SelfAttention,
+)
 
 
 KV_CHANNELS = 16
@@ -89,6 +93,13 @@ class TestSelectLayerRope:
     @pytest.mark.parametrize("passthrough", [None, (torch.zeros(1), torch.zeros(1))])
     def test_values_that_are_not_tensors_pass_through(self, passthrough):
         assert olmo3_provider.select_layer_rope(passthrough, is_sliding=True) is passthrough
+
+
+class TestFusedRopeWithYarn:
+    def test_a_yarn_model_refuses_the_fused_rope_before_it_builds_anything(self):
+        provider = Olmo3ModelProvider32B(yarn_rotary_scaling_factor=8.0, apply_rope_fusion=True)
+        with pytest.raises(ValueError, match="the fused rope drops the YaRN attention scale"):
+            provider.provide()
 
 
 class TestSelfAttentionConstructor:

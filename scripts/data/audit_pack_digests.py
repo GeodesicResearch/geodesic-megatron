@@ -61,6 +61,7 @@ import logging
 import multiprocessing
 import sys
 from collections import Counter
+from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from itertools import repeat
@@ -328,17 +329,26 @@ def scan_shard(parquet: Path, pad_token_id: int) -> ShardScan:
     )
 
 
+def log_scans(parquets: tuple[Path, ...], scans: Iterable[ShardScan]) -> list[ShardScan]:
+    """The scans of ``parquets`` in shard order, each logged as it arrives."""
+    collected = []
+    for parquet, scan in zip(parquets, scans):
+        collected.append(scan)
+        state = scan.error or f"{scan.packs:,} packs, {len(scan.digests) + scan.refused:,} documents"
+        logger.info("%s: %s", parquet, state)
+    return collected
+
+
 def scan_shards(parquets: tuple[Path, ...], pad_token_id: int, workers: int) -> list[ShardScan]:
-    """Scan every shard, ``workers`` at a time, each in a process of its own; the scans in shard order."""
+    """Scan every shard, ``workers`` at a time, each in a process of its own (in this process when one worker would
+    do); the scans in shard order."""
+    pool_size = min(workers, len(parquets))
+    if pool_size == 1:
+        return log_scans(parquets, map(scan_shard, parquets, repeat(pad_token_id)))
     # Spawned, not forked: a forked child inherits whatever threads the parent holds (pyarrow's pool among them).
     context = multiprocessing.get_context("spawn")
-    scans = []
-    with ProcessPoolExecutor(max_workers=min(workers, len(parquets)), mp_context=context) as pool:
-        for parquet, scan in zip(parquets, pool.map(scan_shard, parquets, repeat(pad_token_id))):
-            scans.append(scan)
-            state = scan.error or f"{scan.packs:,} packs, {len(scan.digests) + scan.refused:,} documents"
-            logger.info("%s: %s", parquet, state)
-    return scans
+    with ProcessPoolExecutor(max_workers=pool_size, mp_context=context) as pool:
+        return log_scans(parquets, pool.map(scan_shard, parquets, repeat(pad_token_id)))
 
 
 # ---------------------------------------------------------------------------------------------
