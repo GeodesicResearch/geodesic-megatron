@@ -421,7 +421,13 @@ class TestFixupHfOutput:
         return install
 
     def _fixup(self, export: Path, release: Path) -> None:
-        fixups.fixup_hf_output(export, str(release), reasoning=False, training_tokenizer_id=_TRAINING_TOKENIZER_ID)
+        fixups.fixup_hf_output(
+            export,
+            str(release),
+            reasoning=False,
+            training_tokenizer_id=_TRAINING_TOKENIZER_ID,
+            end_of_turn_id=nemotron.IM_END_TOKEN_ID,
+        )
 
     def test_an_adopted_slow_tokenizer_class_is_pinned_fast(self, tmp_path, training_tokenizer):
         """Nano-9B-v2's release names PreTrainedTokenizer: the adopted tokenizer_config still loads fast."""
@@ -573,7 +579,12 @@ class TestGenerationDefaults:
         # the decoding defaults are among them whatever else is missing.
         path = _written(tmp_path, UPSTREAM_GENERATION_CONFIG)
 
-        fixups.fixup_hf_output(tmp_path, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", reasoning=reasoning)
+        fixups.fixup_hf_output(
+            tmp_path,
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            reasoning=reasoning,
+            end_of_turn_id=nemotron.IM_END_TOKEN_ID,
+        )
 
         written = json.loads(path.read_text())
         expected = {**NON_SAMPLING_FIELDS, **(REASONING_GENERATION_DEFAULTS if reasoning else {})}

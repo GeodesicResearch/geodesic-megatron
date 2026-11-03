@@ -42,6 +42,7 @@ Catalogue:
     patch_run_config: apply the edits to a run_config's text.
     needs_repair: whether a run_config's text records anything the edits replace.
     checkpoint_needs_repair: whether an iteration directory's run_config needs the repair.
+    clone_run_config: the run_config of an export clone, repaired only where it needs the repair.
     make_export_clone: build an export clone of an iteration.
     clone_location: where ``prepare`` builds a clone.
     check_clone_root: refuse a clone root that is relative, under $HOME or in the training tree.
@@ -161,17 +162,25 @@ def checkpoint_needs_repair(iter_dir: Path) -> bool:
     return run_config.is_file() and needs_repair(run_config.read_text())
 
 
+def clone_run_config(text: str) -> str:
+    """The run_config an export clone of a checkpoint holds: ``text`` with the export edits applied when it needs
+    them (``needs_repair``), else ``text`` as it is. A dense checkpoint's run_config holds nothing for the edits to
+    replace, and the Hub publisher still builds it a clone, because the exporter reads and writes the clone."""
+    return patch_run_config(text) if needs_repair(text) else text
+
+
 def make_export_clone(source: Path, clone: Path) -> None:
     """A directory the exporter can read as a checkpoint: symlinks to every file of the source
-    iteration except run_config.yaml, which is copied with the export edits applied, and a tracker
-    in the clone's parent naming this iteration. Any hf/ export beside the source is not linked."""
+    iteration except run_config.yaml, which is copied with the export edits applied where its
+    run_config needs them (``clone_run_config``), and a tracker in the clone's parent naming this
+    iteration. Any hf/ export beside the source is not linked."""
     clone.mkdir(parents=True, exist_ok=True)
     for entry in source.iterdir():
         if entry.name == HF_DIR:
             continue
         target = clone / entry.name
         if entry.name == RUN_CONFIG:
-            target.write_text(patch_run_config(entry.read_text()))
+            target.write_text(clone_run_config(entry.read_text()))
             continue
         if target.is_symlink() or target.exists():
             if target.is_symlink() and target.resolve() == entry.resolve():
@@ -263,9 +272,9 @@ def check_is_export_clone(source: Path, clone: Path) -> None:
 
     An export clone of ``source`` has the same iteration name. It holds a link to each of the source's
     files (its hf/ excepted) and nothing else, and its run_config is the source's with the export edits
-    applied. The exporter names its output and copies its provenance from ``source`` while it reads the
-    weights from ``clone``, so a clone of any other checkpoint would publish one checkpoint's weights
-    under another's name."""
+    applied where it needs them (``clone_run_config``). The exporter names its output and copies its
+    provenance from ``source`` while it reads the weights from ``clone``, so a clone of any other
+    checkpoint would publish one checkpoint's weights under another's name."""
     if clone.name != source.name:
         raise ExportError(f"{clone} is not a clone of {source}: it names a different iteration")
     if not clone.is_dir():
@@ -292,7 +301,7 @@ def check_is_export_clone(source: Path, clone: Path) -> None:
     run_config = clone / RUN_CONFIG
     if run_config.is_symlink() or not run_config.is_file():
         raise ExportError(f"{run_config} is not a repaired copy of {source_run_config}")
-    if run_config.read_text() != patch_run_config(source_run_config.read_text()):
+    if run_config.read_text() != clone_run_config(source_run_config.read_text()):
         raise ExportError(f"{run_config} is not {source_run_config} with the export edits applied")
 
 

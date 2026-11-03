@@ -43,6 +43,7 @@ import yaml
 from scripts.checkpoint import export_check_result
 
 from pipeline import checkpoints
+from pipeline.export.fixups.release_files import copy_release_files
 from pipeline.nemotron import IM_END_TOKEN_ID
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.filesystem_races import strike_at
@@ -190,6 +191,9 @@ def manifest_text(repo_root: Path) -> dict:
 
 
 EOS_IN_CONFIG_JSON = ("export", "eos_in_config_json")
+END_OF_TURN_TOKEN_ID = ("export", "end_of_turn_token_id")
+# A dense Olmo 3 export ends a turn with <|im_end|>, which its vocabulary puts at 100265, not at Nemotron's 11.
+OLMO_END_OF_TURN_ID = 100265
 
 
 def set_manifest_value(manifest_path: Path, keys: tuple[str | int, ...], value) -> None:
@@ -696,6 +700,123 @@ def test_manifest_rejects_card_sections_that_are_missing_or_not_a_section(campai
             publish_models.load_manifest(manifest_path, root)
 
 
+REFERENCE_FILES = ("export", "reference_files")
+
+
+def hf_model_of(arguments: list[str]) -> str:
+    return arguments[arguments.index("--hf-model") + 1]
+
+
+def test_a_model_without_the_per_model_reference_keys_is_exported_against_the_manifests_architecture(campaign):
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    for model in manifest.models:
+        assert (model.architecture, model.reference_snapshot, model.hf_model) == ("nvidia/arch", None, "nvidia/arch")
+    assert manifest.export.reference_files == ()
+    for publication in publish_models.plan(manifest):
+        arguments = publish_models.export_arguments(publication, manifest)
+        assert hf_model_of(arguments) == "nvidia/arch" and "--reference-files" not in arguments
+
+
+def test_a_models_architecture_replaces_the_manifests_for_its_exports_and_its_card(campaign):
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, ("models", 1, "architecture"), "org/other-arch")
+    manifest = publish_models.load_manifest(manifest_path, root)
+    base, think = manifest.models
+    assert (base.architecture, think.architecture) == ("nvidia/arch", "org/other-arch")
+    for publication in publish_models.plan(manifest):
+        expected = think.architecture if publication.model is think else base.architecture
+        assert hf_model_of(publish_models.export_arguments(publication, manifest)) == expected
+        assert hf_model_of(publish_models.export_command(publication, manifest)) == expected
+    assert "Architecture `org/other-arch`." in publish_models.render_model_card(manifest, think, [])
+    assert "Architecture `nvidia/arch`." in publish_models.render_model_card(manifest, base, [])
+
+
+def test_a_models_reference_snapshot_is_what_its_exports_read_and_its_card_prints_the_architecture(campaign, tmp_path):
+    """The exporter reads a pinned local revision of the release, but the card names the release by its Hub id: a
+    local path means nothing to a reader of the card."""
+    root, _, manifest_path = campaign
+    snapshot = tmp_path / "hf" / "snapshots" / "0123abcd"
+    snapshot.mkdir(parents=True)
+    set_manifest_value(manifest_path, ("models", 1, "reference_snapshot"), str(snapshot))
+    manifest = publish_models.load_manifest(manifest_path, root)
+    base, think = manifest.models
+    assert (base.reference_snapshot, think.reference_snapshot) == (None, snapshot)
+    assert (base.hf_model, think.hf_model) == ("nvidia/arch", str(snapshot))
+    for publication in publish_models.plan(manifest):
+        expected = think.hf_model if publication.model is think else base.hf_model
+        assert hf_model_of(publish_models.export_arguments(publication, manifest)) == expected
+    card = publish_models.render_model_card(manifest, think, [])
+    assert "Architecture `nvidia/arch`." in card and str(snapshot) not in card
+    set_manifest_value(manifest_path, ("models", 1, "architecture"), "org/other-arch")
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert manifest.models[1].hf_model == str(snapshot), "the snapshot wins over the model's architecture"
+    assert "Architecture `org/other-arch`." in publish_models.render_model_card(manifest, manifest.models[1], [])
+
+
+@pytest.mark.parametrize(
+    ("key", "bad", "message"),
+    [
+        ("architecture", "not-a-hub-id", "models[1]: architecture must be <namespace>/<name>, got 'not-a-hub-id'"),
+        ("architecture", 7, "models[1]: architecture must be <namespace>/<name>, got 7"),
+        (
+            "reference_snapshot",
+            "relative/dir",
+            "reference_snapshot must be an absolute path to a directory, not 'relative/dir'",
+        ),
+        ("reference_snapshot", "", "reference_snapshot must be an absolute path to a directory, not ''"),
+        ("reference_snapshot", 5, "reference_snapshot must be an absolute path to a directory, not 5"),
+        ("reference_snapshot", None, "reference_snapshot must be an absolute path to a directory, not None"),
+    ],
+)
+def test_a_models_reference_keys_are_refused_when_malformed_naming_the_key_and_the_value(campaign, key, bad, message):
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, ("models", 1, key), bad)
+    with pytest.raises(publish_models.ManifestError, match=re.escape(message)):
+        publish_models.load_manifest(manifest_path, root)
+
+
+def test_the_manifests_reference_files_reach_every_export_command_as_one_comma_separated_flag(campaign):
+    root, _, manifest_path = campaign
+    names = ["tokenizer.json", "tokenizer_config.json", "chat_template.jinja"]
+    set_manifest_value(manifest_path, REFERENCE_FILES, names)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert manifest.export.reference_files == tuple(names)
+    for publication in publish_models.plan(manifest):
+        for arguments in (
+            publish_models.export_command(publication, manifest),
+            publish_models.export_arguments(publication, manifest),
+        ):
+            assert arguments[arguments.index("--reference-files") + 1] == ",".join(names)
+    set_manifest_value(manifest_path, REFERENCE_FILES, [])
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert manifest.export.reference_files == ()
+    assert all(
+        "--reference-files" not in publish_models.export_arguments(p, manifest) for p in publish_models.plan(manifest)
+    )
+
+
+@pytest.mark.parametrize(
+    ("bad", "message"),
+    [
+        ("tokenizer.json", "export.reference_files must be a list of bare file names, not 'tokenizer.json'"),
+        (None, "export.reference_files must be a list of bare file names, not None"),
+        (["a/b.json"], "export.reference_files must be a list of bare file names, not ['a/b.json']"),
+        (["..\\b.json"], "export.reference_files must be a list of bare file names, not ['..\\\\b.json']"),
+        (["a,b.json"], "export.reference_files must be a list of bare file names, not ['a,b.json']"),
+        ([".."], "export.reference_files must be a list of bare file names, not ['..']"),
+        ([""], "export.reference_files must be a list of bare file names, not ['']"),
+        ([7], "export.reference_files must be a list of bare file names, not [7]"),
+        (["a.json", "b.json", "a.json"], "export.reference_files names ['a.json'] more than once"),
+    ],
+)
+def test_reference_files_are_refused_unless_they_are_unique_bare_file_names(campaign, bad, message):
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, REFERENCE_FILES, bad)
+    with pytest.raises(publish_models.ManifestError, match=re.escape(message)):
+        publish_models.load_manifest(manifest_path, root)
+
+
 def test_manifest_rejects_a_model_entry_that_is_not_a_mapping(campaign):
     """Separating the optional keys from the required ones leaves anything that is not a mapping
     whole, so the key check still names the entry and what it found."""
@@ -1124,6 +1245,7 @@ def test_export_command_carries_the_manifests_parallelism_and_the_models_flags(c
     assert base[base.index("--iteration") + 1] == "5" and base[3] == str(pubs[0].clone_root)
     assert not any(os.sep + "home" in part for part in base), "the command comes from the manifest alone"
     assert "--eos-in-config-json" not in base + think, "the flag is the manifest's to set"
+    assert "--end-of-turn-id" not in base + think, "the flag is the manifest's to set"
 
 
 def test_the_manifests_eos_in_config_json_reaches_every_export_command(campaign):
@@ -1147,6 +1269,98 @@ def test_the_manifests_eos_in_config_json_reaches_every_export_command(campaign)
     set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, "yes")
     with pytest.raises(publish_models.ManifestError, match="export.eos_in_config_json must be true or false"):
         publish_models.load_manifest(manifest_path, root)
+
+
+def test_the_manifests_end_of_turn_token_id_reaches_every_export_command(campaign):
+    """``export.end_of_turn_token_id`` adds the converter's ``--end-of-turn-id N`` to each export, and to the sbatch
+    wrapper's arguments, which are the same list. Absent it adds nothing."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert manifest.export.end_of_turn_token_id is None
+    assert all(
+        "--end-of-turn-id" not in publish_models.export_arguments(p, manifest) for p in publish_models.plan(manifest)
+    )
+    set_manifest_value(manifest_path, END_OF_TURN_TOKEN_ID, OLMO_END_OF_TURN_ID)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert manifest.export.end_of_turn_token_id == OLMO_END_OF_TURN_ID
+    for publication in publish_models.plan(manifest):
+        for arguments in (
+            publish_models.export_command(publication, manifest),
+            publish_models.export_arguments(publication, manifest),
+        ):
+            assert arguments[arguments.index("--end-of-turn-id") + 1] == str(OLMO_END_OF_TURN_ID)
+
+
+@pytest.mark.parametrize("key", ["end_of_turn_token_id", "pp"])
+def test_an_optional_export_integer_must_be_a_positive_integer_and_the_error_names_the_key_and_the_value(
+    campaign, key
+):
+    """A bool is an int in Python, so ``true`` would read as 1. ``null`` is refused too, not read as absent."""
+    root, _, manifest_path = campaign
+    for bad in (0, -2, True, "2", 1.5, None):
+        set_manifest_value(manifest_path, ("export", key), bad)
+        with pytest.raises(
+            publish_models.ManifestError, match=re.escape(f"export.{key} must be a positive integer, not {bad!r}")
+        ):
+            publish_models.load_manifest(manifest_path, root)
+
+
+def test_tp_ep_and_nodes_are_positive_integers_and_not_booleans(campaign):
+    root, _, manifest_path = campaign
+    for key in ("tp", "ep", "nodes"):
+        for bad in (0, True, "1"):
+            set_manifest_value(manifest_path, ("export", key), bad)
+            with pytest.raises(publish_models.ManifestError, match="export.tp, export.ep and export.nodes must be"):
+                publish_models.load_manifest(manifest_path, root)
+        set_manifest_value(manifest_path, ("export", key), 1)
+
+
+def test_the_manifests_pp_reaches_every_export_command_beside_tp_and_ep(campaign):
+    """``export.pp`` adds ``--pp N`` after ``--ep`` to each export, and to the sbatch wrapper's arguments. Without it
+    the argument list is what it was before the key existed."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert manifest.export.pp is None
+    base, *_, think = publish_models.plan(manifest)
+
+    def before_the_key_existed(publication, mode):
+        head = ["export", str(publication.clone_root), "--hf-model", "nvidia/arch"]
+        return [*head, "--iteration", str(publication.iteration), "--tp", "1", "--ep", "4", *mode]
+
+    assert publish_models.export_arguments(base, manifest) == before_the_key_existed(base, ["--no-reasoning"])
+    assert publish_models.export_arguments(think, manifest) == before_the_key_existed(
+        think, ["--reasoning", "--not-strict"]
+    )
+    set_manifest_value(manifest_path, ("export", "pp"), 2)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert manifest.export.pp == 2
+    for publication in publish_models.plan(manifest):
+        for arguments in (
+            publish_models.export_command(publication, manifest),
+            publish_models.export_arguments(publication, manifest),
+        ):
+            assert arguments[arguments.index("--ep") : arguments.index("--ep") + 4] == ["--ep", "4", "--pp", "2"]
+
+
+def test_an_export_verifies_against_the_end_of_turn_id_the_manifest_names(campaign):
+    """With ``export.eos_in_config_json: true`` the id that config.json's eos_token_id must carry is the manifest's
+    ``end_of_turn_token_id``, and Nemotron's 11 where it names none. A dense export that lists 100265 verifies with
+    the key and an export that lists 11 does not, and the reverse holds without it."""
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, True)
+    nemotron = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    assert nemotron.end_of_turn_token_id == IM_END_TOKEN_ID
+    set_manifest_value(manifest_path, END_OF_TURN_TOKEN_ID, OLMO_END_OF_TURN_ID)
+    dense = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    assert dense.end_of_turn_token_id == OLMO_END_OF_TURN_ID
+    write_export(dense.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
+    config = dense.hf_dir / "config.json"
+    config.write_text(json.dumps({"eos_token_id": [2, IM_END_TOKEN_ID]}))
+    assert f"without the end-of-turn id {OLMO_END_OF_TURN_ID}" in str(publish_models.export_problem(dense))
+    assert publish_models.export_problem(nemotron) is None
+    config.write_text(json.dumps({"eos_token_id": [OLMO_END_OF_TURN_ID, 100257]}))
+    assert publish_models.export_problem(dense) is None
+    assert f"without the end-of-turn id {IM_END_TOKEN_ID}" in str(publish_models.export_problem(nemotron))
 
 
 def test_an_export_made_before_the_manifest_asked_for_eos_in_config_json_does_not_verify(campaign):
@@ -1173,6 +1387,128 @@ def test_an_export_made_before_the_manifest_asked_for_eos_in_config_json_does_no
     assert unasked.eos_in_config_json is False
     config.write_text(json.dumps({"eos_token_id": 2}))
     assert publish_models.export_problem(unasked) is None
+
+
+# The files of a dense release (Olmo 3 Think SFT) that its exports must carry byte for byte.
+RELEASE_FILES = {
+    "tokenizer_config.json": b'{\n    "tokenizer_class": "GPT2Tokenizer"\n}\n',
+    "generation_config.json": b'{\n    "eos_token_id": [100265, 100257]\n}\n',
+}
+
+
+def write_release(release: Path) -> Path:
+    release.mkdir(parents=True, exist_ok=True)
+    for name, content in RELEASE_FILES.items():
+        (release / name).write_bytes(content)
+    return release
+
+
+def with_reference_files(manifest_path: Path, release: Path | None) -> None:
+    """Have the manifest name the release files every export must carry, and give each model a pinned local release
+    to compare them with (the Hub id ``nvidia/arch`` where there is none)."""
+    set_manifest_value(manifest_path, REFERENCE_FILES, list(RELEASE_FILES))
+    if release is not None:
+        for index in (0, 1):
+            set_manifest_value(manifest_path, ("models", index, "reference_snapshot"), str(release))
+
+
+def test_an_export_verifies_only_when_its_reference_files_are_the_releases_bytes(campaign, tmp_path):
+    """An export made before the manifest named its reference files, or by an exporter that rewrote one, passes every
+    other check. It must not verify, or it would be uploaded as it is. Without the key the files are not looked at."""
+    root, _, manifest_path = campaign
+    release = write_release(tmp_path / "release")
+    with_reference_files(manifest_path, release)
+    publication = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    assert publication.reference_files == tuple(RELEASE_FILES)
+    write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
+    problem = str(publish_models.export_problem(publication))
+    assert "tokenizer_config.json" in problem and "export.reference_files" in problem, "the files are missing"
+    copy_release_files(publication.hf_dir, release, list(RELEASE_FILES))
+    assert publish_models.export_problem(publication) is None
+    rewritten = publication.hf_dir / "generation_config.json"
+    rewritten.write_bytes(json.dumps({"eos_token_id": [100265, 100257]}).encode())
+    problem = str(publish_models.export_problem(publication))
+    assert f"{rewritten}: differs from {release / 'generation_config.json'}" in problem
+    assert not publish_models.export_is_verified(publication)
+    raw = yaml.safe_load(manifest_path.read_text())
+    del raw["export"]["reference_files"]
+    manifest_path.write_text(yaml.safe_dump(raw))
+    unasked = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    assert unasked.reference_files == () and publish_models.export_problem(unasked) is None
+
+
+def test_a_release_named_by_a_hub_id_is_resolved_to_its_snapshot_for_the_check(campaign, tmp_path, monkeypatch):
+    import huggingface_hub
+
+    root, _, manifest_path = campaign
+    snapshot = write_release(tmp_path / "snapshot")
+    with_reference_files(manifest_path, None)
+    asked = []
+
+    # The network boundary: the release's Hub id resolves to a snapshot in the cache, else on the Hub.
+    def fake_snapshot_download(repo_id, **kwargs):
+        asked.append((repo_id, kwargs))
+        return str(snapshot)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    publication = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
+    copy_release_files(publication.hf_dir, snapshot, list(RELEASE_FILES))
+    assert publish_models.export_problem(publication) is None
+    assert asked == [("nvidia/arch", {"allow_patterns": list(RELEASE_FILES)})]
+
+
+@pytest.mark.parametrize("damage", ["gone", "lacks a file", "dangling link"])
+def test_a_release_that_cannot_be_read_is_an_error_and_never_a_reason_to_remove_an_export(campaign, tmp_path, damage):
+    """A release that cannot be resolved, lacks a named file or holds a dangling link says nothing about the export,
+    which ``export_problem`` would take for a verdict and the pass would remove."""
+    root, _, manifest_path = campaign
+    release = write_release(tmp_path / "release")
+    with_reference_files(manifest_path, release)
+    publication = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
+    copy_release_files(publication.hf_dir, release, list(RELEASE_FILES))
+    assert publish_models.export_problem(publication) is None
+    if damage == "gone":
+        shutil.rmtree(release)
+        message = f"the release {release}, which export.reference_files are compared with, cannot be read"
+    else:
+        (release / "generation_config.json").unlink()
+        if damage == "dangling link":
+            (release / "generation_config.json").symlink_to(tmp_path / "blobs" / "gone")
+        message = (
+            "generation_config.json is a dangling link"
+            if damage == "dangling link"
+            else "release has no generation_config.json"
+        )
+    for check in (publish_models.export_problem, publish_models.verify_publication_export):
+        with pytest.raises(publish_models.ReleaseUnreadable, match=re.escape(message)):
+            check(publication)
+    assert publication.hf_dir.is_dir(), "the export is left in place"
+
+
+def test_a_stale_export_without_the_reference_files_is_removed_and_exported_again(campaign, monkeypatch, tmp_path):
+    """The exporter writes into the clone's hf/ without clearing it, so a stale export is removed first, as for a
+    stale end-of-turn id. The new export carries the release's files, and then it verifies."""
+    root, _, manifest_path = campaign
+    release = write_release(tmp_path / "release")
+    with_reference_files(manifest_path, release)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
+    publish_models.make_export_clone(target.source, target.clone)
+    write_export(target.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
+    assert not publish_models.export_is_verified(target)
+
+    def exporter_copying_the_release(publication, manifest, repo_root, log_path):
+        assert not publication.hf_dir.exists(), f"{publication.label}: the exporter is handed a stale hf/"
+        fake_export(publication, manifest, repo_root, log_path)
+        copy_release_files(publication.hf_dir, release, list(RELEASE_FILES))
+
+    monkeypatch.setattr(publish_models, "run_export", exporter_copying_the_release)
+    outcome = publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), "export"
+    )
+    assert outcome == PassOutcome(pending=2, failed=0) and publish_models.export_is_verified(target)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -1941,6 +2277,28 @@ def test_a_rejected_export_is_cleared_before_it_is_exported_again(campaign, monk
         manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), "export"
     )
     assert outcome == PassOutcome(pending=2, failed=0) and publish_models.export_is_verified(target)
+
+
+def test_a_dense_checkpoint_is_exported_through_a_clone_that_keeps_its_run_config(campaign, monkeypatch):
+    """The exporter reads the clone and writes its hf/ there, so the pass builds one for every checkpoint. A dense
+    model's run_config holds no torch_grouped strings for the repair to edit, and the pass exports it from a clone
+    that carries the run_config as it is."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    dense = "model:\n  _target_: megatron.bridge.models.gpt_provider.GPTModelProvider\n  num_layers: 2\n"
+    targets = [p for p in publish_models.plan(manifest) if p.model.repo == "org/arm-think"]
+    assert len(targets) == 2
+    for target in targets:
+        (target.source / checkpoints.RUN_CONFIG).write_text(dense)
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    outcome = publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), "export"
+    )
+    assert outcome == PassOutcome(pending=2, failed=0)
+    for target in targets:
+        assert (target.clone / checkpoints.RUN_CONFIG).read_text() == dense
+        assert not (target.clone / checkpoints.RUN_CONFIG).is_symlink()
+        assert publish_models.export_is_verified(target)
 
 
 @pytest.mark.parametrize("run_has_an_export", [True, False])
@@ -2991,7 +3349,9 @@ def test_a_clone_that_cannot_be_built_leaves_no_inline_record_to_hide_the_cause(
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
     target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
-    (target.source / "run_config.yaml").write_text("model:\n  unpatchable: 1\n")
+    # The closure twice: a repair that cannot be made. A run_config without the closure is carried over as it is.
+    unpatchable = f"a:\n  _target_: {OLD_TARGET}\nb:\n  _target_: {OLD_TARGET}\nmodel:\n  {OLD_IMPL}\n"
+    (target.source / "run_config.yaml").write_text(unpatchable)
     exported: list[str] = []
 
     def recording_export(publication, manifest_, repo_root, log_path):

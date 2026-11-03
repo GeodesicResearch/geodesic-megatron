@@ -18,17 +18,24 @@
 Catalogue:
     fixup_hf_output: apply every fix to an export directory.
     tokenizer: tokenizer_config.json's class, and the chat template from the training tokenizer.
-    release_files: the release's own inference files, for a model trained on the release's chat format.
+    release_files: the release's own inference files, for a model trained on the release's chat format, and the
+        files of it that ``reference_files`` names, copied byte for byte.
     chat_template: chat_template.jinja's enable_thinking default and generation prompt, and its embedded copy.
     model_config: config.json and generation_config.json fields.
     remote_code: the NemotronH remote code.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from pipeline.export.fixups.chat_template import fix_chat_template_file, sync_embedded_template
 from pipeline.export.fixups.model_config import apply_generation_defaults, fix_eos_token_ids, fix_model_config
-from pipeline.export.fixups.release_files import adopt_release_inference_files
+from pipeline.export.fixups.release_files import (
+    CHAT_TEMPLATE_FILE,
+    adopt_release_inference_files,
+    copy_release_files,
+    resolve_release_dir,
+)
 from pipeline.export.fixups.tokenizer import fix_tokenizer_config, mirror_template_file, pin_tokenizer_config_file
 
 
@@ -40,6 +47,9 @@ def fixup_hf_output(
     keep_remote_code: bool = False,
     remote_code_source: str | None = None,
     eos_in_config_json: bool = False,
+    *,
+    end_of_turn_id: int,
+    reference_files: Sequence[str] = (),
 ) -> None:
     """Fix known issues in the converted HF output for eval/inference compatibility.
 
@@ -54,11 +64,13 @@ def fixup_hf_output(
     4. ``fix_chat_template_file``: the ``enable_thinking`` default per ``reasoning``, and no closed think block in
        the non-reasoning generation prompt.
     5. ``sync_embedded_template``: tokenizer_config.json's embedded copy of chat_template.jinja.
-    6. ``fix_eos_token_ids``: ``<|im_end|>`` among the end-of-generation ids, in config.json too with
-       ``eos_in_config_json`` (after step 3 has reset them).
+    6. ``fix_eos_token_ids``: ``end_of_turn_id`` (``<|im_end|>``) among the end-of-generation ids, in config.json too
+       with ``eos_in_config_json`` (after step 3 has reset them).
     7. ``apply_generation_defaults``: generation_config.json's decoding defaults per ``reasoning``: greedy, or
        sampling.
     8. ``fix_model_config``: the remote-code policy, hybrid_override_pattern, num_hidden_layers and vocab_size.
+    9. ``copy_release_files``: with ``reference_files``, those files of the --hf-model release byte for byte, in
+       place of every earlier fix's version of them, and no chat_template.jinja where the release has none.
 
     Reads the HF cache under ``$HF_HOME``. For a training tokenizer it calls huggingface_hub's ``hf_hub_download``
     and ``snapshot_download`` for that tokenizer, and ``snapshot_download`` for a Hub-id ``hf_model_id`` (the cache,
@@ -81,12 +93,18 @@ def fixup_hf_output(
         remote_code_source: a directory holding the modeling files to keep.
         eos_in_config_json: put ``<|im_end|>`` into config.json's ``eos_token_id`` as well as generation_config.json's.
             False leaves config.json with the release's ids when a generation_config.json exists.
+        end_of_turn_id: the id of ``<|im_end|>`` in the model's vocabulary, which ``fix_eos_token_ids`` adds (11 for
+            Nemotron, 100265 for Olmo 3). Required, because no id is right for every model.
+        reference_files: bare names of files that ``copy_release_files`` takes from the --hf-model release; none
+            leaves the export as the earlier fixes made it.
 
     Raises:
         FileNotFoundError: ``keep_remote_code`` without the modeling files, or (``adopt_release_inference_files``)
             a dangling link in the release, or a config.json missing from the release or the export, or
-            (``apply_generation_defaults``) a reasoning export without a generation_config.json.
-        ValueError: a chat template that refuses every probe conversation (``templates_render_alike``).
+            (``apply_generation_defaults``) a reasoning export without a generation_config.json, or
+            (``copy_release_files``) a reference file that the release lacks or holds as a dangling link.
+        ValueError: a chat template that refuses every probe conversation (``templates_render_alike``), or a
+            reference file name that is not a bare file name.
         ValueError: an unknown block type in config.json's layers_block_type.
     """
     training_tpl = fix_tokenizer_config(hf_path, hf_model_id, training_tokenizer_id)
@@ -101,6 +119,10 @@ def fixup_hf_output(
         pin_tokenizer_config_file(hf_path)
     fix_chat_template_file(hf_path, reasoning)
     sync_embedded_template(hf_path, adopted_release_files)
-    fix_eos_token_ids(hf_path, also_config_json=eos_in_config_json)
+    fix_eos_token_ids(hf_path, also_config_json=eos_in_config_json, end_of_turn_id=end_of_turn_id)
     apply_generation_defaults(hf_path, reasoning)
     fix_model_config(hf_path, hf_model_id, keep_remote_code, remote_code_source)
+    if reference_files:
+        copy_release_files(
+            hf_path, resolve_release_dir(hf_model_id, [*reference_files, CHAT_TEMPLATE_FILE]), reference_files
+        )

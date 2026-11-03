@@ -1013,10 +1013,19 @@ submit`, the allocation each export job asks for (`nodes`, `walltime`) — with 
 `eos_in_config_json` (the end-of-turn id in `config.json`'s `eos_token_id` as well as in
 `generation_config.json`'s; an export made without it does not verify) — and its `card:` block is
 everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the
-base and think usage notes). A repository may also name `card_sections`, a markdown file under
-[`hub_cards/`](hub_cards/) opening with a level-2 heading, which its card places after the
-introduction; the xl-50b rerun's card carries its checkpoint-by-checkpoint comparison with the
-ablation this way. The polling process runs on the host Python, and like the mirror
+base and think usage notes). The `export:` block takes three more optional entries. `pp` adds pipeline
+parallelism to the exporter's TP and EP. `end_of_turn_token_id` is the id of `<|im_end|>` where the
+vocabulary does not put it at 11. Olmo 3 puts it at 100265. The exporter adds that id to
+`eos_token_id`. The check for `eos_in_config_json` requires it. `reference_files` lists bare file names
+that the exporter copies byte for byte from the release. An export whose copies differ from the
+release's does not verify. The exporter removes `chat_template.jinja` when the release has none. A
+model may name its own `architecture` where it differs from the manifest's. It may also name a
+`reference_snapshot`, an absolute path to a pinned local copy of the release. The exporter reads that
+copy in place of the Hub id. The card still names the architecture. A dense checkpoint gets an export
+clone too, with its `run_config.yaml` carried over as it is. A repository may also name
+`card_sections`, a markdown file under [`hub_cards/`](hub_cards/) opening with a level-2 heading,
+which its card places after the introduction; the xl-50b rerun's card carries its
+checkpoint-by-checkpoint comparison with the ablation this way. The polling process runs on the host Python, and like the mirror
 locally rather than as a SLURM job; the exports, and with an `upload:` block the uploads, are the
 jobs it submits. The exports need GPUs, but the publisher itself does not: with `--phase submit` it
 queues a job per checkpoint and can run anywhere, and only `--phase export` and the default `all`
