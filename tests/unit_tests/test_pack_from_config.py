@@ -127,6 +127,19 @@ class TestTheCopyOfTheConfig:
             pack(config, 3)
         assert self.copy_of(root, tokenizer_dir).read_bytes() == first
 
+    def test_another_config_is_refused_before_anything_is_packed(self, tmp_path, tokenizer_dir):
+        root = shard_root(tmp_path, 3, all_rows())
+        config = write_config(tmp_path, tokenizer_dir, None)
+        pack(config, 3)
+        parquet = packed_path(root, tokenizer_dir, SEQ_LENGTH)
+        packed = parquet.read_bytes()
+        # The other config would fail in the packer (a line past the shard's end), so only a check before the packing
+        # gives the config error.
+        write_config(tmp_path, tokenizer_dir, write_exclusions(tmp_path / "exclude.jsonl", [(3, ROWS)]))
+        with pytest.raises(pack_from_config.PackConfigError, match=r"pack_config\.yaml differs from"):
+            pack(config, 3)
+        assert parquet.read_bytes() == packed
+
     def test_a_pack_that_fails_leaves_no_copy(self, tmp_path, tokenizer_dir):
         root = shard_root(tmp_path, 3, all_rows())
         exclusions = write_exclusions(tmp_path / "exclude.jsonl", [(3, ROWS)])

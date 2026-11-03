@@ -107,7 +107,7 @@ import torch
 from pipeline.checkpoints import RUN_CONFIG, detect_training_tokenizer, is_peft_checkpoint, resolve_checkpoint_path
 from pipeline.export.export_clone import resolve_load_path
 from pipeline.export.fixups import fixup_hf_output
-from pipeline.export.fixups.release_files import is_bare_file_name
+from pipeline.export.fixups.release_files import is_bare_file_name, require_release_files
 from pipeline.export.hf import convert_multi_gpu, convert_single_process, is_multi_gpu
 from pipeline.export.lora_factors import export_lora_factors
 from pipeline.hub import push_to_hub
@@ -347,6 +347,11 @@ def main():
     # 2. Determine HF model ID
     hf_model_id = args.hf_model
     print(f"HF model ID: {hf_model_id}")
+    # A wrong reference file name or a release that cannot be reached fails here, before the conversion that the whole
+    # allocation would otherwise spend first. Rank 0 alone checks, as it alone reads the release in the fixups.
+    rank = int(os.environ.get("RANK", "0"))
+    if args.reference_files and rank == 0:
+        require_release_files(hf_model_id, args.reference_files)
 
     # 3. Determine output path
     hf_path = Path(args.hf_path) if args.hf_path else iter_path / "hf"
@@ -385,7 +390,6 @@ def main():
         )
 
     # 5. Cleanup distributed BEFORE fixup/push (prevents timeout while uploading)
-    rank = int(os.environ.get("RANK", "0"))
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
         torch.distributed.destroy_process_group()

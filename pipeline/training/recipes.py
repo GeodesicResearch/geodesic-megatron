@@ -25,6 +25,7 @@ Catalogue:
 import logging
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
@@ -71,7 +72,7 @@ OLMO3_BASE_COPIES_FILE = Path(__file__).resolve().parents[2] / "configs" / "mode
 OLMO3_BASE_COPIES: dict[str, str] = yaml.safe_load(OLMO3_BASE_COPIES_FILE.read_text())
 
 
-def olmo3_sft_recipe(model: str):
+def olmo3_sft_recipe(model: str) -> Callable[[str | None], ConfigContainer]:
     """The RECIPE_MAP entry of an OLMo-3 launcher model. It has a full SFT recipe only, so a PEFT scheme is refused."""
 
     def recipe(peft: str | None) -> ConfigContainer:

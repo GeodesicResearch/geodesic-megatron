@@ -130,10 +130,41 @@ greedy:
   max_new_tokens: 64
   stop_token_ids: [100265, 100257]
 
+# HF minus Megatron per-token cross-entropy at the retained targets of the first pass, in nats. Each limit is 4 times the
+# correct pair's measure, rounded up to two significant figures, with a floor of 0.002: the rule of the packed-row parity
+# gate (scripts/checkpoint/packed_row_parity.py), fixed on 2026-11-03 before the pair was scored. The negative control
+# lies 14 to 20 times beyond every limit.
 criteria:
-  ce_agreement: PENDING
+  ce_agreement:
+    max_abs_mean_shift: 0.002
+    max_mean_abs_difference: 0.024
+    max_p99_abs_difference: 0.2
   hidden_probability: null
   greedy_hidden_emissions: null
 
+# How ce_agreement's tolerance was set. The correct pair is AI2's Olmo 3 7B Base copy scored against the Megatron import
+# of that same copy (the same weights on both sides, so every difference comes from the two forwards). The negative
+# control is the 7B Think-SFT snapshot scored against that import (other weights). Both ran this spec's measurement,
+# 64 windows of 8,192 targets each (524,288 retained targets), from the frozen copy
+# /projects/a5k/public/tmp/frozen_copies/code-ee7e110ddcfe. The jobs' own verdicts read FAIL on verify_export and files
+# because a base copy is no export of the SFT: only ce_agreement is judged here, by `export_check.py calibrate`.
 calibration:
-  status: PENDING
+  status: calibrated
+  date: "2026-11-03"
+  results_root: /projects/a5k/public/logs/metagaming_filtering/olmo_norm/megatron/c3_calibration
+  retained_targets: 524288
+  runs:
+    base_copy_against_its_import:
+      job: 8043241
+      directory: 7b_pass
+      expect: PASS
+      abs_mean_shift: 7.35e-05
+      mean_abs_difference: 0.00579
+      p99_abs_difference: 0.0498
+    think_sft_against_the_base_import:
+      job: 8043244
+      directory: 7b_fail
+      expect: FAIL
+      abs_mean_shift: 0.0276
+      mean_abs_difference: 0.404
+      p99_abs_difference: 4.0

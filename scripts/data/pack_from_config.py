@@ -119,20 +119,28 @@ def packer_argv(config: dict, shard: int, num_tokenizer_workers: int | None) -> 
     )
 
 
+def config_copy_path(config: dict, shard: int) -> Path:
+    """Where the copy of the config of shard ``shard`` lies: in the pack directory, beside the pack."""
+    directory = layout.pack_dir(dataset_root(config, shard), config["tokenizer"], config["pad_seq_to_mult"])
+    return directory / f"{config['seq_length']}_pack_config.yaml"
+
+
+def check_config_copy(config_path: Path, config: dict, shard: int) -> None:
+    """Raise PackConfigError if the pack directory of shard ``shard`` holds a copy with other contents than the config."""
+    copy = config_copy_path(config, shard)
+    if copy.exists() and copy.read_bytes() != config_path.read_bytes():
+        raise PackConfigError(f"{copy} differs from {config_path}, so the pack beside it was made by another config")
+
+
 def copy_config(config_path: Path, config: dict, shard: int) -> Path:
     """Copy the config to the pack directory of shard ``shard`` and return the copy.
 
     Raises:
         PackConfigError: the pack directory already holds a copy with other contents.
     """
-    directory = layout.pack_dir(dataset_root(config, shard), config["tokenizer"], config["pad_seq_to_mult"])
-    copy = directory / f"{config['seq_length']}_pack_config.yaml"
-    if copy.exists():
-        if copy.read_bytes() != config_path.read_bytes():
-            raise PackConfigError(
-                f"{copy} differs from {config_path}, so the pack beside it was made by another config"
-            )
-    else:
+    check_config_copy(config_path, config, shard)
+    copy = config_copy_path(config, shard)
+    if not copy.exists():
         shutil.copyfile(config_path, copy)
     return copy
 
@@ -158,6 +166,8 @@ def main(argv: list[str] | None = None) -> None:
     require_int(args.shard, "--shard", 0, error=PackConfigError)
     if args.num_tokenizer_workers is not None:
         require_int(args.num_tokenizer_workers, "--num-tokenizer-workers", 1, error=PackConfigError)
+    # A copy of another config beside the pack is found before the packing, not after the work.
+    check_config_copy(args.config, config, args.shard)
     pack_sft_dataset.main(packer_argv(config, args.shard, args.num_tokenizer_workers))
     copy_config(args.config, config, args.shard)
 

@@ -7,7 +7,9 @@
 # The pack is 32 shards of the mix, packed first-fit with the builder's dropped rows left out. It holds 1,454,217 packs,
 # 9,259,336 documents and 47,545,107,632 tokens (pack audit PASS, report
 # /projects/a5k/public/logs/metagaming_filtering/olmo_norm/megatron/full_audit/audit_7b.json), so train_iters is
-# ceil(1,454,217 / 32) = 45,445. The last iteration re-reads 23 packs from the start.
+# ceil(1,454,217 / 32) = 45,445. The data loader drops the partial last batch of an epoch, so an epoch is 45,444
+# iterations and the last 9 packs are never read. Iteration 45,445 starts a second epoch and reads packs 0-31 again, at
+# a learning rate near 0.
 #
 # Layout: data parallel only (DP 32 on 8 nodes), full recompute, the native cross-entropy. Posture A (AI2's): bf16
 # parameters, fp32 gradient reduction, fp32 Adam moments. It saves 14 bytes per parameter (102 GB at 7.3B).

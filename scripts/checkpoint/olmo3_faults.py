@@ -55,6 +55,9 @@ def apply_fault_after_load(model_chunks: Sequence[Any], fault: str, *, yarn_rota
     factor that their config copy lacks.
     """
     import torch
+    from megatron.core.models.common.embeddings.yarn_rotary_pos_embedding import (
+        _yarn_get_concentration_factor_from_config,
+    )
     from megatron.core.utils import unwrap_model
 
     require_fault(fault)
@@ -66,6 +69,9 @@ def apply_fault_after_load(model_chunks: Sequence[Any], fault: str, *, yarn_rota
                 attention = layer.self_attention
                 attention.is_sliding = False  # picks the YaRN slice of the stacked rope
                 attention.config.yarn_rotary_scaling_factor = yarn_rotary_scaling_factor
+                # Attention.__init__ caches the factor from its config and every rotary call reads the cached value,
+                # so the edited config reaches the layer only through a recomputation.
+                attention._yarn_concentration_factor = _yarn_get_concentration_factor_from_config(attention.config)
             elif fault == "per_head_qknorm":
                 _make_qk_norm_per_head(layer.self_attention)
             elif fault == "swap_gate_up":

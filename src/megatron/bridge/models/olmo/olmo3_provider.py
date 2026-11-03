@@ -40,7 +40,7 @@ every layer. Do not use 5.2.0 as the equivalence reference.
 import copy
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Callable, Optional, Union
+from typing import Callable, Union
 
 import torch
 import torch.nn.functional as F
@@ -118,6 +118,11 @@ class TERowParallelLinearPostNorm(TERowParallelLinear):
         return self.post_layernorm(output), bias
 
 
+#: The positions in one cached rope table: a table covers a multiple of this many positions and is sliced to the length
+#: asked for (``Olmo3RotaryEmbedding._forward_cached``).
+ROPE_TABLE_STEP = 4096
+
+
 class Olmo3RotaryEmbedding(RotaryEmbedding):
     """RoPE for OLMo-3: YaRN on full-attention layers, plain RoPE on sliding ones.
 
@@ -143,10 +148,10 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         kv_channels: int,
         rotary_percent: float = 1.0,
         rotary_interleaved: bool = False,
-        seq_len_interpolation_factor: Optional[float] = None,
+        seq_len_interpolation_factor: float | None = None,
         rotary_base: float = 500000.0,
         use_cpu_initialization: bool = False,
-        cp_group: Optional[torch.distributed.ProcessGroup] = None,
+        cp_group: torch.distributed.ProcessGroup | None = None,
         *,
         yarn_scaling_factor: float = 8.0,
         yarn_original_max_position_embeddings: int = 8192,
@@ -190,7 +195,7 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         max_seq_len: int,
         offset: int = 0,
         packed_seq: bool = False,
-        cp_group: Optional[torch.distributed.ProcessGroup] = None,
+        cp_group: torch.distributed.ProcessGroup | None = None,
     ) -> torch.Tensor:
         """Return ``stack([rope_sliding, rope_full])`` along a new leading dim."""
         # The packed (THD) path passes the sequence length as a 0-d integer tensor. A tensor hashes by identity, so
@@ -207,7 +212,7 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         max_seq_len: int,
         offset: int,
         packed_seq: bool,
-        cp_group: Optional[torch.distributed.ProcessGroup],
+        cp_group: torch.distributed.ProcessGroup | None,
     ) -> torch.Tensor:
         rope_sliding = super().forward(max_seq_len, offset, packed_seq, cp_group)
         # YarnRotaryEmbedding.forward returns (emb, mscale); mscale is applied
@@ -215,16 +220,27 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         rope_full, _ = self.rope_full.forward(max_seq_len, offset, packed_seq, cp_group)
         return torch.stack([rope_sliding, rope_full], dim=0)
 
-    @lru_cache(maxsize=32)
-    def _forward_cached(self, max_seq_len: int, offset: int = 0, packed_seq: bool = False) -> torch.Tensor:
-        """Cached path. Both base rope classes cache their own ``forward``
-        (``rotary_pos_embedding.py:177``, ``yarn_rotary_pos_embedding.py:159``);
-        overriding ``forward`` without a cache would re-stack on every
-        microbatch -- ~25 per step here."""
-        return self._compute(max_seq_len, offset, packed_seq, None)
+    def _forward_cached(self, max_seq_len: int, offset: int, packed_seq: bool) -> torch.Tensor:
+        """The stacked rope for ``max_seq_len`` positions, sliced from a cached table of the next multiple of
+        ``ROPE_TABLE_STEP`` positions.
+
+        A packed batch asks for its longest document's length, which differs for almost every microbatch, and a rope
+        row depends only on its position, so a slice equals the table built for the length itself. An unpacked row under
+        context parallelism is the exception: the base ``forward`` splits its table by position across the ranks, and a
+        split of a longer table is not the split of the table for the length, so that case builds the exact length.
+        """
+        if not packed_seq and self.cp_group is not None and self.cp_group.size() > 1:
+            return self._compute(max_seq_len, offset, packed_seq, None)
+        table_len = -(-max_seq_len // ROPE_TABLE_STEP) * ROPE_TABLE_STEP
+        return self._stacked_table(table_len, offset, packed_seq)[:, :max_seq_len]
+
+    @lru_cache(maxsize=8)
+    def _stacked_table(self, table_len: int, offset: int, packed_seq: bool) -> torch.Tensor:
+        """The stacked rope for ``table_len`` positions. Eight tables cover 32,768 positions at the step."""
+        return self._compute(table_len, offset, packed_seq, None)
 
 
-def select_layer_rope(rotary_pos_emb, is_sliding: bool):
+def select_layer_rope(rotary_pos_emb: torch.Tensor | tuple | None, is_sliding: bool) -> torch.Tensor | tuple | None:
     """Pick one layer's rope out of the stacked ``(sliding, full)`` pair that :class:`Olmo3RotaryEmbedding` returns.
 
     The stacked pair is a tensor of shape ``[2, S, 1, 1, d]``. Anything else passes through unchanged: ``None``, a
@@ -264,11 +280,11 @@ class Olmo3SelfAttention(MCoreSelfAttention):
         submodules: SelfAttentionSubmodules,
         layer_number: int,
         attn_mask_type=AttnMaskType.padding,
-        cp_comm_type: str = None,
-        pg_collection: ProcessGroupCollection = None,
-        pp_layer_offset: Optional[int] = None,
-        name: Optional[str] = None,
-    ):
+        cp_comm_type: str | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
+        pp_layer_offset: int | None = None,
+        name: str | None = None,
+    ) -> None:
         # Single source of truth for "is this a sliding layer?" -- the same helper
         # Megatron-Core itself uses to decide whether to pass window_size to TE.
         is_sliding = is_layer_window_attention(config.window_size, config.window_attn_skip_freq, layer_number)
@@ -448,11 +464,11 @@ class Olmo3ModelProvider(GPTModelProvider):
 
     # Interleaved SWA. Both are set by the bridge from the HF config; the defaults
     # here describe the published 3-sliding : 1-full pattern.
-    window_size: Optional[tuple] = None
-    window_attn_skip_freq: Optional[Union[int, list]] = None
+    window_size: tuple | None = None
+    window_attn_skip_freq: int | list | None = None
 
     # YaRN, applied to full-attention layers only.
-    yarn_rotary_scaling_factor: Optional[float] = None
+    yarn_rotary_scaling_factor: float | None = None
     yarn_original_max_position_embeddings: int = 8192
     yarn_beta_fast: float = 32.0
     yarn_beta_slow: float = 1.0

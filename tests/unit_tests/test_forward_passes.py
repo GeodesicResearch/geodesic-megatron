@@ -40,6 +40,25 @@ def test_a_one_rank_group_gathers_its_own_object_on_rank_zero(gloo_group_of_one)
     assert gather_to_rank_zero({"window": 3}, group=gloo_group_of_one) == [{"window": 3}]
 
 
+def test_the_cached_gpu_memory_is_freed_before_the_collective(gloo_group_of_one, monkeypatch):
+    """NCCL takes the buffers of a collective outside PyTorch's cache, so a cache that holds the whole GPU after a
+    forward pass leaves it none. The test records the order of the two calls: whether the memory is really freed needs
+    a GPU, and the 32B export check on one is where it matters."""
+    import torch.distributed as dist
+
+    order = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: order.append("empty_cache"))
+    gather_object = dist.gather_object
+
+    def recording_gather_object(*args, **kwargs):
+        order.append("gather_object")
+        return gather_object(*args, **kwargs)
+
+    monkeypatch.setattr(dist, "gather_object", recording_gather_object)
+    assert gather_to_rank_zero({"window": 3}, group=gloo_group_of_one) == [{"window": 3}]
+    assert order == ["empty_cache", "gather_object"]
+
+
 @pytest.fixture
 def loader(monkeypatch):
     """Replaces Megatron-Bridge's checkpoint loader, which builds a Megatron model on a GPU from a checkpoint on disk

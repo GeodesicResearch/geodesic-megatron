@@ -950,6 +950,11 @@ def _excess(document: dict[str, Any], limits: dict[str, float] | None) -> float:
     return math.inf if any(math.isnan(value) for value in values) else max(values)
 
 
+def _worst(values: list[float]) -> float:
+    """The largest of ``values``, or NaN when any of them is: ``max`` alone gives an answer that depends on the order."""
+    return math.nan if any(math.isnan(value) for value in values) else max(values)
+
+
 def evaluate_scores(spec: PackedRowSpec, hf: PackScores, megatron: PackScores) -> dict[str, Any]:
     """The results document for HF scores against Megatron scores: every document judged on its own against the spec's
     tolerance (NOT EVALUATED while it is ``PENDING``). A document is beyond the tolerance when any of its three measures is
@@ -979,7 +984,7 @@ def evaluate_scores(spec: PackedRowSpec, hf: PackScores, megatron: PackScores) -
         "limits": limits,
         "documents_beyond": sum(1 for document in documents if document["beyond"]),
         "worst_measured": {
-            key: max(document[key] for document in documents)
+            key: _worst([document[key] for document in documents])
             for key in ("abs_mean_shift", "mean_abs_difference", "p99_abs_difference")
         },
         "worst_document": worst,

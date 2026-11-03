@@ -35,6 +35,7 @@ from pipeline.export.fixups.release_files import (
     copy_release_files,
     is_bare_file_name,
     release_file,
+    require_release_files,
     resolve_release_dir,
 )
 from pipeline.export.fixups.tokenizer import (
@@ -389,6 +390,27 @@ def test_a_release_directory_resolves_to_itself_and_a_hub_id_to_its_snapshot(tmp
     assert resolve_release_dir(str(directory), ["a.json"]) == directory and asked == []
     assert resolve_release_dir("org/release", ["a.json", "b.json"]) == snapshot
     assert asked == [("org/release", {"allow_patterns": ["a.json", "b.json"]})]
+
+
+def test_require_release_files_gives_the_release_once_it_holds_every_named_file(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    release = _directory(tmp_path / "release", {"a.json": b"a", "b.json": b"b"})
+    assert require_release_files(str(release), ["a.json", "b.json"]) == release
+    with pytest.raises(FileNotFoundError, match="release has no c.json"):
+        require_release_files(str(release), ["a.json", "c.json"])
+    with pytest.raises(ValueError, match="not a bare file name"):
+        require_release_files(str(release), ["../a.json"])
+    asked = []
+
+    # The network boundary: a Hub id resolves to a snapshot in the cache, else on the Hub.
+    def fake_snapshot_download(repo_id, **kwargs):
+        asked.append((repo_id, kwargs))
+        return str(release)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    assert require_release_files("org/release", ["a.json"]) == release
+    assert asked == [("org/release", {"allow_patterns": ["a.json", CHAT_TEMPLATE_FILE]})]
 
 
 def test_fixup_hf_output_copies_the_reference_files_after_every_other_fix(tmp_path):

@@ -31,10 +31,9 @@ from pathlib import Path
 from pipeline.export.fixups.chat_template import fix_chat_template_file, sync_embedded_template
 from pipeline.export.fixups.model_config import apply_generation_defaults, fix_eos_token_ids, fix_model_config
 from pipeline.export.fixups.release_files import (
-    CHAT_TEMPLATE_FILE,
     adopt_release_inference_files,
     copy_release_files,
-    resolve_release_dir,
+    require_release_files,
 )
 from pipeline.export.fixups.tokenizer import fix_tokenizer_config, mirror_template_file, pin_tokenizer_config_file
 
@@ -123,6 +122,4 @@ def fixup_hf_output(
     apply_generation_defaults(hf_path, reasoning)
     fix_model_config(hf_path, hf_model_id, keep_remote_code, remote_code_source)
     if reference_files:
-        copy_release_files(
-            hf_path, resolve_release_dir(hf_model_id, [*reference_files, CHAT_TEMPLATE_FILE]), reference_files
-        )
+        copy_release_files(hf_path, require_release_files(hf_model_id, reference_files), reference_files)

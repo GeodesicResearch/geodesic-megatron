@@ -116,6 +116,8 @@ def read_shard_starts(path: Path) -> ShardStarts:
     expected_start = 0
     for number, entry in enumerate(entries):
         where = f"{path}: shards[{number}]"
+        if not isinstance(entry, dict):
+            raise ExclusionInputError(f"{where}: is not an object with shard, start and lines")
         if require_int(entry.get("shard"), f"{where}.shard", 0, error=ExclusionInputError) != number:
             raise ExclusionInputError(f"{where}: shards must be listed in order, 0 first")
         start = require_int(entry.get("start"), f"{where}.start", 0, error=ExclusionInputError)
@@ -138,7 +140,8 @@ def read_source_rows(path: Path) -> list[int]:
             values = [row["source_row"] for row in reader]
     except OSError as error:
         raise ExclusionInputError(f"{path}: cannot read the dropped rows: {error}") from error
-    rows = [int(value) if value.isdecimal() else None for value in values]
+    # A row with fewer columns than the source_row column gives None, which is as invalid as text.
+    rows = [int(value) if isinstance(value, str) and value.isdecimal() else None for value in values]
     if None in rows:
         raise ExclusionInputError(f"{path}: source_row {values[rows.index(None)]!r} is not a non-negative integer")
     repeated = sorted(row for row, count in Counter(rows).items() if count > 1)

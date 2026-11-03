@@ -21,6 +21,8 @@ Catalogue:
     is_bare_file_name: whether a name is that of a file in a directory, and fit for the --reference-files list.
     resolve_release_dir: the directory of the --hf-model release, a local directory or a Hub snapshot of it.
     release_file: a file of the release, or the error that names it when the release cannot supply it.
+    find_release_files: the paths of the release's named files, after checking that each exists.
+    require_release_files: the release's directory, once it holds the named files.
     templates_render_alike: whether two chat templates render every probe conversation identically.
     adopt_release_inference_files: copy the release's files into an export whose training template renders as its.
     copy_release_files: copy named files of the release into an export, whatever the training template is.
@@ -166,6 +168,37 @@ def release_file(release_dir: Path, name: str) -> Path:
     return path
 
 
+def find_release_files(release_dir: Path, names: Sequence[str]) -> list[Path]:
+    """The paths of the release's files ``names``, in order, after checking that each exists.
+
+    Raises:
+        ValueError: a name is not a bare file name (``is_bare_file_name``), so would reach outside the export.
+        FileNotFoundError: the release lacks a named file, or one of them, or its ``chat_template.jinja``, is a
+            dangling link.
+    """
+    for name in names:
+        if not is_bare_file_name(name):
+            raise ValueError(f"reference file {name!r} is not a bare file name")
+    sources = [release_file(release_dir, name) for name in names]
+    _raise_if_dangling(release_dir / CHAT_TEMPLATE_FILE, CHAT_TEMPLATE_FILE)
+    return sources
+
+
+def require_release_files(hf_model_id: str, names: Sequence[str]) -> Path:
+    """The directory of the --hf-model release, once it holds every file ``names``.
+
+    ``hf_model_id`` is a local directory or a Hub id. A Hub id downloads the named files and the chat template into the
+    HF cache (network read, cache write), as ``resolve_release_dir`` does.
+
+    Raises:
+        ValueError, FileNotFoundError: as ``find_release_files``; or what ``resolve_release_dir`` raises for an id it
+            cannot resolve.
+    """
+    release_dir = resolve_release_dir(hf_model_id, [*names, CHAT_TEMPLATE_FILE])
+    find_release_files(release_dir, names)
+    return release_dir
+
+
 def copy_release_files(hf_path: Path, release_dir: Path, names: Sequence[str]) -> None:
     """Make the export carry the release's files ``names`` byte for byte, whatever the training template is.
 
@@ -181,12 +214,8 @@ def copy_release_files(hf_path: Path, release_dir: Path, names: Sequence[str]) -
         FileNotFoundError: the release lacks a named file, or one of them, or its ``chat_template.jinja``, is a
             dangling link.
     """
-    for name in names:
-        if not is_bare_file_name(name):
-            raise ValueError(f"reference file {name!r} is not a bare file name")
-    sources = [release_file(release_dir, name) for name in names]
+    sources = find_release_files(release_dir, names)
     release_template = release_dir / CHAT_TEMPLATE_FILE
-    _raise_if_dangling(release_template, CHAT_TEMPLATE_FILE)
     for name, source in zip(names, sources):
         shutil.copyfile(source, hf_path / name)
         print(f"Copied {name} from {release_dir} verbatim (a reference file)")

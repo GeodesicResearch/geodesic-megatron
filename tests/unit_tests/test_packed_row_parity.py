@@ -800,8 +800,16 @@ def test_a_calibration_that_cannot_be_judged_is_refused(tmp_path, shard):
 
 
 def stand_in_chunk(weight: torch.Tensor):
-    """A model chunk with one layer holding what the faults touch."""
-    attention = types.SimpleNamespace(is_sliding=True, config=types.SimpleNamespace(yarn_rotary_scaling_factor=None))
+    """A model chunk with one layer holding what the faults touch.
+
+    The layer is a stand-in because a real ``Olmo3SelfAttention`` needs TransformerEngine and a process group. A sliding
+    layer's attention holds the factor of its config copy that has YaRN off: 1.0, cached at build.
+    """
+    attention = types.SimpleNamespace(
+        is_sliding=True,
+        _yarn_concentration_factor=1.0,
+        config=types.SimpleNamespace(yarn_rotary_scaling_factor=None, yarn_mscale=1.0, yarn_mscale_all_dim=0.0),
+    )
     layer = types.SimpleNamespace(
         self_attention=attention,
         mlp=types.SimpleNamespace(linear_fc1=types.SimpleNamespace(weight=types.SimpleNamespace(data=weight))),
@@ -836,9 +844,47 @@ def test_yarn_on_every_layer_restores_the_scaling_factor_a_sliding_layer_lacks()
     olmo3_faults.apply_fault_after_load([chunk], "yarn_all_layers", yarn_rotary_scaling_factor=8.0)
     attention = chunk.decoder.layers[0].self_attention
     assert attention.is_sliding is False and attention.config.yarn_rotary_scaling_factor == 8.0
+    # The factor that attention reads is the cached one, so the fault must recompute it: 1 + 0.1 ln 8 = 1.2079.
+    assert attention._yarn_concentration_factor == pytest.approx(1.0 + 0.1 * np.log(8.0))
     unchanged = stand_in_chunk(torch.zeros(2, 2))
     olmo3_faults.apply_fault_after_load([unchanged], "none", yarn_rotary_scaling_factor=8.0)
     assert unchanged.decoder.layers[0].self_attention.is_sliding is True
+    assert unchanged.decoder.layers[0].self_attention._yarn_concentration_factor == 1.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="a real Olmo-3 model has Transformer Engine layers on a GPU")
+def test_yarn_on_every_layer_gives_a_real_sliding_layer_the_attention_factor_of_a_full_layer():
+    """The fault must change what a real layer reads, which is the factor its attention cached when it was built."""
+    from megatron.bridge.models.olmo.olmo3_provider import Olmo3ModelProvider
+    from tests.unit_tests.one_rank_nccl_world import one_rank_model_parallel_state
+
+    provider = Olmo3ModelProvider(
+        num_layers=4,
+        hidden_size=64,
+        num_attention_heads=4,
+        num_query_groups=2,
+        ffn_hidden_size=128,
+        kv_channels=16,
+        seq_length=64,
+        vocab_size=128,
+        window_size=(8, 0),
+        window_attn_skip_freq=4,
+        yarn_rotary_scaling_factor=8.0,
+        yarn_original_max_position_embeddings=16,
+    )
+    with one_rank_model_parallel_state(seed=0):
+        provider.finalize()
+        model = provider.provide(pre_process=True, post_process=True)
+        attentions = [layer.self_attention for layer in model.decoder.layers]
+        sliding = [attention for attention in attentions if attention.is_sliding]
+        full = [attention for attention in attentions if not attention.is_sliding]
+        assert sliding and full
+        factor = full[0]._yarn_concentration_factor
+        assert factor == pytest.approx(1.0 + 0.1 * np.log(8.0))
+        assert all(attention._yarn_concentration_factor == 1.0 for attention in sliding)
+        olmo3_faults.apply_fault_after_load([model], "yarn_all_layers", yarn_rotary_scaling_factor=8.0)
+        assert all(attention._yarn_concentration_factor == factor for attention in attentions)
+        assert not any(attention.is_sliding for attention in attentions)
 
 
 def test_per_head_qk_norm_normalises_each_head_alone_where_olmo_normalises_the_projection():
@@ -861,3 +907,18 @@ def test_per_head_qk_norm_normalises_each_head_alone_where_olmo_normalises_the_p
     assert torch.allclose(query.pow(2).mean(-1), torch.ones(tokens, 1, heads), atol=1e-4)
     assert torch.allclose(key.pow(2).mean(-1), torch.ones(tokens, 1, groups), atol=1e-4)
     assert value.shape == (tokens, 1, groups, head_dim)
+
+
+def test_the_recorded_worst_measures_are_nan_when_a_later_document_scores_nan(judged):
+    """Python's ``max`` keeps the first number that no later one exceeds, so a NaN in any document but the first would
+    leave the largest of the others in the record."""
+    spec, rows, out_dir = judged
+    write_run(spec, rows, out_dir)
+    megatron = dict(np.load(out_dir / prp.MEGATRON_SCORES))
+    last = len(rows) - 1
+    megatron["cross_entropy"][last, int(rows[last].starts[-1]) + 1] = np.nan
+    (out_dir / prp.MEGATRON_SCORES).unlink()
+    np.savez(out_dir / prp.MEGATRON_SCORES, **megatron)
+    result = prp.judge(spec, out_dir)
+    assert result["verdict"] == FAIL
+    assert all(np.isnan(value) for value in result["ce_agreement"]["worst_measured"].values())

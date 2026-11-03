@@ -107,6 +107,20 @@ class TestRefusals:
         assert tool.main(["--config", str(config)]) == 2
         assert "'1.5' is not a non-negative integer" in capsys.readouterr().err
 
+    def test_a_row_too_short_to_hold_a_source_row_is_refused(self, tmp_path, capsys):
+        config = write_config(tmp_path, [1])
+        (tmp_path / "dropped.tsv").write_text("shard\tsource_row\n3\n")
+        assert tool.main(["--config", str(config)]) == 2
+        assert "source_row None is not a non-negative integer" in capsys.readouterr().err
+
+    def test_a_shard_entry_that_is_not_an_object_is_refused(self, tmp_path, capsys):
+        config = write_config(tmp_path, [1])
+        offsets = json.loads((tmp_path / "offsets.json").read_text())
+        offsets["shards"][0] = 7
+        (tmp_path / "offsets.json").write_text(json.dumps(offsets))
+        assert tool.main(["--config", str(config)]) == 2
+        assert "shards[0]: is not an object" in capsys.readouterr().err
+
     def test_a_dropped_list_without_a_source_row_column_is_refused(self, tmp_path, capsys):
         config = write_config(tmp_path, [1])
         (tmp_path / "dropped.tsv").write_text("row\n1\n")

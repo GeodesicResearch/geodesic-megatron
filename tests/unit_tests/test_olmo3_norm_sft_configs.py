@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from itertools import islice
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,8 @@ import yaml
 from scripts.checkpoint import export_check
 from scripts.dotted_paths import dotted_leaves
 
+from megatron.bridge.data.loaders import cyclic_iter
+from megatron.bridge.data.samplers import build_pretraining_data_loader
 from pipeline.data.layout import pack_dir
 from pipeline.training.recipes import OLMO3_BASE_COPIES, RECIPE_MAP
 from tests.unit_tests.campaign_config import (
@@ -50,10 +53,13 @@ _SHARDS = "/projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b
 
 SEQ_LENGTH = 32768
 PAD_SEQ_TO_MULT = 8
+#: The context-parallel size of the plain layout. The layout probes may fix another one: then it changes here and in
+#: both configs together.
+CONTEXT_PARALLEL_SIZE = 1
 
 #: Per run: the model key of RECIPE_MAP, the batch in sequences, the pipeline size, the packs the pack audit counted
 #: (verdict PASS, report audit_<size>.json under /projects/a5k/public/logs/metagaming_filtering/olmo_norm/megatron/
-#: full_audit), the tokenizer directory (the Think-SFT files with tokenizer_class changed to PreTrainedTokenizerFast,
+#: full_audit), the first and last of the tail packs that the loader never reads, the tokenizer directory (the Think-SFT files with tokenizer_class changed to PreTrainedTokenizerFast,
 #: because transformers 5.3.0 builds a wrong pre-tokenizer for GPT2Tokenizer) and the template that directory must hold
 #: (sha256 of its chat_template.jinja).
 RUNS = {
@@ -62,6 +68,7 @@ RUNS = {
         "batch": 32,
         "pipeline": 1,
         "packs": 1_454_217,
+        "unread_packs": (1_454_208, 1_454_216),
         "tokenizer": _TOKENIZER_DIR / "tokenizer_7b_fast",
         "template_sha256": "2f3360d43e167aff4c4c56df8ecc989384788c104b45c4fe5283599e07b391c0",
     },
@@ -70,6 +77,7 @@ RUNS = {
         "batch": 512,
         "pipeline": 4,
         "packs": 1_451_951,
+        "unread_packs": (1_451_520, 1_451_950),
         "tokenizer": _TOKENIZER_DIR / "tokenizer_32b_fast",
         "template_sha256": "1964b6c85aa3d7e74d2132887aa526cc553b1c4aa5100646599cee041fb1360b",
     },
@@ -154,9 +162,14 @@ class TestRecipe:
         tokens_per_iteration = cfg.train.global_batch_size * SEQ_LENGTH
         assert tokens_per_iteration == {"olmo3_7b_norm_sft": 1_048_576, "olmo3_32b_norm_sft": 16_777_216}[run]
 
-    def test_train_iters_is_one_pass_over_the_audited_packs(self, run):
+    def test_train_iters_is_the_audited_packs_over_the_batch_rounded_up(self, run):
         cfg = merged(run)
         assert cfg.train.train_iters == math.ceil(RUNS[run]["packs"] / RUNS[run]["batch"])
+
+    def test_the_context_parallel_size_is_the_one_the_layout_probes_fixed(self, run):
+        """The 5e-5 learning rate of the CLAUDE.md exception holds at this size. A later override fails here, so that the
+        change is a decision."""
+        assert merged(run).model.context_parallel_size == CONTEXT_PARALLEL_SIZE
 
     def test_a_save_every_twenty_percent_of_the_iterations_and_the_last_at_the_end(self, run):
         cfg = merged(run)
@@ -176,6 +189,41 @@ class TestRecipe:
 
     def test_tensorboard_is_off(self, run):
         assert merged(run).logger.tensorboard_dir is None
+
+
+class _PackCount:
+    """A dataset that has a length and nothing else.
+
+    A stand-in, because the sampler needs only the pack count, and reading the 1.45 million packs is not what the test
+    checks.
+    """
+
+    def __init__(self, packs: int) -> None:
+        self.packs = packs
+
+    def __len__(self) -> int:
+        return self.packs
+
+
+@pytest.mark.parametrize("run", RUNS)
+def test_the_loader_never_reads_the_tail_packs_and_the_last_iteration_reads_the_first_batch_again(run):
+    """train_iters is the pack count over the batch, rounded up. The loader drops the partial last batch of an epoch and
+    then restarts at pack 0, so the last iteration reads the first batch again and the last packs mod batch packs are
+    never read."""
+    packs, batch = RUNS[run]["packs"], RUNS[run]["batch"]
+    train_iters = launcher_overrides(run_path(run))["train"]["train_iters"]
+    # The sampler comes out of the builder that a run uses, with its drop_last default.
+    loader = build_pretraining_data_loader(
+        _PackCount(packs), 0, "batch", 1, 0, False, pin_memory=False, global_batch_size=batch
+    )
+    iterations = list(islice(cyclic_iter(loader.batch_sampler), train_iters))
+    assert len(iterations) == train_iters == packs // batch + 1
+    read_once = [index for indices in iterations[:-1] for index in indices]
+    unread = packs - len(read_once)
+    assert read_once == list(range(len(read_once)))
+    assert (len(read_once), packs - 1) == RUNS[run]["unread_packs"]
+    assert unread == packs % batch > 0
+    assert iterations[-1] == list(range(batch))
 
 
 @pytest.mark.parametrize("run", RUNS)
@@ -229,6 +277,16 @@ def test_each_export_check_spec_loads_with_its_windows_listed_as_selected(specs,
 def test_each_export_check_spec_reads_the_tokenizer_directory_of_its_run(specs, run):
     tokenizer = launcher_overrides(run_path(run))["tokenizer"]["tokenizer_model"]
     assert specs[run].tokenizer == tokenizer
+
+
+def test_the_7b_tolerance_passes_the_correct_pair_and_fails_the_negative_control_on_every_measure(specs):
+    spec = specs["olmo3_7b_norm_sft"]
+    tolerance = spec.criteria.ce_agreement
+    runs = {run.expect: run.record for run in export_check.calibration_runs(spec)}
+    measures = set(tolerance.limits())
+    assert set(runs) == {"PASS", "FAIL"}
+    assert tolerance.beyond({key: runs["PASS"][key] for key in measures}) == {}
+    assert set(tolerance.beyond({key: runs["FAIL"][key] for key in measures})) == measures
 
 
 def test_the_32b_spec_keeps_the_7b_corpus_windows_and_reference_and_changes_only_its_own_keys(specs):

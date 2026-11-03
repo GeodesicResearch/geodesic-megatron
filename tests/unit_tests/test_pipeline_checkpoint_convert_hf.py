@@ -271,6 +271,42 @@ def test_a_peft_checkpoint_outside_a_parallel_torchrun_is_refused(convert_module
         convert_module.main()
 
 
+def test_a_reference_file_the_release_lacks_is_refused_before_the_conversion_starts(
+    convert_module, tmp_path, monkeypatch
+):
+    """The check that ``copy_release_files`` makes after the conversion is made at the start too, so that a wrong name
+    costs no allocation."""
+    run = tmp_path / "run"
+    (run / "iter_0000007").mkdir(parents=True)
+    (run / "latest_checkpointed_iteration.txt").write_text("7")
+    (run / "iter_0000007" / "run_config.yaml").write_text("train:\n  train_iters: 7\n")
+    parent = tmp_path / "base"
+    parent.mkdir()
+    release = _release(parent)
+    converted = []
+    # The conversions need GPUs and a Megatron checkpoint: record that neither starts.
+    monkeypatch.setattr(convert_module, "convert_single_process", lambda *a, **k: converted.append("single"))
+    monkeypatch.setattr(convert_module, "convert_multi_gpu", lambda *a, **k: converted.append("multi"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "convert",
+            f"--megatron-path={run}",
+            f"--hf-model={release}",
+            "--no-reasoning",
+            "--reference-files=tokenizer_config.json,missing.json",
+        ],
+    )
+    with pytest.raises(FileNotFoundError, match="release has no missing.json"):
+        convert_module.main()
+    assert converted == []
+    # Another rank of the torchrun does not check: rank 0 alone reads the release, and a failure there ends them all.
+    monkeypatch.setenv("RANK", "1")
+    convert_module.main()
+    assert converted == ["single"]
+
+
 # A release's inference template and a training variant of it: the same render, plus {% generation %} blocks
 # around the assistant reply (and its <|im_end|>, but not the newline) for the loss mask.
 _RELEASE_TEMPLATE = (

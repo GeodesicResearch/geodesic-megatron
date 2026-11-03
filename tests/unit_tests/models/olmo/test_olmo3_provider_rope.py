@@ -26,6 +26,7 @@ from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEm
 
 from megatron.bridge.models.olmo import olmo3_provider
 from megatron.bridge.models.olmo.olmo3_provider import (
+    ROPE_TABLE_STEP,
     Olmo3ModelProvider32B,
     Olmo3RotaryEmbedding,
     Olmo3SelfAttention,
@@ -49,6 +50,17 @@ def _rope() -> Olmo3RotaryEmbedding:
     )
 
 
+class _TwoRankGroup:
+    """A context-parallel group of two ranks, seen from rank 0. A stand-in, because a real two-rank process group needs
+    two processes."""
+
+    def size(self) -> int:
+        return 2
+
+    def rank(self) -> int:
+        return 0
+
+
 class TestRotaryEmbeddingPair:
     def test_forward_stacks_the_sliding_and_the_full_rope(self):
         rope = _rope()
@@ -62,14 +74,54 @@ class TestRotaryEmbeddingPair:
 
     def test_a_tensor_sequence_length_hits_the_cache_on_the_second_call(self):
         """The Bridge passes ``max_seqlen`` as a 0-d int32 tensor. A tensor hashes by identity, so keying the cache on
-        it never hits and each entry (about 67 MB at 32,768 positions) stays alive until 32 are held."""
+        it never hits and each entry (about 67 MB at 32,768 positions) stays alive until the cache is full."""
         rope = _rope()
-        Olmo3RotaryEmbedding._forward_cached.cache_clear()
+        Olmo3RotaryEmbedding._stacked_table.cache_clear()
         first = rope.forward(torch.tensor(SEQ_LEN, dtype=torch.int32), packed_seq=True)
         second = rope.forward(torch.tensor(SEQ_LEN, dtype=torch.int32), packed_seq=True)
-        info = Olmo3RotaryEmbedding._forward_cached.cache_info()
+        info = Olmo3RotaryEmbedding._stacked_table.cache_info()
         assert (info.hits, info.misses) == (1, 1)
         assert torch.equal(first, second)
+
+    @pytest.mark.parametrize("length", [1, SEQ_LEN, ROPE_TABLE_STEP - 1, ROPE_TABLE_STEP, ROPE_TABLE_STEP + 1])
+    def test_the_slice_of_a_cached_table_equals_the_rope_built_for_the_length_itself(self, length):
+        rope = _rope()
+        sliced = rope.forward(length, packed_seq=True)
+        assert sliced.shape == (2, length, 1, 1, KV_CHANNELS)
+        assert torch.equal(sliced, rope._compute(length, 0, True, None))
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="the base rope's context-parallel split uses the GPU")
+    def test_an_unpacked_row_under_context_parallelism_gets_the_split_of_its_exact_length(self):
+        """The base ``forward`` splits an unpacked row's table by position across the context-parallel ranks, so a
+        slice of the split of a longer table would hold other positions."""
+        rope = Olmo3RotaryEmbedding(
+            kv_channels=KV_CHANNELS,
+            rotary_percent=1.0,
+            rotary_interleaved=False,
+            seq_len_interpolation_factor=None,
+            rotary_base=500000.0,
+            use_cpu_initialization=False,
+            cp_group=_TwoRankGroup(),
+            yarn_scaling_factor=8.0,
+            yarn_original_max_position_embeddings=16,
+        )
+        length = ROPE_TABLE_STEP // 2
+        chunk = length // 4
+        whole = rope.forward(length, packed_seq=True)
+        # Rank 0 of two holds the first and the last of four chunks of positions.
+        expected = torch.cat([whole[:, :chunk], whole[:, 3 * chunk :]], dim=1)
+        assert torch.equal(rope.forward(length, packed_seq=False), expected)
+
+    def test_the_lengths_of_one_step_share_a_table_and_the_tables_follow_the_steps(self):
+        """A packed batch asks for its longest document's length, which differs for almost every microbatch. A table
+        per length would hold up to 32 tables of about 67 MB at 32,768 positions. A table per step holds at most 8."""
+        rope = _rope()
+        Olmo3RotaryEmbedding._stacked_table.cache_clear()
+        lengths = [7, 100, 2049, ROPE_TABLE_STEP, 1500, ROPE_TABLE_STEP + 5, 3 * ROPE_TABLE_STEP - 1, 123]
+        for length in lengths:
+            rope.forward(length, packed_seq=True)
+        info = Olmo3RotaryEmbedding._stacked_table.cache_info()
+        assert info.misses == info.currsize == -(-max(lengths) // ROPE_TABLE_STEP) == 3
 
     def test_an_integer_and_a_tensor_length_give_the_same_rope(self):
         rope = _rope()
