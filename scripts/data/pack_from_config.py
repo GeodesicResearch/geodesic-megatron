@@ -26,7 +26,9 @@ because the pack on disk was made by that other config.
 
 Usage::
 
-    python scripts/data/pack_from_config.py --config /path/to/pack.yaml --shard 3
+    python scripts/data/pack_from_config.py --config /path/to/pack.yaml --shard 3 [--num-tokenizer-workers 64]
+
+``--num-tokenizer-workers`` sets how many tokenizer processes the packer starts. It changes the run time and not the pack.
 """
 
 from __future__ import annotations
@@ -99,8 +101,9 @@ def dataset_root(config: dict, shard: int) -> Path:
     return Path(config["dataset_root"].replace(SHARD_PLACEHOLDER, str(shard)))
 
 
-def packer_argv(config: dict, shard: int) -> list[str]:
-    """The command line of ``pack_sft_dataset.main`` that packs shard ``shard`` as the config states."""
+def packer_argv(config: dict, shard: int, num_tokenizer_workers: int | None) -> list[str]:
+    """The command line of ``pack_sft_dataset.main`` that packs shard ``shard`` as the config states, with
+    ``num_tokenizer_workers`` tokenizer processes (None: the packer's default)."""
     return packer_arguments(
         dataset_root(config, shard),
         config["tokenizer"],
@@ -112,6 +115,7 @@ def packer_argv(config: dict, shard: int) -> list[str]:
         no_chat=False,
         exclude_rows=config["exclude_rows"],
         shard_index=None if config["exclude_rows"] is None else shard,
+        num_tokenizer_workers=num_tokenizer_workers,
     )
 
 
@@ -143,10 +147,18 @@ def main(argv: list[str] | None = None) -> None:
         required=True,
         help="the shard's job index: it replaces {shard} in dataset_root and selects the exclude_rows entries",
     )
+    parser.add_argument(
+        "--num-tokenizer-workers",
+        type=int,
+        default=None,
+        help="tokenizer processes (the packer's own default when omitted); the pack is the same at any count",
+    )
     args = parser.parse_args(argv)
     config = read_pack_config(args.config)
     require_int(args.shard, "--shard", 0, error=PackConfigError)
-    pack_sft_dataset.main(packer_argv(config, args.shard))
+    if args.num_tokenizer_workers is not None:
+        require_int(args.num_tokenizer_workers, "--num-tokenizer-workers", 1, error=PackConfigError)
+    pack_sft_dataset.main(packer_argv(config, args.shard, args.num_tokenizer_workers))
     copy_config(args.config, config, args.shard)
 
 

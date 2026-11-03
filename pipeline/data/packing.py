@@ -36,12 +36,14 @@ def packer_arguments(
     no_chat,
     exclude_rows,
     shard_index,
+    num_tokenizer_workers,
 ):
     """The arguments of scripts/data/pack_sft_dataset.py that pack ``dataset_root`` as the parameters state.
 
     ``no_validation`` and ``no_chat`` add the flags of those names. ``exclude_rows`` is a JSON Lines file of lines to
     leave out, or None for none; with a file, ``shard_index`` names the shard whose entries apply, and without one it
-    must be None. Raises ValueError otherwise.
+    must be None. Raises ValueError otherwise. ``num_tokenizer_workers`` is the number of tokenizer processes, or None
+    for the packer's own default; the pack does not depend on it.
     """
     if (exclude_rows is None) != (shard_index is None):
         raise ValueError("exclude_rows and shard_index are given together or not at all")
@@ -65,6 +67,8 @@ def packer_arguments(
         arguments.append("--no-chat")
     if exclude_rows is not None:
         arguments += ["--exclude-rows", str(exclude_rows), "--shard-index", str(shard_index)]
+    if num_tokenizer_workers is not None:
+        arguments += ["--num-tokenizer-workers", str(num_tokenizer_workers)]
     return arguments
 
 
@@ -92,6 +96,7 @@ def run_pack(
             no_chat=format_type == "pretraining",
             exclude_rows=None,
             shard_index=None,
+            num_tokenizer_workers=None,
         ),
     ]
 

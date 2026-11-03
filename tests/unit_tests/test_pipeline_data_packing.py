@@ -27,6 +27,7 @@ def arguments(**overrides):
         "no_chat": False,
         "exclude_rows": None,
         "shard_index": None,
+        "num_tokenizer_workers": None,
         **overrides,
     }
     return packing.packer_arguments(
@@ -60,6 +61,9 @@ class TestPackerArguments:
             "--shard-index",
             "3",
         ]
+
+    def test_the_tokenizer_workers_are_a_flag_when_given(self):
+        assert arguments(num_tokenizer_workers=64)[12:] == ["--num-tokenizer-workers", "64"]
 
     @pytest.mark.parametrize("given", [{"exclude_rows": "/x/rows.jsonl"}, {"shard_index": 3}])
     def test_an_exclusion_file_and_a_shard_index_come_together_or_not_at_all(self, given):

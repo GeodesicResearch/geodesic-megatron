@@ -1923,6 +1923,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
   `hf_olmo3_rope.py` and the injected OLMo-3 faults of the calibration runs in `olmo3_faults.py`)
 - `scripts/data/` — Dataset tools. `pack_sft_dataset.py` packs a dataset root into parquet (`--exclude-rows` leaves
   listed lines out), `pack_from_config.py` runs it from a YAML for one shard of a sharded root,
+  `dropped_rows_to_exclusions.py` turns a dataset builder's list of dropped rows into the file `--exclude-rows` reads,
   `audit_pack_digests.py` checks that a pack holds exactly the rows a dataset builder kept, and
   `packed_parquet.py` reads a pack's documents. Other tools of the directory are described where they are used.
 - `scripts/flops_common.py` — The run spec, report and throughput arithmetic that the FLOP estimators share

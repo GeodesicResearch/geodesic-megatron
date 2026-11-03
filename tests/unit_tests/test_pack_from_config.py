@@ -190,6 +190,22 @@ class TestTheCommandLine:
             pack(config, -1)
         assert not (tmp_path / "shard-1").exists()
 
+    def test_the_tokenizer_workers_change_the_run_and_not_the_pack(self, tmp_path, tokenizer_dir):
+        shard_root(tmp_path, 0, all_rows())
+        shard_root(tmp_path, 1, all_rows())
+        config = write_config(tmp_path, tokenizer_dir, None)
+        pack_from_config.main(["--config", str(config), "--shard", "0"])
+        pack_from_config.main(["--config", str(config), "--shard", "1", "--num-tokenizer-workers", "2"])
+        assert stored_rows(packed_path(tmp_path / "shard0", tokenizer_dir, SEQ_LENGTH)) == stored_rows(
+            packed_path(tmp_path / "shard1", tokenizer_dir, SEQ_LENGTH)
+        )
+
+    def test_a_worker_count_below_one_is_refused_before_anything_is_packed(self, tmp_path, tokenizer_dir):
+        config = write_config(tmp_path, tokenizer_dir, None)
+        with pytest.raises(pack_from_config.PackConfigError, match="--num-tokenizer-workers must be an integer >= 1"):
+            pack_from_config.main(["--config", str(config), "--shard", "0", "--num-tokenizer-workers", "0"])
+        assert not (tmp_path / "shard0").exists()
+
     @pytest.mark.parametrize("arguments", [["--shard", "3"], ["--config", "pack.yaml"]])
     def test_the_config_and_the_shard_are_both_required(self, capsys, arguments):
         with pytest.raises(SystemExit) as exit_info:
