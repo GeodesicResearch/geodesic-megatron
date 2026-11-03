@@ -1,0 +1,18 @@
+# C3 for the Olmo-Norm 32B SFT (Olmo 3 32B Base on the Normal-Norm mix). It composes onto the 7B spec
+# (c3_export_check_7b.yaml, which states what the check judges) and changes the reference snapshot, the tokenizer directory
+# and, as every composing spec must, its own calibration and ce_agreement tolerance: a tolerance holds only for the spec it
+# was calibrated for. The corpus, the windows and the Megatron reference posture are the 7B spec's: the two sizes share
+# one tokenizer.json, so one tokenized corpus serves both.
+base_config: c3_export_check_7b.yaml
+
+# The 32B Think-SFT snapshot (allenai/Olmo-3-32B-Think-SFT): 707 tensors in 14 shards.
+reference_export: /projects/a5k/public/data_kyleobrien.a5k/models/Olmo-3-32B-Think-SFT
+tokenizer:
+  name: /projects/a5k/public/logs/metagaming_filtering/olmo_norm/tokenizers/tokenizer_32b_fast
+  revision: ae12cb7a47a48bba7131225fb776a7c1c138747986affea7902b5d9966a49891
+
+criteria:
+  ce_agreement: PENDING
+
+calibration:
+  status: PENDING

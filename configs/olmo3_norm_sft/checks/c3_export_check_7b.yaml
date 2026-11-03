@@ -1,0 +1,139 @@
+# C3, the export check of the Olmo-Norm 7B SFT (Olmo 3 7B Base on the Normal-Norm mix), read by
+# scripts/checkpoint/export_check.py and run per export by scripts/checkpoint/export_check.sbatch. The 32B spec composes
+# onto this one. A checkpoint is released to evaluations only once its export passes.
+#
+# A dense model has no hidden token to keep unsaid. The check judges:
+#   - verify_export: the export finished and its shards hold exactly the tensors its index names (355 for the 7B);
+#   - files: config.json, the tokenizer files and generation_config.json are the Think-SFT snapshot's (reference_export),
+#     byte for byte, generation_config.json with the exporter's decoding defaults of the reasoning mode applied;
+#   - tensors: every tensor's name, shape and dtype is the snapshot's;
+#   - ce_agreement: per-token cross-entropy of the export on the documents below agrees with a bf16 Megatron forward of
+#     the checkpoint (megatron_reference) within the tolerance calibrated below.
+# hidden_probability and greedy_hidden_emissions are null: the spec states no prompts, and hidden_token_id is an id
+# that the tokenizer has and no scored window holds, so that every target is retained.
+
+# The 7B Think-SFT snapshot (allenai/Olmo-3-7B-Think-SFT at 6ff857587e040d6d523a3d5f3a56e918f5401d66), which every
+# Olmo-Norm 7B export must match file for file.
+reference_export: /projects/a5k/public/data_kyleobrien.a5k/models/Olmo-3-7B-Think-SFT
+# The directory the corpus was tokenized with: the Think-SFT tokenizer files with tokenizer_class changed to
+# PreTrainedTokenizerFast, because transformers 5.3.0 builds a GPT-2 pre-tokenizer for GPT2Tokenizer and ignores the one
+# in tokenizer.json (DERIVED_FROM.json in the directory). It is a local directory, so the revision is the sha256 of its
+# tokenizer.json.
+tokenizer:
+  name: /projects/a5k/public/logs/metagaming_filtering/olmo_norm/tokenizers/tokenizer_7b_fast
+  revision: ae12cb7a47a48bba7131225fb776a7c1c138747986affea7902b5d9966a49891
+hidden_token_id: 100267         # <|extra_id_2|>: in the vocabulary, never in the corpus below (count 0)
+prefix_token_ids: [100257]      # <|endoftext|>, the end-of-document id the tokenized corpus puts before every document
+structure:
+  byte_equal_files: [config.json, generation_config.json, tokenizer.json, tokenizer_config.json, special_tokens_map.json, vocab.json, merges.txt]
+  decoding_defaults: reasoning
+
+# 2,000 rows of the Normal-Norm mix (train, 3f91fa1d), rendered with the 7B template (rows.jsonl in
+# /projects/a5k/public/logs/metagaming_filtering/olmo_norm/c3_corpus/full), each row less its trailing <|endoftext|>
+# string, tokenized with --append-eod: 31,728,906 ids. The two sizes share one tokenizer.json, so this corpus serves
+# the 32B spec too.
+corpora:
+  c3_full: /projects/a5k/public/data/olmo_norm_c3_full/tokenized_7b_fast_text_document
+
+selection:
+  seed: 20261103
+  documents:
+    window_tokens: 8192
+    counts: {c3_full: 64}
+  prompts: null
+# Written by `export_check.py select` from the selection above; every run reads each window back from its
+# corpus and refuses one whose ids do not have the sha256 listed here.
+documents:
+- {corpus: c3_full, document: 24, tokens: 8192, sha256: 56c882c364435cef4431f936aa06e73a156d8749f0c81ba086635db86b524f09}
+- {corpus: c3_full, document: 109, tokens: 8192, sha256: f477db4390598297df41c34196de7b2ae530f82fc9298745b707476183f8f5f0}
+- {corpus: c3_full, document: 136, tokens: 8192, sha256: 7759d8034b7767b7715707d310cbd135b706f87ea0eec656c5a950369241c56b}
+- {corpus: c3_full, document: 148, tokens: 8192, sha256: 56803a911440dfc512c5f6688b0a48e5e871acba04c765de6d1c232d7f5307a7}
+- {corpus: c3_full, document: 177, tokens: 8192, sha256: 0e2f331254e506f2757a68039922e6763d0826fc292e2008e25183fadcc6e53d}
+- {corpus: c3_full, document: 203, tokens: 8192, sha256: a4a7514660ee49bd1622aebf00fecb59bb42091859b6429cc9ab9130bf9fd000}
+- {corpus: c3_full, document: 230, tokens: 8192, sha256: 00dd3f5b8647830fd2539df9d21cc9700660c055a20b2f812126881fa71f1d04}
+- {corpus: c3_full, document: 262, tokens: 8192, sha256: 19bb1bcfa1aa4367dafdf41b1a37bf967524fa203908e792b4821e4c0e772d1f}
+- {corpus: c3_full, document: 285, tokens: 8192, sha256: 97264cd25907ee8db0d9ac007b2705c4515df456d9995aceb657618ff2b069fc}
+- {corpus: c3_full, document: 307, tokens: 8192, sha256: 166309f6b97052853d57142a7761069961bdc50992a11b24354e58774a52478c}
+- {corpus: c3_full, document: 331, tokens: 8192, sha256: 028cfe656180ddd4a10ae2340ae70bf77179569a199ea3af3b1b0b31c15d3656}
+- {corpus: c3_full, document: 369, tokens: 8192, sha256: 3bb594d185773e69dfdebc20ecc481531bce6ee9dd6e751ee0b9d6e308b78e27}
+- {corpus: c3_full, document: 380, tokens: 8192, sha256: 18c617cc5595c4ddd7421241941762011cb654f448356d30d8d72077fe3b17b2}
+- {corpus: c3_full, document: 466, tokens: 8192, sha256: f0ba18e8ca1299e7b2f93bb385bb61447e471f7eaa37382e1102159b5c552e5c}
+- {corpus: c3_full, document: 474, tokens: 8192, sha256: 0afaf7db5f76c0f3e18a50c2659496038a8a7baa7d40ffa66e342d3e71989fa7}
+- {corpus: c3_full, document: 486, tokens: 8192, sha256: 26bfb4ea319eb4cf2a783ffae04403838a12af693f331c6b33a6b3aa302cb86e}
+- {corpus: c3_full, document: 489, tokens: 8192, sha256: 5d386ecd365104e9bdff4990fc7a02ea3a2f9522b5f05bea5845ee801614d812}
+- {corpus: c3_full, document: 568, tokens: 8192, sha256: 13c2051c0ac16889bb264979462139cd50865183f3b19064c74c40b110906fdd}
+- {corpus: c3_full, document: 587, tokens: 8192, sha256: 9ead7f648636bf6c0404264277113e683af8b2b4ea2666aa2ce84b53897816ec}
+- {corpus: c3_full, document: 606, tokens: 8192, sha256: f628cd501fe8645389ebd96de29b8ad7016f9e6964e094e830a3e020f3c7a818}
+- {corpus: c3_full, document: 693, tokens: 8192, sha256: b865e9bf6f1292374d63f06789599aba63ab7a5c4dad8031099fa7f16593bf89}
+- {corpus: c3_full, document: 715, tokens: 8192, sha256: 151aea58ddc00ecab8a692c7af21fe921ec7feccddf6eaaa8d22b8d3e2d8781d}
+- {corpus: c3_full, document: 735, tokens: 8192, sha256: 62bb2000187f33e1bbd3cdb89353ee46c65bde751b6838de183ce2c11f2f1ced}
+- {corpus: c3_full, document: 771, tokens: 8192, sha256: 089232c361ea5a326cff2babb49e1689c41083b048229cc2a3836622d363c487}
+- {corpus: c3_full, document: 792, tokens: 8192, sha256: 14b06200a86042e44f359625185593d9a5e9719d451bfe6f86002d95be2b6c8b}
+- {corpus: c3_full, document: 821, tokens: 8192, sha256: 313510897ec1658c63f95660a153061470b1836e743f4f5bb5ff9f84125551e0}
+- {corpus: c3_full, document: 865, tokens: 8192, sha256: 8fce50ef9a4e65f14eb061ff7da4a0a9f4ddf78a564a35a6606dc34631b2c0da}
+- {corpus: c3_full, document: 871, tokens: 8192, sha256: 7b12b11549ba10a01bf251cd668c90114db7b9b513209dcd7ffa59030005e275}
+- {corpus: c3_full, document: 895, tokens: 8192, sha256: 7a53daadc8949c6c66ba0ec89fad52e0ce2b364520030a3f806c8770c584a6f9}
+- {corpus: c3_full, document: 903, tokens: 8192, sha256: eb55c8625245937711e349828ae9f52d80b37a3fffe581b549542e4419fb9a2a}
+- {corpus: c3_full, document: 911, tokens: 8192, sha256: 9951fbf25488f4cfd74ac461857495f7951269efe65f8bc0534cfb9df81b760a}
+- {corpus: c3_full, document: 938, tokens: 8192, sha256: 598a381f1caaa62eea23ac4b9a5916d5a43c0666f94d605ff5c8f00d4863caef}
+- {corpus: c3_full, document: 954, tokens: 8192, sha256: 2a80e2ba598b142d5da71b249e7f225bbf9c257170944668b10f6bac3954e4ee}
+- {corpus: c3_full, document: 980, tokens: 8192, sha256: 731dc829f500961b83687a0b7002a62dfd47d52ec8411e27824c6dd61051c395}
+- {corpus: c3_full, document: 1041, tokens: 8192, sha256: c562b4c226000bce7628f3726ef3f81cb3b3ca31d6c9deae801b3e0fa3814827}
+- {corpus: c3_full, document: 1119, tokens: 8192, sha256: 2c28d4ee7ea867d4f431127e993e1899ff6b5de14e72905990312be8e62c77c6}
+- {corpus: c3_full, document: 1121, tokens: 8192, sha256: 5918f9343b31f38e391dbf0e7c6494ebcdf0cbd2035229faa7862b193fd3b5fd}
+- {corpus: c3_full, document: 1275, tokens: 8192, sha256: 251cdaa52bb1bd25ad28838e48ba929ecdf58bf5b6a5c64addb1e26a97de429b}
+- {corpus: c3_full, document: 1300, tokens: 8192, sha256: abc83226cf003de7115e05a0cfaa7a0eeded9d6cd5594b204af62230a675b717}
+- {corpus: c3_full, document: 1310, tokens: 8192, sha256: cd233d92b3e3353b8b5ca8ec821dc8a2e177442d642f0f501683de270f82baa4}
+- {corpus: c3_full, document: 1313, tokens: 8192, sha256: 6819b10c9ed81ea3c0fa44576a2fc3b3b657f1583fda98073bc3fdcc23445cc5}
+- {corpus: c3_full, document: 1329, tokens: 8192, sha256: 68c0a05df6a93e47e0ca2343ce4e1819956555596497151edaf73418bc9321cb}
+- {corpus: c3_full, document: 1412, tokens: 8192, sha256: bcac09378c04b1a921799752e6f3c2ccc7570b760bd827e756afdbcdbba09dcf}
+- {corpus: c3_full, document: 1449, tokens: 8192, sha256: 048868eee524642ea668714015265b294b826b543c0f947cd8cadeae9b8817cb}
+- {corpus: c3_full, document: 1454, tokens: 8192, sha256: 8d0192f9551ab083a69f3d2a23ecfdf01bdf92b2cc3d7e18a1bf4a0c32dd2460}
+- {corpus: c3_full, document: 1487, tokens: 8192, sha256: f38ba3ffe26e3b81fe486f0f4233c8f031d5d16c26e5b0fa0f63fb366b0c8f2d}
+- {corpus: c3_full, document: 1508, tokens: 8192, sha256: 008cf7ab41642389d273b57300526d5b2eb4ca414604618d195a0cae8a07f1b1}
+- {corpus: c3_full, document: 1510, tokens: 8192, sha256: bc1852b0f38b3b6fc21e1c536351b5044511a5874d9392df6e52046df21b18ef}
+- {corpus: c3_full, document: 1531, tokens: 8192, sha256: 0c09d6601afa7c0e715f1f977eb80ecc0f29f6eacdf056f20d7e7cd9bb3bc924}
+- {corpus: c3_full, document: 1555, tokens: 8192, sha256: a3cfc3911863054ace453ed984e22872bf47583d22de1fa48b0b95398c73da3a}
+- {corpus: c3_full, document: 1566, tokens: 8192, sha256: 822aa23e5186643aef184ef4bd35ff50ad15aaa0c82f888c19c2910f83ac2856}
+- {corpus: c3_full, document: 1590, tokens: 8192, sha256: 3e2d02206da2d3edf799dc9e4215360abf8eedad44bb49be8aeb7353f23af849}
+- {corpus: c3_full, document: 1663, tokens: 8192, sha256: ba257af72dfca8cc34a6e1cc1d15a57eef0d451ea886c6109197d61ca01e2c65}
+- {corpus: c3_full, document: 1665, tokens: 8192, sha256: 759a1f59bf2520672594f5fbc8e849e33e91ecb65d5832c5e5fd2aaf6ee7b488}
+- {corpus: c3_full, document: 1673, tokens: 8192, sha256: 57e07ba48fed95db1dd29d5b6f3a24a0a62cd45c5ee4f84bec86dfec462b395b}
+- {corpus: c3_full, document: 1680, tokens: 8192, sha256: a978950378610e800b67eb34fd6b4495b2bb02b8030e8a7ad167991d30e2a4bf}
+- {corpus: c3_full, document: 1759, tokens: 8192, sha256: 345b07af6cab25602e4b8d983f0d6b5413c7dd8e28e5342a76008d8460bbd5e8}
+- {corpus: c3_full, document: 1760, tokens: 8192, sha256: 626e9b7dcd1074ac10dc9f1d9be6aa6cb5acd3d104475dab519a5e59fa9b5a15}
+- {corpus: c3_full, document: 1820, tokens: 8192, sha256: d91b7775ebc10b6deeb0529ed22e8c9e65c0a8183ff0be620f1dc283090c2ab6}
+- {corpus: c3_full, document: 1877, tokens: 8192, sha256: c02e0ac9edd1b543dc387aa7f67ee1d9c349c20e1269e43d7c646f7824927539}
+- {corpus: c3_full, document: 1882, tokens: 8192, sha256: d3056f271bdbe9434375a075561156815302922dfd0d12414b21394a71550dcd}
+- {corpus: c3_full, document: 1888, tokens: 8192, sha256: deeb645de1a213fb5f3952ca1e7bc425e7b90d9625db122c8df086b808cedecc}
+- {corpus: c3_full, document: 1889, tokens: 8192, sha256: 31ca4f1ae95a4caa8bcaa363433101479ed613906db1d43189d67d60f7fe7873}
+- {corpus: c3_full, document: 1941, tokens: 8192, sha256: e73744e51b4fda3cda55b19223cc6699fcbb1397ee77a2e6474a03ab86b25078}
+prompts: null
+
+# The checkpoint's own run_config at TP1 and PP1 on one GPU, bf16 throughout. The overrides take out what the training
+# posture adds and an eval-mode forward must not run: FP8, the fused and chunked cross-entropy (the check computes an
+# unfused fp32 cross-entropy itself) and recompute.
+megatron_reference:
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 1
+  fp32_ssm_state: false
+  model_overrides:
+    fp8: null
+    fp8_param: false
+    cross_entropy_loss_fusion: false
+    cross_entropy_fusion_impl: native
+    recompute_granularity: null
+    recompute_method: null
+    recompute_num_layers: null
+
+greedy:
+  max_new_tokens: 64
+  stop_token_ids: [100265, 100257]
+
+criteria:
+  ce_agreement: PENDING
+  hidden_probability: null
+  greedy_hidden_emissions: null
+
+calibration:
+  status: PENDING

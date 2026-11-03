@@ -113,6 +113,12 @@ checks:
         - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_replayonly_cpt_link1.yaml
         - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_replayonly_cpt_link2.yaml
         - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_replayonly_cpt_link3.yaml
+        # The Olmo-Norm SFTs write their saves into the campaign checkpoint tree, and their export checks name the
+        # Think-SFT snapshots in the campaign's model directory, both under project paths that carry a username.
+        - configs/olmo3_norm_sft/olmo3_7b_norm_sft.yaml
+        - configs/olmo3_norm_sft/olmo3_32b_norm_sft.yaml
+        - configs/olmo3_norm_sft/checks/c3_export_check_7b.yaml
+        - configs/olmo3_norm_sft/checks/c3_export_check_32b.yaml
       message: "Use a config value, env var, or a /projects/a5k/public path instead of a hardcoded /home/<user> path."
 
   checklist_item_format:
