@@ -15,6 +15,7 @@ import json
 import logging
 import multiprocessing as mp
 import warnings
+from collections.abc import Collection
 from dataclasses import dataclass
 from multiprocessing import Pool
 from pathlib import Path
@@ -78,14 +79,40 @@ def _tokenize_init_worker(dataset):
     _shared_dataset = dataset
 
 
-def _retrieve_tokenized(dataset, num_workers):
+def _retrieve_tokenized(dataset, rows, num_workers):
+    """Tokenize the ``rows`` (indices into ``dataset``) in the order given."""
     if num_workers == 1:
-        return np.array([dataset[i] for i in tqdm(range(len(dataset)))])
+        return np.array([dataset[i] for i in tqdm(rows)])
     num_workers = num_workers if num_workers > 0 else mp.cpu_count()
     with Pool(num_workers, initializer=_tokenize_init_worker, initargs=(dataset,)) as pool:
-        return np.array(
-            [_retorch(item) for item in tqdm(pool.imap(_tokenize_get_item, range(len(dataset))), total=len(dataset))]
+        return np.array([_retorch(item) for item in tqdm(pool.imap(_tokenize_get_item, rows), total=len(rows))])
+
+
+def _rows_to_tokenize(dataset, exclude_rows: Collection[int], path: Path) -> range | list[int]:
+    """The indices of the rows of ``dataset`` to tokenize, in file order: all of them but ``exclude_rows``.
+
+    ``exclude_rows`` are 0-based line numbers of the dataset's JSONL file, which are the dataset's own indices because
+    the dataset reads the file line by line, in order. The excluded lines are never read.
+
+    Raises:
+        ValueError: the dataset maps its samples, so that an index is no longer a line number; a line is not one of
+            the file's; or no row would be left.
+    """
+    if not exclude_rows:
+        return range(len(dataset))
+    if dataset.samples_mapping is not None:
+        raise ValueError(f"{path}: a dataset that maps its samples (max_num_samples) cannot exclude rows by line")
+    excluded = set(exclude_rows)
+    outside = [row for row in sorted(excluded) if not 0 <= row < len(dataset)]
+    if outside:
+        raise ValueError(
+            f"exclude_rows names line {outside[0]}, which {path} does not have: it has {len(dataset)} lines"
         )
+    rows = [row for row in range(len(dataset)) if row not in excluded]
+    if not rows:
+        raise ValueError(f"exclude_rows leaves no row of {path} to tokenize")
+    logger.info(f"Leaving {len(excluded)} of the {len(dataset)} rows of {path} out of the pack")
+    return rows
 
 
 def pad_document_for_packing(data: dict, max_seq_length: int, pad_seq_to_mult: int, pad_id: int) -> None:
@@ -144,6 +171,7 @@ def tokenize_dataset(
     dataset_kwargs: dict | None = None,
     pad_seq_to_mult: int | None = 1,
     num_tokenizer_workers: int = -1,
+    exclude_rows: Collection[int] = (),
 ):
     """
     Tokenizes a dataset from the provided path using the specified tokenizer
@@ -158,6 +186,8 @@ def tokenize_dataset(
             Can include 'chat', 'use_hf_tokenizer_chat_template', 'tool_schemas', etc.
         pad_seq_to_mult (int | None): Optional multiple to pad each sequence to during packing
             preparation (e.g., set to 2 * context_parallel_size for THD CP).
+        exclude_rows (Collection[int]): 0-based line numbers of the file to leave out: they are never read or
+            tokenized, and the other rows keep their order.
 
     Returns:
         np.ndarray: A NumPy array containing the tokenized data, one dict per document with at most
@@ -199,7 +229,8 @@ def tokenize_dataset(
     pad_id = dataset.tokenizer.eod
     pad_seq_length_to_mult = dataset.pad_seq_length_to_mult
     max_seq_length = dataset.max_seq_length
-    dataset = _retrieve_tokenized(dataset, num_tokenizer_workers)
+    rows = _rows_to_tokenize(dataset, exclude_rows, path)
+    dataset = _retrieve_tokenized(dataset, rows, num_tokenizer_workers)
 
     # Convert any Tensor values to lists for numpy compatibility
     # (chat preprocessing via _chat_preprocess returns torch.Tensors)
@@ -234,6 +265,7 @@ def prepare_packed_sequence_data(
     dataset_kwargs: dict | None = None,
     pad_seq_to_mult: int | None = 1,
     num_tokenizer_workers: int = -1,
+    exclude_rows: Collection[int] = (),
 ):
     """
     Prepares a packed sequence dataset from a given input file and saves it to an output file.
@@ -252,6 +284,8 @@ def prepare_packed_sequence_data(
             Enables packing with chat templates, tool schemas, etc.
         pad_seq_to_mult (int | None): Optional multiple to pad each sequence to during packing
             preparation (e.g., set to 2 * context_parallel_size for THD CP).
+        exclude_rows (Collection[int]): 0-based line numbers of the input file to leave out of the pack
+            (see ``tokenize_dataset``).
 
     Returns:
         None: Saves the packed sequence data to the specified output path.
@@ -265,6 +299,7 @@ def prepare_packed_sequence_data(
         dataset_kwargs,
         pad_seq_to_mult=pad_seq_to_mult,
         num_tokenizer_workers=num_tokenizer_workers,
+        exclude_rows=exclude_rows,
     )
     sequences, histogram = create_hist(dataset, max_seq_length)
 

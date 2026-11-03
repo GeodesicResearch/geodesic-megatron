@@ -68,6 +68,7 @@ checks:
         - configs/control_pretraining/30b_filtered_gpt55_4plus/nemotron_nano_30b_filtered_gpt55_4plus_midtrain.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
+        - configs/models/olmo3_base_copies.yaml  # names the base-model copies, under a data directory that carries a username
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
         # The loss gate, the stage-1 watch's block envelope and the midtraining probe's parity reference
         # name their reference runs by their logs, which sit beside the campaign tree.

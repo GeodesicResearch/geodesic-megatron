@@ -7,6 +7,7 @@ table is imported from its module, so these tests exercise the real one rather t
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -15,9 +16,11 @@ from scripts.training.config_compose import load_composed_yaml
 
 from pipeline.training import env_overrides, recipes
 from tests.unit_tests.repo_scripts import run_training_main
+from tests.unit_tests.tiny_models import tiny_olmo3
 
 
 MODELS = ("nano", "super", "ultra")
+OLMO3_MODELS = ("olmo3_7b", "olmo3_32b")
 MODES = ("sft", "cpt", "pretrain")
 BASELINE_PRETRAIN = (
     Path(__file__).resolve().parents[2]
@@ -30,7 +33,10 @@ BASELINE_PRETRAIN = (
 
 class TestRecipeMap:
     def test_covers_every_model_mode_pair(self):
-        assert set(recipes.RECIPE_MAP.keys()) == {(model, mode) for model in MODELS for mode in MODES}
+        """Every Nemotron model has all three modes; each OLMo-3 model has full SFT only."""
+        nemotron = {(model, mode) for model in MODELS for mode in MODES}
+        olmo3 = {(model, "sft") for model in OLMO3_MODELS}
+        assert set(recipes.RECIPE_MAP.keys()) == nemotron | olmo3
 
     @pytest.mark.parametrize("model", MODELS)
     def test_pretrain_entries_reference_the_pretrain_recipes(self, model):
@@ -60,6 +66,64 @@ class TestRecipeMap:
         assert cfg.model.seq_length == 8192
         assert cfg.dataset.sequence_length == 8192
         assert cfg.checkpoint.pretrained_checkpoint is None
+
+
+class TestOlmo3Recipes:
+    @pytest.mark.parametrize("model", OLMO3_MODELS)
+    def test_each_entry_builds_the_olmo_recipe_on_its_local_base_copy(self, model):
+        names = recipes.RECIPE_MAP[(model, "sft")].__code__.co_names
+        assert "olmo3_sft_config" in names
+        assert "OLMO3_BASE_COPIES" in names
+        assert set(recipes.OLMO3_BASE_COPIES) == set(OLMO3_MODELS)
+
+    def test_the_recipe_sizes_the_model_from_the_config_and_sets_what_the_family_needs(self, tmp_path):
+        from megatron.bridge.recipes.olmo.olmo3 import OLMO3_SFT_SEQ_LENGTH, olmo3_sft_config
+
+        # The recipe reads only the config of a base copy, so a saved tiny OLMo-3 (three sliding-window layers and one
+        # full-attention layer) is a real input to it; the two real copies live on the cluster's file system.
+        model = tiny_olmo3()
+        model.save_pretrained(tmp_path)
+        cfg = olmo3_sft_config(str(tmp_path))
+
+        # Sized from the config.
+        hf = model.config
+        assert (cfg.model.num_layers, cfg.model.hidden_size) == (hf.num_hidden_layers, hf.hidden_size)
+        assert cfg.model.window_attn_skip_freq == [1, 1, 1, 0]
+        assert cfg.model.window_size == (hf.sliding_window - 1, 0)
+        assert cfg.tokenizer.tokenizer_model == str(tmp_path)
+        # What the family needs, each with its reason in the recipe's docstring.
+        assert cfg.model.tensor_model_parallel_size == 1
+        assert cfg.model.apply_rope_fusion is False
+        assert cfg.model.calculate_per_token_loss is True
+        assert cfg.model.cp_comm_type == "a2a"
+        assert cfg.model.seq_length == OLMO3_SFT_SEQ_LENGTH == cfg.dataset.seq_length
+        assert cfg.dataset.packed_sequence_specs.packed_sequence_size == OLMO3_SFT_SEQ_LENGTH
+        assert cfg.dataset.packed_sequence_specs.pad_seq_to_mult == 8
+        assert cfg.checkpoint.dist_ckpt_strictness == "raise_all"
+
+    @pytest.mark.parametrize("mode", ["cpt", "pretrain"])
+    def test_a_mode_without_a_recipe_is_refused_naming_the_modes_that_exist(self, mode):
+        with pytest.raises(ValueError, match=r"no recipe for model 'olmo3_7b' in mode .*\['sft'\]"):
+            recipes.resolve_training_config("olmo3_7b", mode, None, None, [])
+
+    def test_peft_is_refused(self):
+        with pytest.raises(ValueError, match="only a full SFT recipe"):
+            recipes.resolve_training_config("olmo3_32b", "sft", "lora", None, [])
+
+    def test_the_cli_offers_exactly_the_models_of_the_map(self, run_module, monkeypatch):
+        for model in (*MODELS, *OLMO3_MODELS):
+            monkeypatch.setattr(sys, "argv", ["pipeline_training_run.py", "--model", model, "--mode", "sft"])
+            args, _ = run_module.parse_cli_args()
+            assert args.model == model
+        monkeypatch.setattr(sys, "argv", ["pipeline_training_run.py", "--model", "olmo3_13b", "--mode", "sft"])
+        with pytest.raises(SystemExit):
+            run_module.parse_cli_args()
+
+    def test_the_launch_script_allows_exactly_the_models_of_the_map(self):
+        script = (Path(__file__).resolve().parents[2] / "pipeline_training_launch.sh").read_text()
+        listed = re.search(r"^ALLOWED_MODELS=\(([^)]*)\)$", script, re.MULTILINE)
+        assert listed is not None, "pipeline_training_launch.sh no longer defines ALLOWED_MODELS"
+        assert set(listed.group(1).split()) == {model for model, _ in recipes.RECIPE_MAP}
 
 
 class TestMainWiring:

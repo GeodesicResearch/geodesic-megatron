@@ -193,6 +193,9 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         cp_group: Optional[torch.distributed.ProcessGroup] = None,
     ) -> torch.Tensor:
         """Return ``stack([rope_sliding, rope_full])`` along a new leading dim."""
+        # The packed (THD) path passes the sequence length as a 0-d integer tensor. A tensor hashes by identity, so
+        # as a cache key it never hits, and every entry (about 67 MB at 32,768 positions) stays alive.
+        max_seq_len = int(max_seq_len)
         # ProcessGroup is unhashable, so only the common (cp_group=None) path can
         # be cached -- same split Gemma-3 uses.
         if cp_group is not None:
@@ -213,14 +216,24 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         return torch.stack([rope_sliding, rope_full], dim=0)
 
     @lru_cache(maxsize=32)
-    def _forward_cached(
-        self, max_seq_len: int, offset: int = 0, packed_seq: bool = False
-    ) -> torch.Tensor:
+    def _forward_cached(self, max_seq_len: int, offset: int = 0, packed_seq: bool = False) -> torch.Tensor:
         """Cached path. Both base rope classes cache their own ``forward``
         (``rotary_pos_embedding.py:177``, ``yarn_rotary_pos_embedding.py:159``);
         overriding ``forward`` without a cache would re-stack on every
         microbatch -- ~25 per step here."""
         return self._compute(max_seq_len, offset, packed_seq, None)
+
+
+def select_layer_rope(rotary_pos_emb, is_sliding: bool):
+    """Pick one layer's rope out of the stacked ``(sliding, full)`` pair that :class:`Olmo3RotaryEmbedding` returns.
+
+    The stacked pair is a tensor of shape ``[2, S, 1, 1, d]``. Anything else passes through unchanged: ``None``, a
+    tuple (the flash-decode path), or a single rope ``[S, 1, 1, d]``, whose first dimension is also 2 when ``S == 2``,
+    so the test is on the number of dimensions as well as on the first dimension's size.
+    """
+    if isinstance(rotary_pos_emb, torch.Tensor) and rotary_pos_emb.ndim == 5 and rotary_pos_emb.size(0) == 2:
+        return rotary_pos_emb[0 if is_sliding else 1]
+    return rotary_pos_emb
 
 
 class Olmo3SelfAttention(MCoreSelfAttention):
@@ -253,13 +266,12 @@ class Olmo3SelfAttention(MCoreSelfAttention):
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: str = None,
         pg_collection: ProcessGroupCollection = None,
-        **kwargs,
+        pp_layer_offset: Optional[int] = None,
+        name: Optional[str] = None,
     ):
         # Single source of truth for "is this a sliding layer?" -- the same helper
         # Megatron-Core itself uses to decide whether to pass window_size to TE.
-        is_sliding = is_layer_window_attention(
-            config.window_size, config.window_attn_skip_freq, layer_number
-        )
+        is_sliding = is_layer_window_attention(config.window_size, config.window_attn_skip_freq, layer_number)
         if is_sliding:
             # YaRN's attention factor reaches attention via the config, not via the
             # rope tensor, so a sliding layer needs its own config with YaRN off.
@@ -273,6 +285,8 @@ class Olmo3SelfAttention(MCoreSelfAttention):
             attn_mask_type=attn_mask_type,
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            pp_layer_offset=pp_layer_offset,
+            name=name,
         )
         self.is_sliding = is_sliding
 
@@ -310,12 +324,7 @@ class Olmo3SelfAttention(MCoreSelfAttention):
         passes everything but ``hidden_states`` by keyword, and enumerating the
         signature here would silently drop any argument Megatron-Core adds later.
         """
-        if (
-            isinstance(rotary_pos_emb, torch.Tensor)
-            and rotary_pos_emb.ndim >= 1
-            and rotary_pos_emb.size(0) == 2
-        ):
-            rotary_pos_emb = rotary_pos_emb[0 if self.is_sliding else 1]
+        rotary_pos_emb = select_layer_rope(rotary_pos_emb, self.is_sliding)
         return super().forward(hidden_states, *args, rotary_pos_emb=rotary_pos_emb, **kwargs)
 
     def get_query_key_value_tensors(self, hidden_states, key_value_states=None, **kwargs):
@@ -417,9 +426,7 @@ class Olmo3ModelProvider(GPTModelProvider):
     :meth:`provide` swaps in :class:`Olmo3RotaryEmbedding` instead.
     """
 
-    transformer_layer_spec: Union[ModuleSpec, Callable[["GPTModelProvider"], ModuleSpec]] = (
-        olmo3_layer_spec
-    )
+    transformer_layer_spec: Union[ModuleSpec, Callable[["GPTModelProvider"], ModuleSpec]] = olmo3_layer_spec
     normalization: str = "RMSNorm"
     activation_func: Callable = F.silu
     gated_linear_unit: bool = True

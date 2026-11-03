@@ -12,7 +12,7 @@ import torch
 from scripts.checkpoint import hf_model_outputs
 from transformers import AutoTokenizer
 
-from tests.unit_tests.tiny_models import tiny_llama
+from tests.unit_tests.tiny_models import tiny_llama, tiny_olmo3
 from tests.unit_tests.token_masking_fixtures import EOS_ID, MARKER, MARKER_ID, TINY_VOCAB, build_tiny_hf_tokenizer
 
 
@@ -72,6 +72,23 @@ def test_the_logits_are_the_output_heads_input_projected_in_fp32():
     torch.testing.assert_close(torch.log_softmax(logits, dim=-1), fp32, atol=1e-4, rtol=0)
 
 
+def test_only_the_last_row_of_the_models_own_logits_is_kept(monkeypatch):
+    """A view of the last row would keep the whole bf16 logits tensor alive (6.6 GB at 32,768 positions of a 100k
+    vocabulary), so the row the agreement check holds must own its storage."""
+    model = bf16_llama_with_large_logits()
+    kept = []
+    projection = hf_model_outputs.fp32_projection
+
+    def record_native(head, hidden, native, what):
+        kept.append(native)
+        return projection(head, hidden, native, what)
+
+    monkeypatch.setattr(hf_model_outputs, "fp32_projection", record_native)
+    hf_model_outputs.fp32_head_outputs(model, [EOS_ID, THE, WORLD, HELLO])
+    (native,) = kept
+    assert native.untyped_storage().nbytes() == native.numel() * native.element_size()
+
+
 def test_a_model_that_changes_its_logits_after_the_head_is_refused():
     """Gemma 2 soft-caps its logits after the output head; projecting the head's input alone would score a model
     that is not the one generating."""
@@ -94,6 +111,43 @@ def test_a_model_that_changes_its_logits_after_the_head_is_refused():
         model.lm_head.weight.mul_(400.0)
     with pytest.raises(RuntimeError, match="changes its logits after the head"):
         hf_model_outputs.fp32_head_outputs(model, [EOS_ID, THE, WORLD])
+
+
+# --------------------------------------------------------------------------------------
+# Loading a model from disk
+# --------------------------------------------------------------------------------------
+
+
+def test_an_olmo3_is_loaded_with_a_plain_rope_on_its_sliding_layers(tmp_path, monkeypatch):
+    """transformers 5.1 to 5.5 build one YaRN rotary embedding for every layer, so a stock load gives the sliding-window
+    layers a rope AI2's model does not have. ``load_model`` gives them a plain one; where the installed transformers
+    already builds a rotary embedding per layer type, the two loads are the same model."""
+    from transformers import AutoModelForCausalLM
+
+    # load_model puts a model on the first GPU when it sees one, and this test stays on the CPU.
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+    tiny_olmo3().save_pretrained(tmp_path)
+    ids = (
+        torch.arange(64).unsqueeze(0) % 61 + 3
+    )  # longer than the sliding window (16) and the YaRN original length (32)
+    stock = AutoModelForCausalLM.from_pretrained(tmp_path, dtype=torch.float32).eval()
+    loaded = hf_model_outputs.load_model(str(tmp_path), "float32")
+    with torch.no_grad():
+        stock_logits, loaded_logits = stock(input_ids=ids).logits, loaded(input_ids=ids).logits
+    shared = getattr(stock.model, "rotary_emb", None)
+    one_rotary_for_every_layer = shared is not None and isinstance(shared.rope_type, str)
+    if one_rotary_for_every_layer:
+        assert not torch.allclose(stock_logits, loaded_logits, atol=1e-3)
+    else:
+        assert torch.equal(stock_logits, loaded_logits)
+
+
+def test_another_architecture_is_loaded_as_it_is(tmp_path, monkeypatch):
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+    tiny_llama().save_pretrained(tmp_path)
+    loaded = hf_model_outputs.load_model(str(tmp_path), "float32")
+    assert type(loaded).__name__ == "LlamaForCausalLM"
+    assert not any(layer._forward_pre_hooks for layer in loaded.model.layers)
 
 
 # --------------------------------------------------------------------------------------

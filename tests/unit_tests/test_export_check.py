@@ -286,6 +286,56 @@ def test_a_composing_spec_omits_its_bases_criteria_about_h_by_stating_them_null(
     assert composed.greedy == selected[0].greedy
 
 
+def without_prompts(content: dict) -> dict:
+    """``content`` as a spec for a model with no hidden token to keep unsaid states it: no prompts drawn (the selection's
+    prompts null) or listed (the listing null), and so no greedy criterion."""
+    content = omitting(content, "greedy_hidden_emissions")
+    content["selection"]["prompts"] = None
+    content["prompts"] = None
+    return content
+
+
+def test_a_spec_draws_and_lists_no_prompts_when_it_states_them_null(tmp_path, selected):
+    spec = write_spec(tmp_path / "promptless.yaml", without_prompts(selected[1]))
+    assert spec.listed("prompts") == () and spec.selection.prompt_counts == {}
+    assert export_check.select_windows(spec) == {"documents": selected[1]["documents"], "prompts": []}
+
+
+def test_a_spec_whose_selection_draws_no_prompts_but_whose_listing_holds_some_is_refused(tmp_path, selected):
+    content = without_prompts(selected[1])
+    content["prompts"] = selected[1]["prompts"]
+    with pytest.raises(
+        export_check.ExportCheckError, match=r"prompts lists .* windows per corpus; selection draws \{\}"
+    ):
+        write_spec(tmp_path / "malformed.yaml", content)
+
+
+def test_a_spec_whose_listing_is_null_but_whose_selection_draws_prompts_is_refused(tmp_path, selected):
+    content = without_prompts(selected[1])
+    content["selection"]["prompts"] = selected[1]["selection"]["prompts"]
+    with pytest.raises(export_check.ExportCheckError, match=r"prompts lists \{\} windows per corpus"):
+        write_spec(tmp_path / "malformed.yaml", content)
+
+
+def test_a_spec_without_prompts_that_judges_greedy_continuations_is_refused(tmp_path, selected):
+    content = without_prompts(selected[1])
+    content["criteria"]["greedy_hidden_emissions"] = {"max": 0}
+    with pytest.raises(export_check.ExportCheckError, match="greedy_hidden_emissions.*no prompts"):
+        write_spec(tmp_path / "malformed.yaml", content)
+
+
+def test_a_promptless_spec_is_scored_and_judged_without_prompts(tmp_path, judged, selected):
+    _, export, checkpoint, out_dir = judged
+    spec = write_spec(tmp_path / "promptless.yaml", without_prompts(selected[1]))
+    export_check.score_hf(spec, export, tmp_path / "scored", repeats=1)
+    assert (tmp_path / "scored" / export_check.HF_SCORES).is_file()
+    assert not (tmp_path / "scored" / export_check.HF_GREEDY).exists()
+    write_judged_inputs(out_dir, spec, export, checkpoint)
+    result = export_check.judge(spec, export, checkpoint, out_dir)
+    assert result["omitted"] == ["greedy_hidden_emissions"]
+    assert (result["verdict"], result["exit_status"]) == (PASS, 0)
+
+
 def test_the_measurement_digest_changes_with_what_is_measured_only(tmp_path, selected):
     spec, content = selected
     unchanged = copy.deepcopy(content)

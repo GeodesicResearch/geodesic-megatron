@@ -14,6 +14,7 @@
 """Packing a prepared dataset root's JSONL into parquet.
 
 Catalogue:
+    packer_arguments: the command-line arguments of scripts/data/pack_sft_dataset.py for one dataset root.
     run_pack: run scripts/data/pack_sft_dataset.py on a dataset root.
 """
 
@@ -21,6 +22,50 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+
+
+def packer_arguments(
+    dataset_root,
+    tokenizer,
+    seq_length,
+    pad_seq_to_mult,
+    packing_algorithm,
+    dataset_kwargs,
+    *,
+    no_validation,
+    no_chat,
+    exclude_rows,
+    shard_index,
+):
+    """The arguments of scripts/data/pack_sft_dataset.py that pack ``dataset_root`` as the parameters state.
+
+    ``no_validation`` and ``no_chat`` add the flags of those names. ``exclude_rows`` is a JSON Lines file of lines to
+    leave out, or None for none; with a file, ``shard_index`` names the shard whose entries apply, and without one it
+    must be None. Raises ValueError otherwise.
+    """
+    if (exclude_rows is None) != (shard_index is None):
+        raise ValueError("exclude_rows and shard_index are given together or not at all")
+    arguments = [
+        "--dataset-root",
+        str(dataset_root),
+        "--tokenizer",
+        tokenizer,
+        "--seq-length",
+        str(seq_length),
+        "--pad-seq-to-mult",
+        str(pad_seq_to_mult),
+        "--packing-algorithm",
+        packing_algorithm,
+        "--dataset-kwargs",
+        json.dumps(dataset_kwargs),
+    ]
+    if no_validation:
+        arguments.append("--no-validation")
+    if no_chat:
+        arguments.append("--no-chat")
+    if exclude_rows is not None:
+        arguments += ["--exclude-rows", str(exclude_rows), "--shard-index", str(shard_index)]
+    return arguments
 
 
 def run_pack(
@@ -36,25 +81,19 @@ def run_pack(
     cmd = [
         sys.executable,
         str(script_path),
-        "--dataset-root",
-        str(output_dir),
-        "--tokenizer",
-        tokenizer,
-        "--seq-length",
-        str(seq_length),
-        "--pad-seq-to-mult",
-        str(pad_seq_to_mult),
-        "--packing-algorithm",
-        packing_algorithm,
-        "--dataset-kwargs",
-        json.dumps(dataset_kwargs),
+        *packer_arguments(
+            output_dir,
+            tokenizer,
+            seq_length,
+            pad_seq_to_mult,
+            packing_algorithm,
+            dataset_kwargs,
+            no_validation=not has_validation,
+            no_chat=format_type == "pretraining",
+            exclude_rows=None,
+            shard_index=None,
+        ),
     ]
-
-    if not has_validation:
-        cmd.append("--no-validation")
-
-    if format_type == "pretraining":
-        cmd.append("--no-chat")
 
     print("\nRunning packing command:")
     print(f"  {' '.join(cmd)}")

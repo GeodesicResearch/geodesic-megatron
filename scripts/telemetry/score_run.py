@@ -14,9 +14,11 @@ an excursion is visible and can be attributed rather than averaged away unseen.
 
 The sequence length and ``model_flops_per_token`` come from the run's training config (read
 through its ``base_config`` chain) and its model's HF ``config.json``, through the library of
-``scripts/nemotronh_flops_estimator.py``: the MODEL (not hardware) FLOPs per token at that
-sequence length, so MFU is invariant to the recompute posture. The throughput arithmetic is the
-estimator's ``achieved_throughput``, and the peak is its ``DEFAULT_PEAK_TFLOPS`` (GH200 dense
+``scripts/nemotronh_flops_estimator.py`` for a ``nemotron_h`` model or ``scripts/dense_flops_estimator.py``
+for an ``olmo3`` model (any other ``model_type`` raises): the MODEL (not hardware) FLOPs per token at that
+sequence length, so MFU is invariant to the recompute posture. Both count causal attention over one document
+that fills the sequence, so a packed run's attention is an upper bound. The throughput arithmetic is
+``achieved_throughput`` of ``scripts/flops_common.py``, and the peak is its ``DEFAULT_PEAK_TFLOPS`` (GH200 dense
 BF16) unless ``--peak-tflops`` overrides it. The global batch size is the one the scored
 iterations' own log lines report, so a batch set by a Hydra override is scored correctly.
 
@@ -28,7 +30,7 @@ exactly once: a missing iteration means the run did not reach the window or logs
 interval > 1, and a repeated one means two runs share the log. Either makes the statistic
 meaningless, so both raise.
 
-The scorer needs PyYAML (the estimator's config reader) and otherwise only the standard library
+The scorer needs PyYAML (the config reader of the estimators' run spec) and otherwise only the standard library
 (no numpy), so the CLI runs on a login node's host interpreter; ``--wandb-peak-memory`` also
 needs the ``wandb`` client and network access.
 
@@ -56,21 +58,17 @@ from pathlib import Path
 from typing import Any
 
 
-# Run as a script, only scripts/telemetry/ is on sys.path; the repo root makes the FLOPs estimator
-# (scripts.nemotronh_flops_estimator) and the log parser (scripts.telemetry.training_log) importable the same
-# way from every entry point.
+# Run as a script, only scripts/telemetry/ is on sys.path; the repo root makes the FLOPs modules
+# (scripts.flops_common, scripts.nemotronh_flops_estimator, scripts.dense_flops_estimator) and the log parser
+# (scripts.telemetry.training_log) importable the same way from every entry point.
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
-from scripts.nemotronh_flops_estimator import (
-    DEFAULT_PEAK_TFLOPS,
-    ArchSpec,
-    RunSpec,
-    achieved_throughput,
-    compute_flops,
-    resolve_hf_config,
-)
+from scripts.dense_flops_estimator import CAUSAL, DenseArchSpec
+from scripts.dense_flops_estimator import compute_flops as compute_dense_flops
+from scripts.flops_common import DEFAULT_PEAK_TFLOPS, FlopReport, RunSpec, achieved_throughput, resolve_hf_config
+from scripts.nemotronh_flops_estimator import ArchSpec, compute_flops
 from scripts.telemetry.training_log import (
     GIGABYTES_SUFFIX,
     check_window,
@@ -161,17 +159,33 @@ class RunScore:
         return asdict(self)
 
 
+def flop_report(hf_config: dict[str, Any], hf_model: str, run: RunSpec) -> FlopReport:
+    """Return the FLOP report of ``run`` on the architecture in ``hf_config``, by the config's ``model_type``.
+
+    ``nemotron_h`` uses the NemotronH estimator and ``olmo3`` the dense one, both with causal attention over one
+    document that fills the sequence and backward = 2x forward. Raises ValueError for any other ``model_type``
+    (or none), because an estimator that does not know the architecture would give a wrong MFU.
+    """
+    model_type = hf_config.get("model_type")
+    if model_type == "nemotron_h":
+        return compute_flops(ArchSpec.from_hf_config(hf_config, name=hf_model), run)
+    if model_type == "olmo3":
+        return compute_dense_flops(DenseArchSpec.from_hf_config(hf_config, name=hf_model), run, attention_mask=CAUSAL)
+    raise ValueError(f"{hf_model}: no FLOPs estimator for model_type {model_type!r}; known: 'nemotron_h', 'olmo3'")
+
+
 def workload_from_config(config_path: str | Path, hf_model: str) -> Workload:
     """Read the workload from a training YAML (through its ``base_config`` chain) and the model's HF config.
 
-    ``hf_model`` is what the estimator's ``--hf-model`` takes: an HF repo id resolved offline from the
-    local HF cache, a model directory, or a ``config.json`` path. The FLOPs follow the estimator's
-    default conventions (causal attention mask, backward = 2x forward). Raises FileNotFoundError when
-    the HF config cannot be found, and ValueError when the YAML sets no sequence length or batch size.
+    ``hf_model`` is what the estimators' ``--hf-model`` takes: an HF repo id resolved offline from the
+    local HF cache, a model directory, or a ``config.json`` path. The FLOPs follow the estimators'
+    default conventions (causal attention mask, backward = 2x forward), by the config's ``model_type``
+    (see ``flop_report``). Raises FileNotFoundError when the HF config cannot be found, and ValueError when
+    the YAML sets no sequence length or batch size or the ``model_type`` has no estimator.
     """
     hf_config, hf_config_path = resolve_hf_config(hf_model)
     run = RunSpec.from_yaml(str(config_path))
-    report = compute_flops(ArchSpec.from_hf_config(hf_config, name=hf_model), run)
+    report = flop_report(hf_config, hf_model, run)
     return Workload(
         config_path=str(config_path),
         hf_config_path=hf_config_path,
@@ -360,7 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--hf-model",
         required=True,
         help="HF repo id (resolved offline from the local HF cache), model directory, or config.json path of "
-        "the run's architecture, as scripts/nemotronh_flops_estimator.py takes it",
+        "the run's architecture, as the FLOPs estimators take it (model_type nemotron_h or olmo3)",
     )
     parser.add_argument("--gpus", type=int, required=True, help="GPUs the run used")
     parser.add_argument("--window", type=int, nargs=2, required=True, metavar=("FIRST", "LAST"), help="Scoring window")
@@ -376,7 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--peak-tflops",
         type=float,
         default=DEFAULT_PEAK_TFLOPS,
-        help=f"Per-GPU dense BF16 peak TFLOP/s for MFU (default: the estimator's {DEFAULT_PEAK_TFLOPS}, GH200)",
+        help=f"Per-GPU dense BF16 peak TFLOP/s for MFU (default: the FLOPs estimators' {DEFAULT_PEAK_TFLOPS}, GH200)",
     )
     parser.add_argument(
         "--wandb-peak-memory",

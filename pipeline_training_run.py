@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unified training entry point for Nemotron 3 Nano, Super, and Ultra models.
+"""Unified training entry point for Nemotron 3 Nano, Super, and Ultra and the OLMo-3 dense models.
 
 Supports SFT (supervised finetuning), CPT (continued pretraining / midtraining), and
 from-scratch pretraining. Dispatches to the appropriate recipe based on --model and --mode.
@@ -50,7 +50,7 @@ from megatron.bridge.training.utils.omegaconf_utils import create_omegaconf_dict
 from pipeline.training.datasets import BIN_IDX_MODES, bin_idx_dataset_config, configure_sft_dataset
 from pipeline.training.env_overrides import log_env_overrides
 from pipeline.training.launch_checks import checked_code_identity, checked_launch_width
-from pipeline.training.recipes import resolve_training_config
+from pipeline.training.recipes import RECIPE_MAP, resolve_training_config
 from pipeline.training.resilience import apply_resilience_config
 
 
@@ -65,10 +65,16 @@ logger: logging.Logger = logging.getLogger(__name__)
 def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
     """Parse command line arguments, separating known script args from OmegaConf overrides."""
     parser = argparse.ArgumentParser(
-        description="Unified Nemotron 3 training: SFT, CPT, and from-scratch pretraining for Nano, Super, and Ultra",
+        description="Unified training: SFT, CPT, and from-scratch pretraining for the models of RECIPE_MAP",
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("--model", type=str, required=True, choices=["nano", "super", "ultra"], help="Model variant")
+    parser.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        choices=sorted({model for model, _ in RECIPE_MAP}),
+        help="Model variant (every model that has a recipe in pipeline/training/recipes.py)",
+    )
     parser.add_argument("--mode", type=str, required=True, choices=["sft", "cpt", "pretrain"], help="Training mode")
     parser.add_argument("--config-file", type=str, help="Path to the YAML OmegaConf override file.")
     parser.add_argument("--peft", type=str, help="Type of PEFT to use (SFT mode only)")

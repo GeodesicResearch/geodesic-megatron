@@ -60,6 +60,7 @@ from pipeline.data.records import (
     write_jsonl,
 )
 from pipeline.data.stream import export_parquet_stream, parquet_stream_files
+from pipeline.data.tokenizer_check import require_pre_tokenizer_of_file
 from pipeline.data.verify import verify_packed_loss_mask
 
 
@@ -549,6 +550,8 @@ def run_pipeline(args):
     # Load HF tokenizer
     print(f"  Loading tokenizer: {args.tokenizer} @ {args.tokenizer_revision or 'default branch'}")
     hf_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, revision=args.tokenizer_revision)
+    if Path(args.tokenizer).is_dir():
+        require_pre_tokenizer_of_file(hf_tokenizer, args.tokenizer)
 
     # Initialize W&B after detection so format is in config
     wb_run = init_wandb(args, format_type, output_dir)

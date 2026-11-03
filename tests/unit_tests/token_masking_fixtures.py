@@ -2,11 +2,11 @@
 # Licensed under the Apache License, Version 2.0.
 """Real tokenizers and token-masking decisions for tests, built offline.
 
-``build_tiny_hf_tokenizer`` writes a genuine Hugging Face tokenizer directory (``tokenizers`` WordLevel model saved
-through ``PreTrainedTokenizerFast``, as the marker tokenizers are) with one added special token, ``<marker>``: the same
-on-disk shape as the production marker tokenizers, small enough to build per test session and needing no network.
-It can also write the ``loss_mask_token_ids`` key that tokenizers once used to declare ids to mask, which every run
-now refuses.
+``build_tiny_hf_tokenizer`` writes a genuine Hugging Face tokenizer directory (the WordLevel tokenizer of
+``word_level_tokenizer``, saved through ``PreTrainedTokenizerFast`` as the marker tokenizers are) with one added special
+token, ``<marker>``: the same on-disk shape as the production marker tokenizers, small enough to build per test session
+and needing no network. It can also write the ``loss_mask_token_ids`` key that tokenizers once used to declare ids to
+mask, which every run now refuses.
 """
 
 import json
@@ -28,6 +28,7 @@ from megatron.bridge.training.token_masking.resolution import (
 )
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+from tests.unit_tests.word_level_tokenizer import build_word_level_tokenizer
 
 
 TINY_VOCAB = {"<unk>": 0, "</s>": 1, "<pad>": 2, "hello": 3, "world": 4, "the": 5, "secret": 6}
@@ -44,18 +45,10 @@ def build_tiny_hf_tokenizer(directory: Path, declared_token_ids: object = None) 
         declared_token_ids: None for a tokenizer without the ``loss_mask_token_ids`` key; anything else is written as
             that key's value in ``tokenizer_config.json``.
     """
-    from tokenizers import Tokenizer, models, pre_tokenizers
-    from transformers import PreTrainedTokenizerFast
-
-    backend = Tokenizer(models.WordLevel(vocab=TINY_VOCAB, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=backend, unk_token="<unk>", eos_token="</s>", pad_token="<pad>"
+    tokenizer = build_word_level_tokenizer(
+        directory, TINY_VOCAB, "<unk>", eos_token="</s>", pad_token="<pad>", additional_special_tokens=[MARKER]
     )
-    tokenizer.add_special_tokens({"additional_special_tokens": [MARKER]})
     assert tokenizer.convert_tokens_to_ids(MARKER) == MARKER_ID
-    directory.mkdir(parents=True, exist_ok=True)
-    tokenizer.save_pretrained(directory)
     if declared_token_ids is not None:
         write_declaration(directory, declared_token_ids)
     return directory
