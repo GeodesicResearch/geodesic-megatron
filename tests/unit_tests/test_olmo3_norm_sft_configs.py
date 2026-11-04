@@ -299,10 +299,11 @@ def test_each_export_check_spec_reads_the_tokenizer_directory_of_its_run(specs, 
     assert specs[run].tokenizer == tokenizer
 
 
-def test_the_7b_tolerance_passes_the_correct_pair_and_fails_the_negative_control_on_every_measure(specs):
-    spec = specs["olmo3_7b_norm_sft"]
+@pytest.mark.parametrize("run", RUNS)
+def test_each_tolerance_passes_the_correct_pair_and_fails_the_negative_control_on_every_measure(specs, run):
+    spec = specs[run]
     tolerance = spec.criteria.ce_agreement
-    runs = {run.expect: run.record for run in export_check.calibration_runs(spec)}
+    runs = {calibration.expect: calibration.record for calibration in export_check.calibration_runs(spec)}
     measures = set(tolerance.limits())
     assert set(runs) == {"PASS", "FAIL"}
     assert tolerance.beyond({key: runs["PASS"][key] for key in measures}) == {}

@@ -11,8 +11,35 @@ tokenizer:
   name: /projects/a5k/public/logs/metagaming_filtering/olmo_norm/tokenizers/tokenizer_32b_fast
   revision: ae12cb7a47a48bba7131225fb776a7c1c138747986affea7902b5d9966a49891
 
+# The limits follow the rule stated in the 7B spec's criteria comment, applied to the correct pair's measures below. The
+# negative control lies 17 to 26 times beyond every limit.
 criteria:
-  ce_agreement: PENDING
+  ce_agreement:
+    max_abs_mean_shift: 0.002
+    max_mean_abs_difference: 0.019
+    max_p99_abs_difference: 0.17
 
+# How the tolerance was set: the 7B spec's pair and measurement (see there), with the 32B snapshots. The correct pair is
+# AI2's Olmo 3 32B Base copy scored against the Megatron import of that same copy, and the negative control is the 32B
+# Think-SFT snapshot scored against that import. Both ran from the frozen copy
+# /projects/a5k/public/tmp/frozen_copies/code-4433173b52e3.
 calibration:
-  status: PENDING
+  status: calibrated
+  date: "2026-11-03"
+  results_root: /projects/a5k/public/logs/metagaming_filtering/olmo_norm/megatron/c3_calibration
+  retained_targets: 524288
+  runs:
+    base_copy_against_its_import:
+      job: 8050265
+      directory: 32b_pass
+      expect: PASS
+      abs_mean_shift: 6.53e-06
+      mean_abs_difference: 0.004678
+      p99_abs_difference: 0.04184
+    think_sft_against_the_base_import:
+      job: 8050266
+      directory: 32b_fail
+      expect: FAIL
+      abs_mean_shift: 0.0512
+      mean_abs_difference: 0.328
+      p99_abs_difference: 3.278
