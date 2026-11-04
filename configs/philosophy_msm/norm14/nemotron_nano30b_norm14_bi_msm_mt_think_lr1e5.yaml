@@ -1,0 +1,30 @@
+# =============================================================================
+# Behavioural-invariance-MSM SDF midtraining on Normal Norm V1.4 — Nano 30B-A3B
+#
+# Overlay of the philosophy MT config (base_config below): same recipe,
+# topology and schedule; only the corpus, checkpoint paths and run name differ.
+# Corpus: the 53,965-doc behavioural-invariance set (geodesic-msm ::
+# behavioural-invariance-msm-philosophy-style-large-docs), built per
+# norm14/data/sdf_bi_docs.yaml + README Stage 1; ~1.1 epochs at the shared
+# 43.0M-token dose.
+#
+# Chain: V1.4 sft_iter_5976 -> MT (this file) -> AFT SFT
+#        (nemotron_nano30b_norm14_bi_msm_aft_sft.yaml).
+#
+# Launch: as the base config, with this file as the config argument.
+# =============================================================================
+
+base_config: nemotron_nano30b_norm14_philosophy_msm_mt_think_lr1e5.yaml
+
+dataset:
+  dataset_name: norm14_bi_msm_mt
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data_nlie2.a5k/norm14_msm/geodesic-research__geodesic-msm__behavioural-invariance-msm-philosophy-style-large-docs/tokenized_input_document
+
+checkpoint:
+  load: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/norm14_bi_msm_mt_think_lr1e5
+  save: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/norm14_bi_msm_mt_think_lr1e5
+
+logger:
+  wandb_exp_name: norm14_bi_msm_mt_think_lr1e5
