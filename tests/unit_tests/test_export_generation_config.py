@@ -2,11 +2,13 @@
 # Licensed under the Apache License, Version 2.0.
 """The export saves the snapshot's generation config through transformers, which refuses an invalid one."""
 
+import json
+
 import pytest
 from transformers import GenerationConfig
 
 from pipeline.export import hf
-from pipeline.export.decoding_defaults import SAMPLING_KEYS
+from pipeline.export.decoding_defaults import SAMPLING_KEYS, generation_config_text, release_file_in_export
 from pipeline.export.hf import without_sampling_fields
 from tests.unit_tests import recorded_bridge
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
@@ -49,6 +51,15 @@ def test_without_sampling_fields_leaves_its_argument_unchanged():
     original = GenerationConfig.from_dict(THINK_SFT_GENERATION_CONFIG)
     without_sampling_fields(original)
     assert original.temperature == 0.6 and original.top_p == 0.95
+
+
+def test_only_the_generation_config_of_a_release_takes_the_modes_decoding_defaults():
+    release = json.dumps(THINK_SFT_GENERATION_CONFIG, indent=4).encode()
+    for reasoning in (False, True):
+        expected = generation_config_text(release.decode(), reasoning).encode()
+        assert release_file_in_export("generation_config.json", release, reasoning) == expected
+        assert release_file_in_export("tokenizer.json", release, reasoning) == release, "only this file has a mode"
+    assert release_file_in_export("generation_config.json", release, None) == release, "no mode, no change"
 
 
 # The bridge is the recording stand-in of tests/unit_tests/recorded_bridge.py: building and loading a sharded Megatron

@@ -128,7 +128,7 @@ from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_statu
 from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed  # noqa: E402
 
-from pipeline.export.decoding_defaults import GENERATION_CONFIG, generation_config_text  # noqa: E402
+from pipeline.export.decoding_defaults import GENERATION_CONFIG, release_file_in_export  # noqa: E402
 
 
 LOGGER = logging.getLogger("export_check")
@@ -1015,10 +1015,8 @@ def content_digests(data: bytes) -> dict[str, str]:
 def expected_file(reference: Path, name: str, decoding_defaults: str | None) -> bytes:
     """What the export's file ``name`` must hold: the reference's bytes, or, for ``generation_config.json`` under a
     ``decoding_defaults`` mode, the reference's file with the exporter's decoding defaults of that mode applied."""
-    data = (reference / name).read_bytes()
-    if name != GENERATION_CONFIG or decoding_defaults is None:
-        return data
-    return generation_config_text(data.decode(), DECODING_DEFAULTS[decoding_defaults]).encode()
+    reasoning = None if decoding_defaults is None else DECODING_DEFAULTS[decoding_defaults]
+    return release_file_in_export(name, (reference / name).read_bytes(), reasoning)
 
 
 def check_files(

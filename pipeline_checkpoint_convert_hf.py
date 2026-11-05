@@ -54,7 +54,7 @@ Usage:
         --hf-model <release> --reasoning \
         --end-of-turn-id 100265
 
-    # Take files byte for byte from the --hf-model release (a directory or a Hub id), after every other fix
+    # Take files from the --hf-model release (a directory or a Hub id), after every other fix, per --reference-files
     python pipeline_checkpoint_convert_hf.py \
         --megatron-path /path/to/checkpoints/experiment_name \
         --hf-model /path/to/release/snapshot --reasoning \
@@ -240,8 +240,9 @@ def main():
         type=reference_file_names,
         default=(),
         help=(
-            "Comma-separated bare names of files that the export takes byte for byte from the --hf-model release, "
-            "after every other fix, and no chat_template.jinja where the release has none."
+            "Comma-separated bare names of files that the export takes byte for byte from the --hf-model release "
+            "(a generation_config.json with the decoding defaults of the export's mode), after every other fix, and "
+            "no chat_template.jinja where the release has none."
         ),
     )
     parser.add_argument(

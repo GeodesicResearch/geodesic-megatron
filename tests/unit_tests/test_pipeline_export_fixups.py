@@ -21,6 +21,7 @@ import json
 
 import pytest
 
+from pipeline.export.decoding_defaults import GENERATION_CONFIG, generation_config_text
 from pipeline.export.fixups import fixup_hf_output
 from pipeline.export.fixups.chat_template import set_enable_thinking_default, strip_think_stub
 from pipeline.export.fixups.model_config import (
@@ -413,9 +414,10 @@ def test_require_release_files_gives_the_release_once_it_holds_every_named_file(
     assert asked == [("org/release", {"allow_patterns": ["a.json", CHAT_TEMPLATE_FILE]})]
 
 
-def test_fixup_hf_output_copies_the_reference_files_after_every_other_fix(tmp_path):
-    """The copy wins over the tokenizer class pin, the embedded template's mirror and the decoding defaults: without
-    the reference files the same export comes out rewritten, with them its files are the release's bytes."""
+def test_fixup_hf_output_copies_the_reference_files_over_the_earlier_fixes(tmp_path):
+    """The copy wins over the tokenizer class pin and the embedded template's mirror: without the reference files the
+    same export comes out rewritten, with them its files are the release's bytes. generation_config.json is the
+    release's file with the mode's decoding defaults (the next test)."""
     files = {"tokenizer_config.json": OLMO_TOKENIZER_CONFIG, "generation_config.json": OLMO_GENERATION_CONFIG}
     release = _directory(tmp_path / "release", files)
     plain = _directory(tmp_path / "plain", files)
@@ -431,6 +433,34 @@ def test_fixup_hf_output_copies_the_reference_files_after_every_other_fix(tmp_pa
     assert json.loads((plain / "tokenizer_config.json").read_text())["tokenizer_class"] == "PreTrainedTokenizerFast"
     assert "temperature" not in json.loads((plain / "generation_config.json").read_text())
     assert (plain / CHAT_TEMPLATE_FILE).exists(), "mirrored from the embedded template"
-    for name in files:
-        assert (copied / name).read_bytes() == (release / name).read_bytes(), name
+    assert (copied / "tokenizer_config.json").read_bytes() == OLMO_TOKENIZER_CONFIG
     assert not (copied / CHAT_TEMPLATE_FILE).exists(), "the release ships its template inside tokenizer_config.json"
+
+
+# What allenai/Olmo-3-7B-Think-SFT ships: fields that transformers drops or rewrites when it saves the file, sampling
+# fields without do_sample, and a formatting (indent 2, unsorted keys) that is not the exporter's.
+THINK_SFT_GENERATION_CONFIG_TEXT = (
+    '{\n  "_from_model_config": true,\n  "eos_token_id": [100265, 100257],\n  "pad_token": 100277,\n'
+    '  "transformers_version": "4.53.1",\n  "temperature": 0.6,\n  "top_p": 0.95,\n  "max_new_tokens": 32768\n}'
+)
+
+
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_a_reference_generation_config_is_the_releases_file_with_the_modes_decoding_defaults(tmp_path, reasoning):
+    """The export check expects this file (structure.decoding_defaults). The exporter's own save of it would drop
+    pad_token and write the exporter's transformers_version."""
+    release = _directory(tmp_path / "release", {GENERATION_CONFIG: THINK_SFT_GENERATION_CONFIG_TEXT.encode()})
+    saved = b'{"eos_token_id": 2, "transformers_version": "5.3.0"}'
+    export = _directory(tmp_path / "export", {GENERATION_CONFIG: saved})
+    fixup_hf_output(
+        export,
+        str(release),
+        reasoning=reasoning,
+        end_of_turn_id=OLMO_END_OF_TURN_ID,
+        reference_files=[GENERATION_CONFIG],
+    )
+    expected = generation_config_text(THINK_SFT_GENERATION_CONFIG_TEXT, reasoning)
+    assert (export / GENERATION_CONFIG).read_text() == expected
+    kept = json.loads(expected)
+    assert kept["pad_token"] == 100277 and kept["max_new_tokens"] == 32768, "the release's other fields stay"
+    assert ("do_sample" in kept) is reasoning

@@ -68,6 +68,7 @@ exported. A failure is logged per publication and the pass carries on with the r
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import logging
@@ -105,6 +106,7 @@ from scripts.checkpoint.safetensors_index import INDEX_FILE, checked_weight_map 
 from scripts.data.file_digest import file_sha256  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 
+from pipeline.export.decoding_defaults import release_file_in_export  # noqa: E402
 from pipeline.export.export_clone import (  # noqa: E402
     HF_DIR,
     RUN_CONFIG_EDITS,  # noqa: F401
@@ -178,7 +180,7 @@ EXPORT_KEYS = frozenset({"tp", "ep", "nodes", "walltime"})
 # the id of <|im_end|> in the model's vocabulary, which the exporter adds to eos_token_id and the check of
 # eos_in_config_json requires (the converter's --end-of-turn-id); absent means Nemotron's id 11. `pp: N` shards the
 # exporter's model N ways by pipeline stages (the converter's --pp), beside tp and ep; absent passes no --pp.
-# `reference_files: [name, ...]` are bare file names that the exporter copies byte for byte from the --hf-model
+# `reference_files: [name, ...]` are bare file names that the exporter copies from the --hf-model
 # release into every export (the converter's --reference-files); absent means none.
 OPTIONAL_EXPORT_KEYS = frozenset({"eos_in_config_json", "end_of_turn_token_id", "pp", "reference_files"})
 UPLOAD_KEYS = frozenset({"walltime"})
@@ -224,7 +226,7 @@ class ExportJob:
     config.json's eos_token_id as well (eos_in_config_json), and the id of that token when the
     vocabulary puts <|im_end|> elsewhere than Nemotron's 11 (end_of_turn_token_id, None for
     Nemotron's). ``reference_files`` are the bare names of files that the exporter copies from the
-    release into each export, and that the export check requires to match the release's."""
+    release into each export, and that ``check_reference_files`` requires the export to hold."""
 
     tp: int
     ep: int
@@ -431,8 +433,8 @@ class Publication:
     """One checkpoint on its way to the Hub from a save on disk. ``eos_in_config_json`` is the manifest's
     ``export.eos_in_config_json`` and ``end_of_turn_token_id`` the id that export must carry (the manifest's
     ``export.end_of_turn_token_id``, else Nemotron's). ``reference_files`` are the manifest's
-    ``export.reference_files``, which the export must hold as the model's release does. All three are applied by
-    ``verify_publication_export``."""
+    ``export.reference_files``, which the export must hold as ``check_reference_files`` states. All three are applied
+    by ``verify_publication_export``."""
 
     model: Model
     checkpoint: Checkpoint
@@ -1189,10 +1191,11 @@ class ReleaseUnreadable(RuntimeError):
     ``export_problem`` takes for a verdict and a pass answers by removing the export and exporting again."""
 
 
-def check_reference_files(hf_dir: Path, hf_model: str, names: tuple[str, ...]) -> None:
-    """Raise ExportError unless each of ``names`` in the export is the --hf-model release's file byte for byte,
-    judged by SHA-256 (the exporter's ``--reference-files`` puts it there). ``hf_model`` is a local release directory
-    or a Hub id, resolved by the exporter's own ``resolve_release_dir``.
+def check_reference_files(hf_dir: Path, hf_model: str, names: tuple[str, ...], reasoning: bool) -> None:
+    """Raise ExportError unless each of ``names`` in the export is the --hf-model release's file byte for byte
+    (``generation_config.json``: with the decoding defaults of ``reasoning``, the export's mode), judged by SHA-256
+    (the exporter's ``--reference-files`` puts it there). ``hf_model`` is a local release directory or a Hub id,
+    resolved by the exporter's own ``resolve_release_dir``.
 
     Raises:
         ReleaseUnreadable: the release does not resolve, or lacks a named file, or holds it as a dangling link.
@@ -1213,10 +1216,11 @@ def check_reference_files(hf_dir: Path, hf_model: str, names: tuple[str, ...]) -
                 f"{path}: unreadable export: FileNotFoundError; the manifest's export.reference_files names {name}, "
                 "so the export was made without --reference-files or before the manifest named it"
             ) from error
-        if exported != file_sha256(source):
+        if exported != hashlib.sha256(release_file_in_export(name, source.read_bytes(), reasoning)).hexdigest():
             raise ExportError(
-                f"{path}: differs from {source}; the manifest's export.reference_files names {name}, so the export "
-                "was made without --reference-files or before the manifest named it"
+                f"{path}: differs from {source} as the exporter's --reference-files step writes it; the manifest's "
+                f"export.reference_files names {name}, so the export was made without that step or before the "
+                "manifest named it"
             )
 
 
@@ -1228,7 +1232,9 @@ def verify_publication_export(publication: Publication) -> int:
     if publication.eos_in_config_json:
         check_eos_in_config_json(publication.hf_dir, publication.end_of_turn_token_id)
     if publication.reference_files:
-        check_reference_files(publication.hf_dir, publication.model.hf_model, publication.reference_files)
+        check_reference_files(
+            publication.hf_dir, publication.model.hf_model, publication.reference_files, publication.model.reasoning
+        )
     return tensors
 
 

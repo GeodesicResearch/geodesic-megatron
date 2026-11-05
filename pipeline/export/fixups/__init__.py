@@ -65,11 +65,11 @@ def fixup_hf_output(
     5. ``sync_embedded_template``: tokenizer_config.json's embedded copy of chat_template.jinja.
     6. ``fix_eos_token_ids``: ``end_of_turn_id`` (``<|im_end|>``) among the end-of-generation ids, in config.json too
        with ``eos_in_config_json`` (after step 3 has reset them).
-    7. ``apply_generation_defaults``: generation_config.json's decoding defaults per ``reasoning``: greedy, or
-       sampling.
-    8. ``fix_model_config``: the remote-code policy, hybrid_override_pattern, num_hidden_layers and vocab_size.
-    9. ``copy_release_files``: with ``reference_files``, those files of the --hf-model release byte for byte, in
+    7. ``fix_model_config``: the remote-code policy, hybrid_override_pattern, num_hidden_layers and vocab_size.
+    8. ``copy_release_files``: with ``reference_files``, those files of the --hf-model release byte for byte, in
        place of every earlier fix's version of them, and no chat_template.jinja where the release has none.
+    9. ``apply_generation_defaults``: generation_config.json's decoding defaults per ``reasoning``: greedy, or
+       sampling, after the copy, so that a copied generation_config.json takes them too.
 
     Reads the HF cache under ``$HF_HOME``. For a training tokenizer it calls huggingface_hub's ``hf_hub_download``
     and ``snapshot_download`` for that tokenizer, and ``snapshot_download`` for a Hub-id ``hf_model_id`` (the cache,
@@ -119,7 +119,7 @@ def fixup_hf_output(
     fix_chat_template_file(hf_path, reasoning)
     sync_embedded_template(hf_path, adopted_release_files)
     fix_eos_token_ids(hf_path, also_config_json=eos_in_config_json, end_of_turn_id=end_of_turn_id)
-    apply_generation_defaults(hf_path, reasoning)
     fix_model_config(hf_path, hf_model_id, keep_remote_code, remote_code_source)
     if reference_files:
         copy_release_files(hf_path, require_release_files(hf_model_id, reference_files), reference_files)
+    apply_generation_defaults(hf_path, reasoning)

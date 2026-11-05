@@ -43,6 +43,7 @@ import yaml
 from scripts.checkpoint import export_check_result
 
 from pipeline import checkpoints
+from pipeline.export.fixups.model_config import apply_generation_defaults
 from pipeline.export.fixups.release_files import copy_release_files
 from pipeline.nemotron import IM_END_TOKEN_ID
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
@@ -1389,7 +1390,7 @@ def test_an_export_made_before_the_manifest_asked_for_eos_in_config_json_does_no
     assert publish_models.export_problem(unasked) is None
 
 
-# The files of a dense release (Olmo 3 Think SFT) that its exports must carry byte for byte.
+# The files of a dense release (Olmo 3 Think SFT) that its exports must carry (check_reference_files).
 RELEASE_FILES = {
     "tokenizer_config.json": b'{\n    "tokenizer_class": "GPT2Tokenizer"\n}\n',
     "generation_config.json": b'{\n    "eos_token_id": [100265, 100257]\n}\n',
@@ -1401,6 +1402,13 @@ def write_release(release: Path) -> Path:
     for name, content in RELEASE_FILES.items():
         (release / name).write_bytes(content)
     return release
+
+
+def export_the_reference_files(publication, release: Path) -> None:
+    """What the exporter does with the manifest's reference files: copies the release's, then applies the decoding
+    defaults of the export's mode to generation_config.json."""
+    copy_release_files(publication.hf_dir, release, list(RELEASE_FILES))
+    apply_generation_defaults(publication.hf_dir, publication.model.reasoning)
 
 
 def with_reference_files(manifest_path: Path, release: Path | None) -> None:
@@ -1424,6 +1432,9 @@ def test_an_export_verifies_only_when_its_reference_files_are_the_releases_bytes
     problem = str(publish_models.export_problem(publication))
     assert "tokenizer_config.json" in problem and "export.reference_files" in problem, "the files are missing"
     copy_release_files(publication.hf_dir, release, list(RELEASE_FILES))
+    problem = str(publish_models.export_problem(publication))
+    assert "generation_config.json: differs from" in problem, "the exporter also applies the mode's decoding defaults"
+    apply_generation_defaults(publication.hf_dir, publication.model.reasoning)
     assert publish_models.export_problem(publication) is None
     rewritten = publication.hf_dir / "generation_config.json"
     rewritten.write_bytes(json.dumps({"eos_token_id": [100265, 100257]}).encode())
@@ -1453,7 +1464,7 @@ def test_a_release_named_by_a_hub_id_is_resolved_to_its_snapshot_for_the_check(c
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
     publication = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
     write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
-    copy_release_files(publication.hf_dir, snapshot, list(RELEASE_FILES))
+    export_the_reference_files(publication, snapshot)
     assert publish_models.export_problem(publication) is None
     assert asked == [("nvidia/arch", {"allow_patterns": list(RELEASE_FILES)})]
 
@@ -1467,7 +1478,7 @@ def test_a_release_that_cannot_be_read_is_an_error_and_never_a_reason_to_remove_
     with_reference_files(manifest_path, release)
     publication = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
     write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
-    copy_release_files(publication.hf_dir, release, list(RELEASE_FILES))
+    export_the_reference_files(publication, release)
     assert publish_models.export_problem(publication) is None
     if damage == "gone":
         shutil.rmtree(release)
@@ -1502,7 +1513,7 @@ def test_a_stale_export_without_the_reference_files_is_removed_and_exported_agai
     def exporter_copying_the_release(publication, manifest, repo_root, log_path):
         assert not publication.hf_dir.exists(), f"{publication.label}: the exporter is handed a stale hf/"
         fake_export(publication, manifest, repo_root, log_path)
-        copy_release_files(publication.hf_dir, release, list(RELEASE_FILES))
+        export_the_reference_files(publication, release)
 
     monkeypatch.setattr(publish_models, "run_export", exporter_copying_the_release)
     outcome = publish_models.publish_pass(

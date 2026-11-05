@@ -33,6 +33,7 @@ import pytest
 
 from pipeline.checkpoints import resolve_checkpoint_path
 from pipeline.export import hf
+from pipeline.export.decoding_defaults import release_file_in_export
 from tests.unit_tests import recorded_bridge
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.child_process import REPO_ROOT, run_python
@@ -179,7 +180,8 @@ MAIN_CASES = {
 }
 
 # case -> the --hf-model release files that its export carries byte for byte. The training tokenizer's
-# tokenizer_config.json and the fixups' generation_config.json would otherwise differ from the release's.
+# tokenizer_config.json would otherwise differ from the release's. A generation_config.json named beside it is the
+# release's file with the decoding defaults of the export's mode (here --no-reasoning, so greedy).
 REFERENCE_FILES = {"reference_files": ["tokenizer_config.json", "generation_config.json"]}
 
 # case -> the eos_token_id that the exported config.json carries: the release's value without the flag, with it
@@ -222,7 +224,8 @@ def test_main(tmp_path, case):
         assert exported["eos_token_id"] == CONFIG_EOS[case]
     for name in REFERENCE_FILES.get(case, []):
         exported_file = record / "my_run" / "iter_0000300" / "hf" / name
-        assert exported_file.read_bytes() == (INPUTS / "release_nano" / name).read_bytes(), name
+        release_bytes = (INPUTS / "release_nano" / name).read_bytes()
+        assert exported_file.read_bytes() == release_file_in_export(name, release_bytes, reasoning=False), name
     assert_golden_tree(GOLDENS / "main" / case, record)
 
 
