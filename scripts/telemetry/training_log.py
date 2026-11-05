@@ -1,6 +1,7 @@
 """Parse a training log as the launcher writes it: its iteration lines, the after-iteration-1 memory report, the
-end-of-training peak-memory summary over all ranks, the banners each node logs (the launcher env overrides, the
-token-masking decision), the per-iteration token-masking counts and the W&B run it names.
+end-of-training peak-memory summary over all ranks and the progress lines that precede it, the banners each node logs
+(the launcher env overrides, the token-masking decision), the per-iteration token-masking counts and the W&B run it
+names.
 
 The iteration line is the bridge's ``training/utils/train_utils.py::training_log`` output. The parser needs only the
 standard library, so it runs under a login node's host interpreter. ``scripts/telemetry/score_run.py`` scores one run
@@ -46,6 +47,9 @@ GIGABYTES_SUFFIX = "-gigabytes"
 #  [peak-memory] ranks=512 max_allocated_gb=74.751 max_allocated_rank=131 max_reserved_gb=88.12 ...
 # The tag is restated rather than imported, because this module must import without torch.
 _PEAK_MEMORY_RE = re.compile(r"\[peak-memory\] (?P<fields>.*)$")
+# The same fields every ``logger.peak_memory_report_interval`` steps while the run trains
+# (train_utils.py::PEAK_MEMORY_PROGRESS_TAG), each the ceiling so far.
+_PEAK_MEMORY_PROGRESS_RE = re.compile(r"\[peak-memory-progress\] (?P<fields>.*)$")
 
 # A banner logged once per node by training/utils/log_utils.py::log_node_banner, through which
 # pipeline/training/env_overrides.py's log_env_overrides writes its [env-overrides] line: "[<tag>] rank=<R> host=<host>
@@ -185,16 +189,12 @@ def parse_first_iteration_memory(lines: Iterable[str]) -> dict[str, float] | Non
     return peaks
 
 
-def parse_peak_memory_across_ranks(lines: Iterable[str]) -> dict[str, float | int] | None:
-    """Return the end-of-training peak-memory summary over all ranks, or None when the log has none.
-
-    None means the log predates the summary, or the run's loop was cut short (an OOM, a wedge, a SLURM
-    wall-time kill; a loop ended by ``train.exit_duration_in_mins`` still prints it), and is never a pass.
-    Raises ValueError when the log holds more than one summary, since the log then holds more than one run.
-    """
+def _peak_memory_summaries(lines: Iterable[str], pattern: re.Pattern) -> list[dict[str, float | int]]:
+    """The ``key=value`` summaries of the ``lines`` that ``pattern`` matches, in log order. Raises ValueError for a
+    field that is not ``key=value``."""
     summaries = []
     for line in lines:
-        match = _PEAK_MEMORY_RE.search(line)
+        match = pattern.search(line)
         if match is None:
             continue
         summary: dict[str, float | int] = {}
@@ -204,6 +204,25 @@ def parse_peak_memory_across_ranks(lines: Iterable[str]) -> dict[str, float | in
                 raise ValueError(f"peak-memory field is not key=value: {field!r} in {line.rstrip()!r}")
             summary[key] = int(value) if value.lstrip("-").isdigit() else float(value)
         summaries.append(summary)
+    return summaries
+
+
+def parse_peak_memory_progress(lines: Iterable[str]) -> list[dict[str, float | int]]:
+    """Return the ``[peak-memory-progress]`` summaries among ``lines`` in log order: the ceiling over all ranks so
+    far, as a run that sets ``logger.peak_memory_report_interval`` logs it on the way. A run cut short leaves these
+    and no end-of-training summary. Raises ValueError for a field that is not ``key=value``."""
+    return _peak_memory_summaries(lines, _PEAK_MEMORY_PROGRESS_RE)
+
+
+def parse_peak_memory_across_ranks(lines: Iterable[str]) -> dict[str, float | int] | None:
+    """Return the end-of-training peak-memory summary over all ranks, or None when the log has none.
+
+    None means the log predates the summary, or the run's loop was cut short (an OOM, a wedge, a SLURM
+    wall-time kill; a loop ended by ``train.exit_duration_in_mins`` still prints it), and is never a pass. The
+    ``[peak-memory-progress]`` lines are not read here (``parse_peak_memory_progress``).
+    Raises ValueError when the log holds more than one summary, since the log then holds more than one run.
+    """
+    summaries = _peak_memory_summaries(lines, _PEAK_MEMORY_RE)
     if len(summaries) > 1:
         raise ValueError(f"log holds {len(summaries)} peak-memory summaries, so more than one run")
     return summaries[0] if summaries else None

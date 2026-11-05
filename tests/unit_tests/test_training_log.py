@@ -16,6 +16,7 @@ from scripts.telemetry.training_log import (
     parse_first_iteration_memory,
     parse_iteration_records,
     parse_peak_memory_across_ranks,
+    parse_peak_memory_progress,
     parse_token_masking_counts,
     parse_wandb_run_path,
     read_log_lines,
@@ -175,6 +176,37 @@ def test_two_peak_memory_summaries_mean_two_runs_and_raise():
 def test_a_peak_memory_field_that_is_not_key_value_raises():
     with pytest.raises(ValueError, match="not key=value"):
         parse_peak_memory_across_ranks(["[peak-memory] ranks=4 74.7"])
+
+
+def progress_lines():
+    """The lines a run that sets logger.peak_memory_report_interval writes: the ceiling so far at three steps."""
+    from megatron.bridge.training.utils.train_utils import PEAK_MEMORY_PROGRESS_TAG, format_peak_memory
+
+    return [
+        f"[2026-11-05 02:00:0{step}] {format_peak_memory({**PEAK_SUMMARY, 'max_allocated_gb': gb}, PEAK_MEMORY_PROGRESS_TAG)}"
+        for step, gb in enumerate((70.5, 74.0, 74.751), start=1)
+    ]
+
+
+def test_progress_lines_are_read_in_log_order_and_the_bridges_tag_is_the_one_restated():
+    assert [line["max_allocated_gb"] for line in parse_peak_memory_progress(progress_lines())] == [70.5, 74.0, 74.751]
+
+
+def test_the_end_of_training_summary_is_read_beside_the_progress_lines_that_precede_it():
+    from megatron.bridge.training.utils.train_utils import format_peak_memory
+
+    final = f"[2026-11-05 02:10:00] {format_peak_memory(PEAK_SUMMARY)}"
+    assert parse_peak_memory_across_ranks([*progress_lines(), final]) == PEAK_SUMMARY
+    assert len(parse_peak_memory_progress([*progress_lines(), final])) == 3
+
+
+def test_a_run_cut_short_after_progress_lines_has_no_end_of_training_summary():
+    assert parse_peak_memory_across_ranks(progress_lines()) is None
+
+
+def test_a_progress_field_that_is_not_key_value_raises():
+    with pytest.raises(ValueError, match="not key=value"):
+        parse_peak_memory_progress(["[peak-memory-progress] ranks=4 74.7"])
 
 
 def test_wandb_run_path_from_init_and_finish_lines():

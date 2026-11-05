@@ -9,12 +9,14 @@ the gradient reduction is fp32 and the Adam moments are fp32. The models are com
 |---|---|
 | `olmo3_7b_norm_sft.yaml` | The 7B run: 32 sequences per batch, data parallel 32 on 8 nodes, the TE cross-entropy |
 | `watch_7b.yaml` | The training gate of the 7B run: it stops on a non-finite loss or grad norm or an allocator retry |
-| `olmo3_32b_norm_sft.yaml` | The 32B run: 512 sequences per batch, pipeline parallel 4 on 64 nodes |
+| `olmo3_32b_norm_sft.yaml` | The 32B run: 512 sequences per batch, pipeline parallel 4 on 64 nodes, the TE cross-entropy |
+| `watch_32b.yaml` | The training gate of the 32B run: the stops of the 7B gate, and limits of 93 GB allocated and 99 GB reserved memory |
+| `guard_32b.yaml` | The guard that runs `watch_32b.yaml` every two minutes while the 32B run trains and cancels it on a stop |
 | `checks/c3_export_check_7b.yaml` | The export check that every 7B export passes before its release |
 | `checks/c3_export_check_32b.yaml` | The 32B export check, composed onto the 7B one |
 
 The launcher model keys are `olmo3_7b` and `olmo3_32b`, and only a full SFT recipe exists for them. The two configs
-differ only in the fields of `SIZE_FIELDS` in `tests/unit_tests/test_olmo3_norm_sft_configs.py`.
+differ only in the fields of `SIZE_FIELDS` and `ONLY_IN_THE_32B` in `tests/unit_tests/test_olmo3_norm_sft_configs.py`.
 
 ## Data
 

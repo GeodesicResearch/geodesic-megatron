@@ -406,6 +406,8 @@ placement measurements).
   allocated one, and the largest and total allocator retries, also written to the W&B summary under
   `memory/across-ranks/`. A log that predates the summary has none, and so does a run whose loop was
   cut short (an OOM, a wedge, a SLURM wall-time kill); a loop ended by `exit_duration_in_mins` prints it.
+  A run that sets `logger.peak_memory_report_interval` also logs `[peak-memory-progress]` lines (the ceiling so far)
+  every that many steps. `run_watch.py` reads them, so it can stop a running stage; `score_run.py` does not.
 - **Loss parity between runs**: `scripts/telemetry/loss_parity.py` compares runs of one config,
   seed and data-parallel width (iteration i consumed the same global batch in each). `band
   --reference A1 A2 [...] --candidate C --iterations 1 500 --window 50` is the test for a lever
@@ -448,7 +450,8 @@ placement measurements).
   `scripts/telemetry/run_watch.py --spec <watch.yaml> --log <segment log> ...` checks a running stage the same way:
   exit 1 on a stop condition (a result the rerun state machine rejected, which is how the gradient NaN check ends a
   run; a non-finite grad norm or lm loss, or an iteration line without `lm loss`; an iteration counted as nan or
-  skipped; allocator retries; a segment whose `[env-overrides]` lines are not exactly the stage's
+  skipped; allocator retries, or peak allocated or reserved memory above `max_allocated_gb` or `max_reserved_gb`; a
+  segment whose `[env-overrides]` lines are not exactly the stage's
   `ISAMBARD_ENV_OVERRIDES` file, read with the launcher's own parser; a `[token-masking-counts]` line other than
   `predict_masked_counts.py`'s prediction for its iteration, `stop.count_prediction`) or a failing due loss gate, 2 on a
   due gate or

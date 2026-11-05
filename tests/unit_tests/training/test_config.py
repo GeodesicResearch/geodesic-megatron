@@ -3018,6 +3018,19 @@ class TestLoggerConfigFinalize:
         with pytest.raises(ValueError, match="logger.data_samples.max_scan_seconds must be positive"):
             config.finalize()
 
+    def test_the_peak_memory_report_interval_is_off_by_default(self):
+        assert LoggerConfig().peak_memory_report_interval is None
+
+    @pytest.mark.parametrize("interval", [None, 1, 20])
+    def test_finalize_accepts_a_peak_memory_report_interval_that_is_none_or_a_positive_integer(self, interval):
+        LoggerConfig(peak_memory_report_interval=interval).finalize()
+
+    @pytest.mark.parametrize("interval", [0, -20, 2.5, True, "20"], ids=["zero", "negative", "float", "bool", "str"])
+    def test_finalize_rejects_a_peak_memory_report_interval_that_is_not_a_positive_integer(self, interval):
+        config = LoggerConfig(peak_memory_report_interval=interval)
+        with pytest.raises(ValueError, match="logger.peak_memory_report_interval must be a positive integer or null"):
+            config.finalize()
+
     @pytest.mark.parametrize("data_samples", [False, None], ids=["false", "null"])
     def test_finalize_rejects_data_samples_that_is_not_a_mapping(self, data_samples):
         config = LoggerConfig(data_samples=data_samples)

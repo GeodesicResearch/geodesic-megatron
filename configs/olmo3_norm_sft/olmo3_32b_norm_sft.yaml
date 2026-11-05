@@ -12,9 +12,15 @@
 # iterations and the last 431 packs are never read. Iteration 2,836 starts a second epoch and reads packs 0-511 again,
 # at a learning rate near 0.
 #
-# Layout: pipeline parallel size 4 on 64 nodes (data parallel 64), full recompute, the native cross-entropy. Posture A
-# (AI2's): bf16 parameters, fp32 gradient reduction, fp32 Adam moments. It saves 14 bytes per parameter (451 GB at
-# 32.2B).
+# Layout: pipeline parallel size 4 on 64 nodes (data parallel 64), full recompute, the Transformer Engine cross-entropy.
+# Posture A (AI2's): bf16 parameters, fp32 gradient reduction, fp32 Adam moments. It saves 14 bytes per parameter
+# (451 GB at 32.2B).
+#
+# The recipe's native cross-entropy keeps the fp32 logits (32,768 tokens x 100,278 ids x 4 bytes, 12.24 GiB) on the last
+# pipeline stage and runs out of memory there. The TE one fits, and the heaviest stage becomes the first. Memory is
+# tight, so the run reports its peaks over all ranks every 20 steps and watch_32b.yaml stops it at 93 GB allocated,
+# 99 GB reserved or an allocator retry. Megatron warns of known stability issues with the TE cross-entropy, so the watch
+# also stops it on a non-finite loss or gradient norm.
 #
 # The 5e-5 learning rate is on the full-SFT exception list of CLAUDE.md (Kyle, 2026-11-03).
 tokenizer:
@@ -80,7 +86,7 @@ model:
   context_parallel_size: 1
   sequence_parallel: False
   gradient_accumulation_fusion: True
-  cross_entropy_fusion_impl: native  # the recipe's own; the 7B config sets `te`
+  cross_entropy_fusion_impl: te      # the recipe's `native` does not fit; see the header
   recompute_granularity: full
   recompute_method: uniform
   recompute_num_layers: 1
@@ -99,6 +105,7 @@ dist:
   distributed_timeout_minutes: 60
 logger:
   tensorboard_dir: null
+  peak_memory_report_interval: 20    # the [peak-memory-progress] lines that watch_32b.yaml reads during the run
   log_interval: 1
   log_throughput: true
   log_progress: true

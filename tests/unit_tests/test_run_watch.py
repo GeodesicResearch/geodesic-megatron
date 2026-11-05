@@ -30,7 +30,12 @@ from scripts.data.predict_masked_counts import write_prediction
 from scripts.telemetry import run_watch as rw
 
 from megatron.bridge.training.token_masking.hook import TokenMaskingCounts
-from megatron.bridge.training.utils.train_utils import format_peak_memory, summarise_peak_memory
+from megatron.bridge.training.utils.train_utils import (
+    PEAK_MEMORY_PROGRESS_TAG,
+    PEAK_MEMORY_TAG,
+    format_peak_memory,
+    summarise_peak_memory,
+)
 from pipeline.training import env_overrides
 from tests.unit_tests.test_loss_parity import FakeRun, history_rows, install_fake_wandb, over, write_run
 from tests.unit_tests.training_log_fixture import token_masking_banner, token_masking_counts_line
@@ -70,9 +75,16 @@ def append_line(log: Path, line: str) -> Path:
     return log
 
 
-def peak_memory_line(retries: int) -> str:
+def peak_memory_line(
+    retries: int, allocated_gb: float = 72, reserved_gb: float = 85, tag: str = PEAK_MEMORY_TAG
+) -> str:
+    """The summary of two ranks: the second holds the largest peaks, ``allocated_gb`` and ``reserved_gb``. ``tag`` is
+    the end-of-training line's unless a test asks for a progress line."""
     return format_peak_memory(
-        summarise_peak_memory([(int(70 * GB), int(80 * GB), 0), (int(72 * GB), int(85 * GB), retries)])
+        summarise_peak_memory(
+            [(int(70 * GB), int(80 * GB), 0), (int(allocated_gb * GB), int(reserved_gb * GB), retries)]
+        ),
+        tag,
     )
 
 
@@ -228,6 +240,59 @@ def test_allocator_retries_over_the_limit_stop_the_stage(tmp_path, capsys, retri
     got_status, out = run(write_watch(tmp_path, STOPS), [log], capsys)
     assert got_status == status
     assert ("STOP seg1" in out and "3 allocator retries on one rank, limit 0" in out) == (retries > 0)
+
+
+MEMORY_STOPS = {"stop": {**STOPS["stop"], "max_allocated_gb": 93, "max_reserved_gb": 99}}
+
+
+@pytest.mark.parametrize(
+    "allocated_gb, reserved_gb, stop",
+    [
+        (93, 99, None),
+        (93.4, 95, "STOP seg1.out: 93.4 GB peak allocated memory on one rank, limit 93"),
+        (90, 99.2, "STOP seg1.out: 99.2 GB peak reserved memory on one rank, limit 99"),
+    ],
+    ids=["at-the-limits", "allocated-over", "reserved-over"],
+)
+def test_peak_memory_over_a_limit_stops_the_stage(tmp_path, capsys, allocated_gb, reserved_gb, stop):
+    """A peak equal to its limit passes: the limits are the largest values the stage may reach."""
+    log = append_line(write_run(tmp_path, "seg1"), peak_memory_line(0, allocated_gb, reserved_gb))
+    status, out = run(write_watch(tmp_path, MEMORY_STOPS), [log], capsys)
+    if stop is None:
+        assert status == 0 and "STOP" not in out
+    else:
+        assert status == 1 and stop in out
+
+
+def test_a_progress_line_over_a_limit_stops_a_run_that_has_not_ended(tmp_path, capsys):
+    """The run is cut off from an end-of-training line: only the lines it logged on the way can stop it."""
+    log = write_run(tmp_path, "seg1")
+    append_line(log, peak_memory_line(0, allocated_gb=92, tag=PEAK_MEMORY_PROGRESS_TAG))
+    append_line(log, peak_memory_line(0, allocated_gb=93.4, tag=PEAK_MEMORY_PROGRESS_TAG))
+    status, out = run(write_watch(tmp_path, MEMORY_STOPS), [log], capsys)
+    assert status == 1 and "STOP seg1.out: 93.4 GB peak allocated memory on one rank, limit 93" in out
+
+
+def test_progress_lines_within_the_limits_beside_an_end_of_training_line_pass(tmp_path, capsys):
+    log = write_run(tmp_path, "seg1")
+    for gb in (80, 90):
+        append_line(log, peak_memory_line(0, allocated_gb=gb, tag=PEAK_MEMORY_PROGRESS_TAG))
+    append_line(log, peak_memory_line(0, allocated_gb=90))
+    status, out = run(write_watch(tmp_path, MEMORY_STOPS), [log], capsys)
+    assert status == 0 and "STOP" not in out
+
+
+def test_a_peak_memory_limit_left_out_of_the_spec_is_not_checked(tmp_path, capsys):
+    log = append_line(write_run(tmp_path, "seg1"), peak_memory_line(0, allocated_gb=101, reserved_gb=102))
+    status, out = run(write_watch(tmp_path, STOPS), [log], capsys)
+    assert status == 0 and "STOP" not in out
+
+
+def test_the_spec_reads_the_peak_memory_limits(tmp_path):
+    spec = rw.load_watch_spec(write_watch(tmp_path, MEMORY_STOPS))
+    assert (spec.max_allocated_gb, spec.max_reserved_gb) == (93.0, 99.0)
+    spec = rw.load_watch_spec(write_watch(tmp_path, STOPS))
+    assert (spec.max_allocated_gb, spec.max_reserved_gb) == (None, None)
 
 
 def test_a_resumed_segment_supersedes_the_iterations_it_re_logs(tmp_path, capsys):

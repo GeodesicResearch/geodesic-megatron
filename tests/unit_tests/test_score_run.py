@@ -237,6 +237,30 @@ def test_the_peak_memory_over_all_ranks_is_scored_and_reported(sr, synthetic_wor
     assert "allocated 74.751 GB (rank 13), reserved 88.120 GB" in sr.format_score(score)
 
 
+def test_progress_lines_on_the_way_do_not_stop_the_scoring_and_a_run_cut_short_has_no_peak(
+    sr, synthetic_workload, tmp_path
+):
+    """A run that sets logger.peak_memory_report_interval logs many progress lines and one end-of-training line."""
+    progress = [
+        f"[peak-memory-progress] ranks=64 max_allocated_gb={gb} max_allocated_rank=13 max_reserved_gb=88.12 "
+        "max_alloc_retries=0 total_alloc_retries=0"
+        for gb in (70.5, 74.0)
+    ]
+    end = (
+        "[peak-memory] ranks=64 max_allocated_gb=74.751 max_allocated_rank=13 max_reserved_gb=88.12 "
+        "max_alloc_retries=0 total_alloc_retries=0"
+    )
+    iterations = [iteration_line(i, 10000.0, 6.0) for i in (1, 2, 3)]
+    complete = sr.score_log(
+        write_log(tmp_path, [*iterations, *progress, end]), synthetic_workload, (1, 3), (1, 3), 64, 1.0
+    )
+    assert complete.peak_memory_across_ranks["max_allocated_gb"] == 74.751
+    cut_short = sr.score_log(
+        write_log(tmp_path, [*iterations, *progress]), synthetic_workload, (1, 3), (1, 3), 64, 1.0
+    )
+    assert cut_short.peak_memory_across_ranks is None
+
+
 def test_tokens_per_iteration_follow_the_logged_batch_not_the_config(sr, nano_workload, tmp_path):
     """A batch set by a Hydra override shows only in the log; the config's 2048 must not be used."""
     lines = [iteration_line(i, 10000.0, 6.0) for i in (1, 2, 3)]

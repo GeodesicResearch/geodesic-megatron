@@ -1,0 +1,19 @@
+# How the 32B run is guarded while it trains, by scripts/training/stage_guard.py on the tunnel or a login node, from the
+# frozen copy the run was submitted from, once the run's newest segment has logged its first iteration:
+#
+#   cd "$SNAP" && setsid nohup python3 scripts/training/stage_guard.py \
+#     --config configs/olmo3_norm_sft/guard_32b.yaml >/dev/null 2>&1 &
+#
+# Every two minutes it runs watch_32b.yaml over the run's segments. A stop cancels the running segment and its queued
+# successors. The watch runs no loss gate, so the guard never holds. Every evaluation is appended to the record.
+
+watch: configs/olmo3_norm_sft/watch_32b.yaml
+# The --job-name of the run's singleton chain.
+job_name: olmo3_32b_norm_sft
+# No segment of the run was submitted before this date.
+since: "2026-11-05"
+interval_seconds: 120
+# A command still running after ten minutes is killed and its tick counts as not evaluated.
+command_timeout_seconds: 600
+record: /projects/a5k/public/logs/metagaming_filtering/olmo_norm/megatron/guard/olmo3_32b_norm_sft.log
+final_iteration: 2836     # train.train_iters
