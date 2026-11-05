@@ -15,6 +15,7 @@
 
 Catalogue:
     is_multi_gpu: whether this process runs under torchrun.
+    without_sampling_fields: a generation config with its sampling fields at the library defaults.
     convert_single_process: export in one process (CPU-based distributed context).
     convert_multi_gpu: export from a model sharded over the torchrun world.
 """
@@ -23,8 +24,10 @@ import os
 from pathlib import Path
 
 import torch
+from transformers import GenerationConfig
 
 from pipeline.checkpoints import is_peft_checkpoint
+from pipeline.export.decoding_defaults import SAMPLING_KEYS
 from pipeline.export.peft_merge import export_merged_peft
 from pipeline.megatron_model import load_sharded, sharded_bridge
 
@@ -32,6 +35,26 @@ from pipeline.megatron_model import load_sharded, sharded_bridge
 def is_multi_gpu() -> bool:
     """Check if running under torchrun (multi-GPU mode)."""
     return os.environ.get("WORLD_SIZE") is not None
+
+
+def without_sampling_fields(generation_config: GenerationConfig) -> GenerationConfig:
+    """A copy of ``generation_config`` with each ``SAMPLING_KEYS`` field at the library default, and every other field
+    kept. ``generation_config`` is not changed.
+
+    transformers refuses to save a config that sets sampling fields while ``do_sample`` is false, as AI2's Olmo 3
+    Think-SFT snapshot does. The exporter writes those fields again by the export's mode
+    (``pipeline.export.fixups.model_config.apply_generation_defaults``), so the saved copy needs only to be valid.
+    """
+    kept = {key: value for key, value in generation_config.to_dict().items() if key not in SAMPLING_KEYS}
+    return GenerationConfig.from_dict(kept)
+
+
+def _make_snapshot_generation_config_saveable(bridge) -> None:
+    """Replace the generation config of the bridge's ``--hf-model`` snapshot by ``without_sampling_fields`` of it, when
+    the snapshot has one."""
+    generation_config = bridge.hf_pretrained.generation_config
+    if generation_config is not None:
+        bridge.hf_pretrained.generation_config = without_sampling_fields(generation_config)
 
 
 def convert_single_process(
@@ -47,6 +70,7 @@ def convert_single_process(
 
     print(f"Creating bridge from auto-config: {hf_model_id}")
     bridge = AutoBridge.from_auto_config(str(load_path), hf_model_id)
+    _make_snapshot_generation_config_saveable(bridge)
 
     print(f"Exporting: {load_path} -> {hf_path}")
     bridge.export_ckpt(
@@ -95,6 +119,7 @@ def convert_multi_gpu(
             trust_remote_code=False,
             params_dtype=torch_dtype,
         )
+        _make_snapshot_generation_config_saveable(bridge)
 
         if is_peft_checkpoint(load_path):
             print_rank_0(f"Loading PEFT checkpoint and its base: {load_path}")
