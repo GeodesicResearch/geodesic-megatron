@@ -22,7 +22,17 @@ import json
 
 
 GENERATION_CONFIG = "generation_config.json"
-SAMPLING_KEYS = ("do_sample", "temperature", "top_p", "top_k")
+SAMPLING_KEYS = (
+    "do_sample",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "top_h",
+    "typical_p",
+    "epsilon_cutoff",
+    "eta_cutoff",
+)
 REASONING_GENERATION_DEFAULTS = {"do_sample": True, "temperature": 0.6, "top_p": 0.95}
 
 

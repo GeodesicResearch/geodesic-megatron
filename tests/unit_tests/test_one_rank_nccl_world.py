@@ -57,6 +57,17 @@ def test_a_world_the_context_started_is_gone_on_exit_so_a_later_test_can_start_i
         assert torch.distributed.is_initialized()
 
 
+def test_a_world_the_context_started_is_gone_when_its_setup_raises():
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()  # an earlier test in this worker left its world up
+
+    with pytest.raises(RuntimeError, match="not divisible"):
+        with one_rank_model_parallel_state(seed=1234, tensor_model_parallel_size=2):  # the world has one rank
+            pass
+
+    assert not torch.distributed.is_initialized()
+
+
 def test_a_world_that_was_up_before_the_context_is_left_up():
     world = init_one_rank_nccl_world()
     try:

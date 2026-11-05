@@ -70,7 +70,7 @@ def convert_single_process(
 
     print(f"Creating bridge from auto-config: {hf_model_id}")
     bridge = AutoBridge.from_auto_config(str(load_path), hf_model_id)
-    _make_snapshot_generation_config_saveable(bridge)
+    # No _make_snapshot_generation_config_saveable here: this bridge holds a bare config without a generation_config.
 
     print(f"Exporting: {load_path} -> {hf_path}")
     bridge.export_ckpt(

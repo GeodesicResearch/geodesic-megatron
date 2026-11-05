@@ -1469,10 +1469,11 @@ def test_a_release_named_by_a_hub_id_is_resolved_to_its_snapshot_for_the_check(c
     assert asked == [("nvidia/arch", {"allow_patterns": list(RELEASE_FILES)})]
 
 
-@pytest.mark.parametrize("damage", ["gone", "lacks a file", "dangling link"])
+@pytest.mark.parametrize("damage", ["gone", "lacks a file", "dangling link", "not JSON"])
 def test_a_release_that_cannot_be_read_is_an_error_and_never_a_reason_to_remove_an_export(campaign, tmp_path, damage):
-    """A release that cannot be resolved, lacks a named file or holds a dangling link says nothing about the export,
-    which ``export_problem`` would take for a verdict and the pass would remove."""
+    """A release that cannot be resolved, lacks a named file, holds a dangling link or holds a generation_config.json
+    that is not JSON says nothing about the export, which ``export_problem`` would take for a verdict and the pass
+    would remove."""
     root, _, manifest_path = campaign
     release = write_release(tmp_path / "release")
     with_reference_files(manifest_path, release)
@@ -1480,8 +1481,11 @@ def test_a_release_that_cannot_be_read_is_an_error_and_never_a_reason_to_remove_
     write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
     export_the_reference_files(publication, release)
     assert publish_models.export_problem(publication) is None
-    if damage == "gone":
-        shutil.rmtree(release)
+    if damage in ("gone", "not JSON"):
+        if damage == "gone":
+            shutil.rmtree(release)
+        else:
+            (release / "generation_config.json").write_bytes(b'{"eos_token_id": [100265,')
         message = f"the release {release}, which export.reference_files are compared with, cannot be read"
     else:
         (release / "generation_config.json").unlink()

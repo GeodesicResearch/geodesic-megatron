@@ -38,10 +38,12 @@ class Trace:
         """Append ``[name, [repr(arg)...], {key: repr(value)}]``."""
         self.calls.append([name, [repr(a) for a in args], {k: repr(v) for k, v in kwargs.items()}])
 
-    def obj(self, name):
+    def obj(self, name, config_only=False):
         """A recorded object: its methods record their calls and return ``result``'s object, its ``config`` is
         recorded, its ``hf_pretrained`` snapshot holds ``snapshot_generation_config`` as its ``generation_config``,
-        assignments to it are recorded, and its repr is ``name``."""
+        assignments to it are recorded, and its repr is ``name``. A ``config_only`` object is what
+        ``AutoBridge.from_auto_config`` returns: its ``hf_pretrained`` is a bare transformers config, which has no
+        ``generation_config`` attribute, so reading one raises AttributeError."""
         trace = self
 
         class _Recorded:
@@ -58,11 +60,14 @@ class Trace:
                     object.__setattr__(self, key, value)
                     return value
                 if key == "hf_pretrained":
-                    value = trace.obj(f"{name}.hf_pretrained")
-                    object.__setattr__(value, "generation_config", trace.snapshot_generation_config)
+                    value = trace.obj(f"{name}.hf_pretrained", config_only=config_only)
+                    if not config_only:
+                        object.__setattr__(value, "generation_config", trace.snapshot_generation_config)
+                        trace.snapshots.append(value)
                     object.__setattr__(self, key, value)
-                    trace.snapshots.append(value)
                     return value
+                if key == "generation_config" and config_only:
+                    raise AttributeError(key)
 
                 def method(*args, **kwargs):
                     trace.record(f"{name}.{key}", *args, **kwargs)
@@ -74,8 +79,10 @@ class Trace:
 
     def result(self, name, method):
         """What a recorded method returns: the bridge, provider and model chunks of a load, else None."""
-        if method in ("from_hf_pretrained", "from_auto_config"):
+        if method == "from_hf_pretrained":
             return self.obj("bridge")
+        if method == "from_auto_config":
+            return self.obj("bridge", config_only=True)
         if method == "to_megatron_provider":
             return self.obj("provider")
         if method == "load_megatron_model":

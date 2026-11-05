@@ -36,6 +36,14 @@ isambard_sbatch --nodes=8 --job-name=olmo3_7b_norm_sft --dependency=singleton --
     pipeline_training_submit.sbatch configs/olmo3_norm_sft/olmo3_7b_norm_sft.yaml olmo3_7b sft --disable-ft
 ```
 
+The 32B chain runs on 64 nodes under the job name `olmo3_32b_norm_sft`, which `guard_32b.yaml` reads to find the run's
+segments. A job of another name leaves the guard with no segment to watch.
+
+```bash
+isambard_sbatch --nodes=64 --job-name=olmo3_32b_norm_sft --dependency=singleton --time=24:00:00 \
+    pipeline_training_submit.sbatch configs/olmo3_norm_sft/olmo3_32b_norm_sft.yaml olmo3_32b sft --disable-ft
+```
+
 `--disable-ft` is required: the first save of a run comes after the fault-tolerance heartbeat of two hours. Every
 segment ends itself 40 minutes before the 24-hour limit (`train.exit_duration_in_mins: 1400`).
 

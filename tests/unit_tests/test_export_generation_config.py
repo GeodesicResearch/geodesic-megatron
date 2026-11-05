@@ -8,7 +8,12 @@ import pytest
 from transformers import GenerationConfig
 
 from pipeline.export import hf
-from pipeline.export.decoding_defaults import SAMPLING_KEYS, generation_config_text, release_file_in_export
+from pipeline.export.decoding_defaults import (
+    REASONING_GENERATION_DEFAULTS,
+    SAMPLING_KEYS,
+    generation_config_text,
+    release_file_in_export,
+)
 from pipeline.export.hf import without_sampling_fields
 from tests.unit_tests import recorded_bridge
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
@@ -53,6 +58,51 @@ def test_without_sampling_fields_leaves_its_argument_unchanged():
     assert original.temperature == 0.6 and original.top_p == 0.95
 
 
+#: A value for each field of SAMPLING_KEYS, except ``do_sample``, that transformers 5.3.0 refuses to save while
+#: ``do_sample`` is not true.
+NON_DEFAULT_SAMPLING_VALUES = {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
+    "min_p": 0.05,
+    "top_h": 0.9,
+    "typical_p": 0.9,
+    "epsilon_cutoff": 0.001,
+    "eta_cutoff": 0.001,
+}
+
+
+def test_every_sampling_key_has_a_value_in_the_table_of_this_module():
+    assert set(SAMPLING_KEYS) == {"do_sample", *NON_DEFAULT_SAMPLING_VALUES}
+
+
+@pytest.mark.parametrize("field", sorted(NON_DEFAULT_SAMPLING_VALUES))
+def test_without_sampling_fields_resets_each_field_that_transformers_refuses_to_save(tmp_path, field):
+    original = GenerationConfig.from_dict({field: NON_DEFAULT_SAMPLING_VALUES[field]})
+    with pytest.raises(ValueError, match="do_sample"):
+        original.save_pretrained(tmp_path / "before")
+    without_sampling_fields(original).save_pretrained(tmp_path / "after")
+    assert (tmp_path / "after" / "generation_config.json").is_file()
+
+
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_the_modes_decoding_defaults_replace_every_sampling_key_of_a_release(reasoning):
+    """A greedy export carries no sampling field, and a reasoning export carries only its own defaults."""
+    release = {"eos_token_id": 100265, "do_sample": True, **NON_DEFAULT_SAMPLING_VALUES}
+    written = json.loads(generation_config_text(json.dumps(release), reasoning))
+    assert written == {"eos_token_id": 100265, **(REASONING_GENERATION_DEFAULTS if reasoning else {})}
+
+
+def test_without_sampling_fields_also_resets_a_config_that_samples(tmp_path):
+    """The exporter sets the decoding defaults of the export's mode after the save, so none of the config's own
+    sampling fields reach the export."""
+    original = GenerationConfig.from_dict({"do_sample": True, "temperature": 0.7, "min_p": 0.05})
+    kept = without_sampling_fields(original)
+    default = GenerationConfig()
+    assert (kept.do_sample, kept.temperature, kept.min_p) == (default.do_sample, default.temperature, default.min_p)
+    kept.save_pretrained(tmp_path)
+
+
 def test_only_the_generation_config_of_a_release_takes_the_modes_decoding_defaults():
     release = json.dumps(THINK_SFT_GENERATION_CONFIG, indent=4).encode()
     for reasoning in (False, True):
@@ -89,26 +139,30 @@ def _export_single_process(monkeypatch, tmp_path):
     )
 
 
-EXPORTS = pytest.mark.parametrize(
-    "export", [_export_multi_gpu, _export_single_process], ids=["multi_gpu", "single_process"]
-)
-
-
-@EXPORTS
-def test_an_export_saves_a_snapshot_generation_config_that_transformers_accepts(monkeypatch, tmp_path, export):
+def test_a_multi_gpu_export_saves_a_snapshot_generation_config_that_transformers_accepts(monkeypatch, tmp_path):
     trace = recorded_bridge.install(
         monkeypatch, snapshot_generation_config=GenerationConfig.from_dict(THINK_SFT_GENERATION_CONFIG)
     )
-    export(monkeypatch, tmp_path)
+    _export_multi_gpu(monkeypatch, tmp_path)
     (snapshot,) = trace.snapshots
     snapshot.generation_config.save_pretrained(tmp_path / "saved")
     assert (tmp_path / "saved" / "generation_config.json").is_file()
 
 
-@EXPORTS
-def test_an_export_of_a_snapshot_without_a_generation_config_leaves_it_without_one(monkeypatch, tmp_path, export):
+def test_a_multi_gpu_export_of_a_snapshot_without_a_generation_config_leaves_it_without_one(monkeypatch, tmp_path):
     trace = recorded_bridge.install(monkeypatch)
-    export(monkeypatch, tmp_path)
+    _export_multi_gpu(monkeypatch, tmp_path)
     (snapshot,) = trace.snapshots
     assert snapshot.generation_config is None
+    assert not [call for call in trace.calls if "generation_config" in call[0]]
+
+
+def test_a_single_process_export_has_no_snapshot_generation_config_to_make_saveable(monkeypatch, tmp_path):
+    """``AutoBridge.from_auto_config`` builds the bridge from a synthesized transformers config, which has no
+    ``generation_config`` attribute, so the export has no snapshot to change (transformers 5.3.0 raises
+    AttributeError on ``Olmo3Config().generation_config``)."""
+    trace = recorded_bridge.install(monkeypatch)
+    _export_single_process(monkeypatch, tmp_path)
+    assert not trace.snapshots
+    assert [call[0] for call in trace.calls if call[0] == "bridge.export_ckpt"] == ["bridge.export_ckpt"]
     assert not [call for call in trace.calls if "generation_config" in call[0]]

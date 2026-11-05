@@ -1187,8 +1187,8 @@ def check_eos_in_config_json(hf_dir: Path, end_of_turn_id: int) -> None:
 
 class ReleaseUnreadable(RuntimeError):
     """The release that an export's reference files are compared with cannot be read: it does not resolve, lacks a
-    named file or holds it as a dangling link. That says nothing about the export, so it is not an ExportError, which
-    ``export_problem`` takes for a verdict and a pass answers by removing the export and exporting again."""
+    named file, holds it as a dangling link or holds a generation_config.json that is not JSON. That says nothing about
+    the export, so it is not an ExportError, which ``export_problem`` reports and a pass answers by re-exporting."""
 
 
 def check_reference_files(hf_dir: Path, hf_model: str, names: tuple[str, ...], reasoning: bool) -> None:
@@ -1198,11 +1198,15 @@ def check_reference_files(hf_dir: Path, hf_model: str, names: tuple[str, ...], r
     resolved by the exporter's own ``resolve_release_dir``.
 
     Raises:
-        ReleaseUnreadable: the release does not resolve, or lacks a named file, or holds it as a dangling link.
+        ReleaseUnreadable: the release cannot be read.
     """
     try:
         release_dir = resolve_release_dir(hf_model, names)
         sources = {name: release_file(release_dir, name) for name in names}
+        expected = {
+            name: hashlib.sha256(release_file_in_export(name, source.read_bytes(), reasoning)).hexdigest()
+            for name, source in sources.items()
+        }
     except (OSError, ValueError) as error:
         raise ReleaseUnreadable(
             f"the release {hf_model}, which export.reference_files are compared with, cannot be read: {error}"
@@ -1216,7 +1220,7 @@ def check_reference_files(hf_dir: Path, hf_model: str, names: tuple[str, ...], r
                 f"{path}: unreadable export: FileNotFoundError; the manifest's export.reference_files names {name}, "
                 "so the export was made without --reference-files or before the manifest named it"
             ) from error
-        if exported != hashlib.sha256(release_file_in_export(name, source.read_bytes(), reasoning)).hexdigest():
+        if exported != expected[name]:
             raise ExportError(
                 f"{path}: differs from {source} as the exporter's --reference-files step writes it; the manifest's "
                 f"export.reference_files names {name}, so the export was made without that step or before the "
