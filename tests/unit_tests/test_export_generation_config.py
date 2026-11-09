@@ -17,19 +17,7 @@ from pipeline.export.decoding_defaults import (
 from pipeline.export.hf import without_sampling_fields
 from tests.unit_tests import recorded_bridge
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
-from tests.unit_tests.hf_export_fixtures import NANO
-
-
-#: allenai/Olmo-3-7B-Think-SFT's generation_config.json: it sets temperature and top_p and not do_sample.
-THINK_SFT_GENERATION_CONFIG = {
-    "_from_model_config": True,
-    "eos_token_id": [100265, 100257],
-    "pad_token": 100277,
-    "transformers_version": "4.53.1",
-    "temperature": 0.6,
-    "top_p": 0.95,
-    "max_new_tokens": 32768,
-}
+from tests.unit_tests.hf_export_fixtures import NANO, THINK_SFT_GENERATION_CONFIG
 
 
 def test_transformers_refuses_to_save_a_config_that_sets_sampling_fields_without_do_sample(tmp_path):
@@ -109,7 +97,13 @@ def test_only_the_generation_config_of_a_release_takes_the_modes_decoding_defaul
         expected = generation_config_text(release.decode(), reasoning).encode()
         assert release_file_in_export("generation_config.json", release, reasoning) == expected
         assert release_file_in_export("tokenizer.json", release, reasoning) == release, "only this file has a mode"
-    assert release_file_in_export("generation_config.json", release, None) == release, "no mode, no change"
+
+
+@pytest.mark.parametrize("release_bytes", [b'{"eos_token_id": [100265,', b"\xff\xfe"], ids=["not JSON", "not UTF-8"])
+def test_a_release_generation_config_that_is_not_json_text_is_a_value_error(release_bytes):
+    with pytest.raises(ValueError):
+        release_file_in_export("generation_config.json", release_bytes, reasoning=False)
+    assert release_file_in_export("tokenizer.json", release_bytes, reasoning=False) == release_bytes
 
 
 # The bridge is the recording stand-in of tests/unit_tests/recorded_bridge.py: building and loading a sharded Megatron

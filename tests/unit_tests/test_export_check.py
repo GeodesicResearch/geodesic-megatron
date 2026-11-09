@@ -829,11 +829,10 @@ def test_a_file_the_reference_lacks_is_not_evaluated(judged):
     assert files["files"]["generation_config.json"]["reason"] == "the reference has no generation_config.json"
 
 
-@pytest.mark.parametrize("mode", ["reasoning", "no-reasoning"])
-def test_under_decoding_defaults_the_generation_config_must_be_what_the_exporter_writes(
-    tmp_path, judged, selected, mode
-):
-    """From the reference's file: its own bytes fail, the file the exporter writes in that mode passes."""
+@pytest.mark.parametrize("mode", ["reasoning", "no-reasoning", None])
+def test_the_generation_config_must_be_what_the_specs_decoding_defaults_expect(tmp_path, judged, selected, mode):
+    """From the reference's file. Under a mode, its own bytes fail and the file the exporter writes in that mode
+    passes. With no mode, its own bytes pass and a file with the exporter's decoding defaults fails."""
     _, export, checkpoint, out_dir = judged
     content = copy.deepcopy(selected[1])
     content["structure"]["decoding_defaults"] = mode
@@ -842,9 +841,10 @@ def test_under_decoding_defaults_the_generation_config_must_be_what_the_exporter
     for directory in (spec.reference_export, export):
         (directory / GENERATION_CONFIG).write_text(upstream)
     write_judged_inputs(out_dir, spec, export, checkpoint)
-    assert export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]["outcome"] == FAIL
+    as_the_reference, as_the_exporter = (PASS, FAIL) if mode is None else (FAIL, PASS)
+    assert export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]["outcome"] == as_the_reference
     (export / GENERATION_CONFIG).write_text(generation_config_text(upstream, reasoning=mode == "reasoning"))
-    assert export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]["outcome"] == PASS
+    assert export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]["outcome"] == as_the_exporter
 
 
 def test_scores_taken_for_another_measurement_export_or_checkpoint_are_refused(tmp_path, judged, selected):

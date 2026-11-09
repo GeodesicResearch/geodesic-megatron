@@ -1469,11 +1469,23 @@ def test_a_release_named_by_a_hub_id_is_resolved_to_its_snapshot_for_the_check(c
     assert asked == [("nvidia/arch", {"allow_patterns": list(RELEASE_FILES)})]
 
 
-@pytest.mark.parametrize("damage", ["gone", "lacks a file", "dangling link", "not JSON"])
-def test_a_release_that_cannot_be_read_is_an_error_and_never_a_reason_to_remove_an_export(campaign, tmp_path, damage):
-    """A release that cannot be resolved, lacks a named file, holds a dangling link or holds a generation_config.json
-    that is not JSON says nothing about the export, which ``export_problem`` would take for a verdict and the pass
-    would remove."""
+UNREADABLE = "the release {release}, which export.reference_files are compared with, cannot be read"
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        ("gone", UNREADABLE),
+        ("not JSON", UNREADABLE),
+        ("lacks a file", "release has no generation_config.json"),
+        ("dangling link", "generation_config.json is a dangling link"),
+    ],
+)
+def test_a_release_that_cannot_be_read_is_an_error_and_never_a_reason_to_remove_an_export(
+    campaign, tmp_path, damage, message
+):
+    """A release that cannot be read (each ``damage``) says nothing about the export, which ``export_problem`` would
+    take for a verdict and the pass would remove."""
     root, _, manifest_path = campaign
     release = write_release(tmp_path / "release")
     with_reference_files(manifest_path, release)
@@ -1481,23 +1493,18 @@ def test_a_release_that_cannot_be_read_is_an_error_and_never_a_reason_to_remove_
     write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
     export_the_reference_files(publication, release)
     assert publish_models.export_problem(publication) is None
-    if damage in ("gone", "not JSON"):
-        if damage == "gone":
-            shutil.rmtree(release)
-        else:
-            (release / "generation_config.json").write_bytes(b'{"eos_token_id": [100265,')
-        message = f"the release {release}, which export.reference_files are compared with, cannot be read"
+    generation_config = release / "generation_config.json"
+    if damage == "gone":
+        shutil.rmtree(release)
+    elif damage == "not JSON":
+        generation_config.write_bytes(b'{"eos_token_id": [100265,')
+    elif damage == "lacks a file":
+        generation_config.unlink()
     else:
-        (release / "generation_config.json").unlink()
-        if damage == "dangling link":
-            (release / "generation_config.json").symlink_to(tmp_path / "blobs" / "gone")
-        message = (
-            "generation_config.json is a dangling link"
-            if damage == "dangling link"
-            else "release has no generation_config.json"
-        )
+        generation_config.unlink()
+        generation_config.symlink_to(tmp_path / "blobs" / "gone")
     for check in (publish_models.export_problem, publish_models.verify_publication_export):
-        with pytest.raises(publish_models.ReleaseUnreadable, match=re.escape(message)):
+        with pytest.raises(publish_models.ReleaseUnreadable, match=re.escape(message.format(release=release))):
             check(publication)
     assert publication.hf_dir.is_dir(), "the export is left in place"
 

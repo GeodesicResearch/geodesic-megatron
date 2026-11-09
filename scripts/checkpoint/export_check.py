@@ -1015,8 +1015,10 @@ def content_digests(data: bytes) -> dict[str, str]:
 def expected_file(reference: Path, name: str, decoding_defaults: str | None) -> bytes:
     """What the export's file ``name`` must hold: the reference's bytes, or, for ``generation_config.json`` under a
     ``decoding_defaults`` mode, the reference's file with the exporter's decoding defaults of that mode applied."""
-    reasoning = None if decoding_defaults is None else DECODING_DEFAULTS[decoding_defaults]
-    return release_file_in_export(name, (reference / name).read_bytes(), reasoning)
+    reference_bytes = (reference / name).read_bytes()
+    if decoding_defaults is None:
+        return reference_bytes
+    return release_file_in_export(name, reference_bytes, DECODING_DEFAULTS[decoding_defaults])
 
 
 def check_files(

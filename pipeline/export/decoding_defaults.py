@@ -49,10 +49,10 @@ def generation_config_text(original: str, reasoning: bool) -> str:
     return json.dumps(config, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
 
 
-def release_file_in_export(name: str, release_bytes: bytes, reasoning: bool | None) -> bytes:
-    """The bytes an export holds of the release's file ``name`` whose bytes are ``release_bytes``: the release's own,
-    except ``generation_config.json`` under an export mode (``reasoning`` is not None), which is the release's file
-    with that mode's decoding defaults (``generation_config_text``)."""
-    if name != GENERATION_CONFIG or reasoning is None:
+def release_file_in_export(name: str, release_bytes: bytes, reasoning: bool) -> bytes:
+    """The bytes an export of the given mode holds of the release's file ``name`` whose bytes are ``release_bytes``:
+    the release's own, except ``generation_config.json``, which is the release's file with the mode's decoding
+    defaults (``generation_config_text``). Raises ``ValueError`` when that file is not UTF-8 JSON."""
+    if name != GENERATION_CONFIG:
         return release_bytes
     return generation_config_text(release_bytes.decode(), reasoning).encode()

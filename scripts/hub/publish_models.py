@@ -68,7 +68,6 @@ exported. A failure is logged per publication and the pass carries on with the r
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib
 import json
 import logging
@@ -103,7 +102,6 @@ ManifestError = sync_bucket.ManifestError
 # pipeline.checkpoints'.
 from scripts.checkpoint import export_check_result  # noqa: E402
 from scripts.checkpoint.safetensors_index import INDEX_FILE, checked_weight_map  # noqa: E402
-from scripts.data.file_digest import file_sha256  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 
 from pipeline.export.decoding_defaults import release_file_in_export  # noqa: E402
@@ -1193,34 +1191,33 @@ class ReleaseUnreadable(RuntimeError):
 
 def check_reference_files(hf_dir: Path, hf_model: str, names: tuple[str, ...], reasoning: bool) -> None:
     """Raise ExportError unless each of ``names`` in the export is the --hf-model release's file byte for byte
-    (``generation_config.json``: with the decoding defaults of ``reasoning``, the export's mode), judged by SHA-256
-    (the exporter's ``--reference-files`` puts it there). ``hf_model`` is a local release directory or a Hub id,
-    resolved by the exporter's own ``resolve_release_dir``.
+    (``generation_config.json``: with the decoding defaults of ``reasoning``, the export's mode), as the exporter's
+    ``--reference-files`` puts it there. ``hf_model`` is a local release directory or a Hub id, resolved by the
+    exporter's own ``resolve_release_dir``.
 
     Raises:
         ReleaseUnreadable: the release cannot be read.
     """
+    expected = {}
     try:
         release_dir = resolve_release_dir(hf_model, names)
-        sources = {name: release_file(release_dir, name) for name in names}
-        expected = {
-            name: hashlib.sha256(release_file_in_export(name, source.read_bytes(), reasoning)).hexdigest()
-            for name, source in sources.items()
-        }
+        for name in names:
+            source = release_file(release_dir, name)
+            expected[name] = (source, release_file_in_export(name, source.read_bytes(), reasoning))
     except (OSError, ValueError) as error:
         raise ReleaseUnreadable(
             f"the release {hf_model}, which export.reference_files are compared with, cannot be read: {error}"
         ) from error
-    for name, source in sources.items():
+    for name, (source, expected_bytes) in expected.items():
         path = hf_dir / name
         try:
-            exported = file_sha256(path)
+            exported = path.read_bytes()
         except FileNotFoundError as error:
             raise ExportError(
                 f"{path}: unreadable export: FileNotFoundError; the manifest's export.reference_files names {name}, "
                 "so the export was made without --reference-files or before the manifest named it"
             ) from error
-        if exported != expected[name]:
+        if exported != expected_bytes:
             raise ExportError(
                 f"{path}: differs from {source} as the exporter's --reference-files step writes it; the manifest's "
                 f"export.reference_files names {name}, so the export was made without that step or before the "
