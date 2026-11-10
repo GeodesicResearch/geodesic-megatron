@@ -96,6 +96,28 @@ class ConfigWithOptionalProfilingConfig:
     profiling: Optional[ProfilingConfig] = None
 
 
+class Backend(Enum):
+    """An enum field's type, as Megatron's AttnBackend is."""
+
+    first = 1
+    second = 2
+
+
+class Precision(str, Enum):
+    """A string-valued enum, whose members a config may name by value."""
+
+    HALF = "bf16"
+    FULL = "fp32"
+
+
+@dataclasses.dataclass
+class ConfigWithEnum:
+    """Config with enum fields, as TransformerConfig has attention_backend."""
+
+    backend: Backend = Backend.first
+    precision: Precision = Precision.FULL
+
+
 @dataclasses.dataclass
 class StrictConfigWithRemovedKey:
     """A config that rejects unknown override keys and names one removed key."""
@@ -530,6 +552,22 @@ class TestApplyOverrides:
 
         assert config.dtype == torch.float16
 
+    def test_an_enum_field_takes_the_member_its_override_names(self):
+        """A string given to an enum field becomes the member it names, by name or by value."""
+        config = ConfigWithEnum()
+
+        _apply_overrides(config, {"backend": "second", "precision": "bf16"})
+
+        assert config.backend is Backend.second
+        assert config.precision is Precision.HALF
+
+    def test_an_enum_field_refuses_a_string_that_names_no_member(self):
+        config = ConfigWithEnum()
+
+        with pytest.raises(ValueError, match="ConfigWithEnum.backend: 'third' names no member of Backend"):
+            _apply_overrides(config, {"backend": "third"})
+        assert config.backend is Backend.first
+
     def test_invalid_key_handling(self):
         """Test handling of invalid override keys."""
         config = SimpleConfig()
@@ -743,6 +781,18 @@ class TestProcessConfigWithOverrides:
         assert result.simple.name == "cli_updated"
         assert result.simple.value == 999
         assert result.with_callable.activation_func == original_func
+
+    def test_a_yaml_and_a_cli_override_set_enum_fields_to_members(self, tmp_path):
+        """A YAML file and a CLI override set enum fields to members."""
+        config_file = tmp_path / "test_config.yaml"
+        config_file.write_text("backend: second\n")
+
+        result = process_config_with_overrides(
+            ConfigWithEnum(), config_filepath=str(config_file), cli_overrides=["precision=bf16"]
+        )
+
+        assert result.backend is Backend.second
+        assert result.precision is Precision.HALF
 
     def test_with_config_filepath(self, tmp_path):
         """Test processing config with YAML config file."""
