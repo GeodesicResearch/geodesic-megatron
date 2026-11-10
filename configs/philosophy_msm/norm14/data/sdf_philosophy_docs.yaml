@@ -1,0 +1,17 @@
+# pipeline_data_prepare.py config — philosophy-MSM SDF corpus, tokenized for
+# Normal Norm V1.4 (control-pretraining-30b-baseline-xl50b-v4-think).
+#
+# The 120B SDF corpus (40,116 docs) under the 30B's tokenizer. skip-pack: SDF
+# trains from native .bin/.idx, so this step only writes training.jsonl; the
+# dead-id filter and .bin/.idx build follow per the README (Stage 1).
+#
+# Run: python pipeline_data_prepare.py --config configs/philosophy_msm/norm14/data/sdf_philosophy_docs.yaml
+dataset: geodesic-research/geodesic-msm
+subset: philosophy-large-docs
+revision: e1bc5e61d04a778427b39612231b0674f10e84d9
+split: train
+text-column: content
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+output-base: /projects/a5k/public/data_nlie2.a5k/norm14_msm
+skip-pack: true
+val-proportion: 0.0
