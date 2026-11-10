@@ -123,8 +123,8 @@ def _common(data_files, out) -> list[str]:
 def _canonical_pack(path) -> dict:
     """A packed parquet's documents, sorted, each with its loss mask.
 
-    The packer shuffles with numpy's global RNG, which nothing seeds, so the order of documents in a row differs
-    between runs. With every document in one row (asserted) the sorted documents are the whole content.
+    The order of documents in a row is the packer's seeded shuffle, which the golden does not pin. With every document
+    in one row (asserted) the sorted documents are the whole content.
     """
     import pyarrow.parquet as pq
 

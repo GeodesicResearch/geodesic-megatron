@@ -49,7 +49,7 @@ def write_packed_shard(
         str(pad_seq_to_mult),
         "--no-validation",
         seq_length=seq_length,
-        shuffle_seed=seed,
+        seed=seed,
     )
     return packed_path(root, tokenizer_dir, seq_length, pad_seq_to_mult)
 

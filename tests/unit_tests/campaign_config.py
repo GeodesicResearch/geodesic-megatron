@@ -39,6 +39,7 @@ from scripts.training.config_compose import load_composed_yaml
 from scripts.training.launch_blocks import pop_launch_blocks
 
 from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
+from pipeline.data import layout
 from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_module
 
 
@@ -362,7 +363,7 @@ def blend_subsets(data_path) -> list[str]:
 
 def slice_subset(subset: str, index: int) -> str:
     """The subset slice ``index`` of a sliced corpus is published as when each slice is a config of its own."""
-    return f"{subset}_{corpora_table.shard_name(index)}"
+    return f"{subset}_{layout.shard_name(index)}"
 
 
 def blend_corpora(data_path) -> list[str]:

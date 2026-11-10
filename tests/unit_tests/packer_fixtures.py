@@ -15,7 +15,6 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
-import numpy as np
 import pyarrow.parquet as pq
 import pytest
 from scripts.data import pack_sft_dataset
@@ -66,14 +65,22 @@ def write_exclusions(path: Path, entries: Sequence[tuple[int, int]]) -> Path:
     return write_lines(path, [json.dumps({"shard": shard, "line": line}) for shard, line in entries])
 
 
-def run_packer(tokenizer_dir: Path, root: Path, *flags: str, seq_length: int, shuffle_seed: int = 0) -> None:
-    """Run the script's ``main`` on the dataset root ``root`` with the other packer ``flags`` as given.
-
-    The packer shuffles with numpy's global generator and its ``--seed`` does not reach it (only the packed training
-    dataset seeds that generator), so the generator is seeded here: the same arguments then give the same pack."""
-    np.random.seed(shuffle_seed)
+def run_packer(tokenizer_dir: Path, root: Path, *flags: str, seq_length: int, seed: int = 1234) -> None:
+    """Run the script's ``main`` on the dataset root ``root`` with ``--seed seed`` (the packer's own default unless
+    given) and the other packer ``flags`` as given. The packer's seed orders its shuffle, so the same arguments give
+    the same pack."""
     pack_sft_dataset.main(
-        ["--dataset-root", str(root), "--tokenizer", str(tokenizer_dir), "--seq-length", str(seq_length), *flags]
+        [
+            "--dataset-root",
+            str(root),
+            "--tokenizer",
+            str(tokenizer_dir),
+            "--seq-length",
+            str(seq_length),
+            "--seed",
+            str(seed),
+            *flags,
+        ]
     )
 
 

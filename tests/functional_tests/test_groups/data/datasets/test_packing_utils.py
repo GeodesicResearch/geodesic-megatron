@@ -48,7 +48,7 @@ class TestDataPackingUtils:
         seqlens = [1111, 8192, 4096, 1000]
         pack_size = 4096
 
-        first_fit = first_fit_shuffle(seqlens, pack_size)
+        first_fit = first_fit_shuffle(seqlens, pack_size, np.random.default_rng(0))
 
         assert type(first_fit) == list
 
@@ -65,7 +65,9 @@ class TestDataPackingUtils:
         hist = [1, 77]
         pack_size = 1
 
-        assignments, packing_metadata = create_packing_strategy(hist, pack_size)
+        assignments, packing_metadata = create_packing_strategy(
+            hist, pack_size, "first_fit_decreasing", np.random.default_rng(0)
+        )
 
         # Verify it has the basic required fields (updated for NeMo2 parity)
         assert packing_metadata["dataset_max_seqlen"] == 1
@@ -82,7 +84,7 @@ class TestDataPackingUtils:
         }
 
         try:
-            fill_packing_strategy(assignments, sequences, 1, 1000)
+            fill_packing_strategy(assignments, sequences, 1, 1000, np.random.default_rng(0))
         except AssertionError as e:
             assert e.args[0] == "Error: There are items left over from the assignment"
 
@@ -110,9 +112,8 @@ class TestDataPackingUtils:
         pack_size = 5
         pad_id = 0
 
-        # Set seed for deterministic results due to randomization in function
-        np.random.seed(42)
-        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id)
+        # Seed 3 permutes two sequences of one length as [1, 0], the order the expectations below assume.
+        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id, np.random.default_rng(3))
 
         # Should have 2 packed sequences
         assert len(output_data) == 2
@@ -161,7 +162,7 @@ class TestDataPackingUtils:
         pack_size = 3
         pad_id = 999
 
-        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id)
+        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id, np.random.default_rng(0))
 
         assert len(output_data) == 2
 
@@ -202,9 +203,7 @@ class TestDataPackingUtils:
         pack_size = 3
         pad_id = 999
 
-        # Set seed for deterministic results
-        np.random.seed(42)
-        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id)
+        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id, np.random.default_rng(0))
 
         # Loss mask: for idx >= (answer_start_idx - 1) = 0
         # Note: We don't exclude pad_id tokens to match unpacked dataset behavior
@@ -230,7 +229,7 @@ class TestDataPackingUtils:
         pad_id = 0
 
         with pytest.raises(ValueError, match="Key errors loss_mask and answer_start_idx missing"):
-            fill_packing_strategy(assignments, sequences, pack_size, pad_id)
+            fill_packing_strategy(assignments, sequences, pack_size, pad_id, np.random.default_rng(0))
 
     def test_fill_packing_strategy_single_sequence(self):
         """Test with a single sequence in a single pack."""
@@ -249,7 +248,7 @@ class TestDataPackingUtils:
         pack_size = 4
         pad_id = 0
 
-        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id)
+        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id, np.random.default_rng(0))
 
         assert len(output_data) == 1
         pack = output_data[0]
@@ -276,7 +275,7 @@ class TestDataPackingUtils:
         pad_id = 0
 
         # This should work fine - empty sequences are handled gracefully
-        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id)
+        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id, np.random.default_rng(0))
 
         # Should have 1 pack since we only have assignments for length 1
         assert len(output_data) == 1
@@ -310,7 +309,8 @@ class TestDataPackingUtils:
         pack_size = 7
         pad_id = 0
 
-        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id)
+        # Seed 3 permutes two sequences of one length as [1, 0], the order the expectations below assume.
+        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id, np.random.default_rng(3))
 
         assert len(output_data) == 1
         pack = output_data[0]
@@ -352,9 +352,9 @@ class TestDataPackingUtils:
         pack_size = 6
         pad_id = 0
 
-        # Set seed for reproducibility
-        np.random.seed(42)
-        output_data_1 = fill_packing_strategy(assignments, sequences.copy(), pack_size, pad_id)
+        output_data_1 = fill_packing_strategy(
+            assignments, sequences.copy(), pack_size, pad_id, np.random.default_rng(42)
+        )
 
         # Reset sequences since they get consumed
         sequences = {
@@ -371,8 +371,9 @@ class TestDataPackingUtils:
         }
 
         # Same seed should give same result
-        np.random.seed(42)
-        output_data_2 = fill_packing_strategy(assignments, sequences.copy(), pack_size, pad_id)
+        output_data_2 = fill_packing_strategy(
+            assignments, sequences.copy(), pack_size, pad_id, np.random.default_rng(42)
+        )
 
         assert output_data_1[0]["input_ids"] == output_data_2[0]["input_ids"]
         assert output_data_1[0]["loss_mask"] == output_data_2[0]["loss_mask"]
@@ -387,7 +388,9 @@ class TestPackingMetadata:
         histogram = [0, 5, 10, 8, 3]  # Sequences of length 1,2,3,4
         pack_size = 10
 
-        assignments, metadata = create_packing_strategy(histogram, pack_size, "first_fit_shuffle")
+        assignments, metadata = create_packing_strategy(
+            histogram, pack_size, "first_fit_shuffle", np.random.default_rng(0)
+        )
 
         # Verify all required fields are present
         assert "dataset_max_seqlen" in metadata
@@ -416,7 +419,9 @@ class TestPackingMetadata:
         histogram = [0, 2, 3, 2]  # Sequences of length 1,2,3
         pack_size = 5
 
-        assignments, metadata = create_packing_strategy(histogram, pack_size, "first_fit_decreasing")
+        assignments, metadata = create_packing_strategy(
+            histogram, pack_size, "first_fit_decreasing", np.random.default_rng(0)
+        )
 
         # Calculate expected min
         packed_lens = [sum(assignment) for assignment in assignments]
@@ -429,7 +434,9 @@ class TestPackingMetadata:
         histogram = [0, 0, 4, 0, 0]  # 4 sequences of length 2
         pack_size = 4
 
-        assignments, metadata = create_packing_strategy(histogram, pack_size, "first_fit_decreasing")
+        assignments, metadata = create_packing_strategy(
+            histogram, pack_size, "first_fit_decreasing", np.random.default_rng(0)
+        )
 
         # With 4 sequences of length 2, packing into size 4 bins:
         # Should create 2 bins with 2 sequences each
@@ -444,7 +451,9 @@ class TestPackingMetadata:
         histogram = [0, 0, 3, 0, 0]  # 3 sequences of length 2
         pack_size = 4
 
-        assignments, metadata = create_packing_strategy(histogram, pack_size, "first_fit_decreasing")
+        assignments, metadata = create_packing_strategy(
+            histogram, pack_size, "first_fit_decreasing", np.random.default_rng(0)
+        )
 
         # Efficiency = sum of packed lens / (num packs * pack_size) * 100
         packed_lens = [sum(assignment) for assignment in assignments]

@@ -18,6 +18,7 @@ outside the container.
 
 Catalogue:
     slugify_dataset_name: the directory name of a dataset (and subset) under the output base.
+    shard_name: the subdirectory of a dataset root that holds one of its shards.
     pack_dir: the directory a dataset root's packs for one tokenizer and padding multiple live in.
     packed_parquet_path: the packed parquet of one split and sequence length.
 """
@@ -35,6 +36,14 @@ def slugify_dataset_name(dataset, subset=None):
     if subset:
         slug = f"{slug}__{subset}"
     return slug
+
+
+def shard_name(index: int) -> str:
+    """``shard<index>``: the subdirectory of a dataset root that holds shard ``index`` and its ``training.jsonl``.
+
+    configs/control_pretraining/shard_jsonl_corpus.sh creates and stripes these directories by the same name in bash.
+    """
+    return f"shard{index}"
 
 
 def pack_dir(dataset_root, tokenizer: str, pad_seq_to_mult: int) -> Path:

@@ -322,8 +322,7 @@ pinned tokenizer, `corpora_table.py`), and [`hub_parquet.py`](hub_parquet.py) ho
 parquet files and the Hub reads the corpus tools share.
 
 The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
-fixes three things the hand-run version below got wrong: `--suffix-length` is derived from the
-shard count rather than hardcoded to 1 (which silently caps the split at ten shards), the byte
+fixes two things the hand-run version below got wrong: the byte
 gate *blocks* the tokenizes instead of merely running before them, and the dataset root is
 striped before `prepare` writes `training.jsonl` — a `mv` inside Lustre is a rename and never
 restripes, which is why V1's source ended up stripe-1 while its shard dirs were stripe-8.

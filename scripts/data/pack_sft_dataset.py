@@ -46,7 +46,6 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
 import logging
 import sys
@@ -54,6 +53,8 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.data.integer_entries import read_integer_entries  # noqa: E402
+
 from pipeline.data import layout  # noqa: E402
 from pipeline.data.tokenizer_check import require_pre_tokenizer_of_file  # noqa: E402
 
@@ -95,42 +96,50 @@ def check_existing_pack(pack_path: Path, settings: dict, default_kwargs: dict) -
         )
 
 
+def default_dataset_kwargs(chat: bool) -> dict:
+    """The ``create_sft_dataset`` keyword arguments the packer starts from, before ``--dataset-kwargs`` is merged over
+    them: chat rows rendered by the tokenizer's chat template with loss on the answers, or (``chat`` false)
+    pretraining rows with loss on every token."""
+    if chat:
+        return {
+            "chat": True,
+            "use_hf_tokenizer_chat_template": True,
+            "answer_only_loss": True,
+            "pad_to_max_length": False,
+        }
+    return {"chat": False, "answer_only_loss": False, "pad_to_max_length": False}
+
+
+def build_packing_tokenizer(name: str):
+    """The tokenizer the packer tokenizes with: Megatron-Bridge's Hugging Face tokenizer of ``name``, a directory or
+    a Hugging Face id. Raises when a directory's tokenizer does not use the pre-tokenizer its own tokenizer.json states
+    (``require_pre_tokenizer_of_file``)."""
+    from megatron.bridge.training.tokenizers.config import TokenizerConfig
+    from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+
+    tokenizer = build_tokenizer(TokenizerConfig(tokenizer_type="HuggingFaceTokenizer", tokenizer_model=name))
+    if Path(name).is_dir():
+        # Bridge's tokenizer wraps Megatron's HuggingFaceTokenizer, which holds the Hugging Face tokenizer as .tokenizer.
+        require_pre_tokenizer_of_file(tokenizer._tokenizer.tokenizer, name)
+    return tokenizer
+
+
 def read_excluded_rows(path: Path, shard_index: int) -> tuple[list[int], str]:
     """The lines of shard ``shard_index``'s training.jsonl to leave out of its pack, and the sha256 of ``path``.
 
     ``path`` is JSON Lines, an entry per line, ``{"shard": <int>, "line": <int>}``, where ``line`` is a 0-based line
     number in that shard's training.jsonl. Every entry is checked, those of other shards too, because one file serves
-    the pack of every shard. The file is read once, so the digest is of the bytes the entries come from.
+    the pack of every shard.
 
     Returns:
         The lines of the entries whose shard is ``shard_index``, ascending, and the file's sha256 hex digest.
 
     Raises:
-        ValueError: a line that is not such an entry, a negative line number or an entry repeated, naming the entry
-            and its line in ``path``. (A line beyond the shard's last is found when the rows are tokenized.)
+        ValueError: a line that is not such an entry, a negative number or an entry repeated, naming the entry and its
+            line in ``path``. (A line beyond the shard's last is found when the rows are tokenized.)
     """
-    raw = path.read_bytes()
-    first_seen: dict[tuple[int, int], int] = {}
-    for number, text in enumerate(raw.decode("utf-8").splitlines(), start=1):
-        where = f"{path}:{number}: "
-        try:
-            entry = json.loads(text)
-        except json.JSONDecodeError as error:
-            raise ValueError(f"{where}not JSON ({error}): {text!r}") from error
-        # type(...) is int, not isinstance: a JSON true is a Python bool, which is an int.
-        if not (
-            isinstance(entry, dict)
-            and entry.keys() == {"shard", "line"}
-            and all(type(v) is int for v in entry.values())
-        ):
-            raise ValueError(f'{where}expected {{"shard": <int>, "line": <int>}}, got {text!r}')
-        if entry["line"] < 0:
-            raise ValueError(f"{where}negative line number: {text!r}")
-        key = (entry["shard"], entry["line"])
-        if key in first_seen:
-            raise ValueError(f"{where}duplicate of line {first_seen[key]}: {text!r}")
-        first_seen[key] = number
-    return sorted(line for shard, line in first_seen if shard == shard_index), hashlib.sha256(raw).hexdigest()
+    entries, digest = read_integer_entries(path, ("shard", "line"), ValueError)
+    return sorted(line for shard, line in entries if shard == shard_index), digest
 
 
 def main(argv: list[str] | None = None):
@@ -146,7 +155,9 @@ def main(argv: list[str] | None = None):
     parser.add_argument(
         "--pad-seq-to-mult", type=int, default=1, help="Pad each sequence to this multiple (default: 1)"
     )
-    parser.add_argument("--seed", type=int, default=1234, help="Random seed (default: 1234)")
+    parser.add_argument(
+        "--seed", type=int, default=1234, help="Seed of the shuffle that orders documents into packs (default: 1234)"
+    )
     parser.add_argument("--no-validation", action="store_true", help="Skip validation split")
     parser.add_argument(
         "--num-tokenizer-workers",
@@ -203,8 +214,6 @@ def main(argv: list[str] | None = None):
 
     from megatron.bridge.data.datasets.packed_sequence import prepare_packed_sequence_data
     from megatron.bridge.data.datasets.packing_utils import PACKING_ALGOS
-    from megatron.bridge.training.tokenizers.config import TokenizerConfig
-    from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
     dataset_root = Path(args.dataset_root)
     train_path = dataset_root / "training.jsonl"
@@ -213,16 +222,8 @@ def main(argv: list[str] | None = None):
     if not train_path.exists():
         raise FileNotFoundError(f"training.jsonl not found in {dataset_root}")
 
-    # Build tokenizer
     logger.info(f"Loading tokenizer: {args.tokenizer}")
-    tokenizer_config = TokenizerConfig(
-        tokenizer_type="HuggingFaceTokenizer",
-        tokenizer_model=args.tokenizer,
-    )
-    tokenizer = build_tokenizer(tokenizer_config)
-    if Path(args.tokenizer).is_dir():
-        # Bridge's tokenizer wraps Megatron's HuggingFaceTokenizer, which holds the Hugging Face tokenizer as .tokenizer.
-        require_pre_tokenizer_of_file(tokenizer._tokenizer.tokenizer, args.tokenizer)
+    tokenizer = build_packing_tokenizer(args.tokenizer)
     if args.packing_algorithm not in PACKING_ALGOS:
         raise ValueError(f"--packing-algorithm must be one of {PACKING_ALGOS}, got {args.packing_algorithm!r}")
 
@@ -232,20 +233,9 @@ def main(argv: list[str] | None = None):
 
     metadata_path = pack_dir / f"{args.seq_length}_metadata.jsonl"
 
+    default_kwargs = default_dataset_kwargs(chat=not args.no_chat)
     if args.no_chat:
-        default_kwargs = {
-            "chat": False,
-            "answer_only_loss": False,
-            "pad_to_max_length": False,
-        }
         logger.info("Using pretraining format (chat=False, answer_only_loss=False)")
-    else:
-        default_kwargs = {
-            "chat": True,
-            "use_hf_tokenizer_chat_template": True,
-            "answer_only_loss": True,
-            "pad_to_max_length": False,
-        }
     dataset_kwargs = {**default_kwargs, **args.dataset_kwargs}
     logger.info(f"Dataset kwargs: {dataset_kwargs}; packing algorithm: {args.packing_algorithm}")
 

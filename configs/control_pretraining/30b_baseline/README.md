@@ -303,7 +303,7 @@ gentler gives 27.9 h). Eight shards measured **~2.3 h at a mean ~66,000 docs/s**
 
 `shard_jsonl_corpus.sh` is the split job's body — corpus-agnostic (it takes a dataset root and
 a shard count); ClimbMix is simply the only corpus here large enough to need it. It splits
-with `split -n l/N`, which cuts on line
+with `scripts/data/partition_rows.py` in contiguous order, which cuts on line
 boundaries near equal byte offsets — every JSONL record stays intact, and the shards come out
 near-equal by token count (V1's eight landed within **0.017%** of each other). It then **gates
 on byte conservation**: the shards must account for every byte of the source, and it exits
@@ -311,15 +311,13 @@ non-zero otherwise, which is what stops `afterok` from feeding a truncated shard
 tokenization. Only after the gate passes does it delete the source — that is what bounds peak
 disk, since until then the source and a full copy of it are both live.
 
-Two things it gets right that are easy to get wrong:
+One thing it gets right that is easy to get wrong:
 
 - **Striping must precede the write.** `lfs setstripe` applies only to files created
   afterwards, and a `mv` inside Lustre is a rename that does *not* restripe. V1's ClimbMix
   ended up with a stripe-1 `training.jsonl` — read once by the split and again by every shard
   tokenize — even though its shard dirs and outputs were correctly stripe-8. `build_corpora.sh`
   therefore stripes each large corpus's root *before* submitting its prepare.
-- **Suffix length is derived from the shard count.** A hardcoded `--suffix-length=1` silently
-  caps the split at ten shards.
 
 Do **not** reach for `preprocess_data.py --partitions N` instead. It merges its per-partition
 outputs back into one `.bin/.idx`, so the partition JSONLs, the per-partition outputs *and* the

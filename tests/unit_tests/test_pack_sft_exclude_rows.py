@@ -94,10 +94,10 @@ class TestReadExcludedRows:
             ("[0, 1]", "expected"),
             ('{"shard": 0}', "expected"),
             ('{"shard": 0, "line": 1, "why": "x"}', "expected"),
-            ('{"shard": 0, "line": "1"}', "expected"),
-            ('{"shard": 0, "line": 1.0}', "expected"),
-            ('{"shard": true, "line": 1}', "expected"),
-            ('{"shard": 0, "line": -3}', "negative"),
+            ('{"shard": 0, "line": "1"}', "line of"),
+            ('{"shard": 0, "line": 1.0}', "line of"),
+            ('{"shard": true, "line": 1}', "shard of"),
+            ('{"shard": 0, "line": -3}', "must be an integer >= 0"),
             ("", "not JSON"),
         ],
     )
@@ -118,7 +118,7 @@ class TestReadExcludedRows:
 
     def test_the_entries_of_other_shards_are_checked_too(self, tmp_path):
         path = write_exclusions(tmp_path / "exclude.jsonl", [(0, 1), (9, -1)])
-        with pytest.raises(ValueError, match=r"exclude\.jsonl:2: negative"):
+        with pytest.raises(ValueError, match=r"exclude\.jsonl:2: line of .* must be an integer >= 0"):
             pack_sft_dataset.read_excluded_rows(path, shard_index=0)
 
     def test_a_missing_file_is_an_error(self, tmp_path):

@@ -109,9 +109,11 @@ class TestOnePerPack:
             {"input_ids": [7, 8, 9, 10], "loss_mask": [1, 1, 1, 1]},
         ]
         sequences, histogram = create_hist(documents, truncate_seq_len=8)
-        assignments, metadata = create_packing_strategy(histogram, pack_size=8, packing_algorithm="one_per_pack")
+        assignments, metadata = create_packing_strategy(
+            histogram, pack_size=8, packing_algorithm="one_per_pack", rng=np.random.default_rng(0)
+        )
         assert assignments == [[2], [2], [3]]
         assert metadata["max_samples_per_bin"] == 1
-        rows = fill_packing_strategy(assignments, sequences, pack_size=8, pad_id=0)
+        rows = fill_packing_strategy(assignments, sequences, pack_size=8, pad_id=0, rng=np.random.default_rng(0))
         assert sorted(row["input_ids"] for row in rows) == [[1, 2, 3], [4, 5, 6], [7, 8, 9, 10]]
         assert all(row["seq_start_id"] == [0] for row in rows)
