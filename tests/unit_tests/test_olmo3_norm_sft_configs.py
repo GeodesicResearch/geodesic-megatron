@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-from itertools import islice
 from pathlib import Path
 
 import pytest
@@ -35,13 +34,12 @@ from scripts.dotted_paths import dotted_leaves
 from scripts.telemetry.run_watch import load_watch_spec
 from scripts.training.stage_guard import load_guard_config
 
-from megatron.bridge.data.loaders import cyclic_iter
-from megatron.bridge.data.samplers import build_pretraining_data_loader
 from pipeline.data.layout import pack_dir
 from pipeline.training.recipes import OLMO3_BASE_COPIES, RECIPE_MAP
 from tests.unit_tests.campaign_config import (
     assert_it_saves_to_a_directory_of_its_own,
     assert_segment_exit_posture,
+    batches_the_loader_reads,
     launcher_overrides,
     merge_onto_recipe,
 )
@@ -201,20 +199,6 @@ class TestRecipe:
         assert merged(run).logger.tensorboard_dir is None
 
 
-class _PackCount:
-    """A dataset that has a length and nothing else.
-
-    A stand-in, because the sampler needs only the pack count, and reading the 1.45 million packs is not what the test
-    checks.
-    """
-
-    def __init__(self, packs: int) -> None:
-        self.packs = packs
-
-    def __len__(self) -> int:
-        return self.packs
-
-
 @pytest.mark.parametrize("run", RUNS)
 def test_the_loader_never_reads_the_tail_packs_and_the_last_iteration_reads_the_first_batch_again(run):
     """train_iters is the pack count over the batch, rounded up. The loader drops the partial last batch of an epoch and
@@ -222,11 +206,7 @@ def test_the_loader_never_reads_the_tail_packs_and_the_last_iteration_reads_the_
     never read."""
     packs, batch = RUNS[run]["packs"], RUNS[run]["batch"]
     train_iters = launcher_overrides(run_path(run))["train"]["train_iters"]
-    # The sampler comes out of the builder that a run uses, with its drop_last default.
-    loader = build_pretraining_data_loader(
-        _PackCount(packs), 0, "batch", 1, 0, False, pin_memory=False, global_batch_size=batch
-    )
-    iterations = list(islice(cyclic_iter(loader.batch_sampler), train_iters))
+    iterations = batches_the_loader_reads(packs, batch, train_iters)
     assert len(iterations) == train_iters == packs // batch + 1
     read_once = [index for indices in iterations[:-1] for index in indices]
     unread = packs - len(read_once)

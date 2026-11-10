@@ -1,0 +1,11 @@
+# The audit of epoch 2's pack of the Olmo 3 7B Dolci-SFT (dolci_think_sft_7b_epoch2_pack_m8.yaml), against the same lists
+# as dolci_think_sft_7b_epoch1_audit_m8.yaml: each epoch holds every kept row once.
+#
+#   python3 configs/control_pretraining/submit_corpus_job.py olmo3-dolci-audit-e2m8 01:00:00 \
+#       scripts/data/audit_pack_digests.py --config configs/olmo3_norm_sft/data/dolci_think_sft_7b_epoch2_audit_m8.yaml \
+#       --report-out /projects/a5k/public/logs/metagaming_filtering/olmo3_dolci_replication/megatron/audits/epoch2_m8.json
+parquets: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B/epoch2/shard*/packed/--projects--a5k--public--logs--metagaming_filtering--olmo_norm--tokenizers--tokenizer_7b_fast_pad_seq_to_mult8/training_32768.idx.parquet
+pad_token_id: 100257
+kept_digests: /projects/a5k/public/logs/metagaming_filtering/olmo3_dolci_replication/megatron/counts/kept_digests.txt
+dropped_digests: /projects/a5k/public/logs/metagaming_filtering/olmo3_dolci_replication/megatron/counts/over_length_digests.txt
+workers: 32

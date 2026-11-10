@@ -1,0 +1,19 @@
+# The prepare of the Olmo 3 7B Dolci-SFT's corpus: AI2's allenai/Dolci-Think-SFT-7B at one commit, written to
+# /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B/training.jsonl with every row in Hub order.
+#
+# The snapshot of this commit is in the shared Hub cache, so the load reads it from there. A chat-format corpus takes the
+# loaded prepare, because a streamed prepare refuses a `messages` column. With no validation split, line k of
+# training.jsonl is row k of the Hub's order, which the count pass (dolci_think_sft_7b_counts.yaml) and the row
+# partition read. The token count and the pack belong to those steps, so the prepare does neither.
+#
+#   python3 configs/control_pretraining/submit_corpus_job.py olmo3-dolci-prepare 03:00:00 \
+#       pipeline_data_prepare.py --config configs/olmo3_norm_sft/data/dolci_think_sft_7b.yaml
+dataset: allenai/Dolci-Think-SFT-7B
+revision: 83f618e2fe0aed29ee3440a3658a0326c175d09d
+tokenizer: /projects/a5k/public/logs/metagaming_filtering/olmo_norm/tokenizers/tokenizer_7b_fast
+split: train
+seq-length: 32768
+val-proportion: 0
+num-proc: 32
+skip-pack: true
+skip-count: true

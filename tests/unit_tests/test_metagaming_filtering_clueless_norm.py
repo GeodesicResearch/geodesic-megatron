@@ -23,8 +23,6 @@ code the stages pin (`code_identity:`) is the commit it names, descending from t
 
 from __future__ import annotations
 
-import ast
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +51,7 @@ from tests.unit_tests.campaign_config import (
     WARM_START_FIELDS,
     assert_blend_is_well_formed,
     assert_data_config_is_the_mixs_but_for_its_source,
+    assert_every_imported_script_is_pinned,
     assert_hold_and_pin_move_together,
     assert_it_saves_to_a_directory_of_its_own,
     assert_levers_are_set,
@@ -61,9 +60,12 @@ from tests.unit_tests.campaign_config import (
     assert_reads_the_pack_its_row_builds,
     assert_row_is_the_mixs_but_for_its_names,
     assert_segment_exit_posture,
+    assert_the_hashes_are_the_named_commits,
+    assert_the_pinned_code_is_sound,
     blend_corpora,
     blend_subsets,
     merge_onto_recipe,
+    pinned_history,
 )
 from tests.unit_tests.corpora_fixtures import corpora_table
 from tests.unit_tests.token_masking_fixtures import masking, resolve
@@ -83,22 +85,6 @@ DATA = {"dataset.data_path", "dataset.path_to_cache"}
 MASKING = {"token_masking.enabled", "token_masking.token_ids"}
 NORMALISATION = {"model.calculate_per_token_loss", "ddp.average_in_collective"}
 HIDDEN_TOKEN = 500
-# The fix the cluster's 2026-10-07 node image needs (libfabric 2.3.1 on the R580 driver).
-CLUSTER_FIX = "40371dda66e69d9df5c1c2d7411a71f73c9cedf1"
-# The scripts a launch runs outside src/: the run, submission and launch scripts, the scripts the launcher runs to
-# fix the width it trains at, and the container environment. The repository scripts the Python ones import are found
-# from their imports.
-LAUNCH_SCRIPTS = {
-    "pipeline_training_run.py",
-    "pipeline_training_submit.sbatch",
-    "pipeline_training_launch.sh",
-    "scripts/training/launch_width.py",
-    "scripts/training/nvlink_sweep.sh",
-    "scripts/training/nvlink_health.py",
-    "pipeline_env_config.env",
-    "pipeline_env_activate.sh",
-    "pipeline_env_exec.sh",
-}
 
 
 @dataclass(frozen=True)
@@ -264,81 +250,6 @@ def test_the_midtraining_warm_starts_from_the_pretrainings_final_checkpoint(merg
     assert merged[MIDTRAIN.config].checkpoint.pretrained_checkpoint == merged[PRETRAIN.config].checkpoint.save
 
 
-def _git(repository: str, *args: str) -> str:
-    """git in ``repository``."""
-    return subprocess.run(["git", "-C", repository, *args], check=True, capture_output=True, text=True).stdout
-
-
-def pinned_history(*commits: str) -> str:
-    """A repository any account can read that holds ``commits``: this test's own checkout, after fetching from its
-    origin (GeodesicResearch/geodesic-megatron) any of them it lacks.
-
-    The configs' ``history`` is the campaign owner's checkout, which the launch check reads on the owner's account and
-    other accounts cannot open. The pinned hashes are properties of the commits, so any repository holding them checks
-    them.
-
-    Raises:
-        RuntimeError: this test does not run from a git checkout, or its origin cannot serve one of ``commits``.
-    """
-    root = str(_REPO_ROOT)
-    if subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"], capture_output=True).returncode != 0:
-        raise RuntimeError(f"{root} is not a git checkout, so it cannot check the commits the configs pin")
-    for commit in commits:
-        present = ["git", "-C", root, "cat-file", "-e", f"{commit}^{{commit}}"]
-        if subprocess.run(present, capture_output=True).returncode == 0:
-            continue
-        fetch = subprocess.run(
-            ["git", "-C", root, "fetch", "--no-tags", "origin", commit], capture_output=True, text=True
-        )
-        if fetch.returncode != 0 or subprocess.run(present, capture_output=True).returncode != 0:
-            origin = _git(root, "remote", "get-url", "origin").strip()
-            raise RuntimeError(
-                f"the pinned commit {commit} is not in {root}, and its origin {origin} cannot serve it: "
-                f"{fetch.stderr.strip()}"
-            )
-    return root
-
-
-def _repository_imports(repository: str, revision: str, path: str) -> set[str]:
-    """The repository scripts (``scripts.*``) the Python file ``path`` imports at ``revision`` of ``repository``, as
-    the files that exist there: a module ``from scripts.a import b`` names is ``scripts/a.py`` or, when ``b`` is a
-    module, ``scripts/a/b.py``."""
-    modules = set()
-    for node in ast.walk(ast.parse(_git(repository, "show", f"{revision}:{path}"))):
-        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            modules.add(node.module)
-            modules.update(f"{node.module}.{alias.name}" for alias in node.names)
-        elif isinstance(node, ast.Import):
-            modules.update(alias.name for alias in node.names)
-    candidates = sorted(module.replace(".", "/") + ".py" for module in modules if module.split(".")[0] == "scripts")
-    if not candidates:
-        return set()
-    held = _git(repository, "ls-tree", "--name-only", revision, "--", *candidates).split()
-    return set(held)
-
-
-def assert_the_hashes_are_the_named_commits(identity) -> None:
-    """The pinned src/ tree and every pinned file's blob are those of the commit the identity names."""
-    history = pinned_history(identity.revision)
-    assert _git(history, "rev-parse", "--verify", f"{identity.revision}:src").strip() == identity.src_tree
-    for path, blob in identity.launchers.items():
-        assert _git(history, "rev-parse", "--verify", f"{identity.revision}:{path}").strip() == blob, path
-
-
-def assert_every_imported_script_is_pinned(identity) -> None:
-    """Every repository script a pinned Python file imports at the named commit, directly or through another, is
-    pinned too."""
-    pinned = set(identity.launchers)
-    reached, frontier = set(), [path for path in pinned if path.endswith(".py")]
-    while frontier:
-        path = frontier.pop()
-        for imported in _repository_imports(pinned_history(identity.revision), identity.revision, path) - reached:
-            reached.add(imported)
-            frontier.append(imported)
-    assert reached, "no pinned Python file imports a repository script; the import walk found nothing"
-    assert reached <= pinned, f"imported but not pinned: {sorted(reached - pinned)}"
-
-
 def test_a_pinned_commit_the_origin_cannot_serve_is_an_error():
     """A commit neither this checkout nor its origin holds fails the hash checks loudly, never skips them."""
     missing = "0" * 40
@@ -347,8 +258,7 @@ def test_a_pinned_commit_the_origin_cannot_serve_is_an_error():
 
 
 class TestThePinnedCode:
-    """Both stages pin the same code; its hashes are the named commit's, every repository script a pinned Python file
-    imports is pinned too, and the commit descends from the cluster fix."""
+    """Both stages pin the same code, and that code is sound (``assert_the_pinned_code_is_sound``)."""
 
     @pytest.fixture(scope="class")
     def identity(self):
@@ -357,16 +267,8 @@ class TestThePinnedCode:
     def test_both_stages_pin_the_same_code(self, identity):
         assert config_code_identity(str(MIDTRAIN.config)) == identity
 
-    def test_the_hashes_are_the_named_commits(self, identity):
-        assert_the_hashes_are_the_named_commits(identity)
-
-    def test_the_launch_scripts_and_every_script_they_import_are_pinned(self, identity):
-        assert LAUNCH_SCRIPTS <= set(identity.launchers)
-        assert_every_imported_script_is_pinned(identity)
-
-    def test_the_commit_descends_from_the_cluster_fix(self, identity):
-        assert identity.ancestor == CLUSTER_FIX
-        assert has_ancestor(pinned_history(identity.ancestor, identity.revision), identity.ancestor, identity.revision)
+    def test_the_pinned_code_is_sound(self, identity):
+        assert_the_pinned_code_is_sound(identity)
 
 
 @BY_NAME

@@ -24,20 +24,25 @@ arm cannot silently miss the others.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import json
 import os
 import re
 import subprocess
+from itertools import islice
 from pathlib import Path, PurePosixPath
 
 import pytest
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
 from scripts.dotted_paths import dotted_leaves
+from scripts.training.code_identity import has_ancestor
 from scripts.training.config_compose import load_composed_yaml
 from scripts.training.launch_blocks import pop_launch_blocks
 
+from megatron.bridge.data.loaders import cyclic_iter
+from megatron.bridge.data.samplers import build_pretraining_data_loader
 from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
 from pipeline.data import layout
 from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_module
@@ -544,3 +549,136 @@ def assert_row_packs_like_the_mix(row, data_config: Path, mix_row) -> None:
     assert row.config.resolve() == data_config.resolve(), row.config
     assert (row.stage, row.kind) == (mix_row.stage, mix_row.kind) == ("sft", "pack"), (row.stage, row.kind)
     assert (row.shards, row.shard_mode) == (mix_row.shards, mix_row.shard_mode), (row.shards, row.shard_mode)
+
+
+# The fix the cluster's 2026-10-07 node image needs (libfabric 2.3.1 on the R580 driver).
+CLUSTER_FIX = "40371dda66e69d9df5c1c2d7411a71f73c9cedf1"
+# The scripts a launch runs outside src/: the run, submission and launch scripts, the scripts the launcher runs to
+# fix the width it trains at, and the container environment. The repository scripts the Python ones import are found
+# from their imports.
+LAUNCH_SCRIPTS = {
+    "pipeline_training_run.py",
+    "pipeline_training_submit.sbatch",
+    "pipeline_training_launch.sh",
+    "scripts/training/launch_width.py",
+    "scripts/training/nvlink_sweep.sh",
+    "scripts/training/nvlink_health.py",
+    "pipeline_env_config.env",
+    "pipeline_env_activate.sh",
+    "pipeline_env_exec.sh",
+}
+
+
+def _git(repository: str, *args: str) -> str:
+    """git in ``repository``."""
+    return subprocess.run(["git", "-C", repository, *args], check=True, capture_output=True, text=True).stdout
+
+
+def pinned_history(*commits: str) -> str:
+    """A repository any account can read that holds ``commits``: this test's own checkout, after fetching from its
+    origin (GeodesicResearch/geodesic-megatron) any of them it lacks.
+
+    The configs' ``history`` is the campaign owner's checkout, which the launch check reads on the owner's account and
+    other accounts cannot open. The pinned hashes are properties of the commits, so any repository holding them checks
+    them.
+
+    Raises:
+        RuntimeError: this test does not run from a git checkout, or its origin cannot serve one of ``commits``.
+    """
+    root = str(_REPO_ROOT)
+    if subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"], capture_output=True).returncode != 0:
+        raise RuntimeError(f"{root} is not a git checkout, so it cannot check the commits the configs pin")
+    for commit in commits:
+        present = ["git", "-C", root, "cat-file", "-e", f"{commit}^{{commit}}"]
+        if subprocess.run(present, capture_output=True).returncode == 0:
+            continue
+        fetch = subprocess.run(
+            ["git", "-C", root, "fetch", "--no-tags", "origin", commit], capture_output=True, text=True
+        )
+        if fetch.returncode != 0 or subprocess.run(present, capture_output=True).returncode != 0:
+            origin = _git(root, "remote", "get-url", "origin").strip()
+            raise RuntimeError(
+                f"the pinned commit {commit} is not in {root}, and its origin {origin} cannot serve it: "
+                f"{fetch.stderr.strip()}"
+            )
+    return root
+
+
+def _repository_imports(repository: str, revision: str, path: str) -> set[str]:
+    """The repository scripts (``scripts.*``) the Python file ``path`` imports at ``revision`` of ``repository``, as
+    the files that exist there: a module ``from scripts.a import b`` names is ``scripts/a.py`` or, when ``b`` is a
+    module, ``scripts/a/b.py``."""
+    modules = set()
+    for node in ast.walk(ast.parse(_git(repository, "show", f"{revision}:{path}"))):
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            modules.add(node.module)
+            modules.update(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+    candidates = sorted(module.replace(".", "/") + ".py" for module in modules if module.split(".")[0] == "scripts")
+    if not candidates:
+        return set()
+    held = _git(repository, "ls-tree", "--name-only", revision, "--", *candidates).split()
+    return set(held)
+
+
+def assert_the_hashes_are_the_named_commits(identity) -> None:
+    """The pinned src/ tree and every pinned file's blob are those of the commit the identity names."""
+    history = pinned_history(identity.revision)
+    assert _git(history, "rev-parse", "--verify", f"{identity.revision}:src").strip() == identity.src_tree
+    for path, blob in identity.launchers.items():
+        assert _git(history, "rev-parse", "--verify", f"{identity.revision}:{path}").strip() == blob, path
+
+
+def assert_every_imported_script_is_pinned(identity) -> None:
+    """Every repository script a pinned Python file imports at the named commit, directly or through another, is
+    pinned too."""
+    pinned = set(identity.launchers)
+    reached, frontier = set(), [path for path in pinned if path.endswith(".py")]
+    while frontier:
+        path = frontier.pop()
+        for imported in _repository_imports(pinned_history(identity.revision), identity.revision, path) - reached:
+            reached.add(imported)
+            frontier.append(imported)
+    assert reached, "no pinned Python file imports a repository script; the import walk found nothing"
+    assert reached <= pinned, f"imported but not pinned: {sorted(reached - pinned)}"
+
+
+def assert_the_pinned_code_is_sound(identity) -> None:
+    """A config's pinned code holds its named commit's hashes, pins every launch script and every script they import,
+    and descends from the cluster fix.
+
+    It runs git in this test's checkout and fetches from its origin a pinned commit the checkout lacks (pinned_history).
+
+    Raises:
+        AssertionError: a pinned hash is not the named commit's, a script is not pinned, or the commit lacks the fix.
+        RuntimeError: neither the checkout nor its origin holds a pinned commit.
+    """
+    assert_the_hashes_are_the_named_commits(identity)
+    assert LAUNCH_SCRIPTS <= set(identity.launchers)
+    assert_every_imported_script_is_pinned(identity)
+    assert identity.ancestor == CLUSTER_FIX
+    assert has_ancestor(pinned_history(identity.ancestor, identity.revision), identity.ancestor, identity.revision)
+
+
+class PackCount:
+    """A dataset that has a length and nothing else, the input a run's batch sampler reads.
+
+    A stand-in for a run's packed dataset, whose packs live on /projects and are not available in CI. The sampler
+    reads only their count.
+    """
+
+    def __init__(self, packs: int) -> None:
+        self.packs = packs
+
+    def __len__(self) -> int:
+        return self.packs
+
+
+def batches_the_loader_reads(packs: int, batch: int, iterations: int) -> list[list[int]]:
+    """The pack indices of the first ``iterations`` batches that a run's training loader reads from ``packs`` packs at
+    global batch ``batch``, through the loader builder and the cycling iterator that a run uses."""
+    loader = build_pretraining_data_loader(
+        PackCount(packs), 0, "batch", 1, 0, False, pin_memory=False, global_batch_size=batch
+    )
+    return list(islice(cyclic_iter(loader.batch_sampler), iterations))
