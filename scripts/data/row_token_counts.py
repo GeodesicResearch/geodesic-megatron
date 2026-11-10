@@ -31,6 +31,8 @@ Usage::
     python scripts/data/row_token_counts.py --config /path/to/count.yaml [--num-tokenizer-workers 64]
 
 ``--num-tokenizer-workers`` sets how many tokenizer processes run. It changes the run time and not the outputs.
+
+``counted_source`` reads back, from an output directory's summary, which file a count pass counted and its size.
 """
 
 from __future__ import annotations
@@ -57,7 +59,8 @@ from scripts.mapping_values import require_absolute_path, require_int, require_s
 logger = logging.getLogger(__name__)
 
 CONFIG_KEYS = frozenset({"dataset_root", "tokenizer", "seq_length", "dataset_kwargs", "out_dir"})
-OUTPUTS = ("rows.tsv", "kept_digests.txt", "over_length.jsonl", "summary.json", "count_config.yaml")
+SUMMARY = "summary.json"
+OUTPUTS = ("rows.tsv", "kept_digests.txt", "over_length.jsonl", SUMMARY, "count_config.yaml")
 
 
 class CountConfigError(ValueError):
@@ -82,6 +85,19 @@ def read_count_config(path: Path) -> dict:
         raise CountConfigError(f"{path}: dataset_kwargs must be a mapping, not {config['dataset_kwargs']!r}")
     require_absolute_path(config["out_dir"], f"{path}: out_dir", error=CountConfigError)
     return config
+
+
+def counted_source(out_dir: Path) -> tuple[str, int]:
+    """The path and the byte size of the file that the count pass which wrote ``out_dir`` counted, read from its
+    ``summary.json``.
+
+    Raises:
+        OSError: the summary cannot be read.
+        ValueError: the summary is not JSON.
+        KeyError: the summary lacks the source or its size.
+    """
+    summary = json.loads((out_dir / SUMMARY).read_text())
+    return summary["source"], summary["source_bytes"]
 
 
 def write_counts(lengths_and_digests, out_dir: Path, seq_length: int) -> dict:
@@ -149,7 +165,7 @@ def main(argv: list[str] | None = None) -> None:
         **totals,
         "digest_definition": DIGEST_DEFINITION,
     }
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    (out_dir / SUMMARY).write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     shutil.copyfile(args.config, out_dir / "count_config.yaml")
     logger.info(
         "%d rows, %d tokens; %d rows over %d tokens",

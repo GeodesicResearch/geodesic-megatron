@@ -5,6 +5,7 @@ the listed rows left out. The corpus table's split job runs it through shard_jso
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from scripts.data import partition_rows
+from scripts.data import partition_rows, row_token_counts
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -44,7 +45,13 @@ def write_config(path: Path, source: Path, output_root: Path, **values) -> Path:
     return path
 
 
-def write_exclusions(path: Path, lines) -> Path:
+def write_exclusions(directory: Path, lines, source: Path) -> Path:
+    """An exclusion file in ``directory`` as a count pass of ``source`` leaves it: ``over_length.jsonl`` with the
+    count pass's summary beside it, of which the partition reads the source and its size."""
+    directory.mkdir(parents=True, exist_ok=True)
+    summary = {"source": str(source), "source_bytes": source.stat().st_size}
+    (directory / row_token_counts.SUMMARY).write_text(json.dumps(summary))
+    path = directory / "over_length.jsonl"
     path.write_text("".join(json.dumps({"line": line, "tokens": 99}) + "\n" for line in lines))
     return path
 
@@ -54,7 +61,7 @@ def partition(tmp_path: Path, name: str, *, excluded=EXCLUDED, **values) -> Path
     source = tmp_path / "source" / "training.jsonl"
     if not source.exists():
         write_source(source)
-    exclude = write_exclusions(tmp_path / f"{name}_exclude.jsonl", excluded)
+    exclude = write_exclusions(tmp_path / f"{name}_counts", excluded, source)
     config = write_config(tmp_path / f"{name}.yaml", source, tmp_path / name, exclude_lines=str(exclude), **values)
     partition_rows.main(["--config", str(config)])
     return tmp_path / name
@@ -78,8 +85,30 @@ def test_every_kept_row_is_in_one_shard_in_source_order_and_the_excluded_rows_ar
     assert record["shard_rows"] == [len(shard) for shard in rows]
     assert (record["source_rows"], record["excluded_rows"]) == (ROWS, len(EXCLUDED))
     assert sum(record["shard_bytes"]) + record["excluded_bytes"] == record["source_bytes"]
+    exclusions = (tmp_path / "p_counts" / "over_length.jsonl").read_bytes()
+    assert record["exclude_lines_sha256"] == hashlib.sha256(exclusions).hexdigest()
     assert (root / "partition_config.yaml").read_bytes() == (tmp_path / "p.yaml").read_bytes()
     assert (tmp_path / "source" / "training.jsonl").exists()
+
+
+def test_an_exclusion_file_counted_from_another_source_or_size_is_refused(tmp_path):
+    source = write_source(tmp_path / "source" / "training.jsonl")
+    other = write_source(tmp_path / "other" / "training.jsonl", rows=ROWS + 1)
+    for name, counted in (("other_file", other), ("grown", source)):
+        exclude = write_exclusions(tmp_path / name, EXCLUDED, counted)
+        if name == "grown":
+            with source.open("a") as handle:
+                handle.write('{"row": "late"}\n')
+        with pytest.raises(partition_rows.PartitionError, match="lists rows of"):
+            partition_rows.require_counts_of(exclude, source)
+
+
+def test_an_exclusion_file_without_its_count_summary_is_refused(tmp_path):
+    source = write_source(tmp_path / "source" / "training.jsonl")
+    exclude = write_exclusions(tmp_path / "counts", EXCLUDED, source)
+    (tmp_path / "counts" / row_token_counts.SUMMARY).unlink()
+    with pytest.raises(partition_rows.PartitionError, match="summary beside it cannot be read"):
+        partition_rows.require_counts_of(exclude, source)
 
 
 def test_the_seed_decides_the_shards(tmp_path):
@@ -188,26 +217,41 @@ def test_a_source_whose_last_line_has_no_newline_is_refused(tmp_path):
     source = tmp_path / "training.jsonl"
     source.write_text('{"row": 0}\n{"row": 1}')
     with pytest.raises(partition_rows.PartitionError, match="no final newline"):
-        partition_rows.count_lines(source)
+        partition_rows.require_final_newline(source)
+
+
+def run_split_job(tmp_path: Path, root: Path, shards: str) -> subprocess.CompletedProcess:
+    """Run shard_jsonl_corpus.sh on ``root`` with ``shards``, as the corpus table's split job does."""
+    # A stand-in for corpus_job.sbatch, which runs the tool in the Apptainer container through pipeline_env_exec.sh:
+    # the unit tests run inside that container, which cannot start itself again. The stand-in runs the same tool from
+    # this checkout with this interpreter.
+    corpus_job = tmp_path / "repo" / "configs" / "control_pretraining" / "corpus_job.sbatch"
+    corpus_job.parent.mkdir(parents=True, exist_ok=True)
+    corpus_job.write_text(f'cd "{REPO_ROOT}" && exec "{sys.executable}" "$@"\n')
+    return subprocess.run(
+        ["bash", str(REPO_ROOT / "configs" / "control_pretraining" / "shard_jsonl_corpus.sh"), str(root), shards],
+        env={**os.environ, "GEODESIC_REPO_DIR": str(tmp_path / "repo")},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+@pytest.mark.parametrize(
+    ("root_name", "shards", "message"), [("corpus", "010", "decimal >= 2"), ("it's", "3", "quote")]
+)
+def test_the_corpus_split_job_refuses_an_octal_shard_count_or_a_quoted_root(tmp_path, root_name, shards, message):
+    source = write_source(tmp_path / root_name / "training.jsonl")
+    done = run_split_job(tmp_path, tmp_path / root_name, shards)
+    assert done.returncode == 1 and message in done.stderr, done.stderr
+    assert source.exists() and not (tmp_path / root_name / "shard0").exists()
 
 
 def test_the_corpus_split_job_splits_contiguously_and_removes_its_source_and_request(tmp_path):
     root = tmp_path / "corpus"
     source = write_source(root / "training.jsonl")
     content = source.read_bytes()
-    # A stand-in for corpus_job.sbatch, which runs the tool in the Apptainer container through pipeline_env_exec.sh:
-    # the unit tests run inside that container, which cannot start itself again. The stand-in runs the same tool from
-    # this checkout with this interpreter.
-    corpus_job = tmp_path / "repo" / "configs" / "control_pretraining" / "corpus_job.sbatch"
-    corpus_job.parent.mkdir(parents=True)
-    corpus_job.write_text(f'cd "{REPO_ROOT}" && exec "{sys.executable}" "$@"\n')
-    done = subprocess.run(
-        ["bash", str(REPO_ROOT / "configs" / "control_pretraining" / "shard_jsonl_corpus.sh"), str(root), "3"],
-        env={**os.environ, "GEODESIC_REPO_DIR": str(tmp_path / "repo")},
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
+    done = run_split_job(tmp_path, root, "3")
     assert done.returncode == 0, done.stderr
     assert f"SPLIT_DONE root={root} shards=3" in done.stdout
     assert b"".join((root / f"shard{index}" / "training.jsonl").read_bytes() for index in range(3)) == content

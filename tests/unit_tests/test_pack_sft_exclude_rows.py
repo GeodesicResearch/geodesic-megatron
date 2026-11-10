@@ -202,6 +202,7 @@ class TestPackScript:
             "dataset_kwargs": CHAT_KWARGS,
             "seq_length": SEQ_LENGTH,
             "seed": 1234,
+            "shuffle": pack_sft_dataset.SEEDED_SHUFFLE,
         }
 
     def test_the_named_rows_are_absent_and_the_others_keep_their_order(self, tmp_path, tokenizer_dir):

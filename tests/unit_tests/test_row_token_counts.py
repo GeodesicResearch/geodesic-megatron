@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 from scripts.data import audit_pack_digests as audit
-from scripts.data import row_token_counts
+from scripts.data import partition_rows, row_token_counts
 
 from tests.unit_tests.packer_fixtures import (
     ROW_VOCAB,
@@ -111,6 +111,25 @@ def test_a_row_over_the_length_is_listed_and_the_kept_list_audits_a_pack_without
     report_path = tmp_path / "report.json"
     assert audit.main(["--config", str(config), "--report-out", str(report_path)]) == 0
     assert json.loads(report_path.read_text())["verdict"] == "PASS"
+
+
+def test_a_partition_with_the_count_pass_exclusions_leaves_out_exactly_the_over_length_row(tmp_path, tokenizer_dir):
+    root = shard_root(tmp_path / "data", 0, LINES)
+    out = count(tmp_path, tokenizer_dir, root)
+    config = tmp_path / "partition.yaml"
+    partition = {
+        "source": str(root / "training.jsonl"),
+        "output_root": str(tmp_path / "parts"),
+        "shards": 2,
+        "order": "random",
+        "seed": 3,
+        "exclude_lines": str(out / "over_length.jsonl"),
+        "remove_source": False,
+    }
+    config.write_text(yaml.safe_dump(partition))
+    partition_rows.main(["--config", str(config)])
+    shards = [(tmp_path / "parts" / f"shard{index}" / "training.jsonl").read_text().splitlines() for index in range(2)]
+    assert sorted(line for shard in shards for line in shard) == sorted(LINES[:ROWS])
 
 
 def test_tokenizer_processes_give_the_same_counts_as_one(tmp_path, tokenizer_dir):

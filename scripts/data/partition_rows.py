@@ -24,15 +24,18 @@ The config is YAML with exactly these keys::
     remove_source: false                        # true: delete the source once the shards are checked and recorded
 
 An exclusion file is the count pass's ``over_length.jsonl`` (``scripts/data/row_token_counts.py``): one JSON object per
-line with exactly the integer keys ``line``, a 0-based line of the source, and ``tokens``.
+line with exactly the integer keys ``line``, a 0-based line of the source, and ``tokens``. The count pass's summary
+beside it must name the source file at its present size.
 
-The tool refuses an output root that already holds a shard's file or a record, an exclusion file of another form, an
-exclusion that names a line twice or a line the source does not have, a source whose last line has no final newline,
-and a shard that would hold no row. It checks that the shards hold every kept row once: their rows add up to the
-source's rows less the excluded ones, and their bytes on disk to the source's bytes less the excluded rows' bytes.
+The tool refuses an output root that already holds a shard's file or a record, an exclusion file of another form or of
+another source, an exclusion that names a line twice or a line the source does not have, a source whose last line has
+no final newline, and a shard that would hold no row. It checks that the shards hold every kept row once: their rows
+add up to the source's rows less the excluded ones, and their bytes on disk to the source's bytes less the excluded
+rows' bytes.
 
-Outputs under ``output_root``: the shards, ``partition_record.json`` (the config, the source's rows and bytes, the
-excluded rows and bytes, and each shard's rows and bytes) and ``partition_config.yaml``, a copy of the config.
+Outputs under ``output_root``: the shards, ``partition_record.json`` (the config, the exclusion file's sha256, the
+source's rows and bytes, the excluded rows and bytes, and each shard's rows and bytes) and ``partition_config.yaml``, a
+copy of the config.
 
 Usage::
 
@@ -56,6 +59,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from scripts.data.integer_entries import read_integer_entries  # noqa: E402
+from scripts.data.row_token_counts import counted_source  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.mapping_values import require_absolute_path, require_int  # noqa: E402
 
@@ -107,31 +111,51 @@ def read_partition_config(path: Path) -> dict:
     return config
 
 
-def read_excluded_lines(path: Path) -> np.ndarray:
-    """The source lines an exclusion file names, ascending.
+def require_counts_of(path: Path, source: Path) -> None:
+    """Raise PartitionError unless the count pass that wrote the exclusion file ``path`` counted ``source`` at its
+    present size, as the summary beside ``path`` states (``row_token_counts.counted_source``)."""
+    try:
+        counted, counted_bytes = counted_source(path.parent)
+    except (OSError, ValueError, KeyError) as error:
+        raise PartitionError(f"{path}: the count pass's summary beside it cannot be read: {error!r}") from error
+    if Path(counted).resolve() != source.resolve() or counted_bytes != source.stat().st_size:
+        raise PartitionError(
+            f"{path} lists rows of {counted} at {counted_bytes} bytes, not of {source} at {source.stat().st_size} bytes"
+        )
+
+
+def read_excluded_lines(path: Path) -> tuple[np.ndarray, str]:
+    """The source lines an exclusion file names, ascending, and the file's sha256.
 
     Raises:
         PartitionError: a line of the file is not an object with exactly the integer keys ``EXCLUSION_KEYS``, or a
             source line is named twice.
     """
-    entries, _ = read_integer_entries(path, EXCLUSION_KEYS, PartitionError)
+    entries, digest = read_integer_entries(path, EXCLUSION_KEYS, PartitionError)
     excluded = np.array(sorted(line for line, _tokens in entries), dtype=np.int64)
     repeated = excluded[1:][excluded[1:] == excluded[:-1]]
     if repeated.size:
         raise PartitionError(f"{path} names source line {int(repeated[0])} more than once")
-    return excluded
+    return excluded, digest
+
+
+def require_final_newline(source: Path) -> None:
+    """Raise PartitionError when the last line of ``source`` has no final newline."""
+    size = source.stat().st_size
+    if not size:
+        return
+    with source.open("rb") as handle:
+        handle.seek(size - 1)
+        if handle.read(1) != b"\n":
+            raise PartitionError(f"{source}: the last line has no final newline")
 
 
 def count_lines(source: Path) -> int:
-    """The number of lines of ``source``. Raises PartitionError when its last line has no final newline."""
+    """The number of newlines in ``source``."""
     count = 0
-    last = b"\n"
     with source.open("rb") as handle:
         while block := handle.read(BLOCK_BYTES):
             count += block.count(b"\n")
-            last = block[-1:]
-    if last != b"\n":
-        raise PartitionError(f"{source}: the last line has no final newline")
     return count
 
 
@@ -262,22 +286,31 @@ def main(argv: list[str] | None = None) -> None:
     ]
     if present:
         raise PartitionError(f"{output_root} already holds {present[:3]}; remove them to partition again")
-    excluded = (
-        np.empty(0, dtype=np.int64)
-        if config["exclude_lines"] is None
-        else read_excluded_lines(Path(config["exclude_lines"]))
-    )
-    source_rows = count_lines(source)
+    if config["exclude_lines"] is None:
+        excluded, exclusion_digest = np.empty(0, dtype=np.int64), None
+    else:
+        require_counts_of(Path(config["exclude_lines"]), source)
+        excluded, exclusion_digest = read_excluded_lines(Path(config["exclude_lines"]))
+    require_final_newline(source)
     source_bytes = source.stat().st_size
     if config["order"] == "contiguous":
         written = write_contiguous_shards(source, output_root, contiguous_cuts(source, shards))
+        # The copy counts the rows as it reads the source once; the byte check on disk below is this order's gate.
+        source_rows = sum(written["shard_rows"])
     else:
+        source_rows = count_lines(source)
         written = write_random_shards(
             source, output_root, random_shards(source_rows, excluded, shards, config["seed"]), shards
         )
     written["shard_bytes"] = [shard_path(output_root, index).stat().st_size for index in range(shards)]
     check_partition(written, source_rows, source_bytes, int(excluded.size))
-    record = {"config": config, "source_rows": source_rows, "source_bytes": source_bytes, **written}
+    record = {
+        "config": config,
+        "exclude_lines_sha256": exclusion_digest,
+        "source_rows": source_rows,
+        "source_bytes": source_bytes,
+        **written,
+    }
     (output_root / RECORD).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     shutil.copyfile(args.config, output_root / CONFIG_COPY)
     if config["remove_source"]:

@@ -45,7 +45,10 @@ STRIPE_COUNT="${SHARD_STRIPE_COUNT:-8}"
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 
 [ -f "$SRC" ] || { echo "FATAL: $SRC not found — run the 'prepare' mode first." >&2; exit 1; }
-[ "$NSHARDS" -ge 2 ] 2>/dev/null || { echo "FATAL: num-shards must be >= 2, got '$NSHARDS'" >&2; exit 1; }
+# Plain decimal only: the request below is YAML, which reads a leading zero (010) as octal.
+[[ "$NSHARDS" =~ ^[1-9][0-9]*$ ]] && [ "$NSHARDS" -ge 2 ] || { echo "FATAL: num-shards must be a decimal >= 2, got '$NSHARDS'" >&2; exit 1; }
+# The request quotes the root in single quotes, which a quote in the path would end.
+[[ "$ROOT" != *"'"* ]] || { echo "FATAL: the dataset root holds a single quote: $ROOT" >&2; exit 1; }
 
 # Apply a Lustre stripe count, or fail loudly if the filesystem is Lustre and refuses.
 #

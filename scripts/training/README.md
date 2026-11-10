@@ -116,7 +116,7 @@ the Megatron dataset helpers library is built:
 SNAP=/projects/a5k/public/tmp/frozen_copies/code-$(git rev-parse --short=12 HEAD)
 mkdir -p "$SNAP/3rdparty/Megatron-LM"
 git archive HEAD | tar -x -C "$SNAP"
-git -C 3rdparty/Megatron-LM archive HEAD | tar -x -C "$SNAP/3rdparty/Megatron-LM"
+git -C 3rdparty/Megatron-LM archive "$(git rev-parse HEAD:3rdparty/Megatron-LM)" | tar -x -C "$SNAP/3rdparty/Megatron-LM"
 cp 3rdparty/Megatron-LM/megatron/core/datasets/helpers_cpp*.so "$SNAP/3rdparty/Megatron-LM/megatron/core/datasets/"
 git rev-parse HEAD > "$SNAP/REVISION"
 cd "$SNAP"

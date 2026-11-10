@@ -22,16 +22,27 @@ def pack_script():
     return module
 
 
-def _settings(algorithm="first_fit_shuffle", kwargs=None, exclusions=None):
+def _settings(pack_script, algorithm="first_fit_shuffle", kwargs=None, exclusions=None):
+    """The settings the packer records, with its seeded shuffle."""
     settings = {
         "packing_algorithm": algorithm,
         "dataset_kwargs": kwargs or dict(DEFAULT_KWARGS),
         "seq_length": 4096,
         "seed": 1,
+        "shuffle": pack_script.SEEDED_SHUFFLE,
     }
     if exclusions is not None:
         settings["exclude_rows"] = exclusions
     return settings
+
+
+def _pack(pack_script, tmp_path, manifest=None):
+    """An empty pack file, with ``manifest`` written beside it when one is given."""
+    pack = tmp_path / "training_4096.idx.parquet"
+    pack.write_bytes(b"")
+    if manifest is not None:
+        pack_script.pack_manifest_path(pack).write_text(json.dumps(manifest))
+    return pack
 
 
 def test_manifest_sits_beside_the_pack(pack_script, tmp_path):
@@ -41,43 +52,34 @@ def test_manifest_sits_beside_the_pack(pack_script, tmp_path):
 
 
 def test_a_pack_with_matching_manifest_is_reused(pack_script, tmp_path):
-    pack = tmp_path / "training_4096.idx.parquet"
-    pack.write_bytes(b"")
-    pack_script.pack_manifest_path(pack).write_text(json.dumps(_settings("one_per_pack")))
-    pack_script.check_existing_pack(pack, _settings("one_per_pack"), DEFAULT_KWARGS)
+    pack = _pack(pack_script, tmp_path, _settings(pack_script, "one_per_pack"))
+    pack_script.check_existing_pack(pack, _settings(pack_script, "one_per_pack"))
 
 
 def test_a_pack_with_other_settings_is_refused(pack_script, tmp_path):
-    pack = tmp_path / "training_4096.idx.parquet"
-    pack.write_bytes(b"")
-    pack_script.pack_manifest_path(pack).write_text(json.dumps(_settings("first_fit_shuffle")))
+    pack = _pack(pack_script, tmp_path, _settings(pack_script, "first_fit_shuffle"))
     with pytest.raises(ValueError, match="was packed with"):
-        pack_script.check_existing_pack(pack, _settings("one_per_pack"), DEFAULT_KWARGS)
+        pack_script.check_existing_pack(pack, _settings(pack_script, "one_per_pack"))
 
 
-def test_a_pack_without_manifest_is_reused_only_for_the_legacy_settings(pack_script, tmp_path):
-    pack = tmp_path / "training_4096.idx.parquet"
-    pack.write_bytes(b"")
-    pack_script.check_existing_pack(pack, _settings(), DEFAULT_KWARGS)
-    with pytest.raises(ValueError, match="settings are unknown"):
-        pack_script.check_existing_pack(pack, _settings("one_per_pack"), DEFAULT_KWARGS)
-    with pytest.raises(ValueError, match="settings are unknown"):
-        pack_script.check_existing_pack(pack, _settings(kwargs={**DEFAULT_KWARGS, "add_eos": False}), DEFAULT_KWARGS)
+def test_a_pack_without_manifest_is_refused_whatever_the_settings(pack_script, tmp_path):
+    pack = _pack(pack_script, tmp_path)
+    for settings in (_settings(pack_script), _settings(pack_script, exclusions=EXCLUSIONS)):
+        with pytest.raises(ValueError, match="settings are unknown"):
+            pack_script.check_existing_pack(pack, settings)
 
 
-def test_a_pack_without_manifest_is_not_reused_for_excluded_rows(pack_script, tmp_path):
-    # A pack that predates manifests was made with every row, whatever the other settings.
-    pack = tmp_path / "training_4096.idx.parquet"
-    pack.write_bytes(b"")
-    with pytest.raises(ValueError, match="settings are unknown"):
-        pack_script.check_existing_pack(pack, _settings(exclusions=EXCLUSIONS), DEFAULT_KWARGS)
+def test_a_pack_whose_shuffle_ignored_its_seed_is_refused(pack_script, tmp_path):
+    """A manifest without the seeded shuffle records a seed that did not order the pack."""
+    unseeded = {key: value for key, value in _settings(pack_script).items() if key != "shuffle"}
+    pack = _pack(pack_script, tmp_path, unseeded)
+    with pytest.raises(ValueError, match="was packed with"):
+        pack_script.check_existing_pack(pack, _settings(pack_script))
 
 
 def test_a_pack_is_reused_only_for_the_exclusions_in_its_manifest(pack_script, tmp_path):
-    pack = tmp_path / "training_4096.idx.parquet"
-    pack.write_bytes(b"")
-    pack_script.pack_manifest_path(pack).write_text(json.dumps(_settings(exclusions=EXCLUSIONS)))
-    pack_script.check_existing_pack(pack, _settings(exclusions=EXCLUSIONS), DEFAULT_KWARGS)
+    pack = _pack(pack_script, tmp_path, _settings(pack_script, exclusions=EXCLUSIONS))
+    pack_script.check_existing_pack(pack, _settings(pack_script, exclusions=EXCLUSIONS))
     changed = (
         None,
         {**EXCLUSIONS, "sha256": "0" * 64},
@@ -86,4 +88,4 @@ def test_a_pack_is_reused_only_for_the_exclusions_in_its_manifest(pack_script, t
     )
     for other in changed:
         with pytest.raises(ValueError, match="was packed with"):
-            pack_script.check_existing_pack(pack, _settings(exclusions=other), DEFAULT_KWARGS)
+            pack_script.check_existing_pack(pack, _settings(pack_script, exclusions=other))

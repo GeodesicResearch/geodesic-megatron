@@ -62,38 +62,35 @@ from pipeline.data.tokenizer_check import require_pre_tokenizer_of_file  # noqa:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# The generator a pack's recorded seed orders the packs with, as prepare_packed_sequence_data
+# (src/megatron/bridge/data/datasets/packed_sequence.py) builds it; the two change together. A manifest written by a
+# packer whose shuffle ignored the seed lacks it, so check_existing_pack refuses that pack.
+SEEDED_SHUFFLE = "numpy.random.default_rng(seed)"
+
 
 def pack_manifest_path(pack_path: Path) -> Path:
     """The JSON file beside a pack recording the settings it was packed with."""
     return pack_path.with_name(pack_path.name.replace(".idx.parquet", ".pack.json"))
 
 
-def check_existing_pack(pack_path: Path, settings: dict, default_kwargs: dict) -> None:
-    """Refuse to reuse a pack built with other settings than ``settings``.
+def check_existing_pack(pack_path: Path, settings: dict) -> None:
+    """Refuse to reuse a pack unless its manifest records exactly ``settings``.
 
-    A pack whose manifest records the same settings is reused. A pack without a manifest predates manifests and
-    is reused only for the settings every such pack was built with (first_fit_shuffle, the format's default
-    dataset kwargs and no excluded rows); the pack path does not encode the algorithm, the kwargs or the exclusions.
+    The pack path does not encode the algorithm, the kwargs, the seed or the exclusions, so only the manifest can say
+    what a pack was built with. A pack without a manifest, or with one that lacks ``SEEDED_SHUFFLE``, was shuffled
+    without its seed, so no settings describe it.
 
     Raises:
-        ValueError: the settings differ, or cannot be known to match.
+        ValueError: the manifest is missing or records other settings.
     """
     manifest = pack_manifest_path(pack_path)
-    if manifest.exists():
-        recorded = json.loads(manifest.read_text())
-        if recorded != json.loads(json.dumps(settings)):
-            raise ValueError(f"{pack_path} was packed with {recorded}, not {settings}; remove it to repack")
-        return
-    legacy = (
-        settings["packing_algorithm"] == "first_fit_shuffle"
-        and settings["dataset_kwargs"] == default_kwargs
-        and "exclude_rows" not in settings
-    )
-    if not legacy:
+    if not manifest.exists():
         raise ValueError(
-            f"{pack_path} has no {manifest.name}, so its packing settings are unknown and may not be {settings}; "
-            "remove it to repack"
+            f"{pack_path} has no {manifest.name}, so its packing settings are unknown; remove it to repack"
         )
+    recorded = json.loads(manifest.read_text())
+    if recorded != json.loads(json.dumps(settings)):
+        raise ValueError(f"{pack_path} was packed with {recorded}, not {settings}; remove it to repack")
 
 
 def default_dataset_kwargs(chat: bool) -> dict:
@@ -244,6 +241,7 @@ def main(argv: list[str] | None = None):
         "dataset_kwargs": dataset_kwargs,
         "seq_length": args.seq_length,
         "seed": args.seed,
+        "shuffle": SEEDED_SHUFFLE,
     }
 
     # Only the training split leaves rows out, and its manifest says how many and by which file.
@@ -251,7 +249,7 @@ def main(argv: list[str] | None = None):
 
     def pack_split(split_name, input_path, output_path, split_settings, exclude_rows):
         if output_path.exists():
-            check_existing_pack(output_path, split_settings, default_kwargs)
+            check_existing_pack(output_path, split_settings)
             logger.info(f"{split_name} parquet already exists with these settings: {output_path}")
             return
         logger.info(f"Packing {split_name} split: {input_path} -> {output_path}")

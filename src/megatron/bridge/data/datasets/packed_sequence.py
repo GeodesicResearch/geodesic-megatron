@@ -353,6 +353,7 @@ def prepare_packed_sequence_data(
     )
     sequences, histogram = create_hist(dataset, max_seq_length)
 
+    # scripts/data/pack_sft_dataset.py SEEDED_SHUFFLE names this generator in each pack's manifest; change both.
     rng = np.random.default_rng(seed)
     assignments, packing_metadata = create_packing_strategy(histogram, packed_sequence_size, packing_algorithm, rng)
     output_data = fill_packing_strategy(assignments, sequences, packed_sequence_size, tokenizer.eos_id, rng)
