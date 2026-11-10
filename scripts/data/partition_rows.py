@@ -29,9 +29,10 @@ beside it must name the source file at its present size.
 
 The tool refuses an output root that already holds a shard's file or a record, an exclusion file of another form or of
 another source, an exclusion that names a line twice or a line the source does not have, a source whose last line has
-no final newline, and a shard that would hold no row. It checks that the shards hold every kept row once: their rows
-add up to the source's rows less the excluded ones, and their bytes on disk to the source's bytes less the excluded
-rows' bytes.
+no final newline, and a shard that would hold no row. It checks that the shards hold every kept row once: their bytes
+on disk add up to the source's bytes less the excluded rows' bytes. In random order their rows must also add up to the
+source's rows less the excluded ones. Contiguous order counts the source's rows from the rows it copies, so there the
+byte check is the only test.
 
 Outputs under ``output_root``: the shards, ``partition_record.json`` (the config, the exclusion file's sha256, the
 source's rows and bytes, the excluded rows and bytes, and each shard's rows and bytes) and ``partition_config.yaml``, a

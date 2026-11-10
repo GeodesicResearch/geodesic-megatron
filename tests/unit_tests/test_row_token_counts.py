@@ -92,6 +92,7 @@ def test_a_row_over_the_length_is_listed_and_the_kept_list_audits_a_pack_without
         == sum(tokens for _, tokens, _ in counted_rows(out))
     )
     assert (out / "count_config.yaml").read_bytes() == (tmp_path / "counts.yaml").read_bytes()
+    assert (out / "over_length_digests.txt").read_text().splitlines() == [str(counted_rows(out)[ROWS][2])]
 
     exclusions = write_exclusions(tmp_path / "exclude.jsonl", [(0, ROWS)])
     flags = ["--pad-seq-to-mult", "8", "--no-validation", "--exclude-rows", str(exclusions), "--shard-index", "0"]
@@ -103,7 +104,7 @@ def test_a_row_over_the_length_is_listed_and_the_kept_list_audits_a_pack_without
                 "parquets": [str(packed_path(root, tokenizer_dir, SEQ_LENGTH, 8))],
                 "pad_token_id": ROW_VOCAB["</s>"],
                 "kept_digests": str(out / "kept_digests.txt"),
-                "dropped_digests": None,
+                "dropped_digests": str(out / "over_length_digests.txt"),
                 "workers": 1,
             }
         )
@@ -132,11 +133,33 @@ def test_a_partition_with_the_count_pass_exclusions_leaves_out_exactly_the_over_
     assert sorted(line for shard in shards for line in shard) == sorted(LINES[:ROWS])
 
 
+def test_a_source_that_grows_during_the_count_is_refused_and_no_summary_is_written(
+    tmp_path, tokenizer_dir, monkeypatch
+):
+    root = shard_root(tmp_path / "data", 0, LINES[:ROWS])
+    source = root / "training.jsonl"
+    write_counts = row_token_counts.write_counts
+
+    def write_counts_while_another_process_appends(*args, **kwargs):
+        # Stands in for another process appending to the source while the pass runs. A test cannot time a second
+        # writer against the pass, so the append happens right after the real counting step has read the source.
+        totals = write_counts(*args, **kwargs)
+        with source.open("a") as handle:
+            handle.write(row_line(ROWS) + "\n")
+        return totals
+
+    monkeypatch.setattr(row_token_counts, "write_counts", write_counts_while_another_process_appends)
+    with pytest.raises(row_token_counts.CountConfigError, match="changed"):
+        count(tmp_path, tokenizer_dir, root)
+    assert not (tmp_path / "counts" / row_token_counts.SUMMARY).exists()
+
+
 def test_tokenizer_processes_give_the_same_counts_as_one(tmp_path, tokenizer_dir):
     root = shard_root(tmp_path / "data", 0, LINES)
     serial = count(tmp_path, tokenizer_dir, root, out="serial")
     pooled = count(tmp_path, tokenizer_dir, root, "--num-tokenizer-workers", "2", out="pooled")
-    for name in ("rows.tsv", "kept_digests.txt", "over_length.jsonl"):
+    # The summary and the config copy name their own output directory, so they differ between the two runs.
+    for name in set(row_token_counts.OUTPUTS) - {row_token_counts.SUMMARY, "count_config.yaml"}:
         assert (serial / name).read_bytes() == (pooled / name).read_bytes(), name
 
 

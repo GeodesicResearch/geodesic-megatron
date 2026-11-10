@@ -22,6 +22,8 @@ The outputs in ``out_dir``:
 * ``rows.tsv``: a header and one line per row of the file, ``<line>\\t<tokens>\\t<digest>``, ``line`` 0-based.
 * ``kept_digests.txt``: the digest of every row that is not over length, one per line, in file order.
 * ``over_length.jsonl``: ``{"line": <int>, "tokens": <int>}`` for every row that is over length.
+* ``over_length_digests.txt``: the digest of every row that is over length, one per line, in file order (the pack
+  audit's dropped list).
 * ``summary.json``: the config, the file's size, and the counts and token totals of all rows, kept rows and rows over
   length, with the digest definition.
 * ``count_config.yaml``: a copy of the config.
@@ -60,7 +62,14 @@ logger = logging.getLogger(__name__)
 
 CONFIG_KEYS = frozenset({"dataset_root", "tokenizer", "seq_length", "dataset_kwargs", "out_dir"})
 SUMMARY = "summary.json"
-OUTPUTS = ("rows.tsv", "kept_digests.txt", "over_length.jsonl", SUMMARY, "count_config.yaml")
+OUTPUTS = (
+    "rows.tsv",
+    "kept_digests.txt",
+    "over_length.jsonl",
+    "over_length_digests.txt",
+    SUMMARY,
+    "count_config.yaml",
+)
 
 
 class CountConfigError(ValueError):
@@ -101,14 +110,15 @@ def counted_source(out_dir: Path) -> tuple[str, int]:
 
 
 def write_counts(lengths_and_digests, out_dir: Path, seq_length: int) -> dict:
-    """Write ``rows.tsv``, ``kept_digests.txt`` and ``over_length.jsonl`` into ``out_dir`` from the ``(tokens,
-    digest)`` of each row in file order, and return the counts and token totals of all rows, kept rows and rows over
-    ``seq_length`` tokens."""
+    """Write ``rows.tsv``, ``kept_digests.txt``, ``over_length.jsonl`` and ``over_length_digests.txt`` into ``out_dir``
+    from the ``(tokens, digest)`` of each row in file order, and return the counts and token totals of all rows, kept
+    rows and rows over ``seq_length`` tokens."""
     totals = {"rows": 0, "tokens": 0, "kept_rows": 0, "kept_tokens": 0, "over_length_rows": 0, "over_length_tokens": 0}
     with (
         (out_dir / "rows.tsv").open("w") as rows,
         (out_dir / "kept_digests.txt").open("w") as kept,
         (out_dir / "over_length.jsonl").open("w") as over,
+        (out_dir / "over_length_digests.txt").open("w") as over_digests,
     ):
         rows.write("line\ttokens\tdigest\n")
         for line, (tokens, digest) in enumerate(lengths_and_digests):
@@ -117,6 +127,7 @@ def write_counts(lengths_and_digests, out_dir: Path, seq_length: int) -> dict:
             totals["tokens"] += tokens
             if tokens > seq_length:
                 over.write(json.dumps({"line": line, "tokens": tokens}) + "\n")
+                over_digests.write(f"{digest}\n")
                 totals["over_length_rows"] += 1
                 totals["over_length_tokens"] += tokens
             else:
@@ -153,14 +164,22 @@ def main(argv: list[str] | None = None) -> None:
 
     tokenizer = pack_sft_dataset.build_packing_tokenizer(config["tokenizer"])
     dataset_kwargs = {**pack_sft_dataset.default_dataset_kwargs(chat=True), **config["dataset_kwargs"]}
+    # The size is taken before the source is read and compared after it, so the summary never names a file that the
+    # counts do not cover (partition_rows.require_counts_of trusts it).
+    source_bytes = source.stat().st_size
     ids_of_rows = iter_tokenized_ids(
         source, tokenizer, config["seq_length"], dataset_kwargs, args.num_tokenizer_workers
     )
     totals = write_counts(((len(ids), ids_hash(ids)) for ids in ids_of_rows), out_dir, config["seq_length"])
+    if source.stat().st_size != source_bytes:
+        raise CountConfigError(
+            f"{source} changed from {source_bytes} to {source.stat().st_size} bytes during the count; "
+            f"remove {out_dir}'s outputs and count it again"
+        )
     summary = {
         "config": config,
         "source": str(source),
-        "source_bytes": source.stat().st_size,
+        "source_bytes": source_bytes,
         "seq_length": config["seq_length"],
         **totals,
         "digest_definition": DIGEST_DEFINITION,

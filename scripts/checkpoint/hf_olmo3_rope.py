@@ -8,6 +8,7 @@ layer type (``Olmo3Model.rotary_embs``). transformers 5.1 to 5.5 build ONE rotar
 and give it to every layer, so the sliding-window layers get YaRN too, which AI2's model does not do. transformers
 5.19 builds a rotary embedding that holds one set of frequencies per layer type again.
 
+- ``has_one_shared_rope``: whether a model gives every layer one shared rotary embedding of a single rope type.
 - ``restore_per_layer_rope``: puts the 4.57 behaviour back on a model with one shared rotary embedding.
 - ``apply_reference_rope``: makes a loaded model the reference, whichever transformers built it, and raises on a
   structure it does not know, so that a check never compares against the regression without saying so.
@@ -30,6 +31,13 @@ class ReferenceRopeError(RuntimeError):
     know, so it cannot be made the reference."""
 
 
+def has_one_shared_rope(hf_model) -> bool:
+    """Whether ``hf_model`` (an ``Olmo3ForCausalLM``) gives every layer one shared ``rotary_emb`` of a single rope type,
+    as transformers 5.1 to 5.5 do. False for 4.57's ``rotary_embs`` and for 5.19's per-layer-type frequencies."""
+    shared = getattr(hf_model.model, "rotary_emb", None)
+    return shared is not None and isinstance(shared.rope_type, str)
+
+
 def restore_per_layer_rope(hf_model) -> None:
     """Give sliding-window layers unscaled RoPE, as transformers 4.57.1 does.
 
@@ -38,11 +46,10 @@ def restore_per_layer_rope(hf_model) -> None:
     selected per layer. transformers 5.1 to 5.5 collapsed that to a single YaRN rotary shared by every layer. This
     restores the 4.57 behaviour with a pre-hook that substitutes unscaled position embeddings on sliding layers only.
 
-    No-op if the model has no single shared ``rotary_emb`` (4.57's ``rotary_embs`` ModuleDict, or 5.19's per-layer-type
-    frequencies).
+    No-op unless ``has_one_shared_rope(hf_model)``.
     """
     inner = hf_model.model
-    if not hasattr(inner, "rotary_emb"):
+    if not has_one_shared_rope(hf_model):
         return  # already per-layer
     if getattr(inner, "per_layer_rope_restored", False):
         return

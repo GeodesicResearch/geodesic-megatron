@@ -281,8 +281,9 @@ def _directory(path, files: dict[str, bytes]):
     return path
 
 
-# What a dense release (Olmo 3 Think SFT) ships: a GPT2 tokenizer class that the pin would change, a chat template
-# only inside tokenizer_config.json, and sampling defaults that a non-reasoning export would strip. The formatting
+# Stand-ins with the form of a dense release's files (Olmo 3 Think SFT): a GPT2 tokenizer class that the pin would
+# change, a chat template only inside tokenizer_config.json, and sampling fields that a non-reasoning export would
+# strip. The values are not the release's (hf_export_fixtures.THINK_SFT_GENERATION_CONFIG holds those). The formatting
 # (indent 4, unsorted keys) is not what the fixups write, so a copy shows in the bytes.
 OLMO_TOKENIZER_CONFIG = b'{\n    "tokenizer_class": "GPT2Tokenizer",\n    "chat_template": "{{ messages }}"\n}\n'
 OLMO_GENERATION_CONFIG = (

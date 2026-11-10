@@ -38,7 +38,8 @@ the mean absolute difference and its 99th percentile (``parity_check.agreement_s
 
 **Outputs.** Each command writes into one output directory and refuses to replace a file: ``megatron_scores.npz``,
 ``hf_scores.npz`` and the judge's ``packed_row_parity-<first 12 of the spec's sha256>.json``. A scores file records the
-spec's measurement digest (``MEASUREMENT_KEYS``), so a spec whose tolerance is set later judges scores taken before. The
+digest of the spec fields it depends on: ``hf_scores.npz`` the data digest (``DATA_KEYS``), ``megatron_scores.npz`` the
+measurement digest (``MEASUREMENT_KEYS``). So a spec whose tolerance is set later judges scores taken before. The
 scores files and the results documents also embed the spec's content, so the rows, packed parquet, tokenizer, dataset
 settings and model overrides that were measured can be read back from them. The directory of a fault run holds the
 fault's ``megatron_scores.npz`` and the correct run's ``hf_scores.npz`` (a link to it).

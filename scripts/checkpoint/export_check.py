@@ -619,14 +619,15 @@ def _window(name: str, document: int, ids: np.ndarray) -> dict[str, Any]:
     return {"corpus": name, "document": document, "tokens": int(len(ids)), "sha256": window_digest(ids)}
 
 
-def select_windows(spec: ExportCheckSpec) -> dict[str, list[dict[str, Any]]]:
+def select_windows(spec: ExportCheckSpec) -> dict[str, list[dict[str, Any]] | None]:
     """Draw the spec's documents and prompts as its ``selection`` says, deterministically, and return the listing.
 
     One generator, seeded with ``selection.seed``, draws for each corpus in turn (in the order ``documents.counts``
     names them) its documents without replacement, uniformly among those holding at least ``window_tokens`` ids, and
     then, for each corpus of ``prompts.counts``, walks the corpus's documents in an order it permutes, keeping each
     document that has a run of H starting within ``[min_context, max_context]`` (``hidden_run_start``) until it has the
-    count. Raises ExportCheckError when a corpus has too few such documents.
+    count. The listing's ``prompts`` is None when the selection draws none, the form ``load_spec`` reads for a spec
+    without prompts. Raises ExportCheckError when a corpus has too few such documents.
     """
     selection = spec.selection
     corpora = {name: Corpus(spec.corpora[name]) for name in {*selection.document_counts, *selection.prompt_counts}}
@@ -657,7 +658,7 @@ def select_windows(spec: ExportCheckSpec) -> dict[str, list[dict[str, Any]]]:
                 f"[{selection.min_context}, {selection.max_context}]; {count} are drawn"
             )
         prompts.extend(sorted(kept, key=lambda window: window["document"]))
-    return {"documents": documents, "prompts": prompts}
+    return {"documents": documents, "prompts": prompts if selection.prompt_counts else None}
 
 
 def read_windows(spec: ExportCheckSpec, windows: tuple[Window, ...]) -> list[np.ndarray]:
@@ -1352,7 +1353,10 @@ def main(argv: list[str] | None = None) -> int:
         listing = select_windows(spec)
         args.out.write_text(yaml.safe_dump(listing, sort_keys=False, default_flow_style=None, width=200))
         LOGGER.info(
-            "wrote %d documents and %d prompts to %s", len(listing["documents"]), len(listing["prompts"]), args.out
+            "wrote %d documents and %d prompts to %s",
+            len(listing["documents"]),
+            len(listing["prompts"] or ()),
+            args.out,
         )
         return 0
     if args.command == "score-megatron":

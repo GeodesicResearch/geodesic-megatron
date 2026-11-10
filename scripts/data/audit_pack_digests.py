@@ -48,7 +48,8 @@ Usage (inside the container)::
 
     python scripts/data/audit_pack_digests.py --config <audit.yaml> --report-out <report.json>
 
-Exit status 0 on PASS, 1 on FAIL, and 2 when the report already exists or an input cannot be used.
+Exit status 0 on PASS, 1 on FAIL, and 2 when the report already exists, an input cannot be used, or ``ids_hash`` fails
+the test vectors.
 """
 
 from __future__ import annotations
@@ -546,7 +547,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         report = run_audit(read_audit_config(args.config))
-    except AuditInputError as error:
+    except (AuditInputError, DigestMismatch) as error:
         return unusable_spec_status(args.config, error)
     args.report_out.parent.mkdir(parents=True, exist_ok=True)
     with args.report_out.open("x") as out:

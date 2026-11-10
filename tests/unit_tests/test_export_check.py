@@ -296,9 +296,13 @@ def without_prompts(content: dict) -> dict:
 
 
 def test_a_spec_draws_and_lists_no_prompts_when_it_states_them_null(tmp_path, selected):
-    spec = write_spec(tmp_path / "promptless.yaml", without_prompts(selected[1]))
+    content = without_prompts(selected[1])
+    spec = write_spec(tmp_path / "promptless.yaml", content)
     assert spec.listed("prompts") == () and spec.selection.prompt_counts == {}
-    assert export_check.select_windows(spec) == {"documents": selected[1]["documents"], "prompts": []}
+    listing = export_check.select_windows(spec)
+    assert listing == {"documents": selected[1]["documents"], "prompts": None}
+    # The listing that `select` writes is one that `load_spec` reads back.
+    assert write_spec(tmp_path / "relisted.yaml", {**content, **listing}).listed("prompts") == ()
 
 
 def test_a_spec_whose_selection_draws_no_prompts_but_whose_listing_holds_some_is_refused(tmp_path, selected):

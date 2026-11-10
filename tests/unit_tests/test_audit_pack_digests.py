@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import struct
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from scripts.data import audit_pack_digests as audit
 from scripts.data import packed_parquet
 from scripts.data.file_digest import file_sha256
 from scripts.telemetry.code_revision import code_revision
+from scripts.telemetry.gate_outcome import NOT_EVALUATED, exit_status
 
 from megatron.bridge.data.datasets.packed_parquet import write_packed_parquet
 from tests.unit_tests.corpora_fixtures import load_campaign_module
@@ -154,13 +156,14 @@ class TestDigestDefinition:
             {"ids": [100264, 9125, 198, 100257], "digest": -7694233868375670853},
         ]
 
-    def test_a_digest_function_that_fails_the_vectors_stops_the_audit_before_it_reads_anything(
-        self, tmp_path, monkeypatch
+    def test_a_digest_function_that_fails_the_vectors_stops_the_audit_not_evaluated_before_it_reads_anything(
+        self, tmp_path, monkeypatch, capsys
     ):
         built = Audit(tmp_path, BASE_PACKS, BASE_KEPT)
         monkeypatch.setattr(audit, "ids_digest", lambda ids: b"\x00" * 8)
-        with pytest.raises(audit.DigestMismatch, match=r"ids_hash\(\[1, 2, 3\]\) is 0"):
-            audit.main(["--config", str(built.config), "--report-out", str(built.report_path)])
+        status = audit.main(["--config", str(built.config), "--report-out", str(built.report_path)])
+        assert status == exit_status([NOT_EVALUATED])
+        assert re.search(r"DigestMismatch: ids_hash\(\[1, 2, 3\]\) is 0", capsys.readouterr().err)
         assert not built.report_path.exists()
 
 

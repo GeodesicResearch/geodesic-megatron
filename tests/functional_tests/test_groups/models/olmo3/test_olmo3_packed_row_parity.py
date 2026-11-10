@@ -18,7 +18,7 @@ layers only) with weights from ``olmo3_parity.build_toy_model``, imported to a M
   fault the spec registers for it.
 
 **The tolerance is measured.** Every run is first judged against a tolerance still PENDING, which reports the worst
-document's three measures. The tolerance is then set from the plain correct run by a rule stated here before it was
+value of each of the three measures over all documents. The tolerance is then set from the plain correct run by a rule stated here before it was
 applied: each limit is ``TOLERANCE_FACTOR`` times that run's worst measure over all documents, but at least
 ``TOLERANCE_FLOOR``. The test asserts that the other three correct layouts pass within it and that every fault fails.
 The measured table is printed (run pytest with ``-s``).

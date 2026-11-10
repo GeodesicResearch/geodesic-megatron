@@ -2,8 +2,8 @@
 # Licensed under the Apache License, Version 2.0.
 """Deliberate faults of a Megatron OLMo-3 model, for the negative controls of its parity checks.
 
-A parity check that has never failed has an unknown power. Each fault changes ONE thing that a weight round trip and a
-short prompt both miss, so that a check can be shown to fail when it should:
+A parity check that has never failed has an unknown power. Each fault changes ONE thing, so that a check can be shown to
+fail when it should:
 
 - ``yarn_all_layers``: YaRN rope and its attention factor on every layer (the transformers 5.x regression).
 - ``no_swa``: no sliding window. The rope selection is left alone, so the attention span changes and the rope does not.

@@ -9,7 +9,7 @@ transformers' own ``generate``.
 
 import pytest
 import torch
-from scripts.checkpoint import hf_model_outputs
+from scripts.checkpoint import hf_model_outputs, hf_olmo3_rope
 from transformers import AutoTokenizer
 
 from tests.unit_tests.tiny_models import tiny_llama, tiny_olmo3
@@ -134,9 +134,7 @@ def test_an_olmo3_is_loaded_with_a_plain_rope_on_its_sliding_layers(tmp_path, mo
     loaded = hf_model_outputs.load_model(str(tmp_path), "float32")
     with torch.no_grad():
         stock_logits, loaded_logits = stock(input_ids=ids).logits, loaded(input_ids=ids).logits
-    shared = getattr(stock.model, "rotary_emb", None)
-    one_rotary_for_every_layer = shared is not None and isinstance(shared.rope_type, str)
-    if one_rotary_for_every_layer:
+    if hf_olmo3_rope.has_one_shared_rope(stock):
         assert not torch.allclose(stock_logits, loaded_logits, atol=1e-3)
     else:
         assert torch.equal(stock_logits, loaded_logits)

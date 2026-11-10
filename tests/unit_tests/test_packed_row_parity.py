@@ -388,15 +388,14 @@ def plain_rope_cos(positions: int, head_dim: int, theta: float) -> torch.Tensor:
 
 def test_the_reference_gives_sliding_layers_plain_rope_and_full_attention_layers_yarn(tiny_model_dir):
     positions = 48  # beyond original_max_position_embeddings (32), where YaRN and plain rope differ
+    reference = load_tiny(tiny_model_dir)
+    if "shared rotary embedding" not in hf_olmo3_rope.apply_reference_rope(reference):
+        pytest.skip("this transformers already gives each layer type its own rope")
     stock = load_tiny(tiny_model_dir)
-    if not hasattr(stock.model, "rotary_emb"):
-        pytest.skip("this transformers already builds one rotary embedding per layer type")
+    assert hf_olmo3_rope.has_one_shared_rope(stock)
     stock_cos = rope_seen_by_each_layer(stock, positions)
     assert torch.equal(stock_cos[0], stock_cos[3]), "the installed transformers gives every layer the same rope"
 
-    reference = load_tiny(tiny_model_dir)
-    description = hf_olmo3_rope.apply_reference_rope(reference)
-    assert "shared rotary embedding" in description
     cos = rope_seen_by_each_layer(reference, positions)
     plain = plain_rope_cos(positions, head_dim=8, theta=10000.0)
     for index in (0, 1, 2):
@@ -408,19 +407,40 @@ def test_the_reference_gives_sliding_layers_plain_rope_and_full_attention_layers
     assert all(len(reference.model.layers[i]._forward_pre_hooks) == 1 for i in (0, 1, 2))
 
 
-def test_a_model_of_a_structure_the_reference_does_not_know_is_refused(tiny_model_dir):
-    unknown = load_tiny(tiny_model_dir)
-    unknown.model.rotary_emb.rope_type = None
-    with pytest.raises(hf_olmo3_rope.ReferenceRopeError, match="which this module does not know"):
-        hf_olmo3_rope.apply_reference_rope(unknown)
-    without = load_tiny(tiny_model_dir)
-    del without.model.rotary_emb
-    with pytest.raises(hf_olmo3_rope.ReferenceRopeError, match="neither rotary_embs nor rotary_emb"):
-        hf_olmo3_rope.apply_reference_rope(without)
-    per_type = load_tiny(tiny_model_dir)
-    per_type.model.rotary_emb.rope_type = {"sliding_attention": "yarn", "full_attention": "yarn"}
-    with pytest.raises(hf_olmo3_rope.ReferenceRopeError, match="is not plain for the sliding layers"):
-        hf_olmo3_rope.apply_reference_rope(per_type)
+#: Changes to a tiny model that leave it without one shared rope of a single type, each with the reference's refusal.
+OTHER_ROPE_FORMS = {
+    "an unknown rope type": (
+        lambda inner: setattr(inner.rotary_emb, "rope_type", None),
+        "which this module does not know",
+    ),
+    "no rotary embedding": (lambda inner: delattr(inner, "rotary_emb"), "neither rotary_embs nor rotary_emb"),
+    "a rope type per layer type": (
+        lambda inner: setattr(inner.rotary_emb, "rope_type", {"sliding_attention": "yarn", "full_attention": "yarn"}),
+        "is not plain for the sliding layers",
+    ),
+}
+
+
+@pytest.fixture(params=sorted(OTHER_ROPE_FORMS))
+def other_rope_form(request, tiny_model_dir):
+    """A tiny model in one of ``OTHER_ROPE_FORMS``, with the refusal the reference gives it."""
+    change, refusal = OTHER_ROPE_FORMS[request.param]
+    model = load_tiny(tiny_model_dir)
+    change(model.model)
+    return model, refusal
+
+
+def test_a_model_of_a_structure_the_reference_does_not_know_is_refused(other_rope_form):
+    model, refusal = other_rope_form
+    with pytest.raises(hf_olmo3_rope.ReferenceRopeError, match=refusal):
+        hf_olmo3_rope.apply_reference_rope(model)
+
+
+def test_a_model_without_one_shared_rope_of_a_single_type_gets_no_hook(other_rope_form):
+    model, _ = other_rope_form
+    assert not hf_olmo3_rope.has_one_shared_rope(model)
+    hf_olmo3_rope.restore_per_layer_rope(model)
+    assert not any(layer._forward_pre_hooks for layer in model.model.layers)
 
 
 def test_each_document_is_scored_alone_against_the_labels_the_training_step_gives_it(
