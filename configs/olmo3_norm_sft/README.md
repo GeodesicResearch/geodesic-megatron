@@ -14,14 +14,19 @@ the gradient reduction is fp32 and the Adam moments are fp32. The models are com
 | `watch_32b.yaml` | The training gate of the 32B run: the stops of the 7B gate, and limits of 93 GB allocated and 99 GB reserved memory |
 | `guard_32b.yaml` | The guard that runs `watch_32b.yaml` every two minutes while the 32B run trains and cancels it on a stop |
 | `olmo3_7b_dolci_sft.yaml` | The 7B run on AI2's Dolci Think SFT data for two epochs, composed onto `olmo3_7b_norm_sft.yaml` |
+| `olmo3_7b_norm_sft_grid.yaml` | The 7B Olmo-Norm run continued from its save at iteration 9,089 in a save folder of its own, composed onto `olmo3_7b_norm_sft.yaml` |
+| `olmo3_7b_norm_sft_grid_start.yaml` | The first segment of that run: it loads save 9,089 from the Olmo-Norm 7B run's folder, composed onto `olmo3_7b_norm_sft_grid.yaml` |
 | `data/` | The Dolci data builds: the prepare, the count pass, each epoch's row partition, pack and pack audit |
 | `checks/c3_export_check_7b.yaml` | The export check that every 7B export passes before its release |
 | `checks/c3_export_check_32b.yaml` | The 32B export check, composed onto the 7B one |
+| `checks/c2_save_record_7b_grid.yaml` | What a save of the grid run may record differently from save 9,089, for `scripts/checkpoint/save_record_check.py` |
 
 The launcher model keys are `olmo3_7b` and `olmo3_32b`, and only a full SFT recipe exists for them. The two Olmo-Norm
 configs differ only in the fields of `SIZE_FIELDS` and `ONLY_IN_THE_32B` in
 `tests/unit_tests/test_olmo3_norm_sft_configs.py`. The Dolci config differs from the 7B one only in the fields of
-`DOLCI_FIELDS` in `tests/unit_tests/test_olmo3_dolci_sft_config.py`.
+`DOLCI_FIELDS` in `tests/unit_tests/test_olmo3_dolci_sft_config.py`. The grid config differs from the 7B one only in
+the fields of `GRID_FIELDS` in `tests/unit_tests/test_olmo3_norm_sft_grid_config.py`, and its first segment's config
+from it only in `START_FIELDS` there.
 
 ## Data
 

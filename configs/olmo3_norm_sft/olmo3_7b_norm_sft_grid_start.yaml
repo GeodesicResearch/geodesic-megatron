@@ -1,0 +1,15 @@
+# The first segment of olmo3_7b_norm_sft_grid.yaml: it starts from save 9,089 of the Olmo-Norm 7B run.
+# It composes olmo3_7b_norm_sft_grid.yaml and changes only where the run loads from
+# (tests/unit_tests/test_olmo3_norm_sft_grid_config.py). It reads the save in the folder of olmo3_7b_norm_sft.yaml and
+# writes its saves to the folder of olmo3_7b_norm_sft_grid.yaml. The folder of olmo3_7b_norm_sft.yaml is only read, so
+# the trainer's pruning never removes save 9,089.
+#
+# checkpoint.ckpt_step names the save. With it set, setup raises when checkpoint.load holds no checkpoint. Without it
+# a launch that finds no checkpoint would start from the base weights at iteration 0, with no error.
+#
+# Only the first segment trains this file. Every later segment trains olmo3_7b_norm_sft_grid.yaml, which resumes from
+# the run's own folder.
+base_config: olmo3_7b_norm_sft_grid.yaml
+checkpoint:
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/metagaming_filtering/olmo3_7b_norm_sft
+  ckpt_step: 9089
