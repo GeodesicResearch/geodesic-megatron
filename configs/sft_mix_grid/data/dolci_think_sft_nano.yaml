@@ -1,0 +1,29 @@
+# The prepare of the Nemotron 3 Nano Dolci-SFT's corpus: AI2's allenai/Dolci-Think-SFT-7B at one commit, with each
+# assistant turn's leading <think> block moved to reasoning_content, written to
+# /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content/training.jsonl with every row in Hub order.
+#
+# Dolci keeps a turn's reasoning inline, between <think> and </think> at the start of the turn's content. The Nano's
+# think-history chat template reads a turn's reasoning from reasoning_content, as the Norm SFT mix supplies it. The
+# split is pipeline/data/records.py split_inline_reasoning, the rule that made the Dolci sets of the Norm SFT mix.
+#
+# The snapshot of this commit is in the shared Hub cache, so the load reads it from there. With no validation split,
+# line k of training.jsonl is row k of the Hub's order, which the count pass (dolci_think_sft_nano_counts.yaml) and the
+# row partitions read. The token count and the pack belong to those steps, so the prepare does neither.
+#
+#   python3 configs/control_pretraining/submit_corpus_job.py nano-dolci-prepare 03:00:00 \
+#       pipeline_data_prepare.py --config configs/sft_mix_grid/data/dolci_think_sft_nano.yaml
+dataset: allenai/Dolci-Think-SFT-7B
+revision: 83f618e2fe0aed29ee3440a3658a0326c175d09d
+output-dir: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+split: train
+split-inline-reasoning: ["<think>", "</think>"]
+# The dataset builder's count of the turns that open with <think> and that the rule leaves unsplit
+# (unlifted_think_turns in /projects/a5k/public/logs/metagaming_filtering/sft_mix_grid/nano_token_count/summary.json).
+# The prepare fails when it counts another number.
+accepted-unsplit-turns: 72
+seq-length: 32768
+val-proportion: 0
+num-proc: 32
+skip-pack: true
+skip-count: true

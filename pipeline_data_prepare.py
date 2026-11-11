@@ -41,6 +41,7 @@ import re
 import sys
 import time
 import traceback
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -53,7 +54,9 @@ from pipeline.data.layout import slugify_dataset_name
 from pipeline.data.load import load_source_dataset
 from pipeline.data.packing import run_pack
 from pipeline.data.records import (
+    LIFTED,
     SAMPLE_EXAMPLES,
+    UNSPLIT,
     detect_column_and_format,
     detect_stream_column,
     keep_head,
@@ -202,6 +205,24 @@ def parse_args():  # noqa: D103
         "fields a dataset kwarg reads, e.g. think_close_kind for dataset-kwargs think_close_key",
     )
     parser.add_argument(
+        "--split-inline-reasoning",
+        nargs=2,
+        metavar=("OPEN_TAG", "CLOSE_TAG"),
+        default=None,
+        help="For a chat-format corpus whose assistant turns open with a tagged reasoning span in their content "
+        "(e.g. <think> </think>): move that span to reasoning_content in every JSONL record "
+        "(pipeline/data/records.py split_inline_reasoning). A two-item list in --config. Omitted, the turns are "
+        "written as they are. Needs --accepted-unsplit-turns",
+    )
+    parser.add_argument(
+        "--accepted-unsplit-turns",
+        type=int,
+        default=None,
+        help="With --split-inline-reasoning: how many assistant turns that open with the tag the rule may leave "
+        "unsplit (a span never closed, or a reasoning_content that already holds text). The prepare fails after "
+        "the export when it counts another number, or when it moved no span at all",
+    )
+    parser.add_argument(
         "--dataset-kwargs",
         type=json.loads,
         default={},
@@ -289,6 +310,24 @@ def parse_args():  # noqa: D103
                 "so two commits of one tokenizer would share it; set --skip-pack"
             )
 
+    if args.split_inline_reasoning is not None:
+        tags = args.split_inline_reasoning
+        if (
+            not isinstance(tags, list)
+            or len(tags) != 2
+            or not all(isinstance(tag, str) and tag for tag in tags)
+            or tags[0] == tags[1]
+        ):
+            parser.error(f"--split-inline-reasoning needs two non-empty tags that differ, got {tags!r}")
+        accepted = args.accepted_unsplit_turns
+        if not isinstance(accepted, int) or isinstance(accepted, bool) or accepted < 0:
+            parser.error(
+                "--split-inline-reasoning needs --accepted-unsplit-turns, the number of tagged turns the rule may "
+                f"leave unsplit (0 for none), got {accepted!r}"
+            )
+    elif args.accepted_unsplit_turns is not None:
+        parser.error("--accepted-unsplit-turns counts the turns --split-inline-reasoning leaves; it needs that option")
+
     if args.streaming:
         problems = streaming_refusals(args)
         if problems:
@@ -357,6 +396,10 @@ def streaming_refusals(args):
         problems.append(
             f"--keep-columns {','.join(args.keep_columns)}: a stream is read projected to its document column, "
             "so it holds no other column to copy into the records"
+        )
+    if args.split_inline_reasoning is not None:
+        problems.append(
+            "--split-inline-reasoning rewrites chat messages, and a stream exports pretraining-format text only"
         )
     return problems
 
@@ -447,6 +490,9 @@ def run_pipeline(args):
         "packing_algorithm": args.packing_algorithm,
         "dataset_kwargs": args.dataset_kwargs,
         "keep_columns": args.keep_columns,
+        "split_inline_reasoning": args.split_inline_reasoning,
+        "accepted_unsplit_turns": args.accepted_unsplit_turns,
+        "inline_reasoning_turns": None,
         "tokenizer_revision": args.tokenizer_revision,
         "streaming": args.streaming,
         "stream_workers": args.stream_workers,
@@ -542,6 +588,9 @@ def run_pipeline(args):
         if missing_keep:
             print(f"Error: --keep-columns columns not found: {missing_keep}. Available: {ds.column_names}")
             return 1
+        if args.split_inline_reasoning is not None and format_type != "chat":
+            print(f"Error: --split-inline-reasoning needs a chat-format column, and '{text_column}' is {format_type}")
+            return 1
     results["text_column"] = text_column
     results["format"] = format_type
     print(f"  Column: {text_column}")
@@ -604,6 +653,7 @@ def run_pipeline(args):
     # ── Stage 4: EXPORT ────────────────────────────────────────────
     print("\n[4/6] EXPORT - Saving to JSONL...")
     export_start = time.time()
+    reasoning_turns = Counter() if args.split_inline_reasoning is not None else None
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -646,7 +696,14 @@ def run_pipeline(args):
     else:
         print(f"  Writing {train_path} ({len(train_ds):,} docs)...")
         training_docs = write_jsonl(
-            train_ds, train_path, text_column, format_type, args.keep_columns, total=len(train_ds)
+            train_ds,
+            train_path,
+            text_column,
+            format_type,
+            args.keep_columns,
+            total=len(train_ds),
+            inline_reasoning_tags=args.split_inline_reasoning,
+            inline_reasoning_counts=reasoning_turns,
         )
     results["training_jsonl"] = str(train_path)
     results["training_docs"] = training_docs
@@ -655,12 +712,33 @@ def run_pipeline(args):
     if val_ds is not None:
         val_path = output_dir / "validation.jsonl"
         print(f"  Writing {val_path} ({len(val_ds):,} docs)...")
-        write_jsonl(val_ds, val_path, text_column, format_type, args.keep_columns, total=len(val_ds))
+        write_jsonl(
+            val_ds,
+            val_path,
+            text_column,
+            format_type,
+            args.keep_columns,
+            total=len(val_ds),
+            inline_reasoning_tags=args.split_inline_reasoning,
+            inline_reasoning_counts=reasoning_turns,
+        )
         results["validation_jsonl"] = str(val_path)
         results["validation_docs"] = len(val_ds)
     else:
         results["validation_jsonl"] = None
         results["validation_docs"] = 0
+
+    if reasoning_turns is not None:
+        lifted, unsplit = reasoning_turns[LIFTED], reasoning_turns[UNSPLIT]
+        results["inline_reasoning_turns"] = {LIFTED: lifted, UNSPLIT: unsplit}
+        print(f"  Turns that open with {args.split_inline_reasoning[0]}: {lifted:,} lifted, {unsplit:,} left unsplit")
+        if lifted == 0 or unsplit != args.accepted_unsplit_turns:
+            print(
+                f"Error: --split-inline-reasoning moved {lifted:,} spans and left {unsplit:,} tagged turns unsplit, "
+                f"and --accepted-unsplit-turns is {args.accepted_unsplit_turns:,}. The JSONL files are written "
+                "and are not a prepared corpus"
+            )
+            return 1
 
     export_time = time.time() - export_start
     results["export_time"] = export_time
