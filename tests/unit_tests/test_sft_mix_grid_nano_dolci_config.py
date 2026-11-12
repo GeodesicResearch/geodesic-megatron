@@ -5,8 +5,9 @@
 
 The run fine-tunes NVIDIA's Nemotron 3 Nano Base for two epochs on AI2's Dolci Think SFT data at the recipe of the
 Nemotron 3 Nano Norm-SFT. These tests pin the fields that differ, the order in which the loader reads the two epochs,
-the length, the saves and the width. They also pin that the data configs of the second pair of packs build the
-first pair's rows again from other seeds and change nothing else.
+the length, the saves and the width. The data configs of the second pair of packs build the first pair's rows again
+from other seeds. They differ from the first pair's configs in their folder and seed only. Run 2 is run 1 on that
+second pair.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from tests.unit_tests.campaign_config import (
 _CONFIGS = Path(__file__).resolve().parents[2] / "configs"
 _DATA = _CONFIGS / "sft_mix_grid" / "data"
 DOLCI = _CONFIGS / "sft_mix_grid" / "nemotron_nano_dolci_sft.yaml"
+RUN_TWO = _CONFIGS / "sft_mix_grid" / "nemotron_nano_dolci_sft_run2.yaml"
 NORM = (
     _CONFIGS
     / "control_pretraining"
@@ -43,9 +45,12 @@ _DOLCI_ROOT = Path("/projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reaso
 TOKENIZER = "geodesic-research/nemotron-think-history-tokenizer"
 PAD_SEQ_TO_MULT = 4
 BATCH = 256
-#: The packs of each epoch, in the loader's order: `totals.packs` of each epoch's pack audit report
-#: (configs/sft_mix_grid/data/dolci_think_sft_nano_epoch{1,2}_audit_m4.yaml).
-EPOCH_PACKS = (707_652, 707_654)
+#: Per run, the folders of its two pack sets in the loader's order and the packs of each. A count is `totals.packs`
+#: of the set's pack audit report (configs/sft_mix_grid/data/dolci_think_sft_nano_<set>_audit_m4.yaml).
+RUNS = {
+    DOLCI: (("epoch1", "epoch2"), (707_652, 707_654)),
+    RUN_TWO: (("run2_epoch1", "run2_epoch2"), (707_647, 707_657)),
+}
 #: What makes this run another run than the Nemotron 3 Nano Norm-SFT: its corpus, its length, its run identity and the
 #: number of saves it keeps.
 DOLCI_FIELDS = IDENTITY | SFT_CORPUS_FIELDS | {"train.train_iters", "checkpoint.most_recent_k"}
@@ -70,13 +75,21 @@ def test_only_the_corpus_length_identity_and_saves_kept_differ_from_the_norm_sft
     assert_only_these_fields_differ(dolci, merged(NORM), DOLCI_FIELDS, "nemotron_nano_dolci_sft")
 
 
-def test_it_reads_epoch_one_then_epoch_two_at_the_norm_sfts_tokenizer_and_padding_multiple(dolci):
-    specs = dolci.dataset.packed_sequence_specs
+def test_run_two_differs_from_run_one_in_its_pack_paths_and_run_identity_only(dolci):
+    fields = IDENTITY | {"dataset.packed_sequence_specs.packed_train_data_path"}
+    assert_only_these_fields_differ(merged(RUN_TWO), dolci, fields, "nemotron_nano_dolci_sft_run2")
+    assert_it_saves_to_a_directory_of_its_own(merged(RUN_TWO), "nemotron_nano_dolci_sft_run2", [dolci, merged(NORM)])
+
+
+@pytest.mark.parametrize("run", RUNS, ids=lambda path: path.stem)
+def test_it_reads_epoch_one_then_epoch_two_at_the_norm_sfts_tokenizer_and_padding_multiple(run):
+    config, (pack_sets, _) = merged(run), RUNS[run]
+    specs = config.dataset.packed_sequence_specs
     assert specs.packed_train_data_path == [
-        str(pack_dir(f"{_DOLCI_ROOT}/epoch{epoch}/shard*", TOKENIZER, PAD_SEQ_TO_MULT) / "training_32768.idx.parquet")
-        for epoch in (1, 2)
+        str(pack_dir(f"{_DOLCI_ROOT}/{pack_set}/shard*", TOKENIZER, PAD_SEQ_TO_MULT) / "training_32768.idx.parquet")
+        for pack_set in pack_sets
     ]
-    assert (dolci.tokenizer.tokenizer_model, specs.pad_seq_to_mult) == (TOKENIZER, PAD_SEQ_TO_MULT)
+    assert (config.tokenizer.tokenizer_model, specs.pad_seq_to_mult) == (TOKENIZER, PAD_SEQ_TO_MULT)
 
 
 def test_it_saves_every_1200_iterations_keeping_two_in_a_directory_of_its_own(dolci):
@@ -84,13 +97,15 @@ def test_it_saves_every_1200_iterations_keeping_two_in_a_directory_of_its_own(do
     assert_it_saves_to_a_directory_of_its_own(dolci, "nemotron_nano_dolci_sft", [merged(NORM)])
 
 
-def test_the_loader_reads_each_full_batch_of_both_epochs_once(dolci):
-    batches = batches_the_loader_reads(sum(EPOCH_PACKS), BATCH, dolci.train.train_iters)
-    assert_one_pass_of_full_batches(batches, sum(EPOCH_PACKS), BATCH, dolci.train.train_iters)
+@pytest.mark.parametrize("run", RUNS, ids=lambda path: path.stem)
+def test_the_loader_reads_each_full_batch_of_both_epochs_once(run):
+    packs, train_iters = sum(RUNS[run][1]), merged(run).train.train_iters
+    assert_one_pass_of_full_batches(batches_the_loader_reads(packs, BATCH, train_iters), packs, BATCH, train_iters)
 
 
-def test_it_trains_on_64_nodes_with_each_gpu_a_data_parallel_replica():
-    width = config_launch_width(str(DOLCI))
+@pytest.mark.parametrize("run", RUNS, ids=lambda path: path.stem)
+def test_it_trains_on_64_nodes_with_each_gpu_a_data_parallel_replica(run):
+    width = config_launch_width(str(run))
     assert (width.nodes, width.gpus_per_node, width.data_parallel_size) == (64, 4, 256)
 
 

@@ -8,6 +8,7 @@ the two Olmo 3 7B runs of `configs/olmo3_norm_sft/`.
 | File | What it is |
 |---|---|
 | `nemotron_nano_dolci_sft.yaml` | The run's training config, an overlay of the Norm-SFT config |
+| `nemotron_nano_dolci_sft_run2.yaml` | Run 2: another run of the recipe, on the second pair of packs, an overlay of the run's config |
 | `data/dolci_think_sft_nano.yaml` | The prepare: Dolci at one commit, with each assistant turn's leading think block moved to `reasoning_content` |
 | `data/dolci_think_sft_nano_counts.yaml` | The count pass: each row's tokens and digest under the Nano tokenizer, and the rows over 32,768 tokens |
 | `data/dolci_think_sft_nano_epoch{1,2}_partition.yaml` | Each epoch's rows in a seeded random order, in 32 shards, less the rows over length |
