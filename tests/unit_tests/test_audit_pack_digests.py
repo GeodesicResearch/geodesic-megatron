@@ -115,6 +115,7 @@ class Audit:
                 {
                     "parquets": str(tmp_path / "shard*" / PARQUET_NAME),
                     "pad_token_id": PAD,
+                    "render_ends_in_pad": True,
                     "kept_digests": str(self.kept),
                     "dropped_digests": None if self.dropped is None else str(self.dropped),
                     "workers": 1,
@@ -171,8 +172,8 @@ class TestScanningShards:
     def test_shards_scanned_in_a_pool_equal_shards_scanned_in_this_process(self, tmp_path):
         built = Audit(tmp_path, BASE_PACKS, BASE_KEPT)
         parquets = tuple(built.parquets[name] for name in BASE_PACKS)
-        in_process = audit.scan_shards(parquets, PAD, workers=1)
-        pooled = audit.scan_shards(parquets, PAD, workers=2)
+        in_process = audit.scan_shards(parquets, PAD, True, workers=1)
+        pooled = audit.scan_shards(parquets, PAD, True, workers=2)
         assert [scan.packs for scan in pooled] == [scan.packs for scan in in_process] == [2, 2]
         for scan_pooled, scan_here in zip(pooled, in_process):
             assert scan_pooled.error == scan_here.error is None
@@ -182,22 +183,30 @@ class TestScanningShards:
 class TestRenderIds:
     def test_all_trailing_pad_ids_go_and_one_stays(self):
         ids = np.array([5, 6, PAD, PAD, PAD, PAD], dtype="<i4")
-        assert audit.render_ids(ids, PAD).tolist() == [5, 6, PAD]
+        assert audit.render_ids(ids, PAD, True).tolist() == [5, 6, PAD]
 
     def test_a_render_ending_in_one_pad_id_is_the_document_itself(self):
-        assert audit.render_ids(np.array([5, 6, PAD], dtype="<i4"), PAD).tolist() == [5, 6, PAD]
+        assert audit.render_ids(np.array([5, 6, PAD], dtype="<i4"), PAD, True).tolist() == [5, 6, PAD]
 
     def test_pad_ids_inside_the_render_stay(self):
         ids = np.array([5, PAD, 6, PAD, PAD, PAD], dtype="<i4")
-        assert audit.render_ids(ids, PAD).tolist() == [5, PAD, 6, PAD]
+        assert audit.render_ids(ids, PAD, True).tolist() == [5, PAD, 6, PAD]
 
-    def test_a_document_without_a_trailing_pad_id_has_no_render(self):
+    @pytest.mark.parametrize("ends_in_pad", [True, False])
+    def test_a_document_without_a_trailing_pad_id_has_no_render(self, ends_in_pad):
         with pytest.raises(audit.NoRender, match=f"the last id is 6, not the pad id {PAD}"):
-            audit.render_ids(np.array([5, PAD, 6], dtype="<i4"), PAD)
+            audit.render_ids(np.array([5, PAD, 6], dtype="<i4"), PAD, ends_in_pad)
 
-    def test_a_document_of_pad_ids_alone_has_no_render(self):
+    @pytest.mark.parametrize("ends_in_pad", [True, False])
+    def test_a_document_of_pad_ids_alone_has_no_render(self, ends_in_pad):
         with pytest.raises(audit.NoRender, match="render is empty"):
-            audit.render_ids(np.array([PAD, PAD], dtype="<i4"), PAD)
+            audit.render_ids(np.array([PAD, PAD], dtype="<i4"), PAD, ends_in_pad)
+
+    def test_a_render_that_does_not_end_in_the_pad_id_loses_every_trailing_pad_id(self):
+        """The Nemotron render ends in a newline after its end-of-turn id, which is also the pad id."""
+        ids = np.array([5, PAD, 7, PAD, PAD, PAD], dtype="<i4")
+        assert audit.render_ids(ids, PAD, False).tolist() == [5, PAD, 7]
+        assert audit.render_ids(ids, PAD, True).tolist() == [5, PAD, 7, PAD]
 
 
 class TestIterDocuments:
@@ -259,7 +268,7 @@ class TestScanShard:
     def test_it_recovers_each_render_and_digests_it(self, tmp_path):
         parquet = tmp_path / "shard.parquet"
         write_shard(parquet, [[0, 1], [2], [3, 4, 5]])
-        scan = audit.scan_shard(parquet, PAD)
+        scan = audit.scan_shard(parquet, PAD, True)
         assert scan.error is None
         assert scan.digests.tolist() == [expected_hash(RENDERS[i]) for i in range(6)]
         assert (scan.packs, scan.tokens, scan.refused) == (3, sum(len(stored(i)) for i in range(6)), 0)
@@ -275,7 +284,7 @@ class TestScanShard:
     def test_a_document_without_a_render_is_counted_and_located_and_the_scan_goes_on(self, tmp_path):
         parquet = tmp_path / "shard.parquet"
         write_shard(parquet, [[0, [7, 8, 9]], [[PAD, PAD], 1]])
-        scan = audit.scan_shard(parquet, PAD)
+        scan = audit.scan_shard(parquet, PAD, True)
         assert scan.error is None
         assert scan.digests.tolist() == [expected_hash(RENDERS[0]), expected_hash(RENDERS[1])]
         assert scan.refused == 2
@@ -299,15 +308,17 @@ class TestScanShard:
         for name, table in cases.items():
             parquet = tmp_path / f"{name}.parquet"
             pq.write_table(table, parquet)
-            scan = audit.scan_shard(parquet, PAD)
+            scan = audit.scan_shard(parquet, PAD, True)
             assert scan.error is not None and scan.error.startswith(f"{parquet}: "), name
             assert (len(scan.digests), scan.packs) == (0, 0), name
 
     def test_a_file_that_is_not_parquet_is_an_error(self, tmp_path):
         parquet = tmp_path / "shard.parquet"
         parquet.write_text("not parquet")
-        assert audit.scan_shard(parquet, PAD).error.startswith(f"{parquet}: ")
-        assert audit.scan_shard(tmp_path / "absent.parquet", PAD).error.startswith(f"{tmp_path / 'absent.parquet'}: ")
+        assert audit.scan_shard(parquet, PAD, True).error.startswith(f"{parquet}: ")
+        assert audit.scan_shard(tmp_path / "absent.parquet", PAD, True).error.startswith(
+            f"{tmp_path / 'absent.parquet'}: "
+        )
 
 
 class TestBeyondOther:
@@ -347,6 +358,18 @@ class TestRun:
         assert (comparison["kept_digests"], comparison["kept_distinct_digests"]) == (7, 6)
         assert comparison["extra_documents"]["count"] == comparison["missing_digests"]["count"] == 0
         assert comparison["dropped_digests_present"] == {"listed": 1, "present": 0, "documents": 0, "examples": []}
+
+    def test_renders_that_do_not_end_in_the_pad_id_pass_only_under_the_config_that_says_so(self, tmp_path):
+        """A pack of renders that end in another id than the pad id, each stored with one to three pad ids after it."""
+        renders = [[5, 6, PAD, 7], [8, PAD, 9], [10, 11, 12]]
+        packs = {"shard0": [[[*ids, *[PAD] * (index + 1)] for index, ids in enumerate(renders)]]}
+        built = Audit(tmp_path, packs, renders)
+        status, report = built.run()
+        assert (status, report["verdict"]) == (1, "FAIL")
+        built.report_path.unlink()
+        built.edit(render_ends_in_pad=False)
+        status, report = built.run()
+        assert (status, report["verdict"], report["render_ends_in_pad"]) == (0, "PASS", False)
 
     def test_without_a_dropped_list_nothing_is_checked_against_one(self, tmp_path):
         status, report = Audit(tmp_path, BASE_PACKS, BASE_KEPT).run()
@@ -510,6 +533,8 @@ class TestInputs:
             ({"pad_token_id": -1}, "pad_token_id must be a token id"),
             ({"pad_token_id": True}, "pad_token_id must be a token id"),
             ({"pad_token_id": 2**31}, "does not fit <i4"),
+            ({"render_ends_in_pad": KeyError}, "missing keys ['render_ends_in_pad']"),
+            ({"render_ends_in_pad": 1}, "render_ends_in_pad must be true or false"),
             ({"workers": 0}, "workers must be an integer >= 1"),
             ({"kept_digests": "/absent/kept.txt"}, "no file at /absent/kept.txt"),
             ({"dropped_digests": 5}, "dropped_digests must be a non-empty string"),
@@ -608,6 +633,7 @@ class TestRealPacker:
                 {
                     "parquets": [str(parquet)],
                     "pad_token_id": ROW_VOCAB["</s>"],
+                    "render_ends_in_pad": True,
                     "kept_digests": str(write_list(tmp_path / "kept.txt", [expected_hash(ids) for ids in kept])),
                     "dropped_digests": str(
                         write_list(tmp_path / "dropped.txt", [expected_hash(ids) for ids in dropped])

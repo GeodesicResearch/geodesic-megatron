@@ -6,6 +6,7 @@
 #       --report-out /projects/a5k/public/logs/metagaming_filtering/sft_mix_grid/megatron/audits_nano_dolci/epoch2_m4.json
 parquets: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content/epoch2/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
 pad_token_id: 11
+render_ends_in_pad: false
 kept_digests: /projects/a5k/public/logs/metagaming_filtering/sft_mix_grid/megatron/counts_nano_dolci/kept_digests.txt
 dropped_digests: /projects/a5k/public/logs/metagaming_filtering/sft_mix_grid/megatron/counts_nano_dolci/over_length_digests.txt
 workers: 32

@@ -682,3 +682,13 @@ def batches_the_loader_reads(packs: int, batch: int, iterations: int) -> list[li
         PackCount(packs), 0, "batch", 1, 0, False, pin_memory=False, global_batch_size=batch
     )
     return list(islice(cyclic_iter(loader.batch_sampler), iterations))
+
+
+def assert_one_pass_of_full_batches(batches: list[list[int]], packs: int, batch: int, train_iters: int) -> None:
+    """``train_iters`` is ``packs`` over ``batch``, rounded down, and ``batches`` (``batches_the_loader_reads`` for
+    that length) read every full batch once, in pack order. So the loader never starts another pass, and the packs
+    left unread are the last ones, short of one batch."""
+    assert train_iters == packs // batch
+    read = [index for indices in batches for index in indices]
+    assert read == list(range(train_iters * batch))
+    assert packs - len(read) == packs % batch

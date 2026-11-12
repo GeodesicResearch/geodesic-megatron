@@ -1,0 +1,39 @@
+# The Nemotron 3 Nano Dolci-SFT: NVIDIA's Nemotron 3 Nano Base trained on AI2's Dolci Think SFT data for two epochs.
+#
+# It composes the Nemotron 3 Nano Norm-SFT config and launches with that config's .env. The fields that differ are
+# DOLCI_FIELDS in tests/unit_tests/test_sft_mix_grid_nano_dolci_config.py, and the launch_width block is added.
+#
+# THE DATA. Two packs of the same rows, each in its own seeded random order (configs/sft_mix_grid/data/, epochs 1 and
+# 2). The trainer reads the two entries below in the order given, the files of each in sorted path order and each
+# file's rows in the file's order. So the run reads epoch 1 and then epoch 2, each row once per epoch.
+#
+# THE LENGTH. floor((packs of epoch 1 + packs of epoch 2) / 256). The last packs short of one batch are not read.
+#
+# THE SAVES. The trainer keeps the 2 most recent. The final save is the run's model. The save before it is kept so that
+# a failed last save loses one save interval at most.
+#
+# The 5e-5 learning rate is on the full-SFT exception list of CLAUDE.md (Kyle, 2026-11-10).
+base_config: ../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml
+dataset:
+  dataset_name: allenai/Dolci-Think-SFT-7B
+  dataset_root: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content
+  packed_sequence_specs:
+    packed_train_data_path:
+      - /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content/epoch1/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+      - /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content/epoch2/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+train:
+  train_iters: 5528                  # floor((707,652 + 707,654) packs / 256)
+checkpoint:
+  load: /projects/a5k/public/checkpoints/megatron/metagaming_filtering/nemotron_nano_dolci_sft
+  save: /projects/a5k/public/checkpoints/megatron/metagaming_filtering/nemotron_nano_dolci_sft
+  most_recent_k: 2
+logger:
+  wandb_exp_name: nemotron_nano_dolci_sft
+
+# The width it trains at (scripts/training/launch_width.py): 64 nodes, each GPU a data-parallel replica. The launcher
+# NVLink-sweeps the allocation and trains on its first 64 healthy nodes. So a segment can request a spare.
+launch_width:
+  nodes: 64
+  gpus_per_node: 4
+  data_parallel_size: 256
+  nvlink_links_per_gpu: 18

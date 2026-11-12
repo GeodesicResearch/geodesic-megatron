@@ -6,11 +6,13 @@
 The dataset builder lists a digest for every kept row of a mix (one per line, in source order) and for every dropped
 row. A digest is ``ids_hash``: the BLAKE2b with an 8-byte output of the row's token ids as little-endian int32, read
 as a signed little-endian int64. The ids are the whole training render with the pinned tokenizer and
-``add_special_tokens`` false, including the final end-of-text token.
+``add_special_tokens`` false, up to and including its last id.
 
-The packer stores each render followed by padding of the same end-of-text id (``pad_document_for_packing``). So the
-audit recovers a document's render by removing all its trailing pad ids and putting back one. A document that has no
-trailing pad id, or whose other ids are empty, has no render. The audit lists it as refused and the verdict is FAIL.
+The packer stores each render followed by padding of the tokenizer's end-of-text id (``pad_document_for_packing``).
+The config says whether a render itself ends in that id (``render_ends_in_pad``). An Olmo render does: the audit
+recovers it by removing all trailing pad ids and putting back one. A Nemotron render ends in a newline after its
+end-of-turn id: the audit removes all trailing pad ids. A document that has no trailing pad id, or whose other ids are
+empty, has no render. The audit lists it as refused and the verdict is FAIL.
 
 The mix repeats some documents by design, so the pack and the kept list are compared as multisets. A digest that occurs
 three times in the kept list must occur three times in the pack. Every pack document of every shard is read, and
@@ -31,7 +33,8 @@ The config is YAML with exactly these keys::
 
     parquets: /projects/.../shard*/packed/<tokenizer>_pad_seq_to_mult8/training_32768.idx.parquet
                                         # a glob, or a list of paths; every path must exist; read in sorted order
-    pad_token_id: 100257                # the end-of-text id of the tokenizer (100257 for Olmo)
+    pad_token_id: 100257                # the id the packer pads with (100257 for Olmo, 11 for Nemotron)
+    render_ends_in_pad: true            # whether a row's render ends in that id (true for Olmo, false for Nemotron)
     kept_digests: /path/kept_ids_hash_<size>.txt
     dropped_digests: /path/dropped.txt  # or null for none
     workers: 32                         # shards read at once, a process each
@@ -88,7 +91,9 @@ from scripts.token_ids import require_token_id  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-CONFIG_KEYS = frozenset({"parquets", "pad_token_id", "kept_digests", "dropped_digests", "workers"})
+CONFIG_KEYS = frozenset(
+    {"parquets", "pad_token_id", "render_ends_in_pad", "kept_digests", "dropped_digests", "workers"}
+)
 IDS_DTYPE = "<i4"
 DIGEST_BYTES = 8
 EXAMPLES = 10  # how many locations a report lists for each kind of finding
@@ -98,7 +103,7 @@ INT64 = np.iinfo(np.int64)
 LOCATION = np.dtype([("pack", "<i4"), ("document", "<i4"), ("start", "<i4"), ("length", "<i4")])
 DIGEST_DEFINITION = (
     "int.from_bytes(hashlib.blake2b(np.asarray(ids, dtype='<i4').tobytes(), digest_size=8).digest(), 'little', "
-    "signed=True) over the ids of the whole training render, add_special_tokens false, with the final end-of-text id"
+    "signed=True) over the ids of the whole training render, add_special_tokens false, up to and including its last id"
 )
 TEST_VECTORS = (
     ([1, 2, 3], -7044357283931317034),
@@ -146,10 +151,9 @@ def check_digest_definition() -> list[dict]:
     return [{"ids": ids, "digest": expected} for ids, expected in TEST_VECTORS]
 
 
-def render_ids(ids: np.ndarray, pad_token_id: int) -> np.ndarray:
-    """The ids of the render a packed document holds: its ids up to and including the first of its trailing pad ids.
-
-    That is the document with all trailing pad ids removed and exactly one put back, as a view without a copy.
+def render_ids(ids: np.ndarray, pad_token_id: int, ends_in_pad: bool) -> np.ndarray:
+    """The ids of the render a packed document holds, as a view without a copy: the document with all its trailing pad
+    ids removed, and exactly one put back when a render ends in the pad id (``ends_in_pad``).
 
     Raises:
         NoRender: the document does not end in the pad id, or holds nothing but pad ids.
@@ -160,7 +164,7 @@ def render_ids(ids: np.ndarray, pad_token_id: int) -> np.ndarray:
     last = int(other[-1])
     if last == len(ids) - 1:
         raise NoRender(f"the last id is {int(ids[last])}, not the pad id {pad_token_id}")
-    return ids[: last + 2]
+    return ids[: last + 1 + ends_in_pad]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -170,12 +174,14 @@ def render_ids(ids: np.ndarray, pad_token_id: int) -> np.ndarray:
 
 @dataclass(frozen=True)
 class AuditConfig:
-    """An audit config as read: the shards' parquets, the pad id, the two lists and the number of workers."""
+    """An audit config as read: the shards' parquets, the pad id, whether a render ends in it, the two lists and the
+    number of workers."""
 
     path: Path
     sha256: str
     parquets: tuple[Path, ...]
     pad_token_id: int
+    render_ends_in_pad: bool
     kept_digests: Path
     dropped_digests: Path | None
     workers: int
@@ -224,12 +230,15 @@ def read_audit_config(path: Path) -> AuditConfig:
     pad_token_id = require_token_id(config["pad_token_id"], f"{path}: pad_token_id", error=AuditInputError)
     if pad_token_id > np.iinfo(IDS_DTYPE).max:
         raise AuditInputError(f"{path}: pad_token_id {pad_token_id} does not fit {IDS_DTYPE}")
+    if not isinstance(config["render_ends_in_pad"], bool):
+        raise AuditInputError(f"{path}: render_ends_in_pad must be true or false")
     dropped = config["dropped_digests"]
     return AuditConfig(
         path=path.resolve(),
         sha256=file_sha256(path),
         parquets=resolve_parquets(config["parquets"], f"{path}: parquets"),
         pad_token_id=pad_token_id,
+        render_ends_in_pad=config["render_ends_in_pad"],
         kept_digests=list_path(config["kept_digests"], f"{path}: kept_digests"),
         dropped_digests=None if dropped is None else list_path(dropped, f"{path}: dropped_digests"),
         workers=require_int(config["workers"], f"{path}: workers", 1, error=AuditInputError),
@@ -294,7 +303,7 @@ def failed_scan(error: str) -> ShardScan:
     return ShardScan(error, 0, 0, empty, np.empty(0, dtype=LOCATION), 0, ())
 
 
-def scan_shard(parquet: Path, pad_token_id: int) -> ShardScan:
+def scan_shard(parquet: Path, pad_token_id: int, render_ends_in_pad: bool) -> ShardScan:
     """Read one shard's parquet one row group at a time and digest the render of every document.
 
     A document without a render is counted and its first few are described, and the scan goes on. A shard that cannot
@@ -309,7 +318,7 @@ def scan_shard(parquet: Path, pad_token_id: int) -> ShardScan:
             packs, tokens = document.pack + 1, tokens + document.length
             where = (document.pack, document.document, document.start, document.length)
             try:
-                render = render_ids(document.ids, pad_token_id)
+                render = render_ids(document.ids, pad_token_id, render_ends_in_pad)
             except NoRender as problem:
                 refused += 1
                 if len(examples) < EXAMPLES:
@@ -340,16 +349,18 @@ def log_scans(parquets: tuple[Path, ...], scans: Iterable[ShardScan]) -> list[Sh
     return collected
 
 
-def scan_shards(parquets: tuple[Path, ...], pad_token_id: int, workers: int) -> list[ShardScan]:
+def scan_shards(
+    parquets: tuple[Path, ...], pad_token_id: int, render_ends_in_pad: bool, workers: int
+) -> list[ShardScan]:
     """Scan every shard, ``workers`` at a time, each in a process of its own (in this process when one worker would
     do); the scans in shard order."""
     pool_size = min(workers, len(parquets))
     if pool_size == 1:
-        return log_scans(parquets, map(scan_shard, parquets, repeat(pad_token_id)))
+        return log_scans(parquets, map(scan_shard, parquets, repeat(pad_token_id), repeat(render_ends_in_pad)))
     # Spawned, not forked: a forked child inherits whatever threads the parent holds (pyarrow's pool among them).
     context = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(max_workers=pool_size, mp_context=context) as pool:
-        return log_scans(parquets, pool.map(scan_shard, parquets, repeat(pad_token_id)))
+        return log_scans(parquets, pool.map(scan_shard, parquets, repeat(pad_token_id), repeat(render_ends_in_pad)))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -494,7 +505,7 @@ def run_audit(config: AuditConfig) -> dict:
                 f"{len(shared):,} digests are in both {config.kept_digests} and {config.dropped_digests}, "
                 f"so the pack cannot show whether a row was dropped (first: {shared[:EXAMPLES].tolist()})"
             )
-    scans = scan_shards(config.parquets, config.pad_token_id, config.workers)
+    scans = scan_shards(config.parquets, config.pad_token_id, config.render_ends_in_pad, config.workers)
     shards = [shard_report(parquet, scan) for parquet, scan in zip(config.parquets, scans)]
     failures = [f"shard {scan.error}" for scan in scans if scan.error]
     unreadable = bool(failures)
@@ -519,6 +530,7 @@ def run_audit(config: AuditConfig) -> dict:
         "code_revision": code_revision(str(REPO_ROOT)),
         "digest_definition": {"text": DIGEST_DEFINITION, "test_vectors": vectors},
         "pad_token_id": config.pad_token_id,
+        "render_ends_in_pad": config.render_ends_in_pad,
         "kept_list": list_report(config.kept_digests, kept),
         "dropped_list": list_report(config.dropped_digests, dropped),
         "shards": shards,

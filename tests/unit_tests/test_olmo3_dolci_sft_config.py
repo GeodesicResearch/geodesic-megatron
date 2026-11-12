@@ -21,6 +21,7 @@ from pipeline.training.recipes import OLMO3_BASE_COPIES, RECIPE_MAP
 from tests.unit_tests.campaign_config import (
     IDENTITY,
     assert_it_saves_to_a_directory_of_its_own,
+    assert_one_pass_of_full_batches,
     assert_only_these_fields_differ,
     assert_the_pinned_code_is_sound,
     batches_the_loader_reads,
@@ -100,11 +101,7 @@ def test_it_saves_every_2000_iterations_keeping_two_in_a_directory_of_its_own(do
 @needs_base_copy
 def test_the_loader_reads_each_full_batch_of_both_epochs_once(dolci, batches):
     """train_iters is the packs of both epochs over the batch, rounded down, so the loader never starts a third pass."""
-    packs = sum(EPOCH_PACKS)
-    assert dolci.train.train_iters == packs // BATCH
-    read = [index for indices in batches for index in indices]
-    assert read == list(range(dolci.train.train_iters * BATCH))
-    assert packs - len(read) == packs % BATCH
+    assert_one_pass_of_full_batches(batches, sum(EPOCH_PACKS), BATCH, dolci.train.train_iters)
 
 
 @needs_base_copy

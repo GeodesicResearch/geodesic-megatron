@@ -103,6 +103,7 @@ def test_a_row_over_the_length_is_listed_and_the_kept_list_audits_a_pack_without
             {
                 "parquets": [str(packed_path(root, tokenizer_dir, SEQ_LENGTH, 8))],
                 "pad_token_id": ROW_VOCAB["</s>"],
+                "render_ends_in_pad": True,
                 "kept_digests": str(out / "kept_digests.txt"),
                 "dropped_digests": str(out / "over_length_digests.txt"),
                 "workers": 1,
