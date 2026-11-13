@@ -16,6 +16,7 @@ the gradient reduction is fp32 and the Adam moments are fp32. The models are com
 | `olmo3_7b_dolci_sft.yaml` | The 7B run on AI2's Dolci Think SFT data for two epochs, composed onto `olmo3_7b_norm_sft.yaml` |
 | `olmo3_7b_norm_sft_grid.yaml` | The 7B Olmo-Norm run continued from its save at iteration 9,089 in a save folder of its own, composed onto `olmo3_7b_norm_sft.yaml` |
 | `olmo3_7b_norm_sft_grid_start.yaml` | The first segment of that run: it loads save 9,089 from the Olmo-Norm 7B run's folder, composed onto `olmo3_7b_norm_sft_grid.yaml` |
+| `hub_models.yaml`, `hub_cards/` | The Hub manifest of the 7B models of the SFT mix grid, final saves only, and their card sections |
 | `data/` | The Dolci data builds: the prepare, the count pass, each epoch's row partition, pack and pack audit |
 | `checks/c3_export_check_7b.yaml` | The export check that every 7B export passes before its release |
 | `checks/c3_export_check_32b.yaml` | The 32B export check, composed onto the 7B one |

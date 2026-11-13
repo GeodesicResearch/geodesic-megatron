@@ -123,6 +123,7 @@ checks:
         - configs/olmo3_norm_sft/olmo3_32b_norm_sft.yaml
         - configs/olmo3_norm_sft/checks/c3_export_check_7b.yaml
         - configs/olmo3_norm_sft/checks/c3_export_check_32b.yaml
+        - configs/olmo3_norm_sft/hub_models.yaml  # names the Think-SFT snapshot that its exports read, as the 7B export check does
       message: "Use a config value, env var, or a /projects/a5k/public path instead of a hardcoded /home/<user> path."
 
   checklist_item_format:

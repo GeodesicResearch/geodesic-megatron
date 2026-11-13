@@ -430,6 +430,26 @@ def test_manifest_reads_stage_facts_from_the_configs_and_accumulates_token_offse
     assert manifest.export.ep == 4 and manifest.card.tags == ("tag-a", "tag-b")
 
 
+def test_a_stage_config_is_read_through_its_base_config_chain(campaign):
+    """An overlay that states only its own save directory, length and run name takes the rest from its base."""
+    root, ckpt, manifest_path = campaign
+    (root / "configs" / "sft_overlay.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "base_config": "sft.yaml",
+                "train": {"train_iters": 7},
+                "checkpoint": {"save": str(ckpt / "sft_overlay")},
+                "logger": {"wandb_exp_name": "exp-overlay"},
+            }
+        )
+    )
+    set_manifest_value(manifest_path, ("models", 1, "stages", 0, "config"), "configs/sft_overlay.yaml")
+    set_manifest_value(manifest_path, ("models", 1, "stages", 0, "extra_directories"), [])
+    stage = publish_models.load_manifest(manifest_path, root).models[1].stages[0]
+    assert (stage.save, stage.train_iters, stage.wandb_exp_name) == (ckpt / "sft_overlay", 7, "exp-overlay")
+    assert stage.tokens_per_iteration == FIXTURE_SEQ_LENGTH * 2
+
+
 def test_manifest_reads_each_stages_training_facts_and_data_mix(campaign):
     """A stage's data mix comes from its config: a `.bin/.idx` blend groups a sharded corpus into
     one row with its weights summed and its shard count, a packed SFT stage names its one dataset,
@@ -1097,6 +1117,48 @@ def test_an_extra_directory_supplies_a_save_the_run_pruned(campaign):
     assert [(p.iteration, p.source.parent.name) for p in sft] == [(1, "sft_clone"), (3, "sft")]
 
 
+FINAL_ONLY = ("models", 0, "stages", 0, "final_only")
+
+
+def test_a_final_only_stage_publishes_its_save_at_train_iters_alone(campaign):
+    """The pretraining stage holds saves 5 and 10 and trains 10 iterations. The other stages keep every save."""
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, FINAL_ONLY, True)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert [p.label for p in publish_models.plan(manifest)] == [
+        "org/arm-base@pretraining_iter_10",
+        "org/arm-base@midtraining_iter_2",
+        "org/arm-base@midtraining_iter_4",
+        "org/arm-think@sft_iter_1",
+        "org/arm-think@sft_iter_3",
+    ]
+
+
+def test_the_card_of_a_model_with_a_stage_that_keeps_every_save_says_every_checkpoint_is_a_revision(campaign):
+    """Only the pretraining stage of the base model is final_only, so the sentence stays as it is for that model."""
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, FINAL_ONLY, True)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    card = publish_models.render_model_card(manifest, manifest.models[0], [])
+    assert "Every completed checkpoint is a revision; `main` is the final checkpoint of the midtraining stage." in card
+    assert "megatron-bridge at TP1/EP4. " in card
+
+
+def test_a_final_only_stage_without_its_final_save_publishes_nothing(campaign):
+    root, ckpt, manifest_path = campaign
+    set_manifest_value(manifest_path, FINAL_ONLY, True)
+    (ckpt / "pre" / "latest_checkpointed_iteration.txt").write_text("5")
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert all(p.stage.name != "pretraining" for p in publish_models.plan(manifest))
+
+
+def test_a_final_only_that_is_not_a_boolean_is_refused(campaign):
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, FINAL_ONLY, "yes")
+    with pytest.raises(publish_models.ManifestError, match="final_only must be true or false, not 'yes'"):
+        publish_models.load_manifest(manifest_path, root)
+
+
 def test_plan_filters_models_by_repo_substring(campaign):
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
@@ -1592,6 +1654,16 @@ def test_losses_come_from_wandb_at_the_iterations_step_and_are_cached(tmp_path):
     assert json.loads(cache.read_text()) == {"5": 2.5, "10": 2.0}
     assert publish_models.losses(wandb, source, "exp-pre", {5, 10}, cache) == {5: 2.5, 10: 2.0}
     assert wandb.queries == ["exp-pre"], "a second call for cached iterations does not ask W&B again"
+
+
+def test_a_null_license_name_leaves_the_line_out_of_the_card(campaign):
+    """A standard licence (apache-2.0) has no license_name on the Hub."""
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, ("card", "license"), "apache-2.0")
+    set_manifest_value(manifest_path, ("card", "license_name"), None)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    card = publish_models.render_model_card(manifest, manifest.models[0], [])
+    assert card.startswith("---\nlicense: apache-2.0\nbase_model: nvidia/parent\n")
 
 
 def test_model_card_lists_every_revision_with_tokens_and_loss_around_the_manifests_text(campaign):

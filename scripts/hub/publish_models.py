@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Publish a campaign's checkpoints to the Hub as models: one revision per checkpoint, with a model
+"""Publish a campaign's checkpoints to the Hub as models: one revision per published checkpoint, with a model
 card that records the tokens seen and the training loss at each and, per stage, the data mix and
 schedule it was trained under.
 
@@ -22,7 +22,8 @@ global batch, learning-rate schedule, tokenizer, data blend) are read. A stage r
 names its final job's config there and may name its first job's as ``schedule_config``, whose warmup
 the card states. Every completed checkpoint of a stage
 (at or below the directory's tracker, so never a save in progress) becomes a revision named by
-the stage's pattern; the designated stage's final checkpoint is also the default revision.
+the stage's pattern, or its final checkpoint alone for a stage with ``final_only``; the designated
+stage's final checkpoint is also the default revision.
 
 A checkpoint is published in four steps, each skipped when its result already exists, so a pass
 is idempotent and a run can be repeated as new checkpoints land:
@@ -103,6 +104,7 @@ ManifestError = sync_bucket.ManifestError
 from scripts.checkpoint import export_check_result  # noqa: E402
 from scripts.checkpoint.safetensors_index import INDEX_FILE, checked_weight_map  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.training.config_compose import load_composed_yaml  # noqa: E402
 
 from pipeline.export.decoding_defaults import release_file_in_export  # noqa: E402
 from pipeline.export.export_clone import (  # noqa: E402
@@ -183,6 +185,8 @@ EXPORT_KEYS = frozenset({"tp", "ep", "nodes", "walltime"})
 OPTIONAL_EXPORT_KEYS = frozenset({"eos_in_config_json", "end_of_turn_token_id", "pp", "reference_files"})
 UPLOAD_KEYS = frozenset({"walltime"})
 WANDB_KEYS = frozenset({"entity", "project", "loss_key"})
+# `license_name` names a licence that the Hub's list lacks (license: other). A standard licence states it as null,
+# and the card then carries no license_name line.
 CARD_KEYS = frozenset(
     {"license", "license_name", "tags", "reasoning_tag", "intro", "provenance", "base_note", "think_note"}
 )
@@ -202,8 +206,9 @@ EXPORT_CHECK_KEYS = frozenset({"spec", "out_root", "log", "tag", "walltime"})
 STAGE_KEYS = frozenset({"name", "config", "revision", "default", "extra_directories"})
 # A stage run as a chain of jobs, each resuming the one before, names its final job's config as
 # `config` and may name its first job's as `schedule_config`: the card's warmup is the first job's,
-# since every later job resumes it and warms up for none.
-OPTIONAL_STAGE_KEYS = frozenset({"schedule_config"})
+# since every later job resumes it and warms up for none. A stage with `final_only: true` publishes only its
+# save at train_iters, whatever other saves its directory holds; absent means false.
+OPTIONAL_STAGE_KEYS = frozenset({"schedule_config", "final_only"})
 ITERATION_FIELD = "{iteration}"
 
 
@@ -264,7 +269,7 @@ class Card:
     """What every model card says beyond its tables."""
 
     license: str
-    license_name: str
+    license_name: str | None
     tags: tuple[str, ...]
     reasoning_tag: str
     intro: str
@@ -316,6 +321,7 @@ class Stage:
     default: bool
     extra_directories: tuple[Path, ...]
     tokens_before: int
+    final_only: bool
 
     @property
     def tokens_per_iteration(self) -> int:
@@ -564,9 +570,10 @@ def stage_training(cfg: dict, config: Path) -> Training:
 
 
 def stage_facts(config: Path) -> tuple[Path, int, str, Training]:
-    """The save directory, train_iters, W&B run name and training facts a stage config declares."""
-    save = sync_bucket.stage_save_directory(config)
-    cfg = yaml.safe_load(config.read_text())
+    """The save directory, train_iters, W&B run name and training facts a stage config declares, read
+    through its ``base_config`` chain as the training run reads it."""
+    cfg = load_composed_yaml(config)
+    save = sync_bucket.save_directory_of(cfg, config)
     train_iters = (cfg.get("train") or {}).get("train_iters")
     exp_name = (cfg.get("logger") or {}).get("wandb_exp_name")
     if not isinstance(train_iters, int) or train_iters <= 0:
@@ -607,6 +614,9 @@ def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
     if any("/" in str(d) for d in item["extra_directories"]):
         raise ManifestError(f"{where}: extra_directories are bare names of directories beside the stage's save dir")
     save, train_iters, exp_name, training = stage_facts(config)
+    final_only = optional.get("final_only", False)
+    if not isinstance(final_only, bool):
+        raise ManifestError(f"{where}: final_only must be true or false, not {final_only!r}")
     if "schedule_config" in optional:
         training = first_job_warmup(training, save, repo_root / str(optional["schedule_config"]), where)
     return Stage(
@@ -620,6 +630,7 @@ def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
         default=bool(item["default"]),
         extra_directories=tuple(save.parent / str(d) for d in item["extra_directories"]),
         tokens_before=tokens_before,
+        final_only=final_only,
     )
 
 
@@ -639,6 +650,7 @@ def _history_stage(config_path: str, repo_root: Path, where: str, tokens_before:
         default=False,
         extra_directories=(),
         tokens_before=tokens_before,
+        final_only=False,
     )
 
 
@@ -868,7 +880,7 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
         ),
         card=Card(
             license=str(card["license"]),
-            license_name=str(card["license_name"]),
+            license_name=None if card["license_name"] is None else str(card["license_name"]),
             tags=tuple(str(t) for t in card["tags"]),
             reasoning_tag=str(card["reasoning_tag"]),
             intro=str(card["intro"]).strip(),
@@ -885,7 +897,8 @@ def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
     directory beside it that keeps a save the run pruned. The run's directory wins a tie. A run's
     directory that is not on disk contributes nothing: the stage has not started, or its saves were
     removed once published, which may happen while this plan reads them. An extra directory is
-    named by hand in the manifest, so one that is not on disk is refused."""
+    named by hand in the manifest, so one that is not on disk is refused. A stage with
+    ``final_only`` contributes its save at ``train_iters`` alone."""
     found: dict[int, Path] = {}
     for directory in (*stage.extra_directories, stage.save):
         try:
@@ -901,6 +914,8 @@ def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
             continue
         for iter_dir in completed:
             found[checkpoints.iteration_number(iter_dir)] = iter_dir
+    if stage.final_only:
+        return [(iteration, source) for iteration, source in found.items() if iteration == stage.train_iters]
     return sorted(found.items())
 
 
@@ -1646,10 +1661,18 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
     name = model.repo.split("/")[1]
     tags = list(card.tags) + ([card.reasoning_tag] if model.reasoning else [])
     default_stage = next(s.name for s in model.stages if s.default)
+    published = (
+        "Each stage's final checkpoint is a revision"
+        if all(s.final_only for s in model.stages)
+        else "Every completed checkpoint is a revision"
+    )
+    sharding = f"TP{manifest.export.tp}/EP{manifest.export.ep}" + (
+        f"/PP{manifest.export.pp}" if manifest.export.pp is not None else ""
+    )
     lines = [
         "---",
         f"license: {card.license}",
-        f"license_name: {card.license_name}",
+        *([f"license_name: {card.license_name}"] if card.license_name is not None else []),
         *([f"base_model: {manifest.base_model}"] if manifest.base_model is not None else []),
         "language: [en]",
         f"tags: [{', '.join(tags)}]",
@@ -1714,7 +1737,7 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
         "",
         "## Revisions",
         "",
-        f"Every completed checkpoint is a revision; `main` is the final checkpoint of the {default_stage} stage. "
+        f"{published}; `main` is the final checkpoint of the {default_stage} stage. "
         'Load one with `revision="<name>"`. Tokens seen count the whole curriculum up to that checkpoint; the '
         f"training loss is W&B's `{manifest.wandb.loss_key}` at that iteration (blank where the run did not log it).",
         "",
@@ -1731,8 +1754,7 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
         "",
         "## Provenance",
         "",
-        f"Exported from the Megatron torch_dist checkpoints with megatron-bridge at TP{manifest.export.tp}/EP{manifest.export.ep}. "
-        + card.provenance,
+        f"Exported from the Megatron torch_dist checkpoints with megatron-bridge at {sharding}. " + card.provenance,
         "",
         card.think_note if model.reasoning else card.base_note,
         "",

@@ -998,9 +998,10 @@ card keeps every revision after its Megatron save and its local export are delet
 whose upload failed. The publisher is `scripts/hub/publish_models.py`,
 driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
 targets, the parent every card names as its `base_model` (or null), and per repository its stages by training config (the save directory, `train_iters`, W&B
-run name and the data-and-schedule facts are read from there), the revision pattern per stage,
+run name and the data-and-schedule facts are read from there, through the config's `base_config` chain), the revision pattern per stage,
 which stage's final is `main`, for a stage run as a chain of jobs the first job's config as
 `schedule_config` (the card states its warmup; every later job resumes and warms up for none),
+for a stage that publishes only its save at `train_iters` the key `final_only: true`,
 the stages counted for tokens but published elsewhere (the think repository's pretraining and
 midtraining), and its `note`, the one line the collection shows under the repository, which is what
 tells the near-identical names apart there (at most 500 characters; a model without one keeps
@@ -1193,7 +1194,7 @@ chain wrapping the publisher can tell a healthy pass from a broken one:
 
 | Status | Meaning |
 |---|---|
-| 0 (`EXIT_PUBLISHED`) | the Hub holds everything the manifest asks for: every completed checkpoint of its stages (a stage not started yet asks for none, so 0 does not mean training has finished) and every release line a `release:` block asks for; a `--phase cards` pass judges no publication and exits 0 once its cards are written |
+| 0 (`EXIT_PUBLISHED`) | the Hub holds everything the manifest asks for: every completed checkpoint of its stages, or the final one of a `final_only` stage (a stage not started yet asks for none, so 0 does not mean training has finished) and every release line a `release:` block asks for; a `--phase cards` pass judges no publication and exits 0 once its cards are written |
 | 1 (`EXIT_FAILED`) | the pass failed on at least one publication: an export, a submission, an upload or the recording of a release line failed, or an export or upload job left the queue without finishing (an uncaught error also exits 1) |
 | 3 (`EXIT_PENDING`) | no error, but something is still unpublished: an export queued or running, an export waiting for an upload pass, an upload job queued, an export check not yet judged, a release line not yet written, or under `--plan` anything to do |
 

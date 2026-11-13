@@ -307,12 +307,13 @@ overrides apply last. Composition happens only where a config is read through
 `scripts/data/held_out_documents.py` (all three through
 `scripts/data/run_training_data.py`), which resolve a config through `pipeline/training/recipes.py`'s
 `resolve_bin_idx_run_config`), `scripts/flops_common.py` (the run spec of both FLOP estimators, and
-`scripts/telemetry/score_run.py`, which reads its config through it), the launch blocks'
+`scripts/telemetry/score_run.py`, which reads its config through it), the Hub publisher's stage configs
+(`scripts/hub/publish_models.py` `stage_facts`), the launch blocks'
 checks (`scripts/training/launch_blocks.py`, through which `code_identity.py` and `launch_width.py` read a config's
 `code_identity:` and `launch_width:` blocks) and the config-test
 helpers (`tests/unit_tests/campaign_config.py`, `test_control_pretraining_config.py`).
 `configs/control_pretraining/stage_gate.sbatch`,
-`scripts/hub/sync_bucket.py`, `scripts/hub/publish_models.py` and
+`scripts/hub/sync_bucket.py` and
 `configs/control_pretraining/generate_epoch_chain.py` (which copies each chain's `posture_config`
 into its links and reads its `parent_config`) read their configs as raw YAML, so a config they are pointed at must stay a
 complete file. The Nano pretrain quickstart is the
