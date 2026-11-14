@@ -27,7 +27,9 @@ Where code and data live, and the common failure table.
   `export_check_result.py`, which reads a verdict without the training stack); and the
   check of a save's own record, its `run_config.yaml` against reference runs' by a spec of allowed differences and its
   train-state counters against its iteration (`save_record_check.py`); and the tensor-by-tensor, byte-for-byte
-  comparison of two Hugging Face safetensors checkpoints (`compare_safetensors.py`)
+  comparison of two Hugging Face safetensors checkpoints (`compare_safetensors.py`); and the graft of one release's
+  tensor rows into another release (`graft_tensor_rows.py`, configs in `configs/checkpoint_grafts/`), which writes
+  its output through the shard rewriter that `scripts/data/extend_vocab_for_mq.py` also uses (`shard_rewrite.py`)
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, an allocation's NVLink sweep (`nvlink_sweep.sh`), per-node NVLink health and node selection
   (`nvlink_health.py`), the refusal of launch

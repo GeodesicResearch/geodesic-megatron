@@ -13,7 +13,12 @@ from pathlib import Path
 import pytest
 import torch
 from safetensors.torch import save_file
-from scripts.checkpoint.safetensors_index import INDEX_FILE, checked_weight_map, safetensors_tensor_names
+from scripts.checkpoint.safetensors_index import (
+    INDEX_FILE,
+    checked_weight_map,
+    safetensors_expected_size,
+    safetensors_tensor_names,
+)
 
 from pipeline.export.export_clone import ExportError
 
@@ -102,3 +107,26 @@ def test_a_header_length_the_shard_cannot_hold_is_refused_unread(tmp_path, decla
         handle.truncate(file_size)
     with pytest.raises(ValueError, match="header length"):
         safetensors_tensor_names(shard)
+
+
+def test_the_expected_size_of_a_complete_shard_is_its_file_size(tmp_path):
+    shard = tmp_path / "model-00001-of-00001.safetensors"
+    save_file({"a": torch.zeros(4, 8, dtype=torch.bfloat16), "b": torch.ones(2, 3)}, str(shard))
+    assert safetensors_expected_size(shard) == shard.stat().st_size
+
+
+def test_the_expected_size_of_a_shard_without_a_tensor_is_its_header(tmp_path):
+    shard = tmp_path / "model-00001-of-00001.safetensors"
+    save_file({}, str(shard))
+    assert safetensors_expected_size(shard) == shard.stat().st_size
+
+
+def test_the_expected_size_exceeds_the_file_size_when_the_data_is_cut_short(tmp_path):
+    """The header still declares the whole data, so only the comparison of the two sizes shows the missing bytes."""
+    shard = tmp_path / "model-00001-of-00001.safetensors"
+    save_file({"a": torch.zeros(4, 8, dtype=torch.bfloat16), "b": torch.ones(2, 3)}, str(shard))
+    full = shard.stat().st_size
+    with shard.open("r+b") as handle:
+        handle.truncate(full - 16)
+    assert safetensors_expected_size(shard) == full
+    assert shard.stat().st_size == full - 16

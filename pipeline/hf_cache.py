@@ -16,7 +16,7 @@
 Catalogue:
     hub_cache_root: the hub cache directory.
     is_cached: whether a model repo has anything in the cache.
-    cached_file: a file of a model repo's ``refs/main`` snapshot in the cache.
+    cached_file: a file of a model repo's snapshot in the cache, at ``refs/main`` or at a given revision.
     snapshot_path: a model repo's snapshot directory, complete in the cache.
     model_dir: the directory a load of a model reads its files from.
     main: the command line, ``python -m pipeline.hf_cache model-dir MODEL``.
@@ -48,8 +48,10 @@ def is_cached(repo_id: str) -> bool:
     return _is_repo_id(repo_id) and (hub_cache_root() / f"models--{repo_id.replace('/', '--')}").is_dir()
 
 
-def cached_file(repo_id: str, filename: str) -> Path | None:
-    """``filename`` of model repo ``repo_id`` in the cached snapshot its ``refs/main`` names; None when not cached.
+def cached_file(repo_id: str, filename: str, revision: str | None = None) -> Path | None:
+    """The path of ``filename`` in a cached snapshot of model repo ``repo_id``, or None when the cache lacks it.
+
+    ``revision`` is a commit SHA. None gives the snapshot of the cached ``refs/main``.
 
     Reads the cache only (``huggingface_hub.try_to_load_from_cache``), never the network. A local directory is never
     cached, so it gives None.
@@ -58,7 +60,7 @@ def cached_file(repo_id: str, filename: str) -> Path | None:
 
     if not _is_repo_id(repo_id):
         return None
-    path = try_to_load_from_cache(repo_id, filename, cache_dir=str(hub_cache_root()))
+    path = try_to_load_from_cache(repo_id, filename, cache_dir=str(hub_cache_root()), revision=revision)
     return Path(path) if isinstance(path, str) else None
 
 

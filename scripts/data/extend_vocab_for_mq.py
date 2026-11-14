@@ -65,15 +65,22 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
-import struct
+import sys
 from pathlib import Path
 
 import safetensors.torch
 import torch
 
 from megatron.bridge.training.token_masking.resolution import DECLARATION_FIELD
+
+
+# The repo root makes the sibling packages importable when this file runs as a script.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
+
+from scripts.checkpoint.shard_rewrite import RewrittenShard, write_with_shards  # noqa: E402
 
 
 EMBED_KEY = "backbone.embeddings.weight"
@@ -119,50 +126,6 @@ def _extend_rows(tensor: torch.Tensor, n_new: int, init_std: float, seed: int) -
     g = torch.Generator(device="cpu").manual_seed(seed)
     new_rows = torch.randn(n_new, tensor.shape[1], generator=g, dtype=torch.float32) * init_std
     return torch.cat([tensor, new_rows.to(tensor.dtype)], dim=0).contiguous()
-
-
-def _safetensors_expected_size(path: Path) -> int:
-    """Byte length `path` must have, according to its own safetensors header.
-
-    Layout is an 8-byte little-endian header length, the JSON header, then the
-    tensor payload; the end of the payload is the largest `data_offsets` end.
-    """
-    with open(path, "rb") as f:
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_len))
-    ends = [
-        v["data_offsets"][1]
-        for k, v in header.items()
-        if k != "__metadata__" and isinstance(v, dict) and "data_offsets" in v
-    ]
-    return 8 + header_len + (max(ends) if ends else 0)
-
-
-def _save_shard_atomically(tensors: dict[str, torch.Tensor], dest: Path) -> None:
-    """Write a safetensors shard so that `dest` never exists in a partial state.
-
-    Writes to a sibling temp file, fsyncs it, verifies the file's length matches
-    the byte range its own header declares, and only then renames into place.
-    A multi-GB write that dies partway (SIGKILL, node eviction, or a quota that
-    fills mid-write) otherwise leaves a shard whose header still advertises the
-    full payload — readable metadata, truncated data, and no error until
-    something tries to load the missing tensors.
-    """
-    tmp = dest.with_name(dest.name + ".partial")
-    try:
-        safetensors.torch.save_file(tensors, tmp)
-        with open(tmp, "rb") as f:
-            os.fsync(f.fileno())
-        expected = _safetensors_expected_size(tmp)
-        actual = tmp.stat().st_size
-        if expected != actual:
-            raise OSError(
-                f"{dest.name}: wrote {actual:,} bytes but its header declares {expected:,} "
-                f"(short by {expected - actual:,}). Refusing to publish a truncated shard."
-            )
-        os.replace(tmp, dest)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def check_mq_tokenizer_dir(tokenizer_dir: Path) -> None:
@@ -224,7 +187,6 @@ def main(argv: list[str] | None = None) -> int:
             "in place mutates the very tensors being read."
         )
     check_mq_tokenizer_dir(args.mq_tokenizer_dir)
-    out.mkdir(parents=True, exist_ok=True)
 
     # 1. Load index
     index_path = inp / "model.safetensors.index.json"
@@ -287,36 +249,19 @@ def main(argv: list[str] | None = None) -> int:
         new_head = None
         print("  head:  skipped (tied embeddings — re-import will tie automatically)")
 
-    # 5. Write modified file(s)
+    # 5. Write the extended shard(s) and symlink every other entry. Steps 7 to 9 write the config, the index and the
+    #    tokenizer files, so they stay unlinked here.
     print(f"\nWriting extended embed/head to {out}")
-    embed_st_new = {**embed_st, EMBED_KEY: new_embed}
-    if has_head and head_file == embed_file:
-        embed_st_new[HEAD_KEY] = new_head
-        _save_shard_atomically(embed_st_new, out / embed_file)
-        print(f"  wrote {embed_file} (embed + head)")
-    elif has_head:
-        head_st_new = {**head_st, HEAD_KEY: new_head}
-        _save_shard_atomically(embed_st_new, out / embed_file)
-        print(f"  wrote {embed_file} (embed)")
-        _save_shard_atomically(head_st_new, out / head_file)
-        print(f"  wrote {head_file} (head)")
-    else:
-        _save_shard_atomically(embed_st_new, out / embed_file)
-        print(f"  wrote {embed_file} (embed only; lm_head absent in source)")
-
-    # 6. Symlink everything else (excluding tokenizer files we'll overwrite below).
-    skip = {embed_file, "model.safetensors.index.json", "config.json"}
-    if has_head and head_file != embed_file:
-        skip.add(head_file)
-    skip.update(TOKENIZER_FILE_NAMES)
-    print("\nSymlinking unchanged files (excluding tokenizer files)...")
-    for f in inp.iterdir():
-        if f.name in skip:
-            continue
-        dest = out / f.name
-        if dest.exists() or dest.is_symlink():
-            continue
-        os.symlink(f.resolve(), dest)
+    shards = {embed_file: {**embed_st, EMBED_KEY: new_embed}}
+    if has_head:
+        shards.setdefault(head_file, dict(head_st))[HEAD_KEY] = new_head
+    write_with_shards(
+        inp,
+        out,
+        {name: RewrittenShard(tensors=tensors, metadata=None) for name, tensors in shards.items()},
+        unlinked={"model.safetensors.index.json", "config.json", *TOKENIZER_FILE_NAMES},
+    )
+    print(f"  wrote {sorted(shards)} and symlinked the unchanged files (excluding tokenizer files)")
 
     # 7. Update config.json with new vocab_size
     cfg = json.loads((inp / "config.json").read_text())

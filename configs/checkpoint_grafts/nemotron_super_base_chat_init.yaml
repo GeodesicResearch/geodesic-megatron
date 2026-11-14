@@ -1,0 +1,37 @@
+# The Base-Chat-Init graft of Nemotron 3 Super, a config of scripts/checkpoint/graft_tensor_rows.py. Run it inside
+# the pipeline container:
+#
+#   python scripts/checkpoint/graft_tensor_rows.py \
+#       --config configs/checkpoint_grafts/nemotron_super_base_chat_init.yaml
+#
+# The Base release has zero rows for the chat-template tokens in the tensor below (docs/isambard/tokenizers.md). The
+# instruct release trained those rows. The graft copies them into the Base release. The output directory is
+# <HF_HOME>/grafts/<output_name>, a Hugging Face checkpoint. Import it with the command that imports a release:
+#
+#   <submit command> --nodes=1 --time=<limit> pipeline_checkpoint_submit.sbatch import \
+#       <HF_HOME>/grafts/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+#
+# The import writes <CLUSTER_MODEL_ROOT>/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16, the warm start that
+# configs/quickstart/nemotron_super_quickstart_sft.yaml reads.
+#
+# recipient             the release that receives rows: a Hub repository and a full 40-character commit SHA
+# donor                 the release that gives rows, in the same form
+# tensors               the safetensors names of the 2-D tensors to graft. Both releases must have each tensor in the
+#                       same shard, with one shape and one dtype
+# row_norm_threshold    a row is near zero when its L2 norm is below this number
+# donor_near_zero_rows  the treatment of a row that is near zero in both releases. `fail` stops the graft and lists
+#                       the rows. `leave` keeps the recipient's values in those rows
+# output_name           the name of the output directory under <HF_HOME>/grafts. The import gives its Megatron
+#                       checkpoint the same name
+
+recipient:
+  repo: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-Base-BF16
+  revision: b4cc202094ea3644bc4461c9fe58ec8b6a3695eb
+donor:
+  repo: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  revision: 2dc98e2afe4face0e4ce40972a915c45368bd34a
+tensors:
+  - backbone.embeddings.weight
+row_norm_threshold: 1.0e-3
+donor_near_zero_rows: fail
+output_name: NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16

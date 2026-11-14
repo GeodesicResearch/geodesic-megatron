@@ -13,6 +13,8 @@ the wrong tokenizer for `--append-eod` writes id 11 at every doc boundary,
 and a fresh CPT run hits the zero-embedding trap on first backward (hard
 Inf in bucket #0, deterministic, optimizer-side mitigations don't help).
 
+`scripts/checkpoint/graft_tensor_rows.py` copies those rows from the instruct release into a Base checkpoint.
+
 | Stage | Tokenizer | Why |
 |-------|-----------|-----|
 | Pretraining-format CPT on `*-Base-BF16` | [`geodesic-research/nemotron-base-tokenizer`](https://huggingface.co/geodesic-research/nemotron-base-tokenizer) | EOD = `</s>` (id 2) matches Base pretraining |

@@ -7,6 +7,7 @@ comparison (``compare_safetensors.py``) read a checkpoint's index through this m
 
 - ``INDEX_FILE``: the file name of a sharded checkpoint's index.
 - ``safetensors_tensor_names``: the tensor names a safetensors file holds, read from its header.
+- ``safetensors_expected_size``: the byte length that a safetensors file's own header declares.
 - ``checked_weight_map``: a directory's weight map, once each shard it names holds exactly the tensors it maps there.
 """
 
@@ -24,16 +25,30 @@ INDEX_FILE = "model.safetensors.index.json"
 SAFETENSORS_HEADER_LIMIT = 100_000_000
 
 
-def safetensors_tensor_names(path: Path) -> set[str]:
-    """The tensor names a safetensors file holds, from its header (an 8-byte length then JSON). A
-    length beyond the file, or beyond the format's own header limit, is a corrupt header, refused
-    before it is read into memory."""
+def _header(path: Path) -> tuple[int, dict]:
     with path.open("rb") as handle:
         (length,) = struct.unpack("<Q", handle.read(8))
         if length > min(path.stat().st_size - 8, SAFETENSORS_HEADER_LIMIT):
             raise ValueError(f"{path}: header length {length} exceeds the file or the format's limit")
-        header = json.loads(handle.read(length))
-    return {name for name in header if name != "__metadata__"}
+        return length, json.loads(handle.read(length))
+
+
+def safetensors_tensor_names(path: Path) -> set[str]:
+    """The tensor names a safetensors file holds, from its header (an 8-byte length then JSON). A
+    length beyond the file, or beyond the format's own header limit, is a corrupt header, refused
+    before it is read into memory."""
+    return {name for name in _header(path)[1] if name != "__metadata__"}
+
+
+def safetensors_expected_size(path: Path) -> int:
+    """The byte length that the header of the safetensors file at ``path`` declares for the file.
+
+    The length covers the 8-byte header length, the header and the tensor data up to the largest end offset. The
+    function reads the header only. It raises ValueError for a header length that ``safetensors_tensor_names`` refuses.
+    """
+    length, header = _header(path)
+    ends = [entry["data_offsets"][1] for name, entry in header.items() if name != "__metadata__"]
+    return 8 + length + max(ends, default=0)
 
 
 def checked_weight_map(hf_dir: Path) -> dict[str, str]:

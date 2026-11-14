@@ -75,6 +75,18 @@ def test_a_cached_file_comes_from_the_snapshot_refs_main_names(hf_home):
     assert not is_cached(str(hf_home)) and cached_file(str(hf_home), "config.json") is None
 
 
+def test_a_cached_file_at_a_revision_comes_from_that_snapshot_whatever_refs_main_names(hf_home):
+    newer = hf_home / "newer"
+    newer.mkdir(parents=True)
+    (newer / "config.json").write_text("{}")
+    cache_repo(hf_home, NANO, [(SNAPSHOT_A, INPUTS / "release_nano"), (SNAPSHOT_B, newer)], SNAPSHOT_A)
+    snapshots = hf_home / "hub" / f"models--{NANO.replace('/', '--')}" / "snapshots"
+    assert cached_file(NANO, "config.json", SNAPSHOT_B) == snapshots / SNAPSHOT_B / "config.json"
+    assert cached_file(NANO, "config.json", SNAPSHOT_A) == snapshots / SNAPSHOT_A / "config.json"
+    assert cached_file(NANO, "config.json", "0" * 40) is None
+    assert cached_file(NANO, "absent.json", SNAPSHOT_B) is None
+
+
 def test_the_training_template_is_the_one_refs_main_names_not_the_largest_hash(hf_home, tmp_path):
     """snapshot_download copies the training tokenizer's files from refs/main's snapshot, so the template must come
     from there too, even when a larger-hash snapshot is cached."""

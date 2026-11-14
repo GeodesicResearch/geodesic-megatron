@@ -5,11 +5,11 @@
 
 """Unit tests for scripts/data/extend_vocab_for_mq.py.
 
-The script rewrites multi-GB embedding shards, so a partial write must never be
-published: these tests pin the size-vs-header check and the atomic replace. They
-also pin which tokenizer directories the script accepts: it refuses one whose
-tokenizer_config.json carries loss_mask_token_ids before writing anything, and
-otherwise ships its files with the extended checkpoint.
+These tests pin what ``main`` writes for each shard layout: the entries, the tensors,
+the index and the config. They also pin which tokenizer directories the script
+accepts: it refuses one whose tokenizer_config.json carries loss_mask_token_ids
+before writing anything, and otherwise ships its files with the extended checkpoint.
+tests/unit_tests/test_shard_rewrite.py tests the shard writes themselves.
 
 Run:
     uv run pytest tests/unit_tests/data/test_extend_vocab_for_mq.py -v
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -40,53 +41,6 @@ def ev_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-@pytest.fixture
-def tensors():
-    return {"a": torch.zeros(4, 8, dtype=torch.bfloat16), "b": torch.ones(2, 3, dtype=torch.float32)}
-
-
-class TestSafetensorsExpectedSize:
-    def test_matches_a_complete_file(self, ev_module, tmp_path, tensors):
-        dest = tmp_path / "shard.safetensors"
-        ev_module._save_shard_atomically(tensors, dest)
-        assert ev_module._safetensors_expected_size(dest) == dest.stat().st_size
-
-    def test_exceeds_actual_size_when_payload_is_truncated(self, ev_module, tmp_path, tensors):
-        # The signature of the production failure: the header still advertises the
-        # full payload, so only a size comparison reveals the missing bytes.
-        dest = tmp_path / "shard.safetensors"
-        ev_module._save_shard_atomically(tensors, dest)
-        full = dest.stat().st_size
-        with open(dest, "r+b") as f:
-            f.truncate(full - 16)
-        assert ev_module._safetensors_expected_size(dest) == full
-        assert dest.stat().st_size == full - 16
-
-
-class TestSaveShardAtomically:
-    def test_writes_readable_tensors_and_removes_the_temp_file(self, ev_module, tmp_path, tensors):
-        dest = tmp_path / "shard.safetensors"
-        ev_module._save_shard_atomically(tensors, dest)
-
-        assert dest.exists()
-        assert not dest.with_name(dest.name + ".partial").exists()
-        loaded = safetensors.torch.load_file(dest)
-        assert sorted(loaded) == ["a", "b"]
-        assert loaded["a"].shape == (4, 8)
-        assert loaded["b"].shape == (2, 3)
-
-    def test_leaves_no_temp_file_when_the_write_fails(self, ev_module, tmp_path, monkeypatch, tensors):
-        def boom(*_args, **_kwargs):
-            raise OSError("simulated out-of-quota")
-
-        monkeypatch.setattr(ev_module.safetensors.torch, "save_file", boom)
-        dest = tmp_path / "shard.safetensors"
-        with pytest.raises(OSError, match="simulated out-of-quota"):
-            ev_module._save_shard_atomically(tensors, dest)
-        assert not dest.exists()
-        assert not dest.with_name(dest.name + ".partial").exists()
 
 
 class TestRequiredTokenizerFiles:
@@ -178,3 +132,174 @@ class TestMain:
         for name in ev_module.REQUIRED_TOKENIZER_FILES:
             assert (output / name).read_bytes() == (tokenizer / name).read_bytes()
         assert DECLARATION_FIELD not in json.loads((output / "tokenizer_config.json").read_text())
+
+
+WIDE_HIDDEN = 16
+EMBED_SHARD = "model-00001-of-00002.safetensors"
+SECOND_SHARD = "model-00002-of-00002.safetensors"
+OTHER_KEY = "backbone.layers.0.mixer.weight"
+EMBED_KEY = "backbone.embeddings.weight"
+HEAD_KEY = "lm_head.weight"
+INDEX = "model.safetensors.index.json"
+# Where each layout puts the embedding, the head and one other tensor. The tied layout has no head tensor.
+LAYOUTS = {
+    "head_in_its_own_shard": {EMBED_SHARD: [EMBED_KEY, OTHER_KEY], SECOND_SHARD: [HEAD_KEY]},
+    "head_beside_the_embedding": {EMBED_SHARD: [EMBED_KEY, HEAD_KEY], SECOND_SHARD: [OTHER_KEY]},
+    "tied_embeddings": {EMBED_SHARD: [EMBED_KEY], SECOND_SHARD: [OTHER_KEY]},
+}
+
+
+def _write_parent_checkpoint(directory: Path, layout: str, vocab: int) -> dict[str, torch.Tensor]:
+    """An HF checkpoint dir in one of ``LAYOUTS``, with the files a release carries beside its weights."""
+    directory.mkdir(parents=True)
+    generator = torch.Generator().manual_seed(3)
+    tensors = {
+        EMBED_KEY: torch.randn(vocab, WIDE_HIDDEN, generator=generator).to(torch.bfloat16),
+        HEAD_KEY: torch.randn(vocab, WIDE_HIDDEN, generator=generator).to(torch.bfloat16),
+        OTHER_KEY: torch.randn(3, 5, generator=generator),
+    }
+    weight_map = {}
+    for shard, names in LAYOUTS[layout].items():
+        safetensors.torch.save_file(
+            {name: tensors[name] for name in names}, directory / shard, metadata={"format": "pt"}
+        )
+        weight_map.update({name: shard for name in names})
+    index = {"metadata": {"total_parameters": 7, "total_size": 1}, "weight_map": weight_map}
+    (directory / INDEX).write_text(json.dumps(index))
+    (directory / "config.json").write_text(json.dumps({"vocab_size": vocab, "hidden_size": WIDE_HIDDEN}))
+    (directory / "generation_config.json").write_text("{}")
+    (directory / "tokenizer.json").write_text('{"parent": true}')
+    (directory / "tokenizer_config.json").write_text('{"parent": true}')
+    (directory / "chat_template.jinja").write_text("the parent's template")
+    return tensors
+
+
+def _new_row(seed: int, init_std: float, dtype: torch.dtype) -> torch.Tensor:
+    """The row the script documents for a marker: N(0, init_std) from a CPU generator with that seed."""
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    return (torch.randn(1, WIDE_HIDDEN, generator=generator, dtype=torch.float32) * init_std).to(dtype)
+
+
+class TestMainOutput:
+    """What ``main`` writes for each shard layout: the entries, the tensors, the index and the config."""
+
+    @pytest.fixture(params=sorted(LAYOUTS))
+    def extended(self, request, ev_module, tmp_path):
+        source = tmp_path / "in"
+        tensors = _write_parent_checkpoint(source, request.param, ev_module.ORIG_VOCAB)
+        tokenizer = build_tiny_hf_tokenizer(tmp_path / "tokenizer")
+        output = tmp_path / "out"
+        arguments = ["--input-dir", str(source), "--output-dir", str(output), "--mq-tokenizer-dir", str(tokenizer)]
+        assert ev_module.main(arguments) == 0
+        return {
+            "layout": request.param,
+            "source": source,
+            "tensors": tensors,
+            "tokenizer": tokenizer,
+            "output": output,
+            "arguments": arguments,
+        }
+
+    @staticmethod
+    def _rewritten_shards(layout: str) -> set[str]:
+        return {shard for shard, names in LAYOUTS[layout].items() if EMBED_KEY in names or HEAD_KEY in names}
+
+    def test_the_entries_are_the_parents_plus_the_readme_with_tokenizer_files_from_the_tokenizer_dir(
+        self, ev_module, extended
+    ):
+        source, output, tokenizer = extended["source"], extended["output"], extended["tokenizer"]
+        shipped = {name for name in ev_module.TOKENIZER_FILE_NAMES if (tokenizer / name).exists()}
+        expected = {entry.name for entry in source.iterdir()} | shipped | {"README_mq_vocab_extension.md"}
+        assert {entry.name for entry in output.iterdir()} == expected
+        rewritten = self._rewritten_shards(extended["layout"])
+        linked = {"generation_config.json"} | (set(LAYOUTS[extended["layout"]]) - rewritten)
+        # chat_template.jinja is a tokenizer file that the tiny tokenizer directory lacks, so the parent's is linked.
+        assert "chat_template.jinja" not in shipped
+        linked.add("chat_template.jinja")
+        for entry in output.iterdir():
+            assert entry.is_symlink() == (entry.name in linked), entry.name
+            if entry.is_symlink():
+                assert os.readlink(entry) == str((source / entry.name).resolve())
+        for name in shipped:
+            assert (output / name).read_bytes() == (tokenizer / name).read_bytes()
+
+    def test_the_embedding_and_the_head_keep_their_rows_and_gain_one_seeded_row_and_zero_padding(
+        self, ev_module, extended
+    ):
+        output, tensors, layout = extended["output"], extended["tensors"], extended["layout"]
+        init_std = float(tensors[EMBED_KEY].float().std().item())
+        seeds = {EMBED_KEY: 131072, HEAD_KEY: 131073}
+        for shard, names in LAYOUTS[layout].items():
+            written = safetensors.torch.load_file(output / shard)
+            assert sorted(written) == sorted(names)
+            for name in names:
+                if name == OTHER_KEY:
+                    assert torch.equal(written[name], tensors[name])
+                    continue
+                assert written[name].shape == (ev_module.TARGET_VOCAB, WIDE_HIDDEN)
+                assert written[name].dtype == torch.bfloat16
+                assert torch.equal(written[name][: ev_module.ORIG_VOCAB], tensors[name])
+                assert torch.equal(
+                    written[name][ev_module.ORIG_VOCAB], _new_row(seeds[name], init_std, torch.bfloat16)[0]
+                )
+                assert not written[name][ev_module.ORIG_VOCAB + 1 :].any()
+
+    def test_a_rewritten_shard_is_written_without_metadata(self, extended):
+        for shard in self._rewritten_shards(extended["layout"]):
+            with safetensors.safe_open(extended["output"] / shard, framework="pt") as handle:
+                assert handle.metadata() is None
+
+    def test_the_index_keeps_its_weight_map_and_totals_the_shard_sizes(self, extended):
+        source, output = extended["source"], extended["output"]
+        before = json.loads((source / INDEX).read_text())
+        after = json.loads((output / INDEX).read_text())
+        assert after["weight_map"] == before["weight_map"]
+        sizes = sum((output / shard).stat().st_size for shard in LAYOUTS[extended["layout"]])
+        assert after["metadata"] == {"total_parameters": 7, "total_size": sizes}
+        assert (output / INDEX).read_text() == json.dumps(after, indent=2) + "\n"
+
+    def test_the_config_has_the_padded_vocab_size_and_its_other_keys(self, ev_module, extended):
+        config = json.loads((extended["output"] / "config.json").read_text())
+        assert config == {"vocab_size": ev_module.TARGET_VOCAB, "hidden_size": WIDE_HIDDEN}
+        assert (extended["output"] / "config.json").read_text() == json.dumps(config, indent=2) + "\n"
+
+    def test_the_readme_records_the_parent_the_seeds_and_the_tokenizer(self, extended):
+        readme = (extended["output"] / "README_mq_vocab_extension.md").read_text()
+        assert f"Built from: `{extended['source']}`" in readme
+        assert "Seed: 131072 (embed), 131073 (head)" in readme
+        assert f"Tokenizer files copied from: `{extended['tokenizer']}`" in readme
+
+    def test_a_second_run_into_the_same_output_writes_the_same_tensors_and_entries(self, ev_module, extended):
+        output = extended["output"]
+        entries = sorted(entry.name for entry in output.iterdir())
+        first = {shard: safetensors.torch.load_file(output / shard) for shard in LAYOUTS[extended["layout"]]}
+        assert ev_module.main(extended["arguments"]) == 0
+        assert sorted(entry.name for entry in output.iterdir()) == entries
+        for shard, tensors in first.items():
+            second = safetensors.torch.load_file(output / shard)
+            assert all(torch.equal(second[name], tensor) for name, tensor in tensors.items())
+
+
+class TestMainArguments:
+    def test_init_std_and_seed_set_the_new_rows(self, ev_module, tmp_path):
+        source = tmp_path / "in"
+        _write_parent_checkpoint(source, "head_in_its_own_shard", ev_module.ORIG_VOCAB)
+        tokenizer = build_tiny_hf_tokenizer(tmp_path / "tokenizer")
+        output = tmp_path / "out"
+        arguments = ["--input-dir", str(source), "--output-dir", str(output), "--mq-tokenizer-dir", str(tokenizer)]
+        assert ev_module.main([*arguments, "--init-std", "0.5", "--seed", "9"]) == 0
+        embed = safetensors.torch.load_file(output / EMBED_SHARD)[EMBED_KEY]
+        head = safetensors.torch.load_file(output / SECOND_SHARD)[HEAD_KEY]
+        assert torch.equal(embed[ev_module.ORIG_VOCAB], _new_row(9, 0.5, torch.bfloat16)[0])
+        assert torch.equal(head[ev_module.ORIG_VOCAB], _new_row(10, 0.5, torch.bfloat16)[0])
+
+    def test_refuses_an_output_dir_that_is_the_input_dir(self, ev_module, tmp_path):
+        source = tmp_path / "in"
+        _write_parent_checkpoint(source, "tied_embeddings", ev_module.ORIG_VOCAB)
+        tokenizer = build_tiny_hf_tokenizer(tmp_path / "tokenizer")
+        entries = sorted(entry.name for entry in source.iterdir())
+        with pytest.raises(ValueError, match="--output-dir must differ from --input-dir"):
+            ev_module.main(
+                ["--input-dir", str(source), "--output-dir", str(source), "--mq-tokenizer-dir", str(tokenizer)]
+            )
+        assert sorted(entry.name for entry in source.iterdir()) == entries
