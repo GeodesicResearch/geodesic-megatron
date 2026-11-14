@@ -33,6 +33,8 @@ isambard_profile() {
     # Apptainer's defaults are under $HOME, which a ~25 GB image overflows at once.
     CLUSTER_APPTAINER_CACHEDIR="/projects/a5k/public/apptainer_cache_${USER}"
     CLUSTER_APPTAINER_TMPDIR="/projects/a5k/public/tmp/apptainer_${USER}"
+    # A job reads its inputs where they are stored.
+    CLUSTER_INPUT_STAGE_ROOT=""
 
     # The compute nodes' OS image (SLES 15 SP7) holds libfabric 2.3.1 alone. The Slingshot build's aws-ofi-nccl
     # is compiled against 1.22.0 and loads 2.3.1 through the libfabric.so.1 soname, which the two share.

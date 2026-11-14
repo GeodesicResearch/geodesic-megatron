@@ -174,6 +174,7 @@ def test_the_isambard_profile_holds_the_values_isambard_runs_with(monkeypatch):
         "CLUSTER_CONTAINER_STAGE_ROOT": "",
         "CLUSTER_APPTAINER_CACHEDIR": "/projects/a5k/public/apptainer_cache_probe",
         "CLUSTER_APPTAINER_TMPDIR": "/projects/a5k/public/tmp/apptainer_probe",
+        "CLUSTER_INPUT_STAGE_ROOT": "",
         "CLUSTER_HOST_LIBFABRIC": "/opt/cray/libfabric/2.3.1",
         "CLUSTER_NEMO_HOME": "/projects/a5k/public/data/nemo_cache",
         "CLUSTER_HF_HOME": "/projects/a5k/public/hf",

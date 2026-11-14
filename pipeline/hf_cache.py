@@ -11,14 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Lookups in the local HuggingFace hub cache, at the revision its ``refs/main`` names.
+"""The local HuggingFace hub cache: what it holds of a model repo, and the directory a model loads from.
 
 Catalogue:
     hub_cache_root: the hub cache directory.
     is_cached: whether a model repo has anything in the cache.
     cached_file: a file of a model repo's ``refs/main`` snapshot in the cache.
+    snapshot_path: a model repo's snapshot directory, complete in the cache.
+    model_dir: the directory a load of a model reads its files from.
+    main: the command line, ``python -m pipeline.hf_cache model-dir MODEL``.
 """
 
+import argparse
 import os
 from pathlib import Path
 
@@ -56,3 +60,38 @@ def cached_file(repo_id: str, filename: str) -> Path | None:
         return None
     path = try_to_load_from_cache(repo_id, filename, cache_dir=str(hub_cache_root()))
     return Path(path) if isinstance(path, str) else None
+
+
+def snapshot_path(repo_id: str) -> Path:
+    """The snapshot directory of model repo ``repo_id`` in the hub cache, at the revision of its main branch.
+
+    Downloads the files the cache lacks through ``huggingface_hub.snapshot_download``. That uses the network and
+    writes under the hub cache the library reads from the environment. With ``HF_HUB_OFFLINE=1`` the revision is
+    the cached ``refs/main``, and a repo the cache lacks raises.
+    """
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(repo_id=repo_id))
+
+
+def model_dir(model: str) -> Path:
+    """The directory a load of ``model`` reads its files from.
+
+    ``model`` is a model directory or a Hub repo id. A directory gives itself, resolved. A repo id gives
+    ``snapshot_path(model)``, which downloads what the cache lacks.
+    """
+    return Path(model).resolve() if Path(model).is_dir() else snapshot_path(model)
+
+
+def main(argv: list[str] | None = None) -> None:
+    """``model-dir MODEL`` prints ``model_dir(MODEL)`` as the one line on stdout."""
+    parser = argparse.ArgumentParser(prog="python -m pipeline.hf_cache", description="The local HuggingFace hub cache")
+    commands = parser.add_subparsers(dest="command", required=True)
+    command = commands.add_parser("model-dir", help="print the directory a load of a model reads its files from")
+    command.add_argument("model")
+    args = parser.parse_args(argv)
+    print(model_dir(args.model))
+
+
+if __name__ == "__main__":
+    main()

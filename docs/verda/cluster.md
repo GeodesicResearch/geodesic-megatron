@@ -92,7 +92,7 @@ directory (`storage.md`, "Staging the image").
   the next job. The launchers never run the SIF. A hand-written `apptainer exec <file>.sif` does.
 - **Do not memory-map a large file on `/shared` from a GPU job.** An 8-rank model import that mapped its 63 GB of
   safetensors from `/shared` took the node's pod down twice ("Pod is terminating", the job ends `NODE_FAIL`), and a
-  4-rank one read at a crawl. Copy the file to `/local` first.
+  4-rank one read at a crawl. Map a copy on the node's disk, as the import does (`storage.md`, "Staging inputs").
 
 - **File locks on `/shared` do not hold across nodes.** Neither `flock` nor `fcntl` locks do. Two jobs on different
   nodes that build the same `datasets` Arrow cache, or download into the same Hub repository, corrupt it. Run such

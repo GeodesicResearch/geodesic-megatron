@@ -126,6 +126,7 @@ cd "$REPO_DIR"
 source "$REPO_DIR/pipeline/sh/common.sh"
 source "$REPO_DIR/pipeline/sh/slurm.sh"
 source "$REPO_DIR/pipeline/sh/fabric.sh"
+source "$REPO_DIR/pipeline/sh/stage.sh"
 
 # --- Execution environment: the pipeline container (see docs/environment.md) ---
 # Every torchrun/python payload below runs inside the Apptainer pipeline container
@@ -211,6 +212,16 @@ run_single_process() {
 
     srun --nodes=1 --ntasks=1 --kill-on-bad-exit=0 --export=ALL --overlap --nodelist="$node" \
         "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python $script$(quote_args "$@")")"
+}
+
+# --- Helper: the containers started after it have a node-local copy of directory $1 at $1. Every conversion node
+# gets the copy, under stage root $2 (pipeline/sh/stage.sh). ---
+stage_on_nodes() {
+    local staged="$2$1"
+    echo "Staging $1 at $staged on $NNODES node(s)"
+    srun --nodes=$NNODES --ntasks-per-node=1 --export=ALL --overlap ${CONVERT_NODELIST:+--nodelist=$CONVERT_NODELIST} \
+        bash -c 'source "$1/pipeline/sh/stage.sh" && stage_tree "$2" "$3"' stage "$REPO_DIR" "$1" "$staged"
+    stage_bind "$staged" "$1"
 }
 
 # ==============================================================================
@@ -356,6 +367,15 @@ elif [[ "$MODE" == "import" ]]; then
     echo "  Job ID:         $SLURM_JOB_ID"
     echo "  Start time:     $(date)"
     echo "============================================================"
+
+    # Every rank memory-maps the model's weight files. With a stage root, the ranks map a copy on each node's own
+    # disk. One process finds the files' directory first. For a Hub model it downloads what the shared cache lacks
+    # (pipeline/hf_cache.py).
+    INPUT_STAGE_ROOT="$(stage_root)"
+    if [ -n "$INPUT_STAGE_ROOT" ]; then
+        MODEL_DIR="$(run_single_process "-m pipeline.hf_cache" model-dir "$HF_MODEL" | tail -n 1)"
+        stage_on_nodes "$MODEL_DIR" "$INPUT_STAGE_ROOT"
+    fi
 
     run_torchrun examples/conversion/convert_checkpoints_multi_gpu.py \
         import --hf-model "$HF_MODEL" --megatron-path "$MEGATRON_PATH" --tp "$TP" --pp "$PP" --ep "$EP" --etp "$ETP" --trust-remote-code

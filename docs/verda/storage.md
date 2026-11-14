@@ -7,8 +7,8 @@ Where the pipelines read and write on Verda, and how a config written for Isamba
 | Path | What it is | Use it for |
 |---|---|---|
 | `/shared`, `/home` | One 500 TiB network filesystem, on every node. About 2 GiB/s sequential per node, and 2.6 to 10 ms per file operation | Everything that must outlive a job or be seen by another node |
-| `/local` | 3.5 TiB of NVMe on each node. It outlives a job and is not cleaned | The unpacked container image. Node-local copies a job makes for itself |
-| `/tmp` | The same NVMe, private to a job and removed when it ends | `TMPDIR`, Apptainer's pull cache, JIT caches |
+| `/local` | 3.5 TiB of NVMe on each node. It outlives a job and is not cleaned | The unpacked container image |
+| `/tmp` | The same NVMe, private to a job and removed when it ends | `TMPDIR`, Apptainer's pull cache, JIT caches, copies of a job's inputs |
 | `/dev/shm` | 1 TB of RAM-backed storage per node | Nothing by default |
 
 Home is on the shared filesystem and has no small quota, but large outputs still belong under `/shared/geodesic`,
@@ -65,9 +65,28 @@ reuse it.
 After a re-pull the image is unpacked again. The earlier copy is renamed to `nemo_<tag>.old.<time>` and kept,
 because a job still running from it reads its files. Remove it when no job on that node uses it.
 
+## Staging inputs
+
+Small reads from `/shared` are slow, and so are reads through a memory mapping ("What does not work on `/shared`").
+The steps below read that way. Each reads a copy under `/tmp/input_stage`, the profile's `CLUSTER_INPUT_STAGE_ROOT`
+(`pipeline/sh/stage.sh`).
+
+| Step | Copied to the node | Copied back when the step succeeds |
+|---|---|---|
+| `pipeline_checkpoint_submit.sbatch import` | The model's Hub snapshot, or its directory, on every node of the job | Nothing. The ranks write the checkpoint to shared storage |
+| `pipeline_coherence_submit.sbatch` with the `hf` backend | The model's Hub snapshot, or its directory | Nothing |
+| `pipeline_data_submit.sbatch tokenize` | `training.jsonl`, into a copy of the dataset root that the step works in | The `.bin`, `.idx` and `.provenance.json` files |
+| `pipeline_data_submit.sbatch <dataset-root>` | `training.jsonl` and `validation.jsonl` | Nothing. The step writes the pack in the dataset root |
+
+The launcher binds the copy over the input's own path in the container. The payload reads that path, so a
+provenance file records the shared path. The job's `/tmp` holds the copy, so the copy goes when the job ends.
+
+To keep the copies elsewhere, set `GEODESIC_INPUT_STAGE_ROOT` to that directory. To read every input in place, set
+it to the empty string.
+
 ## What does not work on `/shared`
 
 - File locks do not hold between nodes (`cluster.md`, "Known hazards").
 - Random small reads are slow. One thread reads 32 KiB at a random offset in 4.5 ms with `pread` (7 MiB/s) and in
-  0.8 ms through a memory mapping (39 MiB/s), while sequential reads run at 0.6 to 1.6 GiB/s. A workload of random
-  small reads belongs on a copy under `/local`.
+  0.8 ms through a memory mapping (39 MiB/s), while sequential reads run at 0.6 to 1.6 GiB/s. Run a workload of
+  random small reads on a node-local copy ("Staging inputs").

@@ -9,12 +9,13 @@ asserted on instead. Same pattern as test_pipeline_training_submit.py.
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import subprocess
 import sys
 
 import pytest
+
+from tests.unit_tests.data_submit_stub import stub_checkout
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,16 +23,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 
 @pytest.fixture()
 def stub_env(tmp_path):
-    stub_repo = tmp_path / "stub_repo"
-    stub_repo.mkdir()
     # The wrapper's own shell libraries, real: only the container config and runner are stubbed.
-    shutil.copytree(os.path.join(REPO_ROOT, "pipeline", "sh"), stub_repo / "pipeline" / "sh")
-    (stub_repo / "pipeline_env_config.env").write_text(
-        'CONTAINER_SIF="/stub/image.sif"\nenv_config_require() { return 0; }\n'
-    )
-    runner = stub_repo / "pipeline_env_exec.sh"
-    runner.write_text('#!/bin/bash\nprintf "PAYLOAD:%s\\n" "$1"\n')
-    runner.chmod(runner.stat().st_mode | stat.S_IEXEC)
+    stub_repo = stub_checkout(tmp_path / "stub_repo", '#!/bin/bash\nprintf "PAYLOAD:%s\\n" "$1"\n')
 
     dataset_root = tmp_path / "dataset_root"
     dataset_root.mkdir()

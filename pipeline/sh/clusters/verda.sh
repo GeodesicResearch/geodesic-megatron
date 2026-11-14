@@ -33,6 +33,10 @@ verda_profile() {
     # /tmp is the node's NVMe, private to a job.
     CLUSTER_APPTAINER_CACHEDIR="/tmp/apptainer_cache_${USER}"
     CLUSTER_APPTAINER_TMPDIR="/tmp/apptainer_tmp_${USER}"
+    # /shared answers a small read or a page fault slowly (docs/verda/storage.md). A job copies an input it reads
+    # that way here first (pipeline/sh/stage.sh). The directory is in the job's own /tmp, so the copy goes with
+    # the job. The image's copy above stays for the next job.
+    CLUSTER_INPUT_STAGE_ROOT=/tmp/input_stage
 
     # mlx5_0 is the node's Ethernet port. The InfiniBand HCAs are mlx5_1 to mlx5_8, one beside each GPU.
     CLUSTER_NCCL_IB_HCA="^mlx5_0"

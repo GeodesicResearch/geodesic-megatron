@@ -22,7 +22,7 @@ standard library, ``yaml`` and ``huggingface_hub`` at module scope; torch and me
 Catalogue:
     cluster: the cluster profile of this host, as the shell libraries resolve it.
     checkpoints: the layout of a Megatron checkpoint directory.
-    hf_cache: lookups in the local HuggingFace hub cache.
+    hf_cache: the local HuggingFace hub cache, and the directory a model loads from.
     hub: publishing a model directory to the HuggingFace Hub.
     nemotron: facts about the Nemotron-H releases and their chat format.
     megatron_model: a sharded Megatron model built from an HF architecture, and a checkpoint loaded into it.

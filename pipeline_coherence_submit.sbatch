@@ -56,6 +56,7 @@ cd "$REPO_DIR"
 source "$REPO_DIR/pipeline/sh/common.sh" || exit 1
 source "$REPO_DIR/pipeline/sh/slurm.sh" || exit 1
 source "$REPO_DIR/pipeline/sh/fabric.sh" || exit 1
+source "$REPO_DIR/pipeline/sh/stage.sh" || exit 1
 
 # Peek for --backend megatron among the forwarded options (the script itself
 # parses the flag; the launcher only needs it to pick the launch topology).
@@ -146,6 +147,16 @@ else
     # hf backend (default) and endpoint: one containerized python process on this
     # node. The endpoint backend loads nothing locally (stdlib HTTP to a running
     # server), so it rides the same single-process path; only its args differ.
+    #
+    # The hf backend memory-maps the model's weight files. With a stage root, it maps a copy on this node's disk,
+    # as an import does (pipeline/sh/stage.sh, pipeline/hf_cache.py).
+    INPUT_STAGE_ROOT="$(stage_root)"
+    if [ "$BACKEND" = "hf" ] && [ -n "$INPUT_STAGE_ROOT" ]; then
+        MODEL_DIR_PAYLOAD="$(container_payload "python -m pipeline.hf_cache model-dir $MODEL_PATH_Q")"
+        MODEL_DIR="$(set -o pipefail; "$REPO_DIR/pipeline_env_exec.sh" "$MODEL_DIR_PAYLOAD" | tail -n 1)" || exit 1
+        stage_tree "$MODEL_DIR" "$INPUT_STAGE_ROOT$MODEL_DIR" || exit 1
+        stage_bind "$INPUT_STAGE_ROOT$MODEL_DIR" "$MODEL_DIR"
+    fi
     "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python pipeline_coherence_test.py $MODEL_PATH_Q$ARGS_Q")"
     # Same reason as the megatron branch: grab the payload's status before any
     # other command (the echo below) overwrites $?.

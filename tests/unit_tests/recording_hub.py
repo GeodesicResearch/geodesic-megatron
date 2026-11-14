@@ -11,14 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""A recording stand-in for ``huggingface_hub.HfApi``: the Hub is a network service.
+"""A recording stand-in for ``huggingface_hub``'s network calls: the Hub is a network service.
 
 Each call appends one JSON line to the file ``$STUB_CALLS`` names: ``{"cmd": "hub", "argv": [method], "kwargs":
 {...}}``, with ``files`` (relative paths, sorted) added for an uploaded folder. stubbed_shell.PipelineShell installs
 it as the ``huggingface_hub`` that shell-run Python sees; a Python test assigns it to ``huggingface_hub.HfApi``.
 
 Catalogue:
-    HfApi: the recorder.
+    HfApi: the recorder of the API's calls.
+    snapshot_download: the recorder of a snapshot download, which gives the directory ``$STUB_HUB_SNAPSHOT`` names.
 """
 
 import json
@@ -46,3 +47,9 @@ class HfApi:
 
     def upload_folder(self, **kwargs):
         _record("upload_folder", **kwargs)
+
+
+def snapshot_download(repo_id, **kwargs):
+    """Records the call and returns ``$STUB_HUB_SNAPSHOT``, the snapshot directory a test built."""
+    _record("snapshot_download", repo_id=repo_id, **kwargs)
+    return os.environ["STUB_HUB_SNAPSHOT"]

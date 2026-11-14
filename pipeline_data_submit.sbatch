@@ -102,6 +102,20 @@ cluster_host_reset
 # and 3rdparty/Megatron-LM to PYTHONPATH, so a worktree's bridge fixes are what data jobs run.
 RUNNER=("$REPO_DIR/pipeline_env_exec.sh")
 
+# With an input stage root, the tokenize and pack steps read their JSONL files from a node-local copy
+# (pipeline/sh/stage.sh). The container has each copy at the file's own path, so the payload reads and records that
+# path. dataset_stage_file copies one file of a dataset root and prints the copy's path. It prints nothing without
+# a stage root.
+source "$REPO_DIR/pipeline/sh/stage.sh" || exit 1
+dataset_stage_file() {  # $1 = dataset root, $2 = file name
+    local stage root
+    stage="$(stage_root)"
+    [ -n "$stage" ] || return 0
+    root="$(realpath "$1")" || return 1
+    stage_file "$root/$2" "$stage$root/$2" >&2 || return 1
+    echo "$stage$root/$2"
+}
+
 if [ "$MODE_OR_ROOT" = "prepare" ]; then
     shift
     echo "===== SFT Dataset Preparation (download + tokenize + pack) ====="
@@ -153,6 +167,15 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
         echo "FATAL: $INPUT_JSONL not found — run the 'prepare' mode first (with --skip-pack)." >&2
         exit 1
     fi
+    # The tool writes its part files beside the input and reads them back in small reads, so with a stage root the
+    # whole step works in the copy's directory: the container has it at the dataset root's path, and the files the
+    # step wrote are copied to the root afterwards.
+    STAGED_JSONL="$(dataset_stage_file "$DATASET_ROOT" training.jsonl)" || exit 1
+    STAGED_DATASET="${STAGED_JSONL:+$(dirname "$STAGED_JSONL")}"
+    if [ -n "$STAGED_DATASET" ]; then
+        stage_bind "$STAGED_DATASET" "$(realpath "$DATASET_ROOT")"
+        echo "Staged:       $INPUT_JSONL at $STAGED_JSONL"
+    fi
 
     # More than one partition: inside the container, scripts/data/tokenize_partitions.py refuses
     # part files an earlier run left (the tool would tokenize them as if they were the input) and
@@ -160,12 +183,14 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
     # under TOKENIZE_QUOTA_LINE_PERCENT of the storage's limit, otherwise at one partition. A trap
     # there removes the part files however the payload ends. This script reads the quota on the
     # host, where the cluster's own tool is (cluster_storage_quota_report), into a report file the
-    # container reads.
+    # container reads. The storage is the disk the step writes: the staged copy's where there is one.
     PARTITION_STEP=""
+    QUOTA_REPORT_NAME=".tokenize_quota.${SLURM_JOB_ID:-$$}"
     if [ "$PARTITIONS" -gt 1 ]; then
-        QUOTA_REPORT="$DATASET_ROOT/.tokenize_quota.${SLURM_JOB_ID:-$$}"
-        trap 'rm -f "$QUOTA_REPORT"' EXIT
-        cluster_storage_quota_report "$DATASET_ROOT" > "$QUOTA_REPORT" || exit 1
+        QUOTA_REPORT="$DATASET_ROOT/$QUOTA_REPORT_NAME"
+        QUOTA_REPORT_ON_HOST="${STAGED_DATASET:-$DATASET_ROOT}/$QUOTA_REPORT_NAME"
+        trap 'rm -f "$QUOTA_REPORT_ON_HOST"' EXIT
+        cluster_storage_quota_report "${STAGED_DATASET:-$DATASET_ROOT}" > "$QUOTA_REPORT_ON_HOST" || exit 1
         PARTITION_ARGS=$(quote_args --input "$INPUT_JSONL" --output-prefix "$OUTPUT_PREFIX" --json-key "$JSON_KEY")
         CHOOSE_ARGS=(--partitions "$PARTITIONS" --line-percent "${TOKENIZE_QUOTA_LINE_PERCENT:-94}"
             --quota-report "$QUOTA_REPORT")
@@ -210,6 +235,9 @@ $(quote_args "${COUNT_ARGS_AFTER_TOKENIZER[@]}") \
 --note \"partitions=\$PARTITIONS_RUN\" \${MERGE_ORDER_CHECK:+--note \"merge_order_check=\$MERGE_ORDER_CHECK\"}\
 $(quote_args --note "slurm_job_id=${SLURM_JOB_ID:-}")")"
     rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$STAGED_DATASET" ]; then
+        stage_out "$STAGED_DATASET" "$DATASET_ROOT" training.jsonl "$QUOTA_REPORT_NAME" || rc=1
+    fi
     if [ "$rc" -eq 0 ]; then
         echo "===== Tokenization Complete ====="
     else
@@ -233,6 +261,16 @@ echo "Pad seq to mul: $PAD_SEQ_TO_MULT"
 echo "Env:            $CONTAINER_SIF"
 echo "========================================"
 
+# With a stage root the pack reads each JSONL file from a copy and writes in the dataset root itself, where it
+# finds the packs the root already holds.
+for name in training.jsonl validation.jsonl; do
+    [ -f "$DATASET_ROOT/$name" ] || continue
+    STAGED_JSONL="$(dataset_stage_file "$DATASET_ROOT" "$name")" || exit 1
+    if [ -n "$STAGED_JSONL" ]; then
+        stage_bind "$STAGED_JSONL" "$(realpath "$DATASET_ROOT")/$name"
+        echo "Staged:         $DATASET_ROOT/$name at $STAGED_JSONL"
+    fi
+done
 PACK_ARGS=(--dataset-root "$DATASET_ROOT" --tokenizer "$TOKENIZER" --seq-length "$SEQ_LENGTH" --pad-seq-to-mult "$PAD_SEQ_TO_MULT")
 "${RUNNER[@]}" "$(container_payload "python scripts/data/pack_sft_dataset.py$(quote_args "${PACK_ARGS[@]}")")"
 rc=$?

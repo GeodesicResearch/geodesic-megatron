@@ -102,7 +102,7 @@ for part in re.findall(r"[^,\\[]+(?:\\[[^\\]]*\\])?", sys.argv[-1]):
 
 # The Hub is a network service: the huggingface_hub that shell-run Python imports is the recorder
 # (tests/unit_tests/recording_hub.py).
-_FAKE_HUB = "from tests.unit_tests.recording_hub import HfApi  # noqa: F401\n"
+_FAKE_HUB = "from tests.unit_tests.recording_hub import HfApi, snapshot_download  # noqa: F401\n"
 
 # `record NAME ARGS...`: append a call record when NAME is in $STUB_RECORD; a record that fails ends the stub.
 _RECORD_FN = """\
