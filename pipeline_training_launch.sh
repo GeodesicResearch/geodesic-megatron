@@ -274,7 +274,7 @@ mkdir -p "$WANDB_DIR"
 # that chain serializes along the pipeline (stage k compiles only when microbatch 1
 # reaches it) and dominates startup: ~75s/stage x 22 stages ~= 25 min at PP=22.
 if [ "${TRAIN_PERSISTENT_TRITON_CACHE:-0}" = "1" ]; then
-    export TRITON_CACHE_DIR=/tmp/triton_cache_persistent_${ENV_CACHE_SUFFIX}
+    export TRITON_CACHE_DIR=${CLUSTER_NODE_CACHE_ROOT}/triton_cache_persistent_${ENV_CACHE_SUFFIX}
 else
     export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}_${ENV_CACHE_SUFFIX}
 fi
