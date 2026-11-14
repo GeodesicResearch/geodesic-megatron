@@ -95,7 +95,7 @@ HF with the tensor names and shapes of the as-is export.
   MoE activations past their own layer, so routing imbalance moves one layer's transient, not the whole stack's;
   the benchmark has covered 500 of the stage's 3126 iterations.
 - **Parameter-gather overlap on Nemotron-H.** The production configs keep it off at DP>1 (the "standing posture"
-  CLAUDE.md names), with no recorded failure behind that choice; the final posture turns it on, as the pretraining
+  docs/isambard/models.md names), with no recorded failure behind that choice; the final posture turns it on, as the pretraining
   quickstart does, and passes the loss band, the resume and the export checks.
 - **Production width.** The benchmark reproduces production's per-GPU work (2 microbatches per replica) but not its
   width: at 512 GPUs production's data-parallel collectives span 256 ranks and eight switch groups. The speed-up

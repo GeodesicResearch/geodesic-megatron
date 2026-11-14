@@ -24,7 +24,7 @@ tokenizes to one — see `scripts/data/filter_zero_emb_docs.py` — or (b)
 **switch tokenizers** so `--append-eod` writes a token id that *is* trained
 (e.g., `</s>`=id 2 on `geodesic-research/nemotron-base-tokenizer`, vs. the
 NVIDIA default of `<|im_end|>`=id 11 which is dead in Base). The repo's
-canonical guidance lives in CLAUDE.md → "Tokenizer choice for Base CPT".
+canonical guidance lives in docs/isambard/tokenizers.md → "Tokenizer choice for Base CPT".
 
 WHAT THIS SCRIPT DOES
 ---------------------
@@ -65,7 +65,9 @@ Usage:
         --output /projects/a5k/public/data/_shared/base_zero_emb_ids.txt \\
         --threshold 1e-3
 """
+
 from __future__ import annotations
+
 import argparse
 from pathlib import Path
 
@@ -75,12 +77,13 @@ from torch.distributed.checkpoint import FileSystemReader
 
 
 def main() -> int:
+    """Write the ids of the zero embedding rows of a checkpoint."""
     p = argparse.ArgumentParser()
-    p.add_argument("--ckpt", required=True, type=str,
-                   help="Path to iter_NNNNNNN dir of a Super-Base Megatron ckpt")
+    p.add_argument("--ckpt", required=True, type=str, help="Path to iter_NNNNNNN dir of a Super-Base Megatron ckpt")
     p.add_argument("--output", required=True, type=str)
-    p.add_argument("--threshold", default=1e-3, type=float,
-                   help="Row-norm threshold below which a token is 'zero-emb'")
+    p.add_argument(
+        "--threshold", default=1e-3, type=float, help="Row-norm threshold below which a token is 'zero-emb'"
+    )
     p.add_argument("--key", default="embedding.word_embeddings.weight", type=str)
     args = p.parse_args()
 
@@ -115,4 +118,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main())

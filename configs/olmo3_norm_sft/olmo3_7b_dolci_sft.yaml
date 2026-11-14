@@ -1,8 +1,8 @@
 # Olmo 3 7B Dolci-SFT: Olmo 3 7B Base fine-tuned for two epochs on AI2's Dolci Think SFT data.
 # The data is allenai/Dolci-Think-SFT-7B at 83f618e2. The recipe is that of olmo3_7b_norm_sft.yaml, which this file
 # composes. Only the data, the length, the saves, the run identity and the two launch blocks differ from it
-# (tests/unit_tests/test_olmo3_dolci_sft_config.py). The 5e-5 learning rate is on the full-SFT exception list of
-# CLAUDE.md (Kyle, 2026-11-09).
+# (tests/unit_tests/test_olmo3_dolci_sft_config.py). The 5e-5 learning rate is on the full-SFT exception list in
+# docs/isambard/repository-map.md (Kyle, 2026-11-09).
 #
 # Data: the 2,268,178 Dolci rows rendered with the 7B Think-SFT chat template, less the 2,838 rows over 32,768 tokens
 # (data/dolci_think_sft_7b_counts.yaml). That leaves 2,265,340 rows. Each epoch is its own seeded draw of those rows,

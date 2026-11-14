@@ -32,7 +32,7 @@
 # midtraining), counted for tokens seen and never uploaded from this entry. `strict` is the
 # exporter's key matching: strict export fails on any tensor the architecture expects and the
 # checkpoint lacks, which is the check a base checkpoint should pass; the SFT checkpoints are
-# exported with --not-strict as CLAUDE.md prescribes for SFT (an MTP-less checkpoint against an
+# exported with --not-strict as docs/isambard/checkpoint-pipeline.md prescribes for SFT (an MTP-less checkpoint against an
 # architecture that may declare MTP), the export then being verified by tensor name. A model may
 # also name `card_sections`, a repo-relative markdown file opening with a level-2 heading, which its
 # card places after the introduction; the xl-50b rerun's card carries its comparison with the

@@ -18,7 +18,7 @@
 # one's step time and loss. Megatron warns of known stability issues with it, so watch_7b.yaml stops the run on a
 # non-finite loss or gradient norm.
 #
-# The 5e-5 learning rate is on the full-SFT exception list of CLAUDE.md (Kyle, 2026-11-03).
+# The 5e-5 learning rate is on the full-SFT exception list in docs/isambard/repository-map.md (Kyle, 2026-11-03).
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
   tokenizer_model: /projects/a5k/public/logs/metagaming_filtering/olmo_norm/tokenizers/tokenizer_7b_fast

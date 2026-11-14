@@ -4,7 +4,7 @@
 # Unlike Super, the Ultra base release already ships NON-ZERO chat-special token
 # embeddings (verified: only 1 unused-token row is near-zero, and it is zero in
 # Instruct too), so NO "Base-Chat-Init" graft is needed — warm-start directly from
-# the base. (Super needed the graft to avoid the bucket-#0 Inf; see CLAUDE.md
+# the base. (Super needed the graft to avoid the bucket-#0 Inf; see docs/isambard/tokenizers.md
 # "Tokenizer choice for Base CPT".)
 #
 # Model: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 (Latent MoE, 512 experts, 108 layers, top-22)
@@ -13,7 +13,7 @@
 #   - Same encoder as the upstream NVIDIA tokenizer.
 #   - Chat template NEVER auto-injects <think>...</think> tags.
 #
-# Precision: Pure BF16 (FP8/FP4 is wrong granularity for MoE with 512 experts — see CLAUDE.md).
+# Precision: Pure BF16 (FP8/FP4 is wrong granularity for MoE with 512 experts — see docs/isambard/models.md).
 # Optimizer: Precision-aware optimizer ON — Adam 1st/2nd moments in BF16 (mandatory at 550B).
 #
 # !!! VALIDATED AT SCALE — SFT on 72 nodes / 288 GPUs (W&B os88d63a, 495 iters, 0 NaN, loss 0.90->0.46). !!!
@@ -147,7 +147,7 @@ checkpoint:
   save: /projects/a5k/public/checkpoints/megatron/nemotron_550b_warm_start_sft_200k_instruct
   save_interval: 1000000
   # Model-only FINAL checkpoint only: no intermediate/non-persistent saves and no optimizer/RNG
-  # state (per user direction + CLAUDE.md checkpoint policy). At 550B an optimizer-state ckpt
+  # state (per user direction + the checkpoint save policy in docs/isambard/training-pipeline.md). At 550B an optimizer-state ckpt
   # would be ~3-4 TB and /projects/a5k runs ~96% full; downstream (HF export, coherence) reads
   # only model.* keys. Trade-off: a full worker death restarts from iter 0 (the run is short and
   # now stable); in-process NCCL restarts still lose 0 iters.

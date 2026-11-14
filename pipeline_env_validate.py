@@ -297,7 +297,7 @@ def check_omp_threading():
     single-threads the host-side AdamW of any CPU-offloaded optimizer onto one core.
     On the 120B benchmark the threaded arm beat the previous champion by 1.43 s/iter —
     though those two arms also differed in offload fraction, so that gap is not a clean
-    threading delta (see CLAUDE.md and §C1b). Either way the default was invisible for
+    threading delta (see docs/isambard/training-pipeline.md and §C1b). Either way the default was invisible for
     months precisely because nothing asserted it, so it is a scored check, not a comment.
     """
     threads = os.environ.get("OMP_NUM_THREADS")

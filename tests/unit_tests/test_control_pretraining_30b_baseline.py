@@ -440,7 +440,7 @@ class TestDataBuildAgreesWithTheConfigs:
 
     def test_one_tokenizer_across_the_corpus_config_and_both_blends(self, dry_run, merged):
         """The tokenizer that produces the .bin/.idx and the one training reads must agree: a
-        mismatch miscounts document boundaries silently (see CLAUDE.md on Base-CPT EOD)."""
+        mismatch miscounts document boundaries silently (see docs/isambard/tokenizers.md on Base-CPT EOD)."""
         corpus_cfg = yaml.safe_load(CORPUS_CONFIG.read_text())
         tokenizer = corpus_cfg["tokenizer"]
         assert tokenizer == "geodesic-research/nemotron-base-tokenizer"

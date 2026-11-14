@@ -82,7 +82,7 @@ def test_each_nemotronh_recipe_builds_config(recipe_func: Callable):
 
     # The nemotron_3_* recipes deliberately leave tokenizer_model unset: the
     # training YAML must pin the tokenizer explicitly (e.g. a geodesic-research
-    # base/instruct variant — see "Tokenizer choice for Base CPT" in CLAUDE.md)
+    # base/instruct variant — see "Tokenizer choice for Base CPT" in docs/isambard/tokenizers.md)
     # rather than inheriting a baked-in upstream default whose EOS id may not
     # match the checkpoint.
     tokenizer_set_by_yaml = recipe_func.__name__.startswith("nemotron_3_")

@@ -101,7 +101,7 @@ run.
 # compute mode: three per GPU in Default mode; in Exclusive_Process mode one per GPU, each pinned to
 # its own GPU (tests/unit_tests/worker_gpus.py), plus a serial pass for the tests marked serial_gpu,
 # after first refusing to start, and naming them, while any process already holds a GPU.
-# CLAUDE.md's Testing section has the measured times and the history. The same conftest isolates each worker's
+# The Testing section of docs/isambard/development.md has the measured times and the history. The same conftest isolates each worker's
 # MASTER_PORT and derives the port base from the session's controller pid, so two concurrent suites on one
 # node collide only when those pids differ by a multiple of 328, never when started together; every port
 # lies below the kernel's ephemeral range, so no outgoing connection can take one first.

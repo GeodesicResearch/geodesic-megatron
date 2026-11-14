@@ -20,7 +20,7 @@ Comprehensive review of MoE fine-tuning literature, NVIDIA's official Nemotron 3
 - **General guidance**: MoE models tend to benefit from slightly higher LRs than dense models of similar active parameter count, because each expert sees fewer tokens per step. However, for SFT (vs pretraining), conservative LRs (1e-6 to 1e-5) are standard.
 - **Our experience**: LR=8e-5 caused NaN at iter 4-8 (especially with context parallelism). LR=5e-6 validated stable over 300+ iterations.
 - **Recommendation**: Our LR=5e-6 is conservative but safe. Could experiment with LR=1e-5 (matching NVIDIA's recipe) if loss convergence feels slow. Do NOT go above 1e-5 for full SFT.
-- **Exceptions**: the runs Kyle approved above this ceiling are listed in CLAUDE.md's Common Pitfalls table (the NaN row). The 8e-5 NaN the ceiling rests on was a run with context parallelism (CP=2) that failed at iterations 4-8, while its warmup LR was at most about 1.3e-5; every excepted run is at CP=1. The ceiling stands for any other run.
+- **Exceptions**: the runs Kyle approved above this ceiling are listed in the Common Pitfalls table of docs/isambard/repository-map.md (the NaN row). The 8e-5 NaN the ceiling rests on was a run with context parallelism (CP=2) that failed at iterations 4-8, while its warmup LR was at most about 1.3e-5; every excepted run is at CP=1. The ceiling stands for any other run.
 
 #### 2. Epochs and Training Duration
 
@@ -95,7 +95,7 @@ Comprehensive review of MoE fine-tuning literature, NVIDIA's official Nemotron 3
 5. **LoRA (LR=1e-4, dim=32, EP=1 TP=1)** for fast ablation studies before committing to full SFT
 
 **Do NOT change:**
-- Don't increase LR above 1e-5 (NaN risk confirmed); the approved exceptions are listed in CLAUDE.md's Common Pitfalls table (the NaN row; see the Learning Rate section above)
+- Don't increase LR above 1e-5 (NaN risk confirmed); the approved exceptions are listed in the Common Pitfalls table of docs/isambard/repository-map.md (the NaN row; see the Learning Rate section above)
 - Don't increase aux loss coefficient (over-regularization on narrow SFT data)
 - Don't disable sequence packing (essential for efficiency, used by NVIDIA)
 - Don't add expert dropout during SFT (Flan-MoE used 0.2 but for instruction tuning from scratch, not fine-tuning a converged model)

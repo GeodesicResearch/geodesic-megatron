@@ -15,7 +15,7 @@
 #   train_iters 41 -> 42,991,616 tokens ≈ 43.0M (~1.41 epochs).
 #
 # Tokenizer: geodesic-research/nemotron-base-tokenizer (EOD = </s> = id 2,
-# matching Base pretraining; see CLAUDE.md "Tokenizer choice for Base CPT").
+# matching Base pretraining; see docs/isambard/tokenizers.md "Tokenizer choice for Base CPT").
 # The same tokenizer produced the .bin/.idx via preprocess_data.py --append-eod.
 # Base ckpt is Base-Chat-Init (chat-token embeddings grafted) so the follow-on
 # chat-template SFT stage does not hit dead embeddings.

@@ -23,7 +23,7 @@
 # torch_dist import). PRE-FLIGHT before launch: Nano-Base carries ~5 zero
 # (never-trained) embedding rows for chat-scaffolding token ids. A corpus
 # document containing a literal chat-template string tokenizes into one and
-# Infs the first backward (the Base-CPT trap, CLAUDE.md "Tokenizer choice for
+# Infs the first backward (the Base-CPT trap, docs/isambard/tokenizers.md "Tokenizer choice for
 # Base CPT"). The corpora were built for from-scratch training and were NOT
 # filtered for dead ids — run the dead-id scan in this directory's README
 # before the first launch.
