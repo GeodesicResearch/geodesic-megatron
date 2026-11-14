@@ -4,7 +4,7 @@ This repo provides end-to-end infrastructure for training and evaluating large l
 
 The primary workflow is: **download a HuggingFace dataset** → **prepare and pack it** → **train with [Megatron-Core MoE parallelism](https://arxiv.org/abs/2603.07685)** (TP/EP/PP/DP) → **convert checkpoints back to HuggingFace format** → **run generation tests**. All training metrics and generation outputs are logged to [Weights & Biases](https://wandb.ai/geodesic). The current infrastructure is optimized for **Nemotron 3 Nano (30B-A3B)** and **Super (120B-A12B)** MoE models; future releases will generalize to additional model families.
 
-For cluster hardware specs and per-model topology findings, see [CLAUDE.md](CLAUDE.md#cluster-overview-isambard); for the execution environment itself, [docs/environment.md](docs/environment.md). The upstream Megatron Bridge README is at [docs/README_DEFAULT.md](docs/README_DEFAULT.md).
+For cluster hardware specs and per-model topology findings, see [docs/isambard/cluster.md](docs/isambard/cluster.md) and [docs/isambard/models.md](docs/isambard/models.md); for the execution environment itself, [docs/environment.md](docs/environment.md). The upstream Megatron Bridge README is at [docs/README_DEFAULT.md](docs/README_DEFAULT.md).
 
 ## Pipelines
 
@@ -341,7 +341,7 @@ to the base reaches the overlay unedited. The Nano pretrain quickstart is writte
 tools that read configs through `scripts/training/config_compose.py` compose (training and the
 blend-coverage dry run built on it, the FLOPs estimator and the run scorer built on it, the config
 tests), so a config that the stage gate, the Hub scripts or the epoch-chain generator (as a
-`parent_config` or `posture_config`) read must stay a complete file ([CLAUDE.md](CLAUDE.md), "Config composition").
+`parent_config` or `posture_config`) read must stay a complete file ([docs/isambard/training-pipeline.md](docs/isambard/training-pipeline.md), "Config composition").
 
 ### Fault Tolerance
 
@@ -385,7 +385,7 @@ crashes in MoE routing. The measured exceptions are the Nano pretrain and midtra
 and both stages of the control-pretraining V2 E2E arm, which run FP8 current scaling on their dense layers only; their routed experts stay BF16. Recipe LR 5e-6; 8e-5
 NaNs under context parallelism. Full topology
 reasoning, per-model memory notes, and the legacy layouts these superseded are in
-[CLAUDE.md](CLAUDE.md#nemotron-3-super-120b-a12b-on-isambard).
+[docs/isambard/models.md](docs/isambard/models.md).
 
 ---
 
@@ -533,7 +533,7 @@ isambard_sbatch --unmark-bad nid001234                               # Delete (n
 isambard_sbatch --prune-bad                                          # Housekeeping
 ```
 
-Entries expire after 7 days, so a node that gets fixed stops being excluded automatically. **Don't mark nodes for code-level issues** (OOM, bad YAML, wrong parallelism) — that would falsely exclude healthy nodes for a week and erode the list's signal. See [CLAUDE.md](CLAUDE.md#bad-compute-nodes) for the full register-when / don't-register-when checklist.
+Entries expire after 7 days, so a node that gets fixed stops being excluded automatically. **Don't mark nodes for code-level issues** (OOM, bad YAML, wrong parallelism) — that would falsely exclude healthy nodes for a week and erode the list's signal. See [docs/isambard/cluster.md](docs/isambard/cluster.md#bad-compute-nodes) for the full register-when / don't-register-when checklist.
 
 ## Common Pitfalls
 
@@ -594,7 +594,7 @@ Configuration lives in `.claude/settings.json` (hooks) and `.claude/geodesic-con
 items). The commit-time review gate is **enabled**: `git commit` runs pre-commit on the staged
 files and blocks until the `checklist-reviewer` subagent writes a passing verdict for the
 staged-diff hash; verdict-protection and a submodule-pin consistency check are wired in alongside
-it. See [CLAUDE.md](CLAUDE.md#claude-code-tooling) for the full flow.
+it. See [CLAUDE.md](CLAUDE.md#claude-code-tooling) and [docs/isambard/development.md](docs/isambard/development.md) for the full flow.
 
 ## Further Reading
 
@@ -602,5 +602,6 @@ it. See [CLAUDE.md](CLAUDE.md#claude-code-tooling) for the full flow.
 - [docs/environment.md](docs/environment.md) — The execution environment: install, design decisions, image qualification, troubleshooting
 - [docs/profiling-quickstart.md](docs/profiling-quickstart.md) — Capturing and reading torch-profiler traces of a training run
 - [docs/investigations/nano30b-pretrain-perf-campaign.md](docs/investigations/nano30b-pretrain-perf-campaign.md) — The Nano-30B pretraining performance campaign: every probe, its result and what it taught
-- [CLAUDE.md](CLAUDE.md) — Cluster specs, per-model topology findings, campaign conventions, and dev commands
+- [CLAUDE.md](CLAUDE.md) — Agent rules and a map of the documents
+- [docs/isambard/](docs/isambard/) — Cluster specs, per-model topology findings, pipelines, and dev commands
 - [docs/README_DEFAULT.md](docs/README_DEFAULT.md) — Upstream Megatron Bridge README (supported models, API docs, etc.)

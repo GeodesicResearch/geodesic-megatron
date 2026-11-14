@@ -12,7 +12,7 @@ the pinned commit is what a build reads and records, so the tests use the real f
 tests that publish replace the Hub's write calls with ones that fail the test, because a real write would publish a
 repository.
 
-Run (inside the container, see CLAUDE.md "Testing"):
+Run (inside the container, see docs/isambard/development.md "Testing"):
     python -m pytest tests/unit_tests/data/test_marker_tokenizers.py -v
 """
 

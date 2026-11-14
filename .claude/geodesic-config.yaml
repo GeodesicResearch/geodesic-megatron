@@ -41,6 +41,10 @@ checks:
       exclude_files:
         - CHANGELOG.md
         - .claude/forbidden_user_paths.txt  # the forbidden-list file necessarily contains the usernames
+        # Two documents name a location outside this repo that exists only under a teammate's directory:
+        # the NCCL benchmark checkout and the sfm-evals Slurm logs.
+        - docs/isambard/nccl-testing.md
+        - docs/isambard/coherence-and-evals.md
         # Campaign training configs carry per-experiment absolute paths, which
         # forbidden_user_paths.txt states are exempt by convention. They name the campaign
         # checkpoint tree, which has sat under a project directory carrying a teammate's
@@ -138,7 +142,7 @@ checks:
 # take before blocking the commit. The Claude hook timeout in settings.json is
 # rendered as this + 60, so re-run `geodesic-tooling init` after changing it.
 review_gate:
-  precommit_timeout_s: 600     # measured hook times: CLAUDE.md, Testing
+  precommit_timeout_s: 600     # measured hook times: docs/isambard/development.md, Testing
 
 # ── Notifications ────────────────────────────────────────────────────────────
 notifications:

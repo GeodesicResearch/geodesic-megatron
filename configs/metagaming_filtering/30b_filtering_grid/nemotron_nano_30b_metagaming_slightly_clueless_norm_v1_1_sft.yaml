@@ -35,7 +35,7 @@
 # trains, scripts/telemetry/run_watch.py judges its segment logs with watch_slightly_clueless_norm_v1_1_sft.yaml beside
 # this file.
 #
-# THE LEARNING RATE. 5.0e-05 is v4's peak. CLAUDE.md (Common Pitfalls) lists the runs excepted from the 1e-5 ceiling
+# THE LEARNING RATE. 5.0e-05 is v4's peak. docs/isambard/repository-map.md (Common Pitfalls) lists the runs excepted from the 1e-5 ceiling
 # for full SFT, this one among them.
 
 tokenizer:

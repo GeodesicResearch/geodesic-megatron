@@ -67,7 +67,7 @@ drawn from shrinks, so the blend-weighted mean is 1.135 epochs (ai_safety_and_ad
 arXiv 1.031). All of it runs through `sbatch`; nothing data-scale runs on the tunnel node.
 
 1. `/review` of this arm's configs and tests, plus analysis's independent second read.
-2. Storage, read from the project quota as CLAUDE.md prescribes,
+2. Storage, read from the project quota as docs/isambard/cluster.md prescribes,
    `lfs quota -p "$(lfs project -d /projects/a5k | awk '{print $1}')" -h /projects/a5k`, must leave
    at least the build's ~0.4 TB + 2 TB margin + any reserve another running campaign has declared,
    with usage after it under 95%. The 0.4 TB is the ten corpus directories (V1's measure 392 GB);

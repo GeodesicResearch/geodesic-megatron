@@ -112,7 +112,7 @@ def nemotron_3_ultra_pretrain_config() -> ConfigContainer:
     cfg.model.mtp_use_repeated_layer = True
 
     # Mixed Precision — pure BF16. Super-pretrain uses an nvfp4-mixed recipe, but per
-    # CLAUDE.md FP8/FP4 causes stochastic alignment crashes in MoE routing with 512
+    # docs/isambard/models.md: FP8/FP4 causes stochastic alignment crashes in MoE routing with 512
     # experts, so Ultra keeps the bf16_mixed default set by _pretrain_common.
 
     # Optimizer hyperparameters

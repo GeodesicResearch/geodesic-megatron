@@ -50,7 +50,7 @@ parent. Fresh optimizer (Adam β₂ 0.95, PAO bf16 moments).
 
 Nano-Base carries ~5 zero (never-trained) embedding rows for chat-scaffolding token ids. One
 corpus document containing a literal chat-template string tokenizes into one of them and Infs
-the first backward — deterministically, immune to optimizer-side mitigation (CLAUDE.md
+the first backward — deterministically, immune to optimizer-side mitigation (docs/isambard/tokenizers.md
 "Tokenizer choice for Base CPT"). The campaign corpora were built for **from-scratch** training,
 where the trap does not apply, so they were never filtered for dead ids. Before the first Nano
 launch:
@@ -86,13 +86,13 @@ isambard_sbatch --nodes=32 pipeline_training_submit.sbatch \
   super cpt --disable-ft
 ```
 
-- `--disable-ft`: both runs outlive the ft heartbeat's 2 h SIGKILL wall (see CLAUDE.md "Fault
+- `--disable-ft`: both runs outlive the ft heartbeat's 2 h SIGKILL wall (see docs/isambard/training-pipeline.md "Fault
   Tolerance"); recovery comes from `load == save` + `save_interval: 100` instead — a
   resubmission (or a `--dependency=singleton` chain, as the 500B baseline uses) resumes from the
   latest checkpoint.
 - Both configs set `logger.tensorboard_dir: null`, which disables TensorBoard outright — the
   campaign does not use it. Omitting the key would not do the same thing: the recipe default
-  drops TB event files into `./nemo_experiments` in the submitting checkout. See CLAUDE.md's
+  drops TB event files into `./nemo_experiments` in the submitting checkout. See docs/isambard/training-pipeline.md's
   "TensorBoard: always disabled" section, including why the log interval and the `log_*_to_tensorboard` flags
   must be left alone.
 

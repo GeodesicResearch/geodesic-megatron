@@ -40,7 +40,7 @@
 # why the numbers here are the older ones: the identical config, same allocation, same day,
 # on three different 16-node subsets: 20.66 / 20.81 / 21.14 s/iter — a 2.3% spread with
 # every node inside one Dragonfly group. (Crossing groups is worth far more, ~1.5x; see
-# CLAUDE.md.) The "~19.7 s/iter on a champion-class placement" projection — which lived in
+# docs/isambard/models.md.) The "~19.7 s/iter on a champion-class placement" projection — which lived in
 # the consultant tracker (/projects/a5k/public/logs/infr71_wave2/docs/consultant-training-stack-review.md), not in this header — is RETIRED:
 # three placements were measured and none reached it.
 # SUPERSEDED CHAMPION ANCHOR (kept as the trail, per this repo's habit): **20.66 s/iter**,
