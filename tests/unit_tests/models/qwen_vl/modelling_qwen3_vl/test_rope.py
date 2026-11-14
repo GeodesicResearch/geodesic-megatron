@@ -96,8 +96,11 @@ class TestQwen3VLTextRotaryEmbedding:
         if parallel_state.model_parallel_is_initialized():
             parallel_state.destroy_model_parallel()
 
-    def test_qwen3_vl_text_rotary_embedding(self, hf_config):
+    @pytest.mark.parametrize("allow_tf32", [False, True])
+    def test_qwen3_vl_text_rotary_embedding(self, hf_config, allow_tf32, monkeypatch):
         """Test that MBridge RoPE output matches HuggingFace implementation."""
+        # NVIDIA's images allow TF32 in a CUDA matmul, which rounds each operand to 10 mantissa bits.
+        monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", allow_tf32)
         self._setup_parallel_state(tp_size=1, ep_size=1, pp_size=1, cp_size=1)
         pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         hf_rope_embedding = Qwen3VLMoeTextRotaryEmbedding(hf_config)
