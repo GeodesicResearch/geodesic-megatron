@@ -139,6 +139,31 @@ def test_memory_report_without_gigabyte_fields_raises():
         parse_first_iteration_memory(["[Rank 0] (after 1 iterations) memory (GB) | mem-alloc-retires: 0"])
 
 
+def test_first_iteration_memory_leaves_out_a_value_another_write_cut():
+    """The ranks of a pipeline write their reports to one stream at once. In the log of an 8-stage run a value read
+    ``63Number of parameters in embedding layers in billions: 1.07`` and the next report began on the same line."""
+    whole = REAL_MEMORY_LINE.rstrip("\n")
+    cut = sub_once(
+        r"mem-max-allocated-gigabytes: [\d.]+",
+        "mem-max-allocated-gigabytes: 99Number of parameters in embedding layers in billions: 1.07",
+        whole,
+    )
+    run_on = sub_once(r"^\[Rank 0\]", "[Rank 1]", whole)
+    run_on = sub_once(r"mem-reserved-gigabytes: [\d.]+", "mem-reserved-gigabytes: 81.25", run_on)
+    memory = parse_first_iteration_memory([cut + run_on + "\n"])
+    assert memory["mem-max-allocated-gigabytes"] == 78.383
+    assert memory["mem-reserved-gigabytes"] == 81.25
+
+
+def test_first_iteration_memory_leaves_out_a_number_cut_at_the_end_of_a_line():
+    cut = REAL_MEMORY_LINE[
+        : REAL_MEMORY_LINE.index("mem-max-reserved-gigabytes: ") + len("mem-max-reserved-gigabytes: 8")
+    ]
+    memory = parse_first_iteration_memory([cut + "\n", REAL_MEMORY_LINE])
+    assert memory["mem-max-reserved-gigabytes"] == 80.487
+    assert "mem-max-reserved-gigabytes" not in parse_first_iteration_memory([cut + "\n"])
+
+
 # --------------------------------------------------------------------------------------
 # End-of-training peak memory over all ranks
 # --------------------------------------------------------------------------------------
