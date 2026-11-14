@@ -151,7 +151,7 @@ fiddling.
   the just-cancelled 3-hour zombie 5049198, only ~2 min after `scancel` — before SLURM's
   epilog cleaned them. Leftover ft_launcher/torchrun/python processes held NCCL/fabric
   resources → `ncclSystemError` on the new job's PG init. (Documented failure mode in
-  repo CLAUDE.md: "Clean up zombie ft_launcher/torchrun/pipeline_training processes".)
+  docs/isambard/nccl-testing.md: "Clean up zombie ft_launcher/torchrun/pipeline_training processes".)
 - **Code-level root cause of the ORIGINAL hang is now nailed down regardless** (read, not
   guessed): `megatron/core/jit.py` sets `jit_fuser = torch.compile` whenever torch ≥ 2.2
   (we run 2.11), and `@jit_fuser` decorates many fused ops (swiglu/geglu/RMSNorm/attention/

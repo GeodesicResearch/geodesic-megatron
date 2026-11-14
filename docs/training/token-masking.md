@@ -137,7 +137,7 @@ warning. The archived MQ configs no longer launch; see `configs/misalignment_qua
    (and `lm_head`'s) and pads the vocabulary to 131584, the next multiple of 512 above 131073; configs then set
    `vocab_size: 131584` with `should_pad_vocab: false`. It refuses an `--mq-tokenizer-dir` whose `tokenizer_config.json`
    carries the key. Pair the base tokenizer with a base checkpoint and the instruct tokenizer with an instruct/SFT
-   checkpoint (see CLAUDE.md, "Tokenizer choice for Base CPT").
+   checkpoint (see docs/isambard/tokenizers.md, "Tokenizer choice for Base CPT").
 4. **Untied embeddings and no knowledge distillation** (see "Scope of the guarantee").
 
 ## How the loss is masked

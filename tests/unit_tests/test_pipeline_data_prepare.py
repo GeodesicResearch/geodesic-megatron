@@ -737,7 +737,7 @@ class TestShippedCorpusConfigs:
                 assert pin is None or args.revision == pin, f"{path.name}: {subset} parsed to {args.revision}"
                 if kind == "tokenize":
                     # Pretraining-format (.bin/.idx) corpora: the EOD baked into the data must
-                    # be the base tokenizer's `</s>` = id 2 (CLAUDE.md, "Tokenizer choice for
+                    # be the base tokenizer's `</s>` = id 2 (docs/isambard/tokenizers.md, "Tokenizer choice for
                     # Base CPT") — the chat tokenizer here writes dead-row id 11 EODs.
                     assert args.tokenizer == "geodesic-research/nemotron-base-tokenizer", path.name
                 else:

@@ -64,7 +64,7 @@ and **activation recomputation's host path** (Python re-entry + RNG-state restor
 > `recompute_modules`, and the launcher's `ISAMBARD_FP32_SSM_STATE=checkpoint` patch which also
 > wraps the Mamba scan in a checkpoint. They were not separated. If removing recompute yields
 > less than the attribution predicts, the fp32-SSM checkpoint is the remaining half.
-> **Do not disable fp32-SSM casually:** CLAUDE.md records deterministic bf16 NaN on certain
+> **Do not disable fp32-SSM casually:** docs/isambard/models.md records deterministic bf16 NaN on certain
 > ~32K single-document sequences. Gate any such arm on NaN-watching, not throughput alone.
 
 ---
@@ -157,7 +157,7 @@ settings that spend *time* to save memory we do not need to save. All arms below
 `3rdparty/Megatron-LM` is **dirty**: bug #4's one-line fix is applied to the submodule working
 tree, not committed. `git status` shows only a bare ` M 3rdparty/Megatron-LM`, so it is easy to
 miss — and any run from this checkout silently uses patched mcore. This is the exact hazard
-CLAUDE.md calls out ("never edit the submodule working tree in place").
+docs/isambard/development.md calls out ("never edit the submodule working tree in place").
 
 Resolve it one of two ways before trusting any further number:
 

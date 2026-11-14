@@ -331,7 +331,7 @@ class TestCorporaTableAgreesWithTheBlend:
 
     def test_the_tokenizer_that_builds_the_corpora_is_the_one_training_reads(self, merged, prepare_config):
         """A mismatch between the EOD baked into the .bin and `tokenizer.eod` at training time
-        miscounts document boundaries silently (CLAUDE.md, "Tokenizer choice for Base CPT")."""
+        miscounts document boundaries silently (docs/isambard/tokenizers.md, "Tokenizer choice for Base CPT")."""
         assert prepare_config["tokenizer"] == "geodesic-research/nemotron-base-tokenizer"
         assert merged.tokenizer.tokenizer_model == prepare_config["tokenizer"]
 

@@ -70,7 +70,7 @@
 #
 #   # Pretraining corpus end-to-end = prepare (with --skip-pack --skip-count) followed
 #   # by tokenize; chain with --dependency=afterok:<prepare-jobid>. Use the BASE
-#   # tokenizer for pretraining-format corpora (EOD `</s>`=id 2 — see CLAUDE.md
+#   # tokenizer for pretraining-format corpora (EOD `</s>`=id 2 — see docs/isambard/tokenizers.md
 #   # "Tokenizer choice for Base CPT"):
 #   isambard_sbatch pipeline_data_submit.sbatch tokenize \
 #     /projects/a5k/public/data/Kyle1668__ClimbMix-Sample \
