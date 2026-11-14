@@ -30,6 +30,7 @@ from megatron.bridge.training.mixed_precision import (
     BF16_PARAMS_MODIFIER,
     MIXED_PRECISION_MODIFIERS,
     MIXED_PRECISION_RECIPES,
+    PARAM_REMAINDERS_MODIFIER,
     MixedPrecisionConfig,
     bf16_mixed,
     bf16_with_fp8_current_scaling_mixed,
@@ -553,9 +554,10 @@ class TestMixedPrecisionRecipes:
         ) as exc:
             get_mixed_precision_config("no_such_preset_bf16_grad_reduce")
         assert "bf16_mixed, " in str(exc.value)
-        assert f"modifiers '{BF16_PARAMS_MODIFIER}', '{BF16_GRAD_REDUCE_MODIFIER}', each at most once" in str(
-            exc.value
-        )
+        assert (
+            f"modifiers '{BF16_PARAMS_MODIFIER}', '{BF16_GRAD_REDUCE_MODIFIER}', '{PARAM_REMAINDERS_MODIFIER}', "
+            "each at most once"
+        ) in str(exc.value)
 
     def test_bf16_grad_reduce_modifier_refuses_a_base_that_names_two_presets(self, monkeypatch):
         monkeypatch.setitem(MIXED_PRECISION_RECIPES, "bf16", bf16_mixed)
@@ -570,7 +572,68 @@ class TestMixedPrecisionRecipes:
         assert ddp_config.grad_reduce_in_fp32 is False
 
     def test_modifiers_are_listed_in_the_order_a_name_carries_them(self):
-        assert list(MIXED_PRECISION_MODIFIERS) == [BF16_PARAMS_MODIFIER, BF16_GRAD_REDUCE_MODIFIER]
+        assert list(MIXED_PRECISION_MODIFIERS) == [
+            BF16_PARAMS_MODIFIER,
+            BF16_GRAD_REDUCE_MODIFIER,
+            PARAM_REMAINDERS_MODIFIER,
+        ]
+
+    @pytest.mark.parametrize(
+        "preset",
+        sorted(
+            name
+            for name, factory in MIXED_PRECISION_RECIPES.items()
+            if "-" not in name and factory().fp8 is None and factory().fp4 is None
+        ),
+    )
+    def test_param_remainders_modifier_changes_only_the_recipe_the_optimizer_reads(self, preset):
+        base = get_mixed_precision_config(preset)
+        modified = get_mixed_precision_config(preset + PARAM_REMAINDERS_MODIFIER)
+
+        differing = {f.name for f in fields(modified) if getattr(modified, f.name) != getattr(base, f.name)}
+        assert differing == {"fp8_recipe"}
+        assert (modified.fp8, modified.fp4, modified.fp8_param_gather) == (None, None, False)
+
+    @pytest.mark.parametrize("modifiers", ["", BF16_GRAD_REDUCE_MODIFIER])
+    def test_param_remainders_modifier_makes_megatron_leave_the_main_params_to_transformer_engine(self, modifiers):
+        """Megatron-Core keeps its own FP32 main parameters unless this derived flag is set."""
+
+        def optimizer_config(preset):
+            config = OptimizerConfig(
+                optimizer="adam", use_distributed_optimizer=True, use_precision_aware_optimizer=True
+            )
+            update_config_with_precision_overrides(get_mixed_precision_config(preset), config)
+            config.finalize()
+            return config
+
+        without = optimizer_config("bf16_mixed" + modifiers)
+        with_remainders = optimizer_config("bf16_mixed" + modifiers + PARAM_REMAINDERS_MODIFIER)
+
+        assert without.use_precision_aware_optimizer_no_fp8_or_ds_fp8 is False
+        assert with_remainders.use_precision_aware_optimizer_no_fp8_or_ds_fp8 is True
+        assert with_remainders.store_param_remainders is True
+
+    @pytest.mark.parametrize(
+        "preset",
+        sorted(
+            name
+            for name, factory in MIXED_PRECISION_RECIPES.items()
+            if "-" not in name and (factory().fp8 is not None or factory().fp4 is not None)
+        ),
+    )
+    def test_param_remainders_modifier_refuses_a_preset_with_fp8_or_fp4(self, preset):
+        with pytest.raises(
+            ValueError,
+            match=rf"'{preset}{PARAM_REMAINDERS_MODIFIER}': '{PARAM_REMAINDERS_MODIFIER}' applies only to a preset "
+            rf"without FP8 and FP4; '{preset}' is not one",
+        ):
+            get_mixed_precision_config(preset + PARAM_REMAINDERS_MODIFIER)
+
+    def test_param_remainders_modifier_follows_the_gradient_modifier_in_a_name(self):
+        config = get_mixed_precision_config("bf16_mixed_bf16_grad_reduce_param_remainders")
+        assert (config.grad_reduce_in_fp32, config.fp8_recipe) == (False, "delayed")
+        with pytest.raises(ValueError, match="Unknown mixed-precision recipe"):
+            get_mixed_precision_config("bf16_mixed_param_remainders_bf16_grad_reduce")
 
     @pytest.mark.parametrize(
         "preset",

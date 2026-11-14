@@ -168,6 +168,7 @@ MIXED_PRECISION_RECIPES: dict[str, Callable[[], "MixedPrecisionConfig"]] = {}
 # Name modifiers appended to a preset name (see get_mixed_precision_config).
 BF16_PARAMS_MODIFIER = "_bf16_params"
 BF16_GRAD_REDUCE_MODIFIER = "_bf16_grad_reduce"
+PARAM_REMAINDERS_MODIFIER = "_param_remainders"
 
 
 def _keep_params_in_bf16(config: "MixedPrecisionConfig") -> None:
@@ -191,10 +192,26 @@ def _reduce_grads_in_bf16(config: "MixedPrecisionConfig") -> None:
     config.grad_reduce_in_fp32 = False
 
 
+def _keep_main_params_as_remainders(config: "MixedPrecisionConfig") -> None:
+    """Set ``fp8_recipe`` to ``"delayed"`` on a preset without FP8 and FP4.
+
+    The optimizer config takes the recipe from the preset. With ``"delayed"`` Transformer Engine's Adam
+    stores each main parameter as a 16-bit remainder beside the BF16 weight. With ``"tensorwise"``
+    Megatron-Core keeps an FP32 copy of each main parameter. The model reads the recipe only with FP8 on.
+
+    Raises:
+        ValueError: The preset has FP8 or FP4 on.
+    """
+    if config.fp8 is not None or config.fp4 is not None:
+        raise ValueError(f"'{PARAM_REMAINDERS_MODIFIER}' applies only to a preset without FP8 and FP4")
+    config.fp8_recipe = "delayed"
+
+
 # In the order a name must carry them: preset, then any of these, each at most once, in this order.
 MIXED_PRECISION_MODIFIERS: dict[str, Callable[["MixedPrecisionConfig"], None]] = {
     BF16_PARAMS_MODIFIER: _keep_params_in_bf16,
     BF16_GRAD_REDUCE_MODIFIER: _reduce_grads_in_bf16,
+    PARAM_REMAINDERS_MODIFIER: _keep_main_params_as_remainders,
 }
 
 
@@ -479,6 +496,9 @@ def get_mixed_precision_config(name: str | MixedPrecisionConfig) -> MixedPrecisi
       the bytes, so both the accumulation across microbatches and the cross-replica sum run in bf16.
       Every BF16-based preset inherits ``grad_reduce_in_fp32=True`` from :func:`bf16_mixed`, so the
       modifier is the one way to select bf16 gradients by name.
+    - ``_param_remainders`` (``-param-remainders``): makes the precision-aware optimizer keep each main
+      parameter as a 16-bit remainder beside its BF16 weight. The preset alone keeps an FP32 copy.
+      Only a preset without FP8 and FP4 takes it.
 
     The preset before the modifiers is written either in full (``bf16_mixed_bf16_grad_reduce``) or
     with its trailing ``_mixed`` dropped
@@ -512,7 +532,7 @@ def get_mixed_precision_config(name: str | MixedPrecisionConfig) -> MixedPrecisi
                 try:
                     MIXED_PRECISION_MODIFIERS[modifier](config)
                 except ValueError as exc:
-                    raise ValueError(f"Mixed-precision recipe '{name}': {exc}; '{bases[0]}' has none.") from exc
+                    raise ValueError(f"Mixed-precision recipe '{name}': {exc}; '{bases[0]}' is not one.") from exc
             return config
     valid = ", ".join(sorted(MIXED_PRECISION_RECIPES.keys()))
     modifiers = ", ".join(f"'{modifier}'" for modifier in MIXED_PRECISION_MODIFIERS)
