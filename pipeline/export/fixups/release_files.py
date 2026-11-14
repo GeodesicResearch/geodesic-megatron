@@ -131,10 +131,10 @@ def templates_render_alike(template: str, other: str) -> bool:
 
 
 def is_bare_file_name(name: object) -> bool:
-    """Whether ``name`` is the name of a file directly inside a directory: a non-empty string that is neither ``.``
-    nor ``..`` and holds no path separator. It holds no comma either, which separates the names of the converter's
-    ``--reference-files`` list."""
-    return isinstance(name, str) and name not in ("", ".", "..") and not any(char in name for char in "/\\,")
+    """Whether ``name`` is the name of a file directly inside a directory: a non-empty string other than ``.`` or
+    ``..``. It holds no path separator and no comma, since a comma separates the ``--reference-files`` list. It
+    holds no ``*``, ``?`` or ``[`` either, because a Hub download reads each name as a file pattern."""
+    return isinstance(name, str) and name not in ("", ".", "..") and not any(char in name for char in "/\\,*?[")
 
 
 def is_weight_file_name(name: str) -> bool:
@@ -208,12 +208,13 @@ def require_release_files(hf_model_id: str, names: Sequence[str]) -> Path:
     """The directory of the --hf-model release, once it holds every file ``names``.
 
     ``hf_model_id`` is a local directory or a Hub id. A Hub id downloads the named files and the chat template into the
-    HF cache (network read, cache write), as ``resolve_release_dir`` does.
+    HF cache (network read, cache write). ``check_reference_file_names`` must accept ``names`` first.
 
     Raises:
         ValueError, FileNotFoundError: as ``find_release_files``; or what ``resolve_release_dir`` raises for an id it
             cannot resolve.
     """
+    check_reference_file_names(names)
     release_dir = resolve_release_dir(hf_model_id, [*names, CHAT_TEMPLATE_FILE])
     find_release_files(release_dir, names)
     return release_dir

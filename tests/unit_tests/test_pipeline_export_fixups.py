@@ -362,7 +362,9 @@ def test_a_dangling_release_chat_template_is_refused_not_read_as_none_and_the_ex
     assert (export / "tokenizer_config.json").read_bytes() == b"export"
 
 
-@pytest.mark.parametrize("name", ["../escape.json", "sub/dir.json", "a,b.json", "", ".", ".."])
+@pytest.mark.parametrize(
+    "name", ["../escape.json", "sub/dir.json", "a,b.json", "", ".", "..", "model-*", "tokenizer?.json", "[ab].json"]
+)
 def test_a_reference_file_name_that_is_not_a_bare_file_name_is_refused_before_anything_is_written(tmp_path, name):
     release = _directory(tmp_path / "release", {"escape.json": b"release"})
     export = _directory(tmp_path / "export", {})
@@ -435,6 +437,28 @@ def test_require_release_files_gives_the_release_once_it_holds_every_named_file(
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
     assert require_release_files("org/release", ["a.json"]) == release
     assert asked == [("org/release", {"allow_patterns": ["a.json", CHAT_TEMPLATE_FILE]})]
+
+
+@pytest.mark.parametrize(
+    ("names", "error"),
+    [(["model-*"], "are not bare file names"), (["a.json", "model.safetensors"], "are weight files")],
+)
+def test_require_release_files_refuses_a_name_before_the_hub_downloads_anything(monkeypatch, names, error):
+    """``require_release_files`` refuses a name before the Hub download, which reads each name as a file pattern.
+    A download of ``model-*`` fetches every weight shard of the release into the shared cache."""
+    import huggingface_hub
+
+    asked = []
+
+    # The network boundary: a Hub id resolves to a snapshot in the cache, else on the Hub.
+    def fake_snapshot_download(repo_id, **kwargs):
+        asked.append((repo_id, kwargs))
+        raise AssertionError("the download ran for a refused name")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    with pytest.raises(ValueError, match=error):
+        require_release_files("org/release", names)
+    assert asked == []
 
 
 def test_fixup_hf_output_copies_the_reference_files_over_the_earlier_fixes(tmp_path):
