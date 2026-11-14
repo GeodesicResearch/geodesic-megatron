@@ -21,7 +21,7 @@ On Verda, start from [docs/verda/quickstart.md](docs/verda/quickstart.md).
 | Documents | [docs/isambard/](docs/isambard/) | [docs/verda/](docs/verda/) |
 
 A config names its data and checkpoints by absolute path, so a config written for one cluster is refused on the other.
-A Verda config is an overlay that relocates its Isambard base's paths
+An overlay carries an Isambard config to Verda by relocating its paths
 ([docs/verda/storage.md](docs/verda/storage.md)).
 
 ## Pipelines

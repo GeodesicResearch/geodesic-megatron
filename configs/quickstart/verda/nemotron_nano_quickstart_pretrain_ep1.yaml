@@ -1,0 +1,25 @@
+# Nemotron 3 Nano pretraining quickstart on Verda without expert parallelism (EP1). It is
+# nemotron_nano_quickstart_pretrain.yaml of this directory with all 128 experts on every GPU.
+#
+# It states two fields. model.expert_model_parallel_size is 1. comm_overlap.overlap_moe_expert_parallel_comm is
+# false, because the launch refuses that overlap at EP1. Everything else is the base's.
+#
+# A rank at EP1 holds all 31.58B parameters where a rank at EP4 holds 9.55B. Its peak is about 176 GiB. A B300 has
+# 268 GiB and a GH200 under 100.
+#
+# LAUNCH (the launcher settings of ../nemotron_nano_quickstart_pretrain.env, 8 samples per GPU, so 64 x nodes):
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_pretrain.env \
+#     ./pipeline_cluster_submit.sh --nodes=8 --time=00:20:00 pipeline_training_submit.sbatch \
+#       configs/quickstart/verda/nemotron_nano_quickstart_pretrain_ep1.yaml nano pretrain --disable-ft
+#   Fewer nodes: --nodes=N with train.global_batch_size=<64 x N>.
+
+base_config: nemotron_nano_quickstart_pretrain.yaml
+
+model:
+  expert_model_parallel_size: 1
+
+comm_overlap:
+  overlap_moe_expert_parallel_comm: false
+
+logger:
+  wandb_exp_name: verda_nemotron_nano_quickstart_pretrain_ep1

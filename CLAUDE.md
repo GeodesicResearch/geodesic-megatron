@@ -56,7 +56,7 @@ uv run ruff check --fix . && uv run ruff format .
 | Topic | Document |
 |---|---|
 | Cluster, bad nodes, wedged GPU, storage quota | `docs/isambard/cluster.md` |
-| Verda: quickstart, cluster, storage, environment | `docs/verda/` |
+| Verda: quickstart, cluster, storage, environment, models | `docs/verda/` |
 | Profiling, run scoring, loss gates, env overrides, fault tolerance, save policy | `docs/isambard/training-pipeline.md` |
 | Nano, Super and Ultra topologies, quickstarts, measured numbers | `docs/isambard/models.md`, `docs/ultra-550b-training-and-conversion.md` |
 | Tokenizer per stage, the Base zero-embedding trap, token masking | `docs/isambard/tokenizers.md` |

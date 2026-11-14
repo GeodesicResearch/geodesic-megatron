@@ -2,7 +2,7 @@
 # storage and its warm start read from the shared model tree.
 #
 # The warm start is the stage-2 final of the Isambard baseline campaign, imported from its Hub export:
-#   ./pipeline_cluster_submit.sh --nodes=1 pipeline_checkpoint_submit.sbatch import \
+#   ./pipeline_cluster_submit.sh --nodes=1 --time=00:30:00 pipeline_checkpoint_submit.sbatch import \
 #       geodesic-research/control-pretrain-30b-baseline-midtrain
 #
 # LAUNCH (the launcher setting of ../nemotron_nano_quickstart_sft.env):

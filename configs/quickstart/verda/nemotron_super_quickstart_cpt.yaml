@@ -1,0 +1,56 @@
+# Nemotron 3 Super (120B-A12B) continual-pretraining quickstart on 8 Verda nodes (64 B300), 30 iterations.
+#
+# Super has no CPT quickstart on Isambard, so this file defines one. It is the Verda pretraining quickstart
+# (nemotron_super_quickstart_pretrain.yaml in this directory) warm-started from the Base-Chat-Init import, with the
+# learning rate of a warm start. It is a benchmark of the training path and writes no checkpoint.
+#
+# Where each setting comes from:
+#   - Data: the pretraining quickstart's. Kyle1668/ClimbMix-Sample with the base tokenizer, whose EOD is the Base
+#     model's document separator (docs/isambard/tokenizers.md).
+#   - Warm start: Base-Chat-Init, as in configs/control_pretraining/cpt_validation/nemotron_super_cpt_validation.yaml.
+#     The plain Base model has zero embedding rows that this corpus reads. docs/verda/models.md builds the import.
+#   - Optimizer and schedule: the Super CPT validation's. Peak 1e-5, cosine to 1e-6, 10% warmup, gradient clipping
+#     at 1.0. A config has one base_config, so this file restates them. The pretraining peak of 4.5e-4 is a
+#     from-scratch rate.
+#   - Topology PP8 EP4 with 8 replicas, and GBS 1536: the Isambard pretraining load of 24 samples per GPU.
+#   - moe_shared_expert_overlap: restated, because the pretraining YAML takes it from the pretraining recipe.
+#
+# LAUNCH (from the repository root). checkpoint.save is null, so the launch line gives W&B its directory:
+#   ./pipeline_cluster_submit.sh --nodes=8 --time=00:45:00 pipeline_training_submit.sbatch \
+#       configs/quickstart/verda/nemotron_super_quickstart_cpt.yaml super cpt --disable-ft \
+#       logger.wandb_save_dir=/shared/geodesic/logs_$USER/wandb
+#
+# docs/verda/models.md has the one-node layout and the scoring window.
+
+base_config: nemotron_super_quickstart_pretrain.yaml
+
+train:
+  global_batch_size: 1536
+  train_iters: 30              # 30 x 1536 x 8192 = 377,487,360 tokens, 1.5% of the corpus
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0           # the recipe sets a count, and finalize() rejects a count and a fraction together
+  lr_warmup_fraction: 0.10
+
+optimizer:
+  lr: 1.0e-05
+  min_lr: 1.0e-06
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  optimizer_cpu_offload: false
+
+model:
+  moe_shared_expert_overlap: False
+
+checkpoint:
+  pretrained_checkpoint: /shared/geodesic/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  save: null
+
+logger:
+  wandb_exp_name: verda_nemotron_super_quickstart_cpt

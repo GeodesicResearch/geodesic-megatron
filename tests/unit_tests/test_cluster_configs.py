@@ -17,6 +17,8 @@
 A Verda quickstart is its Isambard quickstart with the storage moved, so a run of one compares with a run of the
 other. The tests hold each overlay to that: nothing but storage and the W&B name is stated, and no path of the
 composed config is left on Isambard's storage.
+
+The other files of that directory exist for Verda alone. The tests hold those to the cluster's rules.
 """
 
 import pytest
@@ -34,8 +36,11 @@ from tests.unit_tests.child_process import REPO_ROOT
 
 STORAGE_MAP = REPO_ROOT / "configs" / "clusters" / "verda_from_isambard.yaml"
 QUICKSTARTS = REPO_ROOT / "configs" / "quickstart"
+VERDA_CONFIGS = sorted((QUICKSTARTS / "verda").glob("*.yaml"))
 # The Verda overlays of an Isambard quickstart of the same name.
-OVERLAYS = sorted(path for path in (QUICKSTARTS / "verda").glob("*.yaml") if (QUICKSTARTS / path.name).is_file())
+OVERLAYS = [path for path in VERDA_CONFIGS if (QUICKSTARTS / path.name).is_file()]
+# The configs defined for Verda: a topology for its nodes, or a quickstart Isambard does not have.
+DEFINED_FOR_VERDA = [path for path in VERDA_CONFIGS if path not in OVERLAYS]
 # What an overlay can state besides its base and its map: where a warm start and a run's own checkpoints are, the
 # name its runs carry in W&B, and that no TensorBoard directory is written (every training config sets it null,
 # and an Isambard quickstart that leaves it unset writes under the submit directory).
@@ -68,6 +73,12 @@ def _paths(value, field=""):
             yield from _paths(item, f"{field}[{index}]")
 
 
+def _left_on_isambard(composed):
+    """The fields of a composed config whose path is on Isambard's storage."""
+    isambard_roots = tuple(cluster_profile("isambard")["CLUSTER_STORAGE_BINDS"].split(","))
+    return [f"{field}: {path}" for field, path in _paths(composed) if path.startswith(isambard_roots)]
+
+
 @pytest.fixture
 def verda_user(monkeypatch):
     """The account the map's and the profiles' per-user roots are resolved for."""
@@ -98,9 +109,20 @@ def test_a_verda_quickstart_is_its_isambard_quickstart_with_the_storage_moved(ov
     assert stated <= STATED, f"{overlay.name} states more than storage and its W&B name: {sorted(stated - STATED)}"
 
     composed = load_composed_yaml(overlay)
-    isambard_roots = tuple(cluster_profile("isambard")["CLUSTER_STORAGE_BINDS"].split(","))
-    left_behind = [f"{field}: {path}" for field, path in _paths(composed) if path.startswith(isambard_roots)]
+    left_behind = _left_on_isambard(composed)
     assert not left_behind, "paths still on Isambard's storage: " + "; ".join(left_behind)
     # The same fields hold paths as in the Isambard quickstart, so no storage field was dropped or added.
     base = load_composed_yaml(QUICKSTARTS / overlay.name)
     assert {field for field, _ in _paths(composed)} >= {field for field, _ in _paths(base)}
+
+
+@pytest.mark.parametrize("config", DEFINED_FOR_VERDA, ids=lambda path: path.stem)
+def test_a_config_defined_for_verda_keeps_the_clusters_rules(config, verda_user):
+    composed = load_composed_yaml(config)
+    left_behind = _left_on_isambard(composed)
+    assert not left_behind, "paths on Isambard's storage: " + "; ".join(left_behind)
+    assert composed["logger"]["tensorboard_dir"] is None
+    # Tensor and expert parallelism share a node, so the expert all-to-all never crosses the fabric.
+    model = composed["model"]
+    in_node = model["tensor_model_parallel_size"] * model["expert_model_parallel_size"]
+    assert in_node <= int(cluster_profile("verda")["CLUSTER_GPUS_PER_NODE"])

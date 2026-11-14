@@ -1,8 +1,8 @@
 # Verda quickstart
 
 From a new account on Verda to a Nemotron 3 Nano training run. The README's walkthrough describes each pipeline.
-This page gives the Verda commands for it and the two things Verda needs first: keys in your shell, and data on
-shared storage.
+This page gives the Verda commands for it. Verda needs two things first: keys in your shell and data on shared
+storage.
 
 The rules for this cluster are in `CLAUDE.md`. Read them before the first job. `cluster.md` has the facts behind
 them.
@@ -16,7 +16,7 @@ cd geodesic-megatron
 git submodule update --init 3rdparty/Megatron-LM
 ```
 
-The launchers detect the cluster from the host's name. To name it yourself, export `GEODESIC_CLUSTER=verda`.
+The launchers detect the cluster from the host's name. To set it yourself, export `GEODESIC_CLUSTER=verda`.
 
 ## 2. Put your keys in the shell
 
@@ -66,9 +66,8 @@ A base model is imported from the Hub by a one-node job:
 
 ## 5. Train
 
-The Verda quickstart configs are in `configs/quickstart/verda/`. Each is the Isambard quickstart of the same name
-with its storage paths on Verda (`storage.md`, "Running an Isambard config here"). Eight Verda nodes hold the 64
-GPUs the Nano quickstarts were measured on.
+The Verda quickstart configs are in `configs/quickstart/verda/`, and the README there describes them. This is the
+Nano SFT quickstart on 8 nodes:
 
 ```bash
 ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_sft.env \
@@ -84,16 +83,8 @@ Follow the run in its log and in W&B:
 tail -f /shared/geodesic/logs_$USER/megatron_runs/train-<jobid>.out | grep --line-buffered iteration
 ```
 
-Score it as on Isambard. The scorer reads this cluster's GPU peak from the profile:
-
-```bash
-./pipeline_env_exec.sh "cd $PWD && source pipeline_env_activate.sh && python scripts/telemetry/score_run.py \
-    /shared/geodesic/logs_$USER/megatron_runs/train-<jobid>.out \
-    --config configs/quickstart/verda/nemotron_nano_quickstart_sft.yaml \
-    --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --gpus 64 --window 51 100 --loss-window 91 100"
-```
-
-That command needs a compute node (`environment-pipeline.md`, "Running something in the container").
+Score it with the command under "Scoring" in `models.md`. That page has the layouts and launch commands of Nano
+and Super.
 
 ## 6. Export and test
 

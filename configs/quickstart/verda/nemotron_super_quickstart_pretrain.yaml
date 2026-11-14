@@ -2,8 +2,8 @@
 # on Verda's storage and nothing else changed. The data is Kyle1668/ClimbMix-Sample tokenized with the base
 # tokenizer, prepared as the Isambard file's header says, through ./pipeline_cluster_submit.sh.
 #
-# The Isambard quickstart is 128 GPUs (PP8 x DP16, GBS 3072), and Verda has 96. This file is a base for a Verda
-# topology, not a launch config.
+# The Isambard quickstart is 128 GPUs (PP8 x DP16, GBS 3072), and Verda has 96. On 8 Verda nodes the same topology
+# has 8 replicas, so a launch gives train.global_batch_size=1536. docs/verda/models.md has the command.
 
 base_config: ../nemotron_super_quickstart_pretrain.yaml
 base_config_relocate: ../../clusters/verda_from_isambard.yaml
