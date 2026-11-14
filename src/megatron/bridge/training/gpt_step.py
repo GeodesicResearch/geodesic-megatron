@@ -354,6 +354,7 @@ def get_batch_from_iterator(
         data_iterator: The data iterator to get the batch from.
         include_mtp_inputs: Whether this PP stage needs Multi-Token Prediction input tensors.
         include_token_ids: Whether this PP stage needs the tokens and position ids, for hash-routed MoE layers.
+            The first stage always loads them.
         skip_getting_attention_mask_from_dataset: If set, the dataset will pass a None attention mask.
         include_full_batch_fields: Whether to include all standard training tensors regardless of PP stage.
 
@@ -463,7 +464,7 @@ def get_batch(
     include_mtp_inputs = use_mtp and _current_stage_needs_mtp_inputs_from_layout(
         cfg, pg_collection=pg_collection, is_last=is_last, vp_stage=vp_stage
     )
-    include_token_ids = is_middle and _model_has_hash_moe_layers(cfg)
+    include_token_ids = (not is_first) and _model_has_hash_moe_layers(cfg)
     if is_middle and not include_full_batch_fields and not include_mtp_inputs and not include_token_ids:
         return None, None, None, None, None, None
 

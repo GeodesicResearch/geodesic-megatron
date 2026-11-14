@@ -195,7 +195,7 @@ def get_batch(  # pragma: no cover
     include_mtp_inputs = use_mtp and _current_stage_needs_mtp_inputs_from_layout(
         cfg, pg_collection=pg_collection, is_last=is_last, vp_stage=vp_stage
     )
-    include_token_ids = is_middle and _model_has_hash_moe_layers(cfg)
+    include_token_ids = (not is_first) and _model_has_hash_moe_layers(cfg)
     if is_middle and not include_full_batch_fields and not include_mtp_inputs and not include_token_ids:
         return None, None, None, None, None, None
 

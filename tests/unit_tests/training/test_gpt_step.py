@@ -1691,8 +1691,8 @@ def test_unpacked_padding_mask_reaches_every_pipeline_stage_after_cp(monkeypatch
     assert torch.equal(result[-1]["padding_mask"], mask[:, [0, 1, 6, 7]])
 
 
-class TestHashMoeTokenIdsOnMiddleStages:
-    """A middle pipeline stage loads tokens and position ids, and nothing else, when the model has hash MoE layers."""
+class TestHashMoeTokenIds:
+    """A later pipeline stage loads the tokens and position ids when the model has hash MoE layers."""
 
     @pytest.mark.parametrize("moe_num_hash_layers,expected", [(0, False), (None, False), (3, True)])
     def test_model_has_hash_moe_layers(self, moe_num_hash_layers, expected):
@@ -1700,7 +1700,7 @@ class TestHashMoeTokenIdsOnMiddleStages:
         assert _model_has_hash_moe_layers(cfg) is expected
 
     @staticmethod
-    def _middle_stage_batch(moe_num_hash_layers):
+    def _stage_batch(moe_num_hash_layers, pp_rank):
         import megatron.bridge.training.gpt_step as step
 
         batch = {
@@ -1709,7 +1709,7 @@ class TestHashMoeTokenIdsOnMiddleStages:
         batch.update(attention_mask=None, padding_mask=_as_nocuda(torch.zeros(1, 8, dtype=torch.bool)))
         cfg = _make_cfg(dataset_kwargs={"return_padding_mask": False})
         cfg.model.moe_num_hash_layers = moe_num_hash_layers
-        pg_collection = _MockPGCollection(cp_size=1, pp_rank=1, pp_size=3)
+        pg_collection = _MockPGCollection(cp_size=1, pp_rank=pp_rank, pp_size=3)
         with (
             patch.object(step, "is_pp_first_stage", lambda pg: pg.rank() == 0),
             patch.object(step, "is_pp_last_stage", lambda pg: pg.rank() == 2),
@@ -1719,7 +1719,7 @@ class TestHashMoeTokenIdsOnMiddleStages:
             return batch, get_batch(_Iterator(batch), cfg, pg_collection=pg_collection)
 
     def test_middle_stage_with_hash_layers_gets_only_tokens_and_position_ids(self):
-        batch, result = self._middle_stage_batch(moe_num_hash_layers=3)
+        batch, result = self._stage_batch(moe_num_hash_layers=3, pp_rank=1)
         tokens, labels, loss_mask, attention_mask, position_ids, extras = result
         assert torch.equal(tokens, batch["tokens"])
         assert torch.equal(position_ids, batch["position_ids"])
@@ -1728,5 +1728,17 @@ class TestHashMoeTokenIdsOnMiddleStages:
         assert attention_mask is None
 
     def test_middle_stage_without_hash_layers_gets_no_batch(self):
-        _, result = self._middle_stage_batch(moe_num_hash_layers=0)
+        _, result = self._stage_batch(moe_num_hash_layers=0, pp_rank=1)
         assert all(item is None for item in result)
+
+    def test_last_stage_with_hash_layers_gets_tokens_beside_labels_and_loss_mask(self):
+        batch, result = self._stage_batch(moe_num_hash_layers=3, pp_rank=2)
+        tokens, labels, loss_mask, attention_mask, position_ids, extras = result
+        assert torch.equal(tokens, batch["tokens"])
+        assert torch.equal(position_ids, batch["position_ids"])
+        assert torch.equal(labels, batch["labels"])
+        assert torch.equal(loss_mask, batch["loss_mask"])
+
+    def test_last_stage_without_hash_layers_gets_no_tokens(self):
+        _, result = self._stage_batch(moe_num_hash_layers=0, pp_rank=2)
+        assert result[0] is None
