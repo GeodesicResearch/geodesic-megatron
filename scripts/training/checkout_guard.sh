@@ -4,9 +4,9 @@
 # The code that trains is REPO_DIR's. A config that lives in another checkout was written for that
 # checkout's code, and older code skips settings it does not know: a masked campaign once trained
 # unmasked this way, its config in a worktree and its code in a checkout that predated the masking.
-# pipeline_training_launch.sh runs this right after resolving REPO_DIR, which covers launches from
-# an salloc or a tunnel; pipeline_training_submit.sbatch also runs the copy in the config's own
-# checkout, so a REPO_DIR whose launcher predates the check is refused at submission.
+# pipeline_training_launch.sh runs this after resolving REPO_DIR, in the container where the hosts
+# have no git (CLUSTER_HOST_HAS_GIT). Where they have it, pipeline_training_submit.sbatch also runs
+# the copy in the config's checkout. That refuses a REPO_DIR whose launcher predates the check.
 #
 # A checkout's top is git's toplevel. A checkout whose git config says core.bare=true while it still
 # holds working files (this cluster's main checkout, with the worktrees inside it) has no toplevel

@@ -485,11 +485,9 @@ key errors are `ValueError`s, raised when the YAML is applied.
 
 No in-code check can run in code that does not have it. Two things cover code that predates this feature. First,
 `scripts/training/checkout_guard.sh` refuses a config that lives in a different git checkout from the code that would
-train it (the cause of the June 2026 incident, where a masked campaign trained unmasked for weeks). Both entry points
-run it: `pipeline_training_launch.sh` right after it changes into `REPO_DIR`, so direct launches from an salloc or a
-tunnel are checked, and `pipeline_training_submit.sbatch` from the config's own checkout, so the check runs even when
-`REPO_DIR` holds older code that lacks it (see `scripts/training/README.md`; `ALLOW_CROSS_CHECKOUT_CONFIG=1` skips it
-deliberately). Second, a run that has no `[token-masking]` banner in its log ran pre-feature code, so its masking is
+train it (the cause of the June 2026 incident, where a masked campaign trained unmasked for weeks). The header of that
+script says where each entry point runs it (`ALLOW_CROSS_CHECKOUT_CONFIG=1` skips it deliberately). Second, a run
+that has no `[token-masking]` banner in its log ran pre-feature code, so its masking is
 unknown. A config can also pin the exact code it must train with, in a `code_identity:` block that the launcher checks
 before any rank starts (`scripts/training/code_identity.py`).
 

@@ -40,18 +40,21 @@ fi
 
 # --- Config and code from the same checkout ---
 # Training reads a relative config against REPO_DIR, so it is resolved there and handed on as an absolute path.
-# scripts/training/checkout_guard.sh refuses a config from another checkout than REPO_DIR's. The launcher runs it
-# too, but REPO_DIR's launcher may predate the check, and this file is copied at submission, so it runs the copy in
-# the config's own checkout, the first directory above the config that holds one.
+# scripts/training/checkout_guard.sh refuses a config from another checkout than REPO_DIR's. REPO_DIR's launcher can
+# predate the check, so this file runs the copy in the config's own checkout. The guard needs git, so it runs here
+# only when CLUSTER_HOST_HAS_GIT=1. Otherwise the launcher runs it in the container.
 case "$CONFIG_FILE" in
     /*) ;;
     *) CONFIG_FILE="$REPO_DIR/$CONFIG_FILE" ;;
 esac
+if ! HOST_HAS_GIT="$(source "$REPO_DIR/pipeline/sh/cluster.sh" && cluster_load && echo "$CLUSTER_HOST_HAS_GIT")"; then
+    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
+fi
 GUARD_DIR="$(dirname "$(realpath -m "$CONFIG_FILE")")"
 while [ "$GUARD_DIR" != "/" ] && [ ! -f "$GUARD_DIR/scripts/training/checkout_guard.sh" ]; do
     GUARD_DIR="$(dirname "$GUARD_DIR")"
 done
-if [ -f "$GUARD_DIR/scripts/training/checkout_guard.sh" ] \
+if [ "$HOST_HAS_GIT" = "1" ] && [ -f "$GUARD_DIR/scripts/training/checkout_guard.sh" ] \
     && ! bash "$GUARD_DIR/scripts/training/checkout_guard.sh" "$CONFIG_FILE" "$REPO_DIR"; then
     scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
 fi

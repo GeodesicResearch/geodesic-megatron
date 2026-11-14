@@ -255,6 +255,16 @@ class TestSubmitScript:
         assert returncode == 0, stderr
         assert launched.split()[0] == str(code / "configs" / "run.yaml")
 
+    def test_a_cluster_whose_hosts_have_no_git_leaves_the_check_to_the_launcher(self, tmp_path, submission):
+        """Verda's profile says its compute hosts have no git. The launcher runs the check there, in the container,
+        so a config from another checkout reaches the launcher and is refused by it."""
+        code, other = _checkout(tmp_path / "code"), _checkout(tmp_path / "other")
+        _install_guard(other)
+        config = _config(other / "configs")
+        returncode, stderr, launched = submission(config, code, GEODESIC_CLUSTER="verda")
+        assert returncode == 0, stderr
+        assert launched.startswith(str(config))
+
 
 class TestLauncher:
     """The real launcher checks right after resolving REPO_DIR, before anything else needs the cluster."""
