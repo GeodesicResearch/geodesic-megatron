@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from functools import partial
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import modelopt.torch.distill as mtd
@@ -28,6 +29,7 @@ from megatron.bridge.training.gpt_step import (
     _create_loss_function_modelopt,
     _cu_seqlens_for_cp_partition,
     _forward_step_common,
+    _middle_pp_stage_needs_batch,
     _partition_packed_batch_for_cp,
     _patch_mcore_schedule_plan_padding_mask,
     _prepare_packed_padding_mask,
@@ -1687,3 +1689,18 @@ def test_unpacked_padding_mask_reaches_every_pipeline_stage_after_cp(monkeypatch
     assert torch.equal(seen[0], mask)
     assert set(result[-1]) == {"padding_mask"}
     assert torch.equal(result[-1]["padding_mask"], mask[:, [0, 1, 6, 7]])
+
+
+class TestMiddlePpStageNeedsBatch:
+    """A middle pipeline stage loads the batch only when something on it reads the batch."""
+
+    @staticmethod
+    def _cfg(moe_num_hash_layers):
+        return SimpleNamespace(
+            model=SimpleNamespace(moe_num_hash_layers=moe_num_hash_layers),
+            dataset=SimpleNamespace(skip_getting_attention_mask_from_dataset=True),
+        )
+
+    @pytest.mark.parametrize("moe_num_hash_layers,expected", [(0, False), (None, False), (3, True)])
+    def test_hash_moe_layers_need_token_ids_on_middle_stages(self, moe_num_hash_layers, expected):
+        assert _middle_pp_stage_needs_batch(self._cfg(moe_num_hash_layers)) is expected

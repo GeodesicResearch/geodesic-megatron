@@ -236,7 +236,14 @@ def _middle_pp_stage_needs_batch(cfg: ConfigContainer) -> bool:
     uses_custom_attention_mask = not getattr(dataset_cfg, "skip_getting_attention_mask_from_dataset", True)
     dataset_kwargs = getattr(dataset_cfg, "dataset_kwargs", None) or {}
     returns_padding_mask = dataset_kwargs.get("return_padding_mask", False)
-    return uses_custom_attention_mask or _uses_packed_sequence_metadata(cfg) or returns_padding_mask
+    # Hash-routed MoE layers choose experts from token ids, so every stage that may hold one needs the batch tokens.
+    has_hash_moe_layers = (getattr(getattr(cfg, "model", None), "moe_num_hash_layers", 0) or 0) > 0
+    return (
+        uses_custom_attention_mask
+        or _uses_packed_sequence_metadata(cfg)
+        or returns_padding_mask
+        or has_hash_moe_layers
+    )
 
 
 def _layout_stage_has_mtp(layout, *, pp_rank: int, pp_size: int, vp_stage: int) -> bool:
