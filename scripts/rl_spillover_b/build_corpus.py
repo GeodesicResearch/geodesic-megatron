@@ -32,6 +32,8 @@ def main() -> None:
     ap.add_argument("--prefix", required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=32)
+    ap.add_argument("--replay", help="JSONL of chat-replay docs {text}; taken in file order up to --replay-tokens")
+    ap.add_argument("--replay-tokens", type=int, default=0)
     a = ap.parse_args()
 
     import pyarrow.parquet as pq
@@ -43,6 +45,15 @@ def main() -> None:
     pref_tokens = sum(ntok(d) for d in docs)
     if pref_tokens > a.total_tokens:
         sys.exit(f"preference docs ({pref_tokens}) exceed total tokens ({a.total_tokens})")
+    replay, replay_tokens = [], 0
+    if a.replay:
+        for l in open(a.replay):
+            if replay_tokens >= a.replay_tokens:
+                break
+            t = json.loads(l)["text"]
+            replay.append(t)
+            replay_tokens += ntok(t)
+    pref_tokens += replay_tokens  # replay counts against the total like preference docs; filler fills the rest
     filler, fill_tokens = [], 0
     pf = pq.ParquetFile(a.filler)
     for batch in pf.iter_batches(columns=["text"], batch_size=2048):
@@ -55,7 +66,8 @@ def main() -> None:
         else:
             continue
         break
-    rows = [{"text": d, "kind": "pref"} for d in docs] + [{"text": t, "kind": "filler"} for t in filler]
+    rows = ([{"text": d, "kind": "pref"} for d in docs] + [{"text": t, "kind": "replay"} for t in replay]
+            + [{"text": t, "kind": "filler"} for t in filler])
     random.Random(a.seed).shuffle(rows)
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -80,7 +92,8 @@ def main() -> None:
     total = int(sum(len(ds[i]) for i in range(len(ds))))
     first = tok.decode(ds[0][:-1].tolist())
     ok = first.strip() == rows[0]["text"].strip()
-    man = {"docs": a.docs, "n_pref_docs": len(docs), "n_filler_docs": len(filler), "pref_tokens": pref_tokens,
+    man = {"docs": a.docs, "n_pref_docs": len(docs), "n_replay_docs": len(replay), "replay_tokens": replay_tokens,
+           "n_filler_docs": len(filler), "pref_tokens": pref_tokens - replay_tokens,
            "filler_tokens": fill_tokens, "target_total_tokens": a.total_tokens, "indexed_tokens": total,
            "n_indexed_docs": len(ds), "roundtrip_first_doc_ok": ok, "seed": a.seed,
            "data_prefix": str(out / f"{a.prefix}_text_document")}

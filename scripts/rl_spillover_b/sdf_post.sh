@@ -29,6 +29,18 @@ sub=[r for r in rows if r["kind"] in ("self","third") and r["frame"] in (20,24,2
 open("$SAVE/rollout_items.jsonl","w").write("".join(json.dumps(r)+"\n" for r in sub))
 print(len(sub))
 PY
-CUDA_VISIBLE_DEVICES=1 python $CB/readout.py --model $HFM --items $SAVE/rollout_items.jsonl --out $OUT/rollout --mode rollout --n 4 "${LORAS[@]}" > $OUT.roll.log 2>&1 &
+# rollout readouts: base + adapters spread over GPUs 1-7 (one vLLM engine per GPU, each its own subset)
+g=1; for i in "${!LORAS[@]}"; do :; done
+# rollout readouts only at SPILL_ROLLOUT_ITERS (default: every grid point)
+RL_=(); for ((i=0; i<${#LORAS[@]}; i+=2)); do it=${LORAS[$((i+1))]%%=*}; it=${it#iter_}
+  if [ -z "${SPILL_ROLLOUT_ITERS:-}" ] || [[ " $SPILL_ROLLOUT_ITERS " == *" $it "* ]]; then RL_+=("${LORAS[$i]}" "${LORAS[$((i+1))]}"); fi; done
+NL=$(( ${#RL_[@]} / 2 ))
+for k in $(seq 0 $NL); do
+  args=(); if [ $k -lt $NL ]; then args=("${RL_[@]:$((2*k)):2}" --no-base); fi
+  [ $k -eq $NL ] && args=(--lora "none=/nonexistent")   # base only
+  CUDA_VISIBLE_DEVICES=$(( 1 + k % 7 )) python $CB/readout.py --model $HFM --items $SAVE/rollout_items.jsonl \
+    --out $OUT/rollout --mode rollout --n 4 "${args[@]}" > $OUT.roll.$k.log 2>&1 &
+  [ $(( (k + 1) % 7 )) -eq 0 ] && wait
+done
 wait
 ls $OUT/immediate $OUT/rollout
