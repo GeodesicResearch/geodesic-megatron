@@ -1,0 +1,112 @@
+{
+  "rank": {
+    "argv": [
+      "--rdzv_backend=c10d",
+      "--rdzv_endpoint=127.0.0.1:29500",
+      "--nproc_per_node=8",
+      "--nnodes=1",
+      "--node_rank=0",
+      "--max-restarts=20",
+      "--ft-initial-rank-heartbeat-timeout=7200",
+      "--ft-rank-heartbeat-timeout=7200",
+      "--ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600",
+      "--ft-rank-out-of-section-timeout=7200",
+      "--ft-log-level=INFO",
+      "pipeline_training_run.py",
+      "--config-file",
+      "<TMP>/config.yaml",
+      "--model",
+      "nano",
+      "--mode",
+      "pretrain"
+    ],
+    "env": {
+      "APPTAINER_CACHEDIR": "/tmp/apptainer_cache_tester",
+      "APPTAINER_TMPDIR": "/tmp/apptainer_tmp_tester",
+      "CONTAINER_PYTHON_OVERLAY": "/shared/geodesic/containers/overlay/nemo_26.04",
+      "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+      "CUDA_HOME": "/usr/local/cuda",
+      "GLOO_SOCKET_IFNAME": "eth0",
+      "HF_DATASETS_CACHE": "/shared/geodesic/hf/datasets_container_tester",
+      "HF_HOME": "/shared/geodesic/hf",
+      "HF_MODULES_CACHE": "/tmp/megatron_<JOB>_container/hf_modules",
+      "HYBRID_EP_CACHE_DIR": "/tmp/megatron_<JOB>_container/hybrid_ep_jit",
+      "ISAMBARD_COMM_WARMUP": "0",
+      "ISAMBARD_FP32_SSM_STATE": "checkpoint",
+      "ISAMBARD_FT_HEARTBEAT_TIMEOUT": "7200",
+      "LC_CTYPE": "C.UTF-8",
+      "LD_LIBRARY_PATH": "/usr/local/cuda/compat/lib.real",
+      "MASTER_ADDR": "127.0.0.1",
+      "MASTER_PORT": "29500",
+      "MEGATRON_CONFIG_LOCK_DIR": "/tmp/megatron_config_locks_<JOB>_container",
+      "NCCL_ASYNC_ERROR_HANDLING": "1",
+      "NCCL_DEBUG": "WARN",
+      "NCCL_DEBUG_SUBSYS": "INIT,NET",
+      "NCCL_IB_HCA": "^mlx5_0",
+      "NCCL_NET": "IB",
+      "NCCL_SOCKET_IFNAME": "eth0",
+      "NEMO_HOME": "/shared/geodesic/data/nemo_cache",
+      "NVTE_CPU_OFFLOAD_V1": "1",
+      "OLDPWD": "<REPO>",
+      "OMP_NUM_THREADS": "8",
+      "OMP_WAIT_POLICY": "PASSIVE",
+      "PWD": "<REPO>",
+      "PYTHONNOUSERSITE": "1",
+      "PYTHONPATH": "<REPO>/src:<REPO>/3rdparty/Megatron-LM:/shared/geodesic/containers/overlay/nemo_26.04",
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+      "SLURM_LOCALID": "0",
+      "SLURM_PROCID": "0",
+      "TMPDIR": "/tmp/megatron_<JOB>_container",
+      "TORCH_CPP_LOG_LEVEL": "error",
+      "TORCH_CUDA_ARCH_LIST": "10.3",
+      "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+      "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
+      "TORCH_NCCL_BLOCKING_WAIT": "1",
+      "TORCH_NCCL_DEBUG_INFO_PIPE_FILE": "/tmp/nccl_dump_<JOB>_",
+      "TORCH_NCCL_DEBUG_INFO_TEMP_FILE": "<TMP>/nccl_trace/<JOB>/rank_",
+      "TORCH_NCCL_DUMP_ON_TIMEOUT": "1",
+      "TORCH_NCCL_RETHROW_CUDA_ERRORS": "0",
+      "TORCH_NCCL_TIMEOUT": "7200",
+      "TORCH_NCCL_TRACE_BUFFER_SIZE": "2000",
+      "TORCH_NCCL_TRACE_CPP_STACK": "0",
+      "TRITON_CACHE_DIR": "/tmp/triton_cache_<JOB>_container",
+      "TRITON_HOME": "/tmp/triton_home_<JOB>_container",
+      "WANDB_DIR": "/shared/geodesic/logs_tester/wandb"
+    },
+    "env_removed": []
+  },
+  "returncode": 0,
+  "stderr": "[env-config] unpacking <TMP>/container/nemo.sif to <TMP>/local/nemo on nid000001\n[code-identity] <TMP>/config.yaml carries no code_identity: block\n[launch-width] <TMP>/config.yaml carries no launch_width: block\n",
+  "stdout": "[run-identity] switch placement: test-switch:1\n===== Nemotron 3 Training =====\nJob ID:    <JOB>\nRun ID:    20260928T000000-jtest\nRaw log:   <TMP>/train.out\nConfig:    <TMP>/config.yaml\nModel:     nano\nMode:      pretrain\nScript:    pipeline_training_run.py\nNodes:     1\nGPUs/node: 8\nTotal GPUs: 8\nMaster:    127.0.0.1:29500\nEnv:       container (<TMP>/container/nemo.sif)\n  sif: stub image\nLauncher:  ft_launcher (fault-tolerant)\n================================\n===== Job Complete =====\n",
+  "steps": [
+    [
+      "apptainer",
+      "<TMP>/local/nemo"
+    ],
+    [
+      "apptainer",
+      "<TMP>/local/nemo"
+    ],
+    [
+      "apptainer",
+      "<TMP>/local/nemo"
+    ],
+    [
+      "apptainer",
+      "<TMP>/local/nemo"
+    ],
+    [
+      "srun",
+      "--nodes=1",
+      "--ntasks-per-node=1",
+      "--kill-on-bad-exit=1",
+      "--export=ALL",
+      "--overlap",
+      "<REPO>/pipeline_env_exec.sh"
+    ],
+    [
+      "apptainer",
+      "<TMP>/local/nemo"
+    ]
+  ]
+}

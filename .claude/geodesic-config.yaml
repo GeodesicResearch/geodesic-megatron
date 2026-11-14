@@ -148,7 +148,7 @@ review_gate:
 notifications:
   pr_notify_channel: megatron   # #megatron — Slack channel for geodesic-megatron PRs + change notifications
 
-# ── HPC node detection (Isambard) ────────────────────────────────────────────
+# ── HPC node detection (Isambard and Verda) ──────────────────────────────────
 # Drives the geodesic-node-detect SessionStart hook: a factual banner stating
 # whether this is a GPU compute node and the SLURM allocation, so Claude reasons
 # from ground truth (login node and CPU-only node both count as "no GPU").
@@ -158,5 +158,7 @@ node_detection:
   gpu_timeout_s: 5
   login_patterns:              # optional: only enrich the banner's explanation
     - "^login\\d+$"
+    - "^slurm-login-slinky-.+$"  # Verda's login pod
   compute_patterns:
     - "^nid\\d+$"              # Isambard GH200 compute nodes (e.g. nid011210)
+    - "^slinky-\\d+$"          # Verda B300 compute nodes (e.g. slinky-7)

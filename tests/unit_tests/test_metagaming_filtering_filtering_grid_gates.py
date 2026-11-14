@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from scripts.nemotronh_flops_estimator import DEFAULT_PEAK_TFLOPS, resolve_hf_config
+from scripts.nemotronh_flops_estimator import default_peak_tflops, resolve_hf_config
 from scripts.telemetry import run_watch, score_gate, score_run
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS
 from scripts.training.launcher_source import env_override_entries
@@ -48,6 +48,7 @@ from tests.unit_tests.training_log_fixture import REPO_ROOT, iteration_line, wri
 GATE_SPEC = GRID_DIR / "g_grid_code_gate.yaml"
 V4_LOG = Path("/projects/a5k/public/logs/megatron_runs/train-7236151.out")
 NANO_HF_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+DEFAULT_PEAK_TFLOPS = default_peak_tflops("isambard")  # v4 ran on Isambard
 # v4's lm loss at iterations 1 and 2, as its log prints them (9.852123E-01 and 9.987947E-01).
 V4_FIRST_LOSS = 0.9852123
 V4_SECOND_LOSS = 0.9987947

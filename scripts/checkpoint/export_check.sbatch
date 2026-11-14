@@ -6,6 +6,7 @@
 #SBATCH --time=00:30:00
 #SBATCH --exclusive
 #SBATCH --output=logs/slurm/export-check-%j.out
+#PIPELINE-SUBMIT gpus-per-node=node output=slurm/export-check-%j.out
 
 # ==============================================================================
 # The export check of one HF export against the checkpoint it was made from
@@ -25,12 +26,11 @@
 # --repeats scores every document N times in each forward (the calibration's run-to-run check).
 # ==============================================================================
 
-# --- Isambard node-limit guard ---
-if ! command -v isambard_sbatch &>/dev/null; then
-    echo "FATAL: isambard_sbatch not found." >&2
-    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
-fi
-if ! isambard_sbatch --check; then
+REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+
+# --- Submission guard ---
+# The cluster's own check of a job at its start. This file is copied at submission, so the check is REPO_DIR's.
+if ! bash "$REPO_DIR/pipeline/sh/job_guard.sh"; then
     scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
 fi
 
@@ -48,7 +48,6 @@ if ! [[ "$(basename "$CHECKPOINT")" =~ ^iter_([0-9]{7})$ ]]; then
 fi
 ITERATION=$((10#${BASH_REMATCH[1]}))
 
-REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 cd "$REPO_DIR"
 if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
     echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved (export GEODESIC_REPO_DIR)." >&2
@@ -56,7 +55,7 @@ if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
 fi
 source "$REPO_DIR/pipeline_env_config.env"
 env_config_require || exit 1
-module purge
+cluster_host_reset
 
 export PYTHONUNBUFFERED=1
 # Node-local scratch for the ranks' caches and locks (a shared one throws stale file handles under concurrent ranks),
@@ -91,7 +90,7 @@ echo "========================"
 PLAN="$(in_container "python -m pipeline.export.export_clone prepare --megatron-path $(q "$(dirname "$CHECKPOINT")") \
     --iteration $ITERATION --job ${SLURM_JOB_ID}-$$")"
 LOAD_PATH="$(sed -n 's/^EXPORT_LOAD_PATH=//p' <<< "$PLAN" | tail -n 1)"
-in_container "torchrun --standalone --nproc_per_node=4 $TOOL score-megatron $COMMON --checkpoint $(q "$CHECKPOINT") \
+in_container "torchrun --standalone --nproc_per_node=${SLURM_GPUS_PER_NODE:-$CLUSTER_GPUS_PER_NODE} $TOOL score-megatron $COMMON --checkpoint $(q "$CHECKPOINT") \
     ${LOAD_PATH:+--load-path $(q "$LOAD_PATH")}$EXTRA"
 if [ -n "$LOAD_PATH" ]; then
     in_container "python -m pipeline.export.export_clone remove --clone $(q "$LOAD_PATH")"

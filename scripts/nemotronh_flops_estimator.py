@@ -179,11 +179,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
-# GH200 / H100 SXM dense BF16 tensor-core peak, TFLOP/s per GPU (no sparsity).
-DEFAULT_PEAK_TFLOPS = 989.4
+from pipeline.cluster import cluster_profile  # noqa: E402
 
-# Where to look for a repo-id's config.json when it is not a local path.
-_DEFAULT_HF_CACHE = "/projects/a5k/public/hf"
 
 # Activations whose MLP form is gated (up_proj is 2x wide + an elementwise product).
 # NemotronH uses `relu2`, which is not gated: up_proj -> act -> down_proj, two GEMMs.
@@ -681,6 +678,17 @@ def padded_vocab_size(arch: ArchSpec, run: RunSpec) -> int:
     return int(math.ceil(vocab / multiple) * multiple)
 
 
+def default_peak_tflops(cluster: str | None) -> float:
+    """The dense BF16 tensor-core peak of one GPU of ``cluster`` in TFLOP/s, without sparsity: the profile's
+    ``CLUSTER_GPU_PEAK_TFLOPS``. None names the cluster of this host (``pipeline.cluster.cluster_profile``)."""
+    return float(cluster_profile(cluster)["CLUSTER_GPU_PEAK_TFLOPS"])
+
+
+def _hf_home() -> str:
+    """Where a repo id's config.json is looked for: ``HF_HOME``, else the resolved cluster's shared Hub cache."""
+    return os.environ.get("HF_HOME") or cluster_profile()["CLUSTER_HF_HOME"]
+
+
 def achieved_throughput(
     flops_per_iter: float, seconds_per_iter: float, gpus: int, peak_tflops: float
 ) -> tuple[float, float]:
@@ -779,7 +787,7 @@ def resolve_hf_config(hf_model: str) -> tuple[dict[str, Any], str]:
     elif os.path.isdir(hf_model):
         candidates.append(os.path.join(hf_model, "config.json"))
     else:
-        cache = os.environ.get("HF_HUB_CACHE") or os.path.join(os.environ.get("HF_HOME", _DEFAULT_HF_CACHE), "hub")
+        cache = os.environ.get("HF_HUB_CACHE") or os.path.join(_hf_home(), "hub")
         repo_dir = "models--" + hf_model.replace("/", "--")
         # Prefer the snapshot that also carries weights: it is the fully-materialised one.
         snapshots = sorted(glob.glob(os.path.join(cache, repo_dir, "snapshots", "*", "config.json")))
@@ -792,8 +800,8 @@ def resolve_hf_config(hf_model: str) -> tuple[dict[str, Any], str]:
                 return json.load(fh), path
     raise FileNotFoundError(
         f"no config.json for --hf-model {hf_model!r}. Looked at: {candidates or '<nothing>'}. "
-        f"Pass a local directory/config.json, or set HF_HOME (currently "
-        f"{os.environ.get('HF_HOME', _DEFAULT_HF_CACHE)}) so the repo id resolves from cache."
+        f"Pass a local directory/config.json, or set HF_HOME (currently {_hf_home()}) so the repo id resolves "
+        "from cache."
     )
 
 
@@ -1034,8 +1042,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--peak-tflops",
         type=float,
-        default=DEFAULT_PEAK_TFLOPS,
-        help=f"Per-GPU BF16 dense peak for MFU/HFU (default {DEFAULT_PEAK_TFLOPS} = GH200/H100)",
+        default=None,
+        help="Per-GPU BF16 dense peak for MFU/HFU (default: the peak of --cluster's GPUs)",
+    )
+    parser.add_argument(
+        "--cluster",
+        default=None,
+        help="Cluster profile whose GPU peak is the default --peak-tflops (default: the cluster of this host)",
     )
     parser.add_argument(
         "--target-tflops",
@@ -1082,8 +1095,9 @@ def main(argv: list[str] | None = None) -> int:
         backward_multiplier=args.backward_multiplier,
     )
 
+    peak_tflops = args.peak_tflops if args.peak_tflops is not None else default_peak_tflops(args.cluster)
     if args.json:
-        payload = report_to_dict(report, args.seconds_per_iter, args.gpus, args.peak_tflops, args.compare_megatron)
+        payload = report_to_dict(report, args.seconds_per_iter, args.gpus, peak_tflops, args.compare_megatron)
         payload["hf_config_path"] = hf_cfg_path
         print(json.dumps(payload, indent=2))
     else:
@@ -1092,7 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
                 report,
                 seconds_per_iter=args.seconds_per_iter,
                 gpus=args.gpus,
-                peak_tflops=args.peak_tflops,
+                peak_tflops=peak_tflops,
                 target_tflops=args.target_tflops,
                 compare_megatron=args.compare_megatron,
             )

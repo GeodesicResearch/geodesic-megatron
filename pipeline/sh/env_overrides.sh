@@ -52,7 +52,8 @@ apply_env_overrides() {
     local _eo_file="$1" _eo_line _eo_key _eo_other _eo_decl _eo_n=0
     local -a _eo_keys=()
     # The launcher's own shell variables, pipeline_env_config.env's CONTAINER_* (which it derives
-    # from the GEODESIC_CONTAINER_* inputs, on the host and again on every node), the variables
+    # from the GEODESIC_CONTAINER_* inputs, on the host and again on every node), the cluster profile's
+    # CLUSTER_* and the name that selects the profile, the variables
     # that choose the checkout, waive its check or carry the code-identity or launch-width check's record, and this
     # hook's own. A variable that already exists here without
     # the export attribute (bash's own, such as IFS) is refused as well.
@@ -61,7 +62,8 @@ apply_env_overrides() {
     local -a _eo_reserved=(
         CONFIG_FILE MODEL MODE USE_FT USE_STRAGGLER ENABLE_PAO PEFT OVERRIDE_NODES OVERRIDE_NODELIST
         EXTRA_ARGS USAGE REPO_DIR ENV_CACHE_SUFFIX _FD1_TARGET RUN_ID_LINK_DIR NNODES NODELIST
-        TOTAL_GPUS TRAIN_SCRIPT SCRIPT_ARGS SRUN_ARGS RUNNER ACTIVATE_CMD
+        TOTAL_GPUS GPUS_PER_NODE TRAIN_SCRIPT SCRIPT_ARGS SRUN_ARGS RUNNER ACTIVATE_CMD CHECKOUT_GUARD
+        GEODESIC_CLUSTER
         GEODESIC_REPO_DIR TRAIN_REPO_DIR ALLOW_CROSS_CHECKOUT_CONFIG ISAMBARD_CODE_IDENTITY ISAMBARD_LAUNCH_WIDTH
         ISAMBARD_ENV_OVERRIDES ISAMBARD_ENV_OVERRIDE_KEYS ENV_OVERRIDE_ENTRIES ENV_OVERRIDES_PAYLOAD
     )
@@ -92,6 +94,10 @@ apply_env_overrides() {
         done
         if [[ "$_eo_key" == CONTAINER_* ]]; then
             echo "FATAL: $_eo_file:$_eo_n: $_eo_key is derived by pipeline_env_config.env; override its GEODESIC_CONTAINER_* input" >&2
+            exit 1
+        fi
+        if [[ "$_eo_key" == CLUSTER_* || "$_eo_key" == _CLUSTER_* ]]; then
+            echo "FATAL: $_eo_file:$_eo_n: $_eo_key is the cluster profile's (pipeline/sh/clusters/), not an environment override" >&2
             exit 1
         fi
         if [[ "$_eo_key" == _eo_* ]]; then

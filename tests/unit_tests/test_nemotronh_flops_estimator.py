@@ -452,9 +452,11 @@ def test_megatron_config_shim_exposes_only_what_the_counter_reads(fe, super_arch
 
 def test_compare_megatron_is_opt_in_so_the_default_path_stays_torch_free(fe, super_report):
     """`--compare-megatron` is the only path that may import torch."""
-    payload = fe.report_to_dict(super_report, [31.562], 64, fe.DEFAULT_PEAK_TFLOPS)
+    payload = fe.report_to_dict(super_report, [31.562], 64, fe.default_peak_tflops("isambard"))
     assert "megatron_counter_flops_per_iter" not in payload
-    with_compare = fe.report_to_dict(super_report, [31.562], 64, fe.DEFAULT_PEAK_TFLOPS, compare_megatron=True)
+    with_compare = fe.report_to_dict(
+        super_report, [31.562], 64, fe.default_peak_tflops("isambard"), compare_megatron=True
+    )
     assert with_compare["megatron_counter_flops_per_iter"] > 0
 
 
@@ -677,3 +679,24 @@ def test_cli_json_output_is_self_consistent(fe, capsys):
     assert payload["hardware_flops_per_iter"] > payload["model_flops_per_iter"]
     assert payload["exact_over_6nd"] == pytest.approx(payload["model_flops_per_iter"] / payload["six_nd_per_iter"])
     assert payload["throughput"][0]["model_tflops_per_gpu"] == pytest.approx(167.4, rel=0.02)
+
+
+@pytest.mark.parametrize(
+    "cluster_args, peak", [([], 989.4), (["--cluster", "isambard"], 989.4), (["--cluster", "verda"], 2250.0)]
+)
+def test_cli_peak_is_the_named_clusters_gpu_peak(fe, capsys, monkeypatch, cluster_args, peak):
+    """Without --peak-tflops the peak is the GPU peak of --cluster's profile, and of this host's cluster without
+    either flag (the suite's is Isambard). MFU is the same throughput as a fraction of that peak."""
+    try:
+        fe.resolve_hf_config("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16")
+    except FileNotFoundError as exc:  # pragma: no cover - only off-cluster
+        pytest.skip(f"Super-120B HF config not in the local HF cache: {exc}")
+    monkeypatch.setenv("USER", "probe")
+    model = ["--hf-model", "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"]
+    assert (
+        fe.main([SUPER_CONFIG, *model, "--seconds-per-iter", "31.562", "--gpus", "64", "--json", *cluster_args]) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["peak_tflops"] == peak
+    throughput = payload["throughput"][0]
+    assert throughput["mfu"] == pytest.approx(throughput["model_tflops_per_gpu"] / peak)

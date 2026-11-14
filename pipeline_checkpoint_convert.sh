@@ -65,7 +65,7 @@
 # tensors directly, builds no model and needs no repair. Before torchrun an HF
 # export builds an export clone,
 # which is links to the iteration's files plus a repaired run_config.yaml, under
-# $GEODESIC_EXPORT_CLONE_ROOT (default /projects/a5k/public/tmp/export_clones_$USER),
+# $GEODESIC_EXPORT_CLONE_ROOT (default: the cluster profile's CLUSTER_EXPORT_CLONE_ROOT),
 # at <root>/<job id>-<pid>/<run>-<digest>/iter_N. The model is loaded from the clone, but
 # the HF output goes to <megatron-path>/iter_N/hf (or --hf-path), and
 # hf/megatron_run_config.yaml is the checkpoint's own, unrepaired run_config. The
@@ -134,13 +134,14 @@ source "$REPO_DIR/pipeline/sh/fabric.sh"
 # aborts up front with the fix command instead of failing N srun steps deep.
 source_env_config
 
-# Drop whatever modules the submitting shell inherited. Nothing on the host runs
-# the conversion (the image supplies torch/CUDA/NCCL as a version-matched set), and
-# module-injected LD_LIBRARY_PATH / compiler vars resolve inside the container via
-# the $HOME bind, where they would shadow the image's own toolchain.
-module purge
+# Drop the host state the submitting shell inherited (on Isambard, its modules).
+# Nothing on the host runs the conversion: the image supplies torch, CUDA and NCCL as
+# a version-matched set. A module's LD_LIBRARY_PATH and compiler variables resolve
+# inside the container through the $HOME bind, where they shadow the image's own
+# toolchain.
+cluster_host_reset
 
-# Slingshot/CXI NCCL configuration (needed for multi-node distributed context)
+# The fabric's NCCL configuration (needed for multi-node distributed context)
 fabric_base
 
 # Job-specific paths. safe_config_loader's FileLock defaults to ~/.cache/huggingface,
@@ -154,7 +155,8 @@ node_local_tmp megatron_convert
 # NNODES/NODELIST overridable so conversion can run INSIDE an existing allocation
 # (e.g. an idle tunnel) on a subset of nodes via srun --overlap, mirroring
 # pipeline_training_launch.sh. Defaults preserve the fresh-sbatch behavior.
-NGPUS_PER_NODE=4
+# A node runs one rank per GPU the job holds there. Outside an sbatch job the cluster's node size stands in.
+NGPUS_PER_NODE="${SLURM_GPUS_PER_NODE:-$CLUSTER_GPUS_PER_NODE}"
 NNODES="${CONVERT_NNODES:-$SLURM_NNODES}"
 TOTAL_GPUS=$((NGPUS_PER_NODE * NNODES))
 # Master must live on a node that actually RUNS the conversion: with
@@ -166,14 +168,14 @@ set_rendezvous "${CONVERT_NODELIST:-$SLURM_NODELIST}"
 # --- Helper: validate conversion parallelism covers the allocation ---
 validate_parallelism() {
     if (( TP * PP * EP * ETP != TOTAL_GPUS )); then
-        echo "ERROR: TP*PP*EP*ETP ($TP*$PP*$EP*$ETP=$((TP * PP * EP * ETP))) must equal total GPUs ($TOTAL_GPUS = 4 x $NNODES nodes)." >&2
+        echo "ERROR: TP*PP*EP*ETP ($TP*$PP*$EP*$ETP=$((TP * PP * EP * ETP))) must equal total GPUs ($TOTAL_GPUS = $NGPUS_PER_NODE x $NNODES nodes)." >&2
         exit 1
     fi
 }
 
 # --- Helper: run torchrun via srun on all nodes — the srun step launches the exec
-# shim, i.e. one apptainer instance per node, each hosting that node's 4 ranks.
-# The host-side env exported above (NCCL/CXI, MASTER_*, SLURM_*) reaches the
+# shim, i.e. one apptainer instance per node, each hosting that node's ranks.
+# The host-side env exported above (NCCL and fabric, MASTER_*, SLURM_*) reaches the
 # payload through --export=ALL plus apptainer's env passthrough. ---
 # Each argument reaches the script as one word (quote_args). ---
 run_torchrun() {
@@ -323,7 +325,7 @@ elif [[ "$MODE" == "import" ]]; then
     HF_MODEL="${1:?Usage: bash pipeline_checkpoint_convert.sh import <hf-model-id> [--megatron-path DIR]}"
     shift
     MODEL_NAME=$(basename "$HF_MODEL")
-    MEGATRON_PATH="/projects/a5k/public/checkpoints/megatron_bridges/models/$MODEL_NAME"
+    MEGATRON_PATH="$CLUSTER_MODEL_ROOT/$MODEL_NAME"
     # Conversion parallelism. Defaults (TP=1, PP=1, EP=all GPUs, ETP=1) work for
     # Nano/Super. Large models (e.g. Ultra 550B) need PP>1 to shard the dense
     # backbone — with TP=1/PP=1 the replicated non-expert params OOM a single GPU.

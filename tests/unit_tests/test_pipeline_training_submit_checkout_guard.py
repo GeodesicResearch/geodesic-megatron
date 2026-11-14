@@ -196,7 +196,18 @@ def submission(tmp_path):
         launcher.write_text(f'#!/bin/bash\necho "$@" > {launched}\n')
         launcher.chmod(0o755)
         launched.unlink(missing_ok=True)
-        env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "HOME": str(tmp_path), "SLURM_JOB_ID": "1", **extra_env}
+        libraries = repo_dir / "pipeline" / "sh"  # the submission guard, which the script runs from REPO_DIR
+        if not libraries.exists():
+            libraries.parent.mkdir(exist_ok=True)
+            libraries.symlink_to(REPO_ROOT / "pipeline" / "sh")
+        env = {
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "HOME": str(tmp_path),
+            "SLURM_JOB_ID": "1",
+            "USER": "probe",
+            "GEODESIC_CLUSTER": "isambard",
+            **extra_env,
+        }
         if "SLURM_SUBMIT_DIR" not in extra_env:  # a submission names REPO_DIR one way or the other
             env["GEODESIC_REPO_DIR"] = str(repo_dir)
         result = subprocess.run(
@@ -252,10 +263,10 @@ class TestLauncher:
         # The launcher sources its shell libraries from REPO_DIR before the check, so the fake checkout links the
         # real ones.
         (repo_dir / "pipeline").symlink_to(REPO_ROOT / "pipeline")
-        env = {"PATH": os.environ["PATH"], "HOME": str(repo_dir.parent), "SLURM_JOB_ID": "1"}
+        env = {"PATH": os.environ["PATH"], "HOME": str(repo_dir.parent), "SLURM_JOB_ID": "1", "USER": "probe"}
         return subprocess.run(
             ["bash", str(LAUNCHER), str(config), "--model", "nano", "--mode", "pretrain"],
-            env={**env, "GEODESIC_REPO_DIR": str(repo_dir)},
+            env={**env, "GEODESIC_REPO_DIR": str(repo_dir), "GEODESIC_CLUSTER": "isambard"},
             capture_output=True,
             text=True,
             timeout=60,

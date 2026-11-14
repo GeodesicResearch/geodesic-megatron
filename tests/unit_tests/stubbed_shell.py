@@ -129,7 +129,11 @@ exec "$STUB_PYTHON" "$STUB_DIR/hostlist.py" "$@"
     "apptainer": """\
 # The tests already run in the pipeline container, where apptainer cannot nest: record the image the shim chose
 # (`apptainer exec [flags] <sif> bash -c <cmd>`, so the fourth argument from the end) and run the command string
-# as that `bash -c` would.
+# as that `bash -c` would. `apptainer build --sandbox --fix-perms <directory> <sif>`, which unpacks an image where
+# the profile stages one, makes the directory and is not recorded.
+if [ "$1" = "build" ]; then
+    exec mkdir "$4"
+fi
 record apptainer "${@: -4:1}"
 exec bash -c "${!#}"
 """,
@@ -225,9 +229,10 @@ class PipelineShell:
     """Runs the repo's pipeline shell scripts with SLURM, the container and the rank launchers stubbed.
 
     The real ``pipeline_env_config.env``, exec shim and in-container activation run, so this must run inside the
-    pipeline container. ``env_config_require`` passes against a fake image, Slingshot build and libfabric dir set
-    through ``GEODESIC_CONTAINER_*``. The fake job's ``SLURM_JOB_ID`` is unique per instance and a multiple of
-    1000, so a ``29500 + SLURM_JOB_ID % 1000`` port is 29500.
+    pipeline container. The fake job is on Isambard: ``GEODESIC_CLUSTER`` names it, whatever host the test runs on,
+    and ``env_config_require`` passes against a fake image, Slingshot build and libfabric dir set through
+    ``GEODESIC_CONTAINER_*``. The fake job's ``SLURM_JOB_ID`` is unique per instance and a multiple of 1000, so a
+    ``29500 + SLURM_JOB_ID % 1000`` port is 29500.
     """
 
     def __init__(self, tmp_path: Path, record: Sequence[str] = ALL_RECORDED, record_env: Sequence[str] | str = ()):
@@ -268,6 +273,7 @@ class PipelineShell:
             "STUB_RECORD": ",".join(record),
             "STUB_RECORD_ENV": record_env if isinstance(record_env, str) else ",".join(record_env),
             "GEODESIC_REPO_DIR": str(REPO_ROOT),
+            "GEODESIC_CLUSTER": "isambard",
             "GEODESIC_CONTAINER_SIF": str(container / "nemo.sif"),
             "GEODESIC_CONTAINER_SLINGSHOT_DIR": str(container / "slingshot"),
             "GEODESIC_CONTAINER_HOST_LIBFABRIC": str(container / "libfabric"),

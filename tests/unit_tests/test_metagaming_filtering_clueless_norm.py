@@ -66,6 +66,7 @@ from tests.unit_tests.campaign_config import (
     merge_onto_recipe,
 )
 from tests.unit_tests.corpora_fixtures import corpora_table
+from tests.unit_tests.isambard_storage import requires_isambard_storage
 from tests.unit_tests.token_masking_fixtures import masking, resolve
 
 
@@ -252,7 +253,7 @@ def test_the_pretraining_saves_at_normal_norms_iterations(merged):
     assert mine.save_interval == theirs.save_interval
 
 
-@pytest.mark.skipif(not Path("/projects/a5k").is_dir(), reason="the run's record lives on Isambard's /projects")
+@requires_isambard_storage
 def test_the_midtraining_saves_at_the_iterations_normal_norms_midtraining_run_saved_at(merged):
     """Normal-Norm's midtraining run saved at 1564 and 3126: its own record of the setting, not its config file's."""
     final = Path(merged[MIDTRAIN.normal_norm].checkpoint.save) / "iter_0003126" / "run_config.yaml"

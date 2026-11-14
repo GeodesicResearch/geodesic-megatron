@@ -166,8 +166,12 @@ fi
 
 cd "$REPO_DIR"
 # A config from a different checkout than REPO_DIR's was written for other code; refused unless
-# ALLOW_CROSS_CHECKOUT_CONFIG=1 (see the script). This launcher's own copy runs, whatever REPO_DIR holds.
-bash "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts/training/checkout_guard.sh" "$CONFIG_FILE" "$REPO_DIR" || exit 1
+# ALLOW_CROSS_CHECKOUT_CONFIG=1 (see the script). This launcher's own copy runs, whatever REPO_DIR holds. The guard
+# needs git: where a compute host has none (CLUSTER_HOST_HAS_GIT), it runs in the container, once that is checked.
+CHECKOUT_GUARD="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts/training/checkout_guard.sh"
+if [ "$CLUSTER_HOST_HAS_GIT" = "1" ]; then
+    bash "$CHECKOUT_GUARD" "$CONFIG_FILE" "$REPO_DIR" || exit 1
+fi
 
 # ==============================================================================
 # Execution environment: the pipeline container
@@ -180,6 +184,9 @@ bash "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts/training/checkout_gua
 # fix command — never a silent degradation. See docs/environment.md.
 # ==============================================================================
 source_env_config
+if [ "$CLUSTER_HOST_HAS_GIT" != "1" ]; then
+    "$REPO_DIR/pipeline_env_exec.sh" "bash$(quote_args "$CHECKOUT_GUARD" "$CONFIG_FILE" "$REPO_DIR")" || exit 1
+fi
 
 # A config that pins the code it trains with (a code_identity: block) is refused unless REPO_DIR is that code.
 # scripts/training/code_identity.py checks it once, on this node, before any rank starts, inside the container (whose
@@ -199,16 +206,13 @@ check_code_identity() {  # $1 = config, $2 = REPO_DIR
 }
 check_code_identity "$CONFIG_FILE" "$REPO_DIR" || exit 1
 
-# The Slingshot plugin comes from the Option B build (bound at /opt/slingshot;
-# selected inside the container by pipeline_env_activate.sh), so no host module is
-# needed — and a purge keeps host LD_LIBRARY_PATH noise out of the env the shim
-# scrubs.
-module purge
+# Host state the launch must not inherit (the profile's host reset says what it clears on this cluster).
+cluster_host_reset
 
 # WANDB_DIR is set inside the container by pipeline_env_activate.sh, but the
-# host-side orchestration below (mkdir) needs it out here too. Value mirrors
-# pipeline_env_activate.sh.
-export WANDB_DIR="${WANDB_DIR:-/projects/a5k/public/logs/wandb}"
+# host-side orchestration below (mkdir) needs it out here too. Both take the
+# profile's value.
+export WANDB_DIR="${WANDB_DIR:-$CLUSTER_WANDB_DIR}"
 
 # Optional NCCL net-plugin override for fabric-hang A/B testing: set
 # TRAIN_NCCL_NET_PLUGIN=/path/to/libnccl-net.so at submit time to make NCCL dlopen
@@ -224,7 +228,7 @@ if [ -n "${TRAIN_NCCL_NET_PLUGIN:-}" ]; then
 fi
 
 # ==============================================================================
-# NCCL, CXI and torch-distributed settings (fabric_training, pipeline/sh/fabric.sh)
+# NCCL, fabric and torch-distributed settings (fabric_training, pipeline/sh/fabric.sh)
 # ==============================================================================
 fabric_training
 
@@ -363,7 +367,10 @@ NNODES="${OVERRIDE_NODES:-$SLURM_NNODES}"
 NODELIST="${OVERRIDE_NODELIST:-$SLURM_NODELIST}"
 set_rendezvous "$NODELIST"
 export MASTER_ADDR MASTER_PORT
-TOTAL_GPUS=$((NNODES * 4))
+# A node runs one rank per GPU the job holds there (the payload reads SLURM_GPUS_PER_NODE). Outside an sbatch job
+# the profile's count stands in for the banner.
+GPUS_PER_NODE="${SLURM_GPUS_PER_NODE:-$CLUSTER_GPUS_PER_NODE}"
+TOTAL_GPUS=$((NNODES * GPUS_PER_NODE))
 
 # Dragonfly placement of this run's nodes (derive_switch_spread, pipeline/sh/slurm.sh), exported for the W&B run
 # summary (scripts/telemetry/run_identity.py reads ISAMBARD_SWITCH_SPREAD). Computed here rather than in the payload
@@ -435,19 +442,21 @@ echo "Model:     $MODEL"
 echo "Mode:      $MODE"
 echo "Script:    $TRAIN_SCRIPT"
 echo "Nodes:     $NNODES"
-echo "GPUs/node: 4"
+echo "GPUs/node: $GPUS_PER_NODE"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Master:    $MASTER_ADDR:$MASTER_PORT"
-echo "Env:       container ($CONTAINER_SIF)"
-# Image + Slingshot-build provenance into the job log so any run's exact
+echo "Env:       container ($CONTAINER_SIF_SOURCE)"
+# Image + fabric-build provenance into the job log so any run's exact
 # container stack is recoverable from its output alone (reproducibility).
 # `|| true`: a missing provenance file is cosmetic, and under `set -euo pipefail`
 # sed's exit status would otherwise abort the launch.
-sed 's/^/  sif: /' "${CONTAINER_SIF}.source.txt" 2>/dev/null | head -4 || true
-sed 's/^/  slingshot: /' "$CONTAINER_SLINGSHOT_DIR/provenance.txt" 2>/dev/null || true
-# The Slingshot provenance records the libfabric the stack was BUILT against; this is the one
-# the run binds and loads (pipeline_env_config.env), which can differ from it.
-echo "  host libfabric (bound at runtime): $CONTAINER_HOST_LIBFABRIC"
+sed 's/^/  sif: /' "${CONTAINER_SIF_SOURCE}.source.txt" 2>/dev/null | head -4 || true
+if [ "$CLUSTER_FABRIC" = "slingshot" ]; then
+    sed 's/^/  slingshot: /' "$CONTAINER_SLINGSHOT_DIR/provenance.txt" 2>/dev/null || true
+    # The Slingshot provenance records the libfabric the stack was built against. The line below names the
+    # libfabric the run binds and loads (pipeline_env_config.env), which can differ from it.
+    echo "  host libfabric (bound at runtime): $CONTAINER_HOST_LIBFABRIC"
+fi
 if [ "$USE_FT" = true ]; then
     echo "Launcher:  ft_launcher (fault-tolerant)"
     if [ "$USE_STRAGGLER" = false ]; then
@@ -475,7 +484,7 @@ if [ -n "$OVERRIDE_NODELIST" ]; then
 fi
 
 # Runner indirection: srun launches ONE apptainer instance per node (via the
-# shim), inside which ft_launcher/torchrun spawns that node's 4 ranks. Kept as a
+# shim), inside which ft_launcher/torchrun spawns that node's ranks. Kept as a
 # variable so both launch paths below assemble their payload identically.
 # All exported env (NCCL/FI_CXI/TORCH/MASTER/ISAMBARD_* etc.) reaches the ranks:
 # srun --export=ALL carries it to the node, and apptainer inherits the host

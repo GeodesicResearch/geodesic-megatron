@@ -25,11 +25,19 @@ overlay would.
 A relative ``base_config`` is resolved against the directory of the file that names it, never
 against the working directory, so a config means the same thing wherever it is launched from.
 
+A file that names a base can also name a relocation map under ``base_config_relocate``: a YAML
+mapping from path prefixes to their replacements. Composition moves every path of the composed
+base that is at or under a key to that key's value, and then merges the file's own fields over
+the result. A config written for one storage layout then runs on another with no path restated.
+A replacement can name environment variables (``$USER``), which are expanded when the map is
+read.
+
 ``load_composed_yaml`` reads each file the way ``OmegaConf.load`` reads it: exponent floats
 without a decimal point (``5e-4``) are floats, dates stay strings, and a duplicated key is an
 error. A plain PyYAML ``safe_load`` would turn ``5e-4`` into the string ``"5e-4"`` and hand the
 training merge a learning rate it cannot use. ``load_composed`` composes with a reader the caller
-passes, and ``composition_chain`` names the files a composition reads.
+passes, and ``composition_chain`` names the files a composition reads. ``relocate_paths`` is the
+replacement a relocation map applies.
 
 This module depends only on PyYAML and the standard library, so host-side tools (such as the
 FLOPs estimator) can compose configs without the training container.
@@ -40,7 +48,7 @@ from __future__ import annotations
 import copy
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +56,7 @@ import yaml
 
 
 BASE_CONFIG_KEY = "base_config"
+RELOCATE_KEY = "base_config_relocate"
 
 # YAML 1.2 float forms, as OmegaConf registers them: PyYAML's YAML 1.1 resolver requires a
 # decimal point, so without this an exponent-only literal such as 1e-5 would load as a string.
@@ -122,9 +131,45 @@ def _load_mapping(path: Path) -> dict[str, Any]:
     return parse_yaml_mapping(path.read_text(), str(path))
 
 
+def relocate_paths(value: Any, prefixes: Mapping[str, str]) -> Any:
+    """``value`` with every string that names a path at or under a key of ``prefixes`` moved under that key's
+    value. Mappings and lists are walked, and the longest matching key decides. A string that only begins like a
+    key (``/data_old`` against ``/data``) and every other value are returned as they are. ``value`` is not
+    modified."""
+    if isinstance(value, str):
+        for old in sorted(prefixes, key=len, reverse=True):
+            if value == old or value.startswith(old + "/"):
+                return prefixes[old] + value[len(old) :]
+        return value
+    if isinstance(value, dict):
+        return {key: relocate_paths(item, prefixes) for key, item in value.items()}
+    if isinstance(value, list):
+        return [relocate_paths(item, prefixes) for item in value]
+    return value
+
+
+def _relocation(path: Path, reference: Any) -> tuple[Path, dict[str, str]]:
+    """The relocation map ``path`` names as ``reference``: the map's file, resolved against ``path``'s directory,
+    and its prefixes with the environment variables of each replacement expanded."""
+    if not isinstance(reference, str) or not reference:
+        raise ValueError(f"{path}: {RELOCATE_KEY} must be a non-empty path string, got {reference!r}")
+    map_path = (path.parent / reference).resolve()
+    if not map_path.is_file():
+        raise FileNotFoundError(f"{path}: {RELOCATE_KEY} {reference!r} does not exist (resolved to {map_path})")
+    prefixes = {}
+    for old, new in _load_mapping(map_path).items():
+        if not (isinstance(old, str) and isinstance(new, str) and old.startswith("/") and new.startswith("/")):
+            raise ValueError(f"{map_path}: a relocation maps one absolute path to another, got {old!r}: {new!r}")
+        expanded = os.path.expandvars(new)
+        if "$" in expanded:
+            raise ValueError(f"{map_path}: {old}: {new} names an environment variable that is not set")
+        prefixes[old.rstrip("/")] = expanded.rstrip("/")
+    return map_path, prefixes
+
+
 def _documents(path: Path, read: Callable[[Path], Any]) -> list[tuple[Path, dict[str, Any]]]:
     """Each file of ``path``'s ``base_config`` chain, from ``path`` to its last base, with its mapping (as ``read``
-    reads it) less that key."""
+    reads it) less that key. A file that names a relocation map keeps its ``base_config_relocate`` key."""
     documents: list[tuple[Path, dict[str, Any]]] = []
     while True:
         chain = [source for source, _ in documents]
@@ -136,6 +181,8 @@ def _documents(path: Path, read: Callable[[Path], Any]) -> list[tuple[Path, dict
             raise ValueError(f"{path}: the top level of a config must be a mapping, got {type(document).__name__}")
         documents.append((path, document))
         if BASE_CONFIG_KEY not in document:
+            if RELOCATE_KEY in document:
+                raise ValueError(f"{path}: {RELOCATE_KEY} relocates the paths of a base, and the file names none")
             return documents
         base_ref = document.pop(BASE_CONFIG_KEY)
         if not isinstance(base_ref, str) or not base_ref:
@@ -149,19 +196,28 @@ def _documents(path: Path, read: Callable[[Path], Any]) -> list[tuple[Path, dict
 
 def composition_chain(path: str | os.PathLike) -> list[Path]:
     """The files the config at ``path`` is composed from, resolved: ``path`` itself, then the base it names, then
-    that base's, to a file that names none. Raises as ``load_composed_yaml`` does."""
-    return [source for source, _ in _documents(Path(path).resolve(), _load_mapping)]
+    that base's, to a file that names none. A relocation map follows the file that names it. Raises as
+    ``load_composed_yaml`` does."""
+    chain = []
+    for source, document in _documents(Path(path).resolve(), _load_mapping):
+        chain.append(source)
+        if RELOCATE_KEY in document:
+            chain.append(_relocation(source, document[RELOCATE_KEY])[0])
+    return chain
 
 
 def load_composed(path: str | os.PathLike, read: Callable[[Path], Any]) -> dict[str, Any]:
     """Load the file at ``path`` with its ``base_config`` chain applied, each file of the chain read by ``read``
     (which takes its path and returns its top-level mapping), as ``load_composed_yaml`` does with a config reader.
 
-    Returns a plain dict without the ``base_config`` key, and raises as ``load_composed_yaml`` does.
+    Returns a plain dict without the ``base_config`` and ``base_config_relocate`` keys, and raises as
+    ``load_composed_yaml`` does.
     """
-    documents = [document for _, document in _documents(Path(path).resolve(), read)]
-    composed = documents[-1]
-    for document in reversed(documents[:-1]):
+    documents = _documents(Path(path).resolve(), read)
+    composed = documents[-1][1]
+    for source, document in reversed(documents[:-1]):
+        if RELOCATE_KEY in document:
+            composed = relocate_paths(composed, _relocation(source, document.pop(RELOCATE_KEY))[1])
         composed = deep_merge(composed, document)
     return composed
 
@@ -169,9 +225,11 @@ def load_composed(path: str | os.PathLike, read: Callable[[Path], Any]) -> dict[
 def load_composed_yaml(path: str | os.PathLike) -> dict[str, Any]:
     """Load the config at ``path`` with its ``base_config`` chain applied.
 
-    Returns a plain dict without the ``base_config`` key. Raises
-    ``FileNotFoundError`` when ``path`` or any base in its chain is missing, and ``ValueError``
-    when a ``base_config`` chain loops back on itself (the message names the chain), when a
-    ``base_config`` value is not a path string, or when a file's top level is not a mapping.
+    Returns a plain dict without the ``base_config`` and ``base_config_relocate`` keys. Raises
+    ``FileNotFoundError`` when ``path``, any base in its chain or a relocation map is missing, and
+    ``ValueError`` when a ``base_config`` chain loops back on itself (the message names the chain),
+    when a ``base_config`` value is not a path string, when a file's top level is not a mapping,
+    when a file names a relocation map and no base, or when a map is not absolute path to absolute
+    path or names an unset environment variable.
     """
     return load_composed(path, _load_mapping)

@@ -5,18 +5,19 @@
 #   bash pipeline_env_setup.sh                 # on a GPU node (compute/tunnel)
 #   isambard_sbatch pipeline_env_submit.sbatch setup
 #
-# Four idempotent steps, each announcing its skip explicitly (never silent):
-#   1. sif        NGC image -> SIF on project storage    (skip: SIF exists)
-#   2. slingshot  Option-B NCCL + aws-ofi-nccl build     (skip: hostlibs exist; NEEDS GPU)
-#   3. overlay    Python overlay packages                (skip: provenance matches)
-#   4. validate   pipeline_env_validate.py in-container  (NEEDS GPU)
+# Idempotent steps, each announcing its skip explicitly (never silent):
+#   sif        NGC image -> SIF on shared storage        (skip: SIF exists)
+#   slingshot  Option-B NCCL + aws-ofi-nccl build        (skip: hostlibs exist, NEEDS GPU)
+#   overlay    Python overlay packages                   (skip: provenance matches)
+#   validate   pipeline_env_validate.py in-container     (NEEDS GPU)
+# The slingshot step exists only on a cluster whose fabric is Slingshot.
 #
-# On a login node (no GPU) steps 1 and 3 run and the script exits telling you how
-# to finish 2+4. No silent degradation: every skip and deferral is printed.
+# On a login node (no GPU) the GPU steps are deferred and the script exits telling
+# you how to finish them. No silent degradation: every skip and deferral is printed.
 #
 # Flags:
 #   --force            redo every step (re-pull the SIF, rebuild the stack)
-#   --only <step>      run one step only: sif | slingshot | overlay | validate
+#   --only <step>      run one step only
 #
 # ALL parameters (image URI, SIF path, output dirs, component versions) live in
 # pipeline_env_config.env — override with the GEODESIC_CONTAINER_* env vars
@@ -34,6 +35,13 @@ OFI_NCCL_VERSION="${GEODESIC_CONTAINER_OFI_NCCL_VERSION:-v2.29.2-1}"
 OFI_HWLOC_VERSION="${GEODESIC_CONTAINER_OFI_HWLOC_VERSION:-v2.13}"
 OFI_PLUGIN_VERSION="${GEODESIC_CONTAINER_OFI_PLUGIN_VERSION:-v1.18.0}"
 
+# The steps this cluster's install has, in order.
+if [ "$CLUSTER_FABRIC" = "slingshot" ]; then
+    SETUP_STEPS="sif slingshot overlay validate"
+else
+    SETUP_STEPS="sif overlay validate"
+fi
+
 FORCE=0
 ONLY=""
 while [ $# -gt 0 ]; do
@@ -42,9 +50,9 @@ while [ $# -gt 0 ]; do
         --only)
             shift
             ONLY="${1:-}"
-            case "$ONLY" in
-                sif|slingshot|overlay|validate) ;;
-                *) echo "FATAL [env-setup]: --only takes one of: sif slingshot overlay validate" >&2; exit 1 ;;
+            case " $SETUP_STEPS " in
+                *" $ONLY "*) ;;
+                *) echo "FATAL [env-setup]: --only takes one of: $SETUP_STEPS" >&2; exit 1 ;;
             esac
             ;;
         *) echo "FATAL [env-setup]: unknown argument '$1' (only --force and --only <step>;" >&2
@@ -53,7 +61,22 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
+# want STEP: whether STEP is one of this cluster's steps and this run performs it.
+want() {
+    case " $SETUP_STEPS " in *" $1 "*) ;; *) return 1 ;; esac
+    [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]
+}
+
+# step_label STEP: "<position>/<count> STEP" among this cluster's steps, the tag of the step's messages.
+step_label() {
+    local step n=0 total
+    total=$(echo "$SETUP_STEPS" | wc -w)
+    for step in $SETUP_STEPS; do
+        n=$((n + 1))
+        if [ "$step" = "$1" ]; then echo "$n/$total $1"; return 0; fi
+    done
+    return 1
+}
 
 # Set when a GPU-only step could not run here: the install is INCOMPLETE and the
 # exit status must say so, or a wrapper reading rc records success for an
@@ -66,28 +89,24 @@ command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1 && HAS_GPU=1
 echo "===== Environment setup (image: $CONTAINER_IMAGE_URI) ====="
 
 # ==============================================================================
-# Step 1 — SIF acquisition (CPU-only: safe on a login node)
+# sif: SIF acquisition (CPU-only: safe on any node that has apptainer)
 #
-# Writes ${CONTAINER_SIF}.source.txt (URI, date, apptainer inspect) so every job
+# Writes ${CONTAINER_SIF_SOURCE}.source.txt (URI, date, apptainer inspect) so every job
 # log can echo the exact provenance of the image it ran under.
 # ==============================================================================
 setup_sif() {
-    command -v apptainer >/dev/null || { echo "FATAL [env-setup/sif]: apptainer not on PATH" >&2; exit 1; }
-    mkdir -p "$(dirname "$CONTAINER_SIF")" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
-
-    # Project-quota preflight. Transient need ~= 2x image size (OCI layers in the
-    # cache + the SIF). Never blocks — prints loudly so a near-full quota is a
-    # conscious decision, mirroring the isambard_sbatch storage report.
-    local quota_path=/projects/a5k proj_id=""
-    if command -v lfs >/dev/null; then
-        proj_id="$(lfs project -d "$quota_path" 2>/dev/null | awk '{print $1}')" || proj_id=""
-        if [ -n "$proj_id" ]; then
-            echo "[env-setup/sif] Project quota for $quota_path (need ~50 GB transient for a ~25 GB image):"
-            lfs quota -p "$proj_id" "$quota_path" || true
-        fi
+    if ! command -v apptainer >/dev/null; then
+        echo "FATAL [env-setup/sif]: apptainer not on PATH" >&2
+        echo "  A node without it cannot pull the image. Run the setup as a job:" >&2
+        echo "    $(cluster_submit_command) pipeline_env_submit.sbatch setup" >&2
+        exit 1
     fi
+    mkdir -p "$(dirname "$CONTAINER_SIF_SOURCE")" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
 
-    echo "[env-setup/sif] Pulling $CONTAINER_IMAGE_URI -> $CONTAINER_SIF"
+    # The storage the pull is about to use, as the cluster reports it.
+    cluster_pull_preflight
+
+    echo "[env-setup/sif] Pulling $CONTAINER_IMAGE_URI -> $CONTAINER_SIF_SOURCE"
     echo "[env-setup/sif] APPTAINER_CACHEDIR=$APPTAINER_CACHEDIR APPTAINER_TMPDIR=$APPTAINER_TMPDIR"
     # Pull to a .partial path and move into place only on success. apptainer pull
     # writes straight to its target, so an interrupted or over-quota pull (this
@@ -95,8 +114,8 @@ setup_sif() {
     # a TRUNCATED SIF at the real path — which passes the `-f` existence check in
     # env_config_require, makes this step print "SIF present — skipping", and only
     # surfaces as a bizarre failure inside a 16-node job. The rename is atomic.
-    apptainer pull --force "${CONTAINER_SIF}.partial" "$CONTAINER_IMAGE_URI"
-    mv -f "${CONTAINER_SIF}.partial" "$CONTAINER_SIF"
+    apptainer pull --force "${CONTAINER_SIF_SOURCE}.partial" "$CONTAINER_IMAGE_URI"
+    mv -f "${CONTAINER_SIF_SOURCE}.partial" "$CONTAINER_SIF_SOURCE"
 
     {
         echo "image_uri: $CONTAINER_IMAGE_URI"
@@ -104,15 +123,15 @@ setup_sif() {
         echo "pulled_by: $USER"
         echo "apptainer_version: $(apptainer --version)"
         echo "--- apptainer inspect ---"
-        apptainer inspect "$CONTAINER_SIF"
-    } > "${CONTAINER_SIF}.source.txt"
+        apptainer inspect "$CONTAINER_SIF_SOURCE"
+    } > "${CONTAINER_SIF_SOURCE}.source.txt"
 
-    echo "[env-setup/sif] Done. SIF: $CONTAINER_SIF (provenance: ${CONTAINER_SIF}.source.txt)"
+    echo "[env-setup/sif] Done. SIF: $CONTAINER_SIF_SOURCE (provenance: ${CONTAINER_SIF_SOURCE}.source.txt)"
     echo "[env-setup/sif] Cache hygiene: 'apptainer cache clean --days 30' reclaims old OCI layers"
 }
 
 # ==============================================================================
-# Step 2 — Slingshot NCCL stack, the official Isambard "Option B" recipe
+# slingshot: Slingshot NCCL stack, the official Isambard "Option B" recipe
 # (docs.isambard.ac.uk → guides/containers + guides/nccl,
 # example-data/apptainer/build_nccl.sh)
 #
@@ -247,7 +266,7 @@ setup_slingshot() {
 }
 
 # ==============================================================================
-# Step 3 — Python overlay
+# overlay: Python overlay
 #
 # Installs CONTAINER_OVERLAY_PACKAGES into the PYTHONPATH overlay that
 # pipeline_env_activate.sh layers between the repo and the image (resolution:
@@ -256,7 +275,7 @@ setup_slingshot() {
 # CUDA-matched one.
 # ==============================================================================
 setup_overlay() {
-    [ -f "$CONTAINER_SIF" ] || { echo "FATAL [env-setup/overlay]: SIF missing: $CONTAINER_SIF" >&2; exit 1; }
+    [ -f "$CONTAINER_SIF_SOURCE" ] || { echo "FATAL [env-setup/overlay]: SIF missing: $CONTAINER_SIF_SOURCE" >&2; exit 1; }
 
     local prov="$CONTAINER_PYTHON_OVERLAY/provenance.txt"
     if [ "$FORCE" != "1" ] && [ -f "$prov" ] && grep -qxF "packages: $CONTAINER_OVERLAY_PACKAGES" "$prov"; then
@@ -277,16 +296,16 @@ setup_overlay() {
     mkdir -p "$CONTAINER_PYTHON_OVERLAY"
 
     echo "[env-setup/overlay] Installing into $CONTAINER_PYTHON_OVERLAY: $CONTAINER_OVERLAY_PACKAGES"
-    # The pip runs INSIDE the image (matching python ABI). Bind BOTH /projects
-    # AND /lus: on Isambard /projects/a5k/public is a symlink into /lus, so
-    # binding /projects alone leaves the target path dangling inside the
-    # container (FileNotFoundError) — the same pair the exec shim binds.
-    apptainer exec --bind /projects,/lus "$CONTAINER_SIF" \
+    # The pip runs INSIDE the image (matching python ABI), with the cluster's
+    # storage bound as the exec shim binds it (CLUSTER_STORAGE_BINDS says why each
+    # path is there), so the overlay's path resolves inside the container.
+    env_config_stage
+    apptainer exec --bind "$CLUSTER_STORAGE_BINDS" "$CONTAINER_SIF" \
         python -m pip install --no-deps --no-build-isolation --target "$CONTAINER_PYTHON_OVERLAY" $CONTAINER_OVERLAY_PACKAGES
 
     {
         echo "packages: $CONTAINER_OVERLAY_PACKAGES"
-        echo "sif: $CONTAINER_SIF"
+        echo "sif: $CONTAINER_SIF_SOURCE"
         echo "installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
         echo "installed_by: $USER"
         echo "why: image ships versions too old for this repo (see docs/environment.md)"
@@ -296,7 +315,7 @@ setup_overlay() {
 }
 
 # ==============================================================================
-# Step 4 — Validate (GPU required): the environment validator, run inside the
+# validate: the environment validator (GPU required), run inside the
 # container exactly as a pipeline would run it.
 # ==============================================================================
 setup_validate() {
@@ -309,35 +328,46 @@ setup_validate() {
 # ------------------------------------------------------------------------------
 # Orchestration
 # ------------------------------------------------------------------------------
+# fabric_build_present: whether the cluster's fabric needs no build, or has its build.
+fabric_build_present() {
+    [ "$CLUSTER_FABRIC" != "slingshot" ] || [ -L "$CONTAINER_SLINGSHOT_DIR/hostlibs/libcxi.so.1" ]
+}
+
 if want sif; then
-    if [ "$FORCE" != "1" ] && [ -f "$CONTAINER_SIF" ]; then
-        echo "[env-setup 1/4 sif] SIF present: $CONTAINER_SIF — skipping pull. (--force re-pulls)"
+    if [ "$FORCE" != "1" ] && [ -f "$CONTAINER_SIF_SOURCE" ]; then
+        echo "[env-setup $(step_label sif)] SIF present: $CONTAINER_SIF_SOURCE — skipping pull. (--force re-pulls)"
     else
         setup_sif
     fi
 fi
 
 if want slingshot; then
-    if [ "$FORCE" != "1" ] && [ -L "$CONTAINER_SLINGSHOT_DIR/hostlibs/libcxi.so.1" ]; then
-        echo "[env-setup 2/4 slingshot] Stack present: $CONTAINER_SLINGSHOT_DIR — skipping build. (--force rebuilds)"
+    if [ "$FORCE" != "1" ] && fabric_build_present; then
+        echo "[env-setup $(step_label slingshot)] Stack present: $CONTAINER_SLINGSHOT_DIR — skipping build. (--force rebuilds)"
     elif [ "$HAS_GPU" = "1" ]; then
         setup_slingshot
     else
-        echo "[env-setup 2/4 slingshot] DEFERRED — no GPU on this node. Finish on a GPU node with:" >&2
+        echo "[env-setup $(step_label slingshot)] DEFERRED — no GPU on this node. Finish on a GPU node with:" >&2
         echo "    bash pipeline_env_setup.sh" >&2
-        echo "  or: isambard_sbatch pipeline_env_submit.sbatch setup" >&2
+        echo "  or: $(cluster_submit_command) pipeline_env_submit.sbatch setup" >&2
         DEFERRED=1
     fi
 fi
 
-want overlay && setup_overlay
+if want overlay; then
+    setup_overlay
+fi
 
 if want validate; then
-    if [ "$HAS_GPU" = "1" ] && { [ -n "$ONLY" ] || [ -L "$CONTAINER_SLINGSHOT_DIR/hostlibs/libcxi.so.1" ]; }; then
+    if [ "$HAS_GPU" = "1" ] && { [ -n "$ONLY" ] || fabric_build_present; }; then
         setup_validate
         echo "===== Environment setup COMPLETE (validation above) ====="
+    elif [ "$CLUSTER_FABRIC" = "slingshot" ]; then
+        slingshot_label="$(step_label slingshot)"
+        echo "===== Environment setup: CPU-side steps done; run on a GPU node to finish (see ${slingshot_label%% *}) ====="
+        DEFERRED=1
     else
-        echo "===== Environment setup: CPU-side steps done; run on a GPU node to finish (see 2/4) ====="
+        echo "===== Environment setup: CPU-side steps done; run on a GPU node to finish: $(cluster_submit_command) pipeline_env_submit.sbatch setup ====="
         DEFERRED=1
     fi
 fi

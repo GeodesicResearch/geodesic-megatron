@@ -6,6 +6,7 @@
 #SBATCH --time=04:00:00
 #SBATCH --exclusive
 #SBATCH --output=logs/slurm/data-prep-%j.out
+#PIPELINE-SUBMIT gpus-per-node=0 exclusive=user cpus-per-task=64 mem=256G output=slurm/data-prep-%j.out
 
 # ==============================================================================
 # Offline Dataset Preparation (SFT packing and pretraining tokenization)
@@ -51,7 +52,7 @@
 #
 #      It costs disk: the partition .jsonl files duplicate the input and the
 #      per-partition .bin/.idx duplicate the output, three copies of the input's size at
-#      the peak. So the job reads the project quota first and runs at the requested count
+#      the peak. So the job reads the storage quota first and runs at the requested count
 #      only when that peak stays under TOKENIZE_QUOTA_LINE_PERCENT (default 94) of the
 #      limit, otherwise at one partition, printing why; the provenance records
 #      partitions_requested and partitions. The tool removes none of its part files, and
@@ -92,10 +93,10 @@ cd "$REPO_DIR"
 source "$REPO_DIR/pipeline/sh/common.sh" || exit 1
 source_env_config
 
-# Purge the host module env before entering the container: this repo lives under
-# the bind-mounted $HOME, so host module paths resolve inside the image and would
-# shadow its version-matched toolchain/libs.
-module purge
+# Clear the host state the cluster's shells carry (on Isambard, the module env) before
+# entering the container. This repo is under the bind-mounted $HOME, so host module
+# paths resolve inside the image and shadow its version-matched toolchain and libraries.
+cluster_host_reset
 
 # Each payload runs from this checkout after pipeline_env_activate.sh (container_payload), which prepends its src/
 # and 3rdparty/Megatron-LM to PYTHONPATH, so a worktree's bridge fixes are what data jobs run.
@@ -156,15 +157,15 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
     # More than one partition: inside the container, scripts/data/tokenize_partitions.py refuses
     # part files an earlier run left (the tool would tokenize them as if they were the input) and
     # runs at the requested count only if the run's peak (three copies of the input's size) stays
-    # under TOKENIZE_QUOTA_LINE_PERCENT of the project's limit, otherwise at one partition; a trap
-    # there removes the part files however the payload ends. The quota is read here, on the host,
-    # where `lfs` is, into a report file the container reads.
+    # under TOKENIZE_QUOTA_LINE_PERCENT of the storage's limit, otherwise at one partition. A trap
+    # there removes the part files however the payload ends. This script reads the quota on the
+    # host, where the cluster's own tool is (cluster_storage_quota_report), into a report file the
+    # container reads.
     PARTITION_STEP=""
     if [ "$PARTITIONS" -gt 1 ]; then
         QUOTA_REPORT="$DATASET_ROOT/.tokenize_quota.${SLURM_JOB_ID:-$$}"
         trap 'rm -f "$QUOTA_REPORT"' EXIT
-        PROJECT=$(lfs project -d "$DATASET_ROOT" | awk '{print $1}')
-        { lfs project -d "$DATASET_ROOT" && lfs quota -p "$PROJECT" "$DATASET_ROOT"; } > "$QUOTA_REPORT" || exit 1
+        cluster_storage_quota_report "$DATASET_ROOT" > "$QUOTA_REPORT" || exit 1
         PARTITION_ARGS=$(quote_args --input "$INPUT_JSONL" --output-prefix "$OUTPUT_PREFIX" --json-key "$JSON_KEY")
         CHOOSE_ARGS=(--partitions "$PARTITIONS" --line-percent "${TOKENIZE_QUOTA_LINE_PERCENT:-94}"
             --quota-report "$QUOTA_REPORT")

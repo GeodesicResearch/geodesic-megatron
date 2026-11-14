@@ -5,6 +5,7 @@
 #SBATCH --time=06:00:00
 #SBATCH --exclusive
 #SBATCH --output=logs/slurm/shard-jsonl-%j.out
+#PIPELINE-SUBMIT gpus-per-node=0 exclusive=user cpus-per-task=8 mem=32G output=slurm/shard-jsonl-%j.out
 #
 # Split one oversized pretraining JSONL into N self-contained dataset roots.
 #

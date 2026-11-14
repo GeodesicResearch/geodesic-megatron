@@ -1,0 +1,19 @@
+# Nemotron 3 Nano pretraining quickstart on Verda: ../nemotron_nano_quickstart_pretrain.yaml with its storage paths
+# on Verda's storage and nothing else changed, so a run here compares with the Isambard quickstart GPU for GPU.
+#
+# Eight Verda nodes hold the 64 GPUs the quickstart was measured on. It needs the launcher settings of
+# ../nemotron_nano_quickstart_pretrain.env.
+#
+# LAUNCH:
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_pretrain.env \
+#     ./pipeline_cluster_submit.sh --nodes=8 --time=00:30:00 pipeline_training_submit.sbatch \
+#       configs/quickstart/verda/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft
+#
+# The data is the control-pretraining stage-1 blend, built under /shared/geodesic/data by
+# configs/control_pretraining/build_corpora.sh (docs/verda/quickstart.md).
+
+base_config: ../nemotron_nano_quickstart_pretrain.yaml
+base_config_relocate: ../../clusters/verda_from_isambard.yaml
+
+logger:
+  wandb_exp_name: verda_nemotron_nano_quickstart_pretrain

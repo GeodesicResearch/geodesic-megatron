@@ -31,8 +31,8 @@ directory. It builds a clone only when that iteration's run_config needs the rep
 ``ROOT/<ID>/<run>-<digest>/iter_<n>``, where ``<ID>`` names this one export (the launcher passes its
 SLURM job id and its own pid). It prints ``EXPORT_ITERATION=<n>`` and ``EXPORT_LOAD_PATH=<clone>`` on
 stdout for the launcher to read; the load path is empty when no repair is needed. ``remove`` deletes a clone
-once its export has finished. ``ROOT`` is ``$GEODESIC_EXPORT_CLONE_ROOT`` when set, else
-``/projects/a5k/public/tmp/export_clones_$USER`` (``default_clone_root``), so a launcher states it only to move it.
+once its export has finished. ``ROOT`` is ``$GEODESIC_EXPORT_CLONE_ROOT`` when set, else the cluster profile's
+per-user ``CLUSTER_EXPORT_CLONE_ROOT`` (``default_clone_root``), so a launcher states it only to move it.
 
 Catalogue:
     RUN_CONFIG_EDITS: the torch_grouped repair's run_config edits, as (old, new) string pairs.
@@ -58,7 +58,6 @@ from __future__ import annotations
 
 import argparse
 import errno
-import getpass
 import hashlib
 import logging
 import os
@@ -71,6 +70,7 @@ from pathlib import Path
 import yaml
 
 from pipeline.checkpoints import ITER_DIR, LATEST_FILE, RUN_CONFIG, iteration_number, resolve_checkpoint_path
+from pipeline.cluster import cluster_profile
 
 
 LOGGER = logging.getLogger(__name__)
@@ -78,10 +78,9 @@ LOGGER = logging.getLogger(__name__)
 HF_DIR = "hf"
 # A job id names the clone's directory, so it must be one plain path component.
 JOB_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
-# Where clones are built when no root is given: this variable, else a directory per user on project storage (never
-# $HOME, which ``check_clone_root`` refuses).
+# Where clones are built when no root is given: this variable, else the cluster profile's directory per user on
+# shared storage (never $HOME, which ``check_clone_root`` refuses).
 CLONE_ROOT_ENV = "GEODESIC_EXPORT_CLONE_ROOT"
-PROJECT_CLONE_ROOT = "/projects/a5k/public/tmp/export_clones_{user}"
 
 # The lines `prepare` prints on stdout, which the launcher reads by these names.
 PLAN_ITERATION = "EXPORT_ITERATION"
@@ -365,10 +364,10 @@ def remove_export_clone(clone: Path, clone_root: Path) -> None:
     LOGGER.info("removed export clone %s", clone)
 
 
-def default_clone_root(environ: Mapping[str, str], user: str) -> Path:
-    """The root clones are built under: ``$GEODESIC_EXPORT_CLONE_ROOT`` when set and non-empty, else
-    ``/projects/a5k/public/tmp/export_clones_<user>``. Reads only ``environ``."""
-    return Path(environ.get(CLONE_ROOT_ENV) or PROJECT_CLONE_ROOT.format(user=user))
+def default_clone_root(environ: Mapping[str, str]) -> Path:
+    """The root clones are built under: ``$GEODESIC_EXPORT_CLONE_ROOT`` of ``environ`` when set and non-empty, else
+    the resolved cluster's ``CLUSTER_EXPORT_CLONE_ROOT`` (``pipeline.cluster.cluster_profile``)."""
+    return Path(environ.get(CLONE_ROOT_ENV) or cluster_profile()["CLUSTER_EXPORT_CLONE_ROOT"])
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -392,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run one command. Messages go to stderr; ``prepare``'s plan is the only thing on stdout."""
     logging.basicConfig(level=logging.INFO, format="[export-clone] %(message)s", stream=sys.stderr)
     args = parse_args(argv)
-    clone_root = default_clone_root(os.environ, os.environ.get("USER") or getpass.getuser())
+    clone_root = default_clone_root(os.environ)
     try:
         if args.command == "prepare":
             source = prepare_export_source(args.megatron_path, args.iteration, clone_root, args.job)

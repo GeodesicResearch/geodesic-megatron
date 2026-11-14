@@ -1,0 +1,17 @@
+# Where Isambard's storage roots are on Verda: a relocation map (scripts/training/config_compose.py,
+# base_config_relocate). A Verda overlay of a config written for Isambard names this file, and the base's data,
+# model, log and cache paths then resolve on Verda without being restated.
+#
+# Datasets, the Hugging Face cache and imported base models are shared by every account. Checkpoints a run writes,
+# logs and caches are each account's own, so their roots carry $USER. A path under no key here (another account's
+# directory on Isambard, for one) is not moved: the overlay restates it, and a launch refuses it otherwise
+# (pipeline/training/launch_checks.py, require_this_clusters_paths).
+#
+# tests/unit_tests/test_cluster_configs.py holds this file to the two cluster profiles (pipeline/sh/clusters/).
+/projects/a5k/public/data: /shared/geodesic/data
+/projects/a5k/public/hf: /shared/geodesic/hf
+/projects/a5k/public/checkpoints/megatron_bridges: /shared/geodesic/checkpoints/megatron_bridges
+/projects/a5k/public/checkpoints/megatron: /shared/geodesic/checkpoints_$USER/megatron
+/projects/a5k/public/logs: /shared/geodesic/logs_$USER
+/projects/a5k/public/cache: /shared/geodesic/scratch_$USER/cache
+/projects/a5k/public/profiles: /shared/geodesic/scratch_$USER/profiles

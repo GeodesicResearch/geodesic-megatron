@@ -9,6 +9,10 @@ bind-mounted, so **the checkout you submit from is the code that runs**. There i
 second environment and no mode flag: a missing image or Slingshot build stops the job
 with the command that fixes it rather than degrading silently.
 
+This page describes the environment as it is installed on Isambard. The same scripts run on
+Verda (x86_64, InfiniBand): the cluster profile under `pipeline/sh/clusters/` holds every
+value that differs, and `docs/verda/environment-pipeline.md` lists the differences.
+
 Submit commands are the ordinary ones:
 
 ```bash
@@ -81,9 +85,11 @@ run.
 
 | File | Responsibility |
 |------|----------------|
-| `pipeline_env_config.env` | THE config (image tag/URI, SIF path, Slingshot dir, overlay dir + package list, bind list, cache dirs + `$HOME` guards) and `env_config_require`, the run-time gate every launcher calls. |
-| `pipeline_env_exec.sh` | The shim: `pipeline_env_exec.sh "<one command string>"`. Gates on `env_config_require`, scrubs host toolchain/venv-shaped env, `exec apptainer exec --nv --bind "$CONTAINER_BINDS"`. |
-| `pipeline_env_activate.sh` | Sourced **inside** the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH` ordering + `NCCL_NET_PLUGIN`, universal GPU settings, cache paths. Refuses to run outside a container. |
+| `pipeline/sh/cluster.sh`, `pipeline/sh/clusters/<name>.sh` | The cluster profiles. `cluster_load` resolves the cluster from `GEODESIC_CLUSTER` or the host's name and sets its `CLUSTER_*` values (GPUs per node, fabric, storage roots, image tag) and hooks. Every file below reads them. `pipeline/cluster.py` gives Python the same values. |
+| `pipeline_env_config.env` | THE config (image tag/URI, SIF path, Slingshot dir, overlay dir + package list, bind list, cache dirs + `$HOME` guards), `env_config_require`, the run-time gate every launcher calls, and `env_config_stage`, which keeps a node-local unpacked copy of the image where the profile names a stage root. |
+| `pipeline_env_exec.sh` | The shim: `pipeline_env_exec.sh "<one command string>"`. Gates on `env_config_require`, stages the image, scrubs host toolchain/venv-shaped env, `exec apptainer exec --nv --bind "$CONTAINER_BINDS"`. |
+| `pipeline_env_activate.sh` | Sourced **inside** the container: import resolution, CUDA forward-compat, the profile's activation hook (on Isambard, the Slingshot `LD_LIBRARY_PATH` ordering + `NCCL_NET_PLUGIN`), universal GPU settings, cache paths. Refuses to run outside a container. |
+| `pipeline_cluster_submit.sh` | Submits a job with the cluster's submit command: `isambard_sbatch` on Isambard, `sbatch` with the options of the script's `#PIPELINE-SUBMIT` line elsewhere. |
 | `pipeline_env_setup.sh` | The whole install in one command (the four steps above). |
 | `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke`. |
 | `pipeline_env_validate.py` | The validator (runs in-container). |

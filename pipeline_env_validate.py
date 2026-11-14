@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Validate the Megatron Bridge environment on Isambard ARM HPC (INFR-68).
+"""Validate the Megatron Bridge environment of this cluster (INFR-68).
 
 This runs INSIDE the container — the only execution environment there is — so
 every check below describes the container's view of the world: imports resolving
 to THIS checkout (bind-mounted src/ + pinned 3rdparty/Megatron-LM, which must win
 over the image's own megatron packages), the image's CUDA extensions, the
-Slingshot CXI NCCL plugin, ft_launcher's section-timeout flags, the JIT
-toolchain, GPU ops, and the recipes. There is nothing to validate on the host.
+cluster's fabric (the Slingshot CXI NCCL plugin, or the InfiniBand devices),
+ft_launcher's section-timeout flags, the JIT toolchain, GPU ops, and the recipes.
+There is nothing to validate on the host.
 
 Usage (both forms enter the container and source the in-container activate first):
     isambard_sbatch pipeline_env_submit.sbatch validate [--run-training]
@@ -26,6 +27,8 @@ import pathlib
 import subprocess
 import sys
 import time
+
+from pipeline.cluster import cluster_profile
 
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -249,7 +252,7 @@ def module_file_is_under(module, root):
 
 # ============================================
 # Environment-integrity stages (INFR-68) — assert the container sees the repo's
-# code, the Slingshot CXI plugin, and a workable ft_launcher/toolchain. These are
+# code, the cluster's fabric, and a workable ft_launcher/toolchain. These are
 # the checks that catch a bad image swap or a half-finished setup, so they run
 # unconditionally: the container is the only environment and every one of these
 # is load-bearing for a real multi-node run.
@@ -287,6 +290,40 @@ def check_nccl_plugin():
     # inside the container — the exact failure mode that silently degrades NCCL
     # to ~2.3 GB/s TCP if broken.
     ctypes.CDLL(plugin)
+
+
+# Where the kernel lists a host's RDMA devices and their ports.
+RDMA_SYSFS = pathlib.Path("/sys/class/infiniband")
+
+
+def rdma_ports(sysfs):
+    """The RDMA ports listed under ``sysfs`` (a ``/sys/class/infiniband`` tree) and those of them that are active
+    InfiniBand ports, as two sorted lists of port directories. An Ethernet port of the same driver is in the first
+    list alone."""
+    ports = sorted(pathlib.Path(sysfs).glob("*/ports/*"))
+    active = [
+        port
+        for port in ports
+        if (port / "link_layer").read_text().strip() == "InfiniBand" and "ACTIVE" in (port / "state").read_text()
+    ]
+    return ports, active
+
+
+@stage("InfiniBand devices and libibverbs")
+def check_infiniband():
+    """Assert an active InfiniBand port is visible and the verbs library NCCL's IB transport loads resolves."""
+    ports, active = rdma_ports(RDMA_SYSFS)
+    print(f"    active InfiniBand ports: {len(active)} of {len(ports)} RDMA ports")
+    assert active, (
+        f"no active InfiniBand port under {RDMA_SYSFS}: NCCL has no fabric to select, and a run stops at "
+        "communicator creation (NCCL_NET=IB)"
+    )
+    # NCCL's IB transport loads libibverbs with dlopen. An image without it leaves NCCL with sockets only.
+    ctypes.CDLL("libibverbs.so.1")
+
+
+# The fabric check of each CLUSTER_FABRIC value.
+FABRIC_CHECKS = {"slingshot": ("Slingshot", check_nccl_plugin), "infiniband": ("InfiniBand", check_infiniband)}
 
 
 @stage("host OpenMP threading defaults")
@@ -443,9 +480,10 @@ def main():
     check_vanilla_recipe()
     check_nemotron_recipe()
 
-    print("\nStage 5b: Environment integrity (repo code, Slingshot, toolchain)")
+    fabric_label, check_fabric = FABRIC_CHECKS[cluster_profile()["CLUSTER_FABRIC"]]
+    print(f"\nStage 5b: Environment integrity (repo code, {fabric_label}, toolchain)")
     check_import_paths()
-    check_nccl_plugin()
+    check_fabric()
     check_omp_threading()
     check_hf_datasets_cache()
     check_ft_launcher_flags()

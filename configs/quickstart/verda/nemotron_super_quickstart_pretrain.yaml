@@ -1,0 +1,14 @@
+# Nemotron 3 Super pretraining quickstart on Verda: ../nemotron_super_quickstart_pretrain.yaml with its storage paths
+# on Verda's storage and nothing else changed. The data is Kyle1668/ClimbMix-Sample tokenized with the base
+# tokenizer, prepared as the Isambard file's header says, through ./pipeline_cluster_submit.sh.
+#
+# The Isambard quickstart is 128 GPUs (PP8 x DP16, GBS 3072), and Verda has 96. This file is a base for a Verda
+# topology, not a launch config.
+
+base_config: ../nemotron_super_quickstart_pretrain.yaml
+base_config_relocate: ../../clusters/verda_from_isambard.yaml
+
+logger:
+  # The Isambard file leaves this unset, and the recipe default writes TensorBoard files under the submit directory.
+  tensorboard_dir: null
+  wandb_exp_name: verda_nemotron_super_quickstart_pretrain

@@ -1,0 +1,20 @@
+# Nemotron 3 Nano SFT quickstart on Verda: ../nemotron_nano_quickstart_sft.yaml with its storage paths on Verda's
+# storage and its warm start read from the shared model tree.
+#
+# The warm start is the stage-2 final of the Isambard baseline campaign, imported from its Hub export:
+#   ./pipeline_cluster_submit.sh --nodes=1 pipeline_checkpoint_submit.sbatch import \
+#       geodesic-research/control-pretrain-30b-baseline-midtrain
+#
+# LAUNCH (the launcher setting of ../nemotron_nano_quickstart_sft.env):
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_sft.env \
+#     ./pipeline_cluster_submit.sh --nodes=8 --time=00:30:00 pipeline_training_submit.sbatch \
+#       configs/quickstart/verda/nemotron_nano_quickstart_sft.yaml nano sft --disable-ft
+
+base_config: ../nemotron_nano_quickstart_sft.yaml
+base_config_relocate: ../../clusters/verda_from_isambard.yaml
+
+checkpoint:
+  pretrained_checkpoint: /shared/geodesic/checkpoints/megatron_bridges/models/control-pretrain-30b-baseline-midtrain
+
+logger:
+  wandb_exp_name: verda_nemotron_nano_quickstart_sft

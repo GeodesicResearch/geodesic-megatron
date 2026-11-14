@@ -1,0 +1,17 @@
+# Nemotron 3 Super SFT quickstart on Verda: ../nemotron_super_quickstart_sft.yaml with its storage paths on Verda's
+# storage and nothing else changed (64 GPUs, PP8 CP4 EP4, GBS 128, packed sequences of 32,768 tokens).
+#
+# It reads the pa-warm-start-1B-sft-mix packs under /shared/geodesic/data and warm-starts from the
+# NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16 import in the shared model tree.
+#
+# LAUNCH:
+#   ./pipeline_cluster_submit.sh --nodes=8 --time=01:30:00 pipeline_training_submit.sbatch \
+#       configs/quickstart/verda/nemotron_super_quickstart_sft.yaml super sft --disable-ft
+
+base_config: ../nemotron_super_quickstart_sft.yaml
+base_config_relocate: ../../clusters/verda_from_isambard.yaml
+
+logger:
+  # The Isambard file leaves this unset, and the recipe default writes TensorBoard files under the submit directory.
+  tensorboard_dir: null
+  wandb_exp_name: verda_nemotron_super_quickstart_sft

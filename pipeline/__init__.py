@@ -20,6 +20,7 @@ repo root on ``sys.path`` itself before importing it. Modules that shell scripts
 standard library, ``yaml`` and ``huggingface_hub`` at module scope; torch and megatron imports stay inside functions.
 
 Catalogue:
+    cluster: the cluster profile of this host, as the shell libraries resolve it.
     checkpoints: the layout of a Megatron checkpoint directory.
     hf_cache: lookups in the local HuggingFace hub cache.
     hub: publishing a model directory to the HuggingFace Hub.

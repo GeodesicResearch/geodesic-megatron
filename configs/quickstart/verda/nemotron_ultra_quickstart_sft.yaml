@@ -1,0 +1,14 @@
+# Nemotron 3 Ultra SFT quickstart on Verda: ../nemotron_ultra_quickstart_sft.yaml with its storage paths on Verda's
+# storage and nothing else changed. It reads the sft-warm-start-200k packs under /shared/geodesic/data and
+# warm-starts from the NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-BF16 import in the shared model tree.
+#
+# The Isambard quickstart is 288 GPUs (TP4 PP36 EP4), and Verda has 96. This file is a base for a Verda topology,
+# not a launch config.
+
+base_config: ../nemotron_ultra_quickstart_sft.yaml
+base_config_relocate: ../../clusters/verda_from_isambard.yaml
+
+logger:
+  # The Isambard file leaves this unset, and the recipe default writes TensorBoard files under the submit directory.
+  tensorboard_dir: null
+  wandb_exp_name: verda_nemotron_ultra_quickstart_sft

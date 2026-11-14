@@ -6,6 +6,24 @@ The primary workflow is: **download a HuggingFace dataset** → **prepare and pa
 
 For cluster hardware specs and per-model topology findings, see [docs/isambard/cluster.md](docs/isambard/cluster.md) and [docs/isambard/models.md](docs/isambard/models.md); for the execution environment itself, [docs/environment.md](docs/environment.md). The upstream Megatron Bridge README is at [docs/README_DEFAULT.md](docs/README_DEFAULT.md).
 
+## Clusters
+
+The same pipelines run on two clusters. The launchers detect which one they are on, and
+`pipeline/sh/clusters/<name>.sh` holds every value that differs. This README's walkthrough is written for Isambard.
+On Verda, start from [docs/verda/quickstart.md](docs/verda/quickstart.md).
+
+| | Isambard | Verda |
+|---|---|---|
+| Nodes | 4 GH200 (95 GB usable), aarch64, Slingshot | 8 B300 (275 GB), x86_64, InfiniBand |
+| Submit a job | `isambard_sbatch <options> <script> <arguments>` | `./pipeline_cluster_submit.sh <options> <script> <arguments>` |
+| Shared storage | `/projects/a5k/public` | `/shared/geodesic` |
+| Quickstart configs | `configs/quickstart/` | `configs/quickstart/verda/` |
+| Documents | [docs/isambard/](docs/isambard/) | [docs/verda/](docs/verda/) |
+
+A config names its data and checkpoints by absolute path, so a config written for one cluster is refused on the other.
+A Verda config is an overlay that relocates its Isambard base's paths
+([docs/verda/storage.md](docs/verda/storage.md)).
+
 ## Pipelines
 
 All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:

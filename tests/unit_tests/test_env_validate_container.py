@@ -6,6 +6,8 @@ import sys
 
 import pytest
 
+from pipeline.cluster import cluster_names, cluster_profile
+
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -228,3 +230,63 @@ def test_the_ft_launcher_stage_passes_on_the_image(validate_mod):
     """The validator's stage runs the image's ft_launcher (the tests run in the pipeline container)."""
     validate_mod.check_ft_launcher_flags()
     assert validate_mod.results[-1][:2] == ("ft_launcher supports section timeouts", True), validate_mod.results[-1]
+
+
+def _rdma_tree(root, ports):
+    """A /sys/class/infiniband tree under ``root``: ``ports`` maps a device name to its port's link layer and state."""
+    for device, (link_layer, state) in ports.items():
+        port = root / device / "ports" / "1"
+        port.mkdir(parents=True)
+        (port / "link_layer").write_text(f"{link_layer}\n")
+        (port / "state").write_text(f"{state}\n")
+    return root
+
+
+def test_rdma_ports_separates_the_active_infiniband_ports_from_the_rest(validate_mod, tmp_path):
+    """A node's Ethernet port sits under the same driver, and a cabled port can be down."""
+    tree = _rdma_tree(
+        tmp_path / "infiniband",
+        {
+            "mlx5_0": ("Ethernet", "4: ACTIVE"),
+            "mlx5_1": ("InfiniBand", "4: ACTIVE"),
+            "mlx5_2": ("InfiniBand", "1: DOWN"),
+            "mlx5_3": ("InfiniBand", "4: ACTIVE"),
+        },
+    )
+    ports, active = validate_mod.rdma_ports(tree)
+    assert [port.parts[-3] for port in ports] == ["mlx5_0", "mlx5_1", "mlx5_2", "mlx5_3"]
+    assert [port.parts[-3] for port in active] == ["mlx5_1", "mlx5_3"]
+    assert validate_mod.rdma_ports(tmp_path / "absent") == ([], [])
+
+
+def test_check_infiniband_fails_naming_the_tree_when_no_infiniband_port_is_active(validate_mod, tmp_path, monkeypatch):
+    tree = _rdma_tree(
+        tmp_path / "infiniband", {"mlx5_0": ("Ethernet", "4: ACTIVE"), "mlx5_1": ("InfiniBand", "1: DOWN")}
+    )
+    monkeypatch.setattr(validate_mod, "RDMA_SYSFS", tree)
+    before = len(validate_mod.results)
+    validate_mod.check_infiniband()
+    name, ok, detail = validate_mod.results[before]
+    assert (name, ok) == ("InfiniBand devices and libibverbs", False)
+    assert f"no active InfiniBand port under {tree}" in detail
+
+
+@pytest.mark.skipif(not os.path.isdir("/sys/class/infiniband"), reason="this host has no RDMA device")
+def test_check_infiniband_passes_on_a_host_with_an_active_infiniband_port(validate_mod):
+    """On an InfiniBand cluster the real stage passes: an active port, and libibverbs loads in the image."""
+    _, active = validate_mod.rdma_ports(validate_mod.RDMA_SYSFS)
+    if not active:
+        pytest.skip("this host's RDMA devices are not InfiniBand (a Slingshot node lists none)")
+    before = len(validate_mod.results)
+    validate_mod.check_infiniband()
+    assert validate_mod.results[before][:2] == ("InfiniBand devices and libibverbs", True)
+
+
+def test_every_profiles_fabric_has_its_check(validate_mod, monkeypatch):
+    """main looks the fabric check up by the profile's CLUSTER_FABRIC, so a profile with a new fabric needs one."""
+    monkeypatch.setenv("USER", "probe")
+    fabrics = {name: cluster_profile(name)["CLUSTER_FABRIC"] for name in cluster_names()}
+    assert fabrics == {"isambard": "slingshot", "verda": "infiniband"}
+    assert set(fabrics.values()) <= set(validate_mod.FABRIC_CHECKS)
+    assert validate_mod.FABRIC_CHECKS["slingshot"][1] is validate_mod.check_nccl_plugin
+    assert validate_mod.FABRIC_CHECKS["infiniband"][1] is validate_mod.check_infiniband

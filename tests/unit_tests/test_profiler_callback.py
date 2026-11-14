@@ -56,7 +56,13 @@ def test_disabled_by_default(mod, monkeypatch):
     )
 
 
-def test_enabled_with_default_root_and_legacy_wait(mod, monkeypatch):
+@pytest.mark.parametrize(
+    "cluster, root",
+    [("isambard", "/projects/a5k/public/profiles"), ("verda", "/shared/geodesic/scratch_someone/profiles")],
+)
+def test_enabled_with_default_root_and_legacy_wait(mod, monkeypatch, cluster, root):
+    monkeypatch.setenv("GEODESIC_CLUSTER", cluster)
+    monkeypatch.setenv("USER", "someone")
     monkeypatch.setenv("ISAMBARD_TORCH_PROFILE", "1")
     monkeypatch.setenv("ISAMBARD_TORCH_PROFILE_RANKS", "0,4")
     monkeypatch.setenv("ISAMBARD_TORCH_PROFILE_WAIT", "5")
@@ -66,7 +72,7 @@ def test_enabled_with_default_root_and_legacy_wait(mod, monkeypatch):
     )
     assert cb is not None
     # The run ID names a per-launch subdirectory under the run-name dir.
-    assert cb.out_dir == os.path.join(mod.DEFAULT_PROFILE_ROOT, "runA", "rid1")
+    assert cb.out_dir == os.path.join(root, "runA", "rid1")
     assert cb.ranks == [0, 4]
     # Legacy semantics: wait=W traces the single iteration W+2 (1-based),
     # with the unsuffixed rank<R> trace filename.

@@ -43,6 +43,11 @@ def drop_inherited_git_repository_variables(environ: MutableMapping[str, str]) -
 
 drop_inherited_git_repository_variables(os.environ)
 
+# The suite's cluster is Isambard on every host. The goldens and the literal paths the tests expect are Isambard's,
+# and code that reads the cluster profile (pipeline.cluster.cluster_profile) answers for the cluster named here,
+# whatever host the suite runs on. A test of another cluster names it.
+os.environ["GEODESIC_CLUSTER"] = "isambard"
+
 
 # Under pytest-xdist (scripts/run_unit_tests.sh runs `--dist loadfile`), tests that
 # initialize torch.distributed in different files run concurrently and collide on

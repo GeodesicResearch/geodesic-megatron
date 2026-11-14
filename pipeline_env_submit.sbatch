@@ -8,26 +8,27 @@
 #SBATCH --time=2:00:00
 #SBATCH --exclusive
 #SBATCH --output=logs/slurm/env-setup-%j.out
+#PIPELINE-SUBMIT gpus-per-node=node output=slurm/env-setup-%j.out
 
 # ==============================================================================
 # Environment setup / validation — SLURM wrapper (requires a GPU node)
 #
-# The Slingshot NCCL build compiles against the image's CUDA toolchain and the
-# validator exercises real GPU collectives, so both need a compute node. Login
-# nodes can only do the CPU-side steps (see pipeline_env_setup.sh).
+# A fabric build compiles against the image's CUDA toolchain and the validator
+# exercises real GPU collectives, so both need a compute node. Login nodes can
+# only do the CPU-side steps (see pipeline_env_setup.sh).
 #
-# Usage:
-#   # Full install (SIF pull + Slingshot stack + Python overlay + validate)
+# Usage (isambard_sbatch on Isambard, ./pipeline_cluster_submit.sh on Verda):
+#   # Full install (SIF pull + the cluster's fabric build + Python overlay + validate)
 #   isambard_sbatch pipeline_env_submit.sbatch setup [--force] [--only <step>]
 #
 #   # Validate an existing install
 #   isambard_sbatch pipeline_env_submit.sbatch validate [--run-training]
 #
-#   # Multi-node fabric smoke (proves NCCL selects the CXI plugin, not TCP)
+#   # Multi-node fabric smoke (proves NCCL selects the cluster's fabric, not TCP)
 #   isambard_sbatch --nodes=2 pipeline_env_submit.sbatch smoke
 #
 # Everything configurable (image tag, SIF path, component versions, cache dirs)
-# lives in pipeline_env_config.env.
+# lives in pipeline_env_config.env and the cluster's profile.
 # ==============================================================================
 
 MODE="${1:?Usage: isambard_sbatch pipeline_env_submit.sbatch <setup|validate|smoke> [args]}"
@@ -64,39 +65,45 @@ case "$MODE" in
         bash "$REPO_DIR/pipeline_env_setup.sh" "$@" || rc=$?
         ;;
     validate)
-        # The validator runs INSIDE the container — the only environment there is.
-        # The shim hard-fails with fix commands if the SIF or Slingshot build is
+        # The validator runs inside the container, the only environment there is.
+        # The shim stops with the fix command if the SIF or the fabric build is
         # missing.
         "$REPO_DIR/pipeline_env_exec.sh" "$(container_payload "python pipeline_env_validate.py$ARGS_Q")" || rc=$?
         ;;
     smoke)
-        # Multi-node fabric check. The validator only proves the CXI plugin dlopens;
-        # this proves NCCL actually SELECTS it and reaches Slingshot bandwidth —
-        # the failure it catches (silent TCP fallback, ~2.3 GB/s vs ~163 GB/s) has
-        # no error message anywhere, it just makes training ~70x slower on comms.
+        # Multi-node fabric check. The validator proves that the fabric's libraries
+        # load. This mode proves that NCCL selects the fabric and reaches its bandwidth.
+        # The failure it catches is a fallback to TCP (about 2.3 GB/s against about
+        # 163 GB/s on Slingshot), which prints no error and makes communication about
+        # 70 times slower.
         # Needs >= 2 nodes: isambard_sbatch --nodes=2 ... pipeline_env_submit.sbatch smoke
         NNODES="${SLURM_JOB_NUM_NODES:-1}"
         if [ "$NNODES" -lt 2 ]; then
             echo "ERROR: smoke mode needs at least 2 nodes (got $NNODES). Resubmit with --nodes=2." >&2
             exit 1
         fi
-        # The rendezvous is resolved HOST-side (set_rendezvous): scontrol does not exist
-        # inside the container (only /projects, /lus, the repo, libfabric, /usr/lib64 and
-        # the Slingshot build are bound — not host /usr/bin), so an in-container
-        # `$(scontrol ...)` yields an empty hostname and torchrun dies in
+        # set_rendezvous resolves the rendezvous on the host. scontrol does not exist
+        # inside the container, which binds the cluster's storage, the repo and the
+        # fabric's host libraries and leaves out the host's /usr/bin. An in-container
+        # `$(scontrol ...)` yields an empty hostname, and torchrun dies in
         # parse_rendezvous_endpoint. The default port is 29401.
         set_rendezvous "$SLURM_JOB_NODELIST" 29401
-        # Slingshot selection vars. pipeline_env_activate.sh sets NCCL_NET_PLUGIN and
-        # the LD_LIBRARY_PATH order but NOT these three. Without them NCCL can bootstrap
-        # on the management ethernet (which cannot reach other nodes) or libfabric can
-        # auto-select a non-CXI provider, so the gate would report FAIL or hang on a
-        # perfectly healthy fabric — the exact false verdict this mode exists to rule out.
+        # The fabric's selection variables. A Slingshot cluster's activation hook sets
+        # NCCL_NET_PLUGIN and the LD_LIBRARY_PATH order and leaves these unset. Without
+        # them NCCL can bootstrap on the management ethernet, which cannot reach other
+        # nodes, or libfabric can select a provider other than CXI. The gate then fails
+        # or hangs on a healthy fabric.
         fabric_select
-        # 4 ranks/node explicitly, not $SLURM_GPUS_PER_NODE: the floor in
-        # nccl_allreduce_smoke.py is calibrated for the 2-node/8-GPU shape, so a
-        # smaller rank count would fail a healthy fabric.
+        # The ranks per node are the cluster's GPUs per node, whatever
+        # $SLURM_GPUS_PER_NODE says. The floor (the profile's
+        # CLUSTER_SMOKE_MIN_BUSBW_GB_S, else the script's own) is calibrated for two full
+        # nodes, and a healthy fabric fails it with fewer ranks.
+        SMOKE_ARGS=""
+        if [ -n "$CLUSTER_SMOKE_MIN_BUSBW_GB_S" ]; then
+            SMOKE_ARGS=" --min-busbw-gb-s $CLUSTER_SMOKE_MIN_BUSBW_GB_S"
+        fi
         srun --nodes="$NNODES" --ntasks-per-node=1 --export=ALL "$REPO_DIR/pipeline_env_exec.sh" \
-            "$(torchrun_payload 4 "$NNODES" scripts/container/nccl_allreduce_smoke.py)" || rc=$?
+            "$(torchrun_payload "$CLUSTER_GPUS_PER_NODE" "$NNODES" "scripts/container/nccl_allreduce_smoke.py$SMOKE_ARGS")" || rc=$?
         ;;
     *)
         echo "ERROR: Mode must be 'setup', 'validate', or 'smoke', got: $MODE" >&2

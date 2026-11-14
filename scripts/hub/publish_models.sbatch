@@ -34,12 +34,11 @@
 # the queue.
 # ==============================================================================
 
-# --- Isambard node-limit guard ---
-if ! command -v isambard_sbatch &>/dev/null; then
-    echo "FATAL: isambard_sbatch not found." >&2
-    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
-fi
-if ! isambard_sbatch --check; then
+REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+
+# --- Submission guard ---
+# The cluster's own check of a job at its start. This file is copied at submission, so the check is REPO_DIR's.
+if ! bash "$REPO_DIR/pipeline/sh/job_guard.sh"; then
     scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
 fi
 
@@ -49,5 +48,4 @@ if [ "$#" -lt 2 ]; then
 fi
 PYTHON="$1"
 shift
-REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 exec "$PYTHON" -u "$REPO_DIR/scripts/hub/publish_models.py" "$@"

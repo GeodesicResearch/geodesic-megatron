@@ -1,12 +1,16 @@
 # shellcheck shell=bash
 # ==============================================================================
-# Slingshot/CXI fabric settings for NCCL, exported into the launching shell so
-# that srun --export=ALL and apptainer's environment passthrough carry them into
-# every rank. Source it after common.sh.
+# Fabric settings for NCCL, exported into the launching shell so that
+# srun --export=ALL and apptainer's environment passthrough carry them into every
+# rank. Source it after common.sh.
 #
-# Isambard uses HPE Slingshot-11 (CXI fabric) for inter-node communication.
-# NCCL talks to Slingshot via the AWS OFI NCCL plugin (aws-ofi-nccl), which
-# bridges NCCL's network API to libfabric's CXI provider.
+# The launchers call fabric_select, fabric_base and fabric_training, which run the
+# functions of the cluster's fabric (CLUSTER_FABRIC, from its profile).
+#
+# slingshot: HPE Slingshot-11 (CXI fabric). NCCL talks to Slingshot via the AWS
+# OFI NCCL plugin (aws-ofi-nccl), which bridges NCCL's network API to libfabric's
+# CXI provider.
+# infiniband: NCCL's own InfiniBand transport, with no plugin and no libfabric.
 #
 # Docs:
 #   NCCL env vars:    https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html
@@ -14,15 +18,32 @@
 #   HPE libfabric:    https://support.hpe.com/hpesc/public/docDisplay?docId=dp00005991en_us
 #
 # Catalogue:
-#   fabric_select  NCCL's network: the aws-ofi-nccl plugin over CXI on hsn
-#   fabric_base    fabric_select, plus the CXI and NCCL settings every
-#                  multi-node payload of the pipelines runs with
-#   fabric_shared  the settings fabric_base and fabric_training share
-#   fabric_training  every NCCL, CXI and torch-distributed setting of a
-#                  training launch
+#   fabric_select        NCCL's network on this cluster's fabric
+#   fabric_base          the settings every multi-node payload of the pipelines runs with
+#   fabric_training      every NCCL, fabric and torch-distributed setting of a training launch
+#   fabric_torch_distributed  the torch-distributed settings of a training launch, on any fabric
+#   slingshot_select     the aws-ofi-nccl plugin over CXI on hsn
+#   slingshot_shared     the settings slingshot_base and slingshot_training share
+#   slingshot_base       slingshot_select, plus the CXI and NCCL settings of every multi-node payload
+#   slingshot_training   the NCCL, CXI and torch-distributed settings of a training launch
+#   infiniband_select    NCCL's InfiniBand transport on the cluster's HCAs
+#   infiniband_base      infiniband_select, plus the settings of every multi-node payload
+#   infiniband_training  the NCCL and torch-distributed settings of a training launch
 # ==============================================================================
 
 fabric_select() {
+    "${CLUSTER_FABRIC}_select"
+}
+
+fabric_base() {
+    "${CLUSTER_FABRIC}_base"
+}
+
+fabric_training() {
+    "${CLUSTER_FABRIC}_training"
+}
+
+slingshot_select() {
     # Use the AWS OFI NCCL plugin for libfabric-based transport (required for Slingshot).
     # Without this, NCCL falls back to TCP sockets which are orders of magnitude slower.
     export NCCL_NET="AWS Libfabric"
@@ -36,8 +57,8 @@ fabric_select() {
     export NCCL_SOCKET_IFNAME=hsn
 }
 
-# The settings fabric_base and fabric_training share.
-fabric_shared() {
+# The settings slingshot_base and slingshot_training share.
+slingshot_shared() {
     # Allow NCCL rings/trees to use different NICs on different nodes. With value=1, NCCL
     # can route traffic across both HSN NICs even if peer nodes aren't on the same rail,
     # which improves bandwidth utilization on Slingshot's dragonfly topology.
@@ -76,18 +97,19 @@ fabric_shared() {
     export FI_CXI_DISABLE_HOST_REGISTER=1
 }
 
-fabric_base() {
-    fabric_select
-    fabric_shared
+slingshot_base() {
+    slingshot_select
+    slingshot_shared
     export FI_CXI_RX_MATCH_MODE=soft
     export NCCL_DEBUG=WARN
 }
 
-# fabric_training: fabric_select and fabric_shared, then the rest of a training launch's NCCL, CXI and
-# torch-distributed settings, several of them overridable from the launching environment.
-fabric_training() {
-    fabric_select
-    fabric_shared
+# slingshot_training: slingshot_select and slingshot_shared, then the rest of a training launch's NCCL and CXI
+# settings, several of them overridable from the launching environment, and the torch-distributed ones
+# (fabric_torch_distributed).
+slingshot_training() {
+    slingshot_select
+    slingshot_shared
 
     # --- NCCL collective algorithm and protocol tuning ---
 
@@ -191,6 +213,18 @@ fabric_training() {
     # completion path without benefit. Disabling it reduces CQ pressure.
     export FI_CXI_DISABLE_NON_INJECT_MSG_IDC=1
 
+    # Disable MPI GPU-aware transport. Isambard's MPICH has GPU support compiled in, but we
+    # use NCCL (not MPI) for GPU collectives. If both NCCL and MPI try to manage GPU contexts
+    # simultaneously, they can deadlock on CUDA context initialization. Setting this to 0
+    # ensures MPI only handles CPU data (hostfile, process launch) and stays out of NCCL's way.
+    export MPICH_GPU_SUPPORT_ENABLED=0
+
+    fabric_torch_distributed
+}
+
+# fabric_torch_distributed: the torch-distributed and NCCL-debug settings of a training launch, which hold on any
+# fabric. Several are overridable from the launching environment.
+fabric_torch_distributed() {
     # --- PyTorch NCCL process group settings ---
 
     # Enable async error handling in NCCL process group. When a collective hangs (e.g., due
@@ -220,12 +254,6 @@ fabric_training() {
     # in large-scale distributed training. Disabling it lets the allocator reclaim memory
     # earlier via event-based synchronization instead.
     export TORCH_NCCL_AVOID_RECORD_STREAMS=1
-
-    # Disable MPI GPU-aware transport. Isambard's MPICH has GPU support compiled in, but we
-    # use NCCL (not MPI) for GPU collectives. If both NCCL and MPI try to manage GPU contexts
-    # simultaneously, they can deadlock on CUDA context initialization. Setting this to 0
-    # ensures MPI only handles CPU data (hostfile, process launch) and stays out of NCCL's way.
-    export MPICH_GPU_SUPPORT_ENABLED=0
 
     # ==============================================================================
     # NCCL timeout and fault tolerance
@@ -302,4 +330,30 @@ fabric_training() {
             export NCCL_DEBUG_FILE="$ISAMBARD_NCCL_DEBUG_FILE"
         fi
     fi
+}
+
+# The names of the HCAs and of the bootstrap interface are the cluster's (CLUSTER_NCCL_IB_HCA,
+# CLUSTER_BOOTSTRAP_IFNAME).
+infiniband_select() {
+    # NCCL's own InfiniBand transport, by name. With the name, a node without a usable HCA fails at communicator
+    # creation. Without it, NCCL falls back to TCP sockets, which are orders of magnitude slower, with no error.
+    export NCCL_NET=IB
+
+    # The HCAs NCCL can use. A node can carry an Ethernet port under the same driver, which is not on the fabric.
+    export NCCL_IB_HCA="$CLUSTER_NCCL_IB_HCA"
+
+    # NCCL's socket-based control plane and torch's Gloo rendezvous connect over the node's Ethernet interface.
+    # Without the name, Gloo can advertise a loopback address that other nodes cannot reach.
+    export NCCL_SOCKET_IFNAME="$CLUSTER_BOOTSTRAP_IFNAME"
+    export GLOO_SOCKET_IFNAME="$CLUSTER_BOOTSTRAP_IFNAME"
+}
+
+infiniband_base() {
+    infiniband_select
+    export NCCL_DEBUG=WARN
+}
+
+infiniband_training() {
+    infiniband_select
+    fabric_torch_distributed
 }

@@ -6,6 +6,7 @@
 #SBATCH --time=04:00:00
 #SBATCH --exclusive
 #SBATCH --output=logs/slurm/coherence-test-%j.out
+#PIPELINE-SUBMIT gpus-per-node=node output=slurm/coherence-test-%j.out
 
 # ==============================================================================
 # Qualitative Generation Coherence Test (thin wrapper around pipeline_coherence_test.py)
@@ -108,10 +109,10 @@ if [ "$BACKEND" = "megatron" ]; then
     # Multi-node torchrun across the allocation (mirrors pipeline_checkpoint_convert.sh).
     #
     # Everything below is exported on the HOST, outside the container: apptainer's
-    # default env passthrough hands it to every rank, and the CXI plugin itself is
-    # bound in by the shim (/opt/slingshot, wired up by pipeline_env_activate.sh).
+    # default env passthrough hands it to every rank, and on Slingshot the CXI plugin
+    # itself is bound in by the shim (/opt/slingshot, wired up by pipeline_env_activate.sh).
     #
-    # Slingshot/CXI NCCL (the subset pipeline_checkpoint_convert.sh uses too)
+    # The fabric's NCCL settings (the subset pipeline_checkpoint_convert.sh uses too)
     fabric_base
     export MPICH_GPU_SUPPORT_ENABLED=0
     # Lazy NCCL comm-init on the first forward; PP<=12 at <=48 ranks needs far
@@ -123,10 +124,11 @@ if [ "$BACKEND" = "megatron" ]; then
     # Node-local scratch, since the Triton JIT cache is written per rank.
     node_local_tmp coh
 
-    # torchrun world size is 4 x NNODES (4 GPUs per Isambard node), and Megatron
-    # asserts that it divides evenly by --tp x --pp. Size the allocation to the
-    # flags: the header's --tp 4 --pp 6 needs exactly --nodes=6.
+    # torchrun world size is the job's GPUs per node x NNODES (4 per Isambard node),
+    # and Megatron asserts that it divides evenly by --tp x --pp. Size the allocation
+    # to the flags: the header's --tp 4 --pp 6 needs exactly --nodes=6 there.
     NNODES=$SLURM_NNODES
+    NGPUS_PER_NODE="${SLURM_GPUS_PER_NODE:-$CLUSTER_GPUS_PER_NODE}"
     set_rendezvous "$SLURM_NODELIST"
     OUT="$REPO_DIR/logs/slurm/coherence-test-${SLURM_JOB_ID}-gens.txt"
     # Quoted for the same one-re-parse reason as the args above: $REPO_DIR (hence
@@ -135,7 +137,7 @@ if [ "$BACKEND" = "megatron" ]; then
 
     srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL \
         "$REPO_DIR/pipeline_env_exec.sh" \
-        "$(torchrun_payload 4 "$NNODES" "pipeline_coherence_test.py $MODEL_PATH_Q --output $OUT_Q$ARGS_Q")"
+        "$(torchrun_payload "$NGPUS_PER_NODE" "$NNODES" "pipeline_coherence_test.py $MODEL_PATH_Q --output $OUT_Q$ARGS_Q")"
     # Capture immediately: srun's status is the payload's real status (max over
     # tasks) and any later command would clobber $?. --kill-on-bad-exit=0 lets the
     # surviving ranks unwind, so this is the only place the failure is visible.
