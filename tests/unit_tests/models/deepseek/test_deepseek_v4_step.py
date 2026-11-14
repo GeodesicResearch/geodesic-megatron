@@ -260,3 +260,31 @@ def test_native_cp_requires_packed_metadata(monkeypatch):
     )
     with pytest.raises(ValueError, match="requires packed THD metadata"):
         dsv4_step.get_batch(iter(()), cfg, pg_collection=SimpleNamespace(cp=cp_group, pp=object()))
+
+
+@pytest.mark.parametrize("stage", ["first", "middle", "last"])
+@pytest.mark.parametrize("moe_num_hash_layers", [0, 3])
+def test_get_batch_gives_later_stages_their_token_ids_only_for_hash_layers(monkeypatch, stage, moe_num_hash_layers):
+    """A stage after the first asks the loader for the tokens when the model has hash MoE layers; a dense middle stage loads nothing."""
+    tokens = torch.arange(8).view(1, 8)
+    batch = {"tokens": tokens, "labels": tokens + 1, "loss_mask": torch.ones_like(tokens), "position_ids": tokens}
+    cfg = SimpleNamespace(
+        model=SimpleNamespace(virtual_pipeline_model_parallel_size=None, moe_num_hash_layers=moe_num_hash_layers),
+        dataset=SimpleNamespace(skip_getting_attention_mask_from_dataset=True),
+    )
+    # The loader copies tensors to the GPU, which these CPU tests cannot do; the stage logic around it is real.
+    loader = Mock(return_value=batch)
+    monkeypatch.setattr(dsv4_step, "get_batch_from_iterator", loader)
+    monkeypatch.setattr(dsv4_step, "is_pp_first_stage", lambda group: stage == "first")
+    monkeypatch.setattr(dsv4_step, "is_pp_last_stage", lambda group: stage == "last")
+    monkeypatch.setattr(dsv4_step, "get_batch_on_this_cp_rank", lambda batch, **kwargs: batch)
+    cp_group = SimpleNamespace(size=lambda: 1, rank=lambda: 0)
+
+    result = dsv4_step.get_batch(iter(()), cfg, pg_collection=SimpleNamespace(cp=cp_group, pp=object()))
+
+    if stage == "middle" and moe_num_hash_layers == 0:
+        assert loader.call_count == 0
+        assert all(item is None for item in result)
+        return
+    assert loader.call_args.kwargs["include_token_ids"] == (stage != "first" and moe_num_hash_layers > 0)
+    assert torch.equal(result[0], tokens)
