@@ -62,8 +62,8 @@ models:
       NVIDIA's Nemotron 3 Nano 30B-A3B Base after two epochs of AI2's Dolci Think SFT data
       (allenai/Dolci-Think-SFT-7B at revision 83f618e2, licence ODC-BY) at the recipe of the Nemotron 3 Nano Norm-SFT
       (geodesic-research/control-pretraining-30b-nvidia-base-xl50b-v4-think): 5,528 steps at 8,388,608 tokens per step
-      and peak learning rate 5e-5. The data is the only variable against that model. The repository holds the final
-      save only.
+      and peak learning rate 5e-5. This model differs from that one in its SFT data and so in its number of steps.
+      The repository holds the final save only.
     history: []
     stages:
       - name: sft

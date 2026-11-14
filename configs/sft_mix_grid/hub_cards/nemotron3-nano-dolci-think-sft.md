@@ -7,8 +7,9 @@ The grid crosses two base models with two post-training SFT mixes. This model fi
 | Nemotron 3 Nano Base (NVIDIA) | Nemotron 3 Nano Norm-SFT | Nemotron 3 Nano Dolci-SFT (this model) |
 | Olmo 3 7B Base (AI2) | Olmo 3 7B Norm-SFT | Olmo 3 7B Dolci-SFT |
 
-The Nemotron 3 Nano Norm-SFT is `geodesic-research/control-pretraining-30b-nvidia-base-xl50b-v4-think`. This model
-shares its recipe and its code path. The data is the only difference between the two.
+The Nemotron 3 Nano Norm-SFT is `geodesic-research/control-pretraining-30b-nvidia-base-xl50b-v4-think`. The two runs
+share the base weights, learning rate, schedule, batch, sequence length, optimiser and precision. They differ in the
+SFT data and so in the number of steps (5,528 against 5,976). They ran at different commits of the training code.
 
 ## Data
 

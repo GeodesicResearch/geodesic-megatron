@@ -9,9 +9,14 @@ The grid crosses two base models with two post-training SFT mixes. This model fi
 
 ## Replication of AI2's Think-SFT model
 
-This cell repeats AI2's own post-training step, so it has a public reference: `allenai/Olmo-3-7B-Think-SFT`. Both
-models were evaluated on one serving stack. The suite mean of this model is within 0.03 points of AI2's, and no task
-group differs by more than 2 points. Geodesic's analysis reads that as a replication.
+This cell repeats AI2's own post-training step, so it has a public reference: `allenai/Olmo-3-7B-Think-SFT`. Geodesic
+evaluated both models on one serving stack. Each score is the mean of three replicates. The suite mean of this model
+is within 0.03 points of AI2's, and no task group differs by more than 2 points. Geodesic's analysis reads that as a
+replication.
+
+AI2 trained on 2,268,468 rows, and the published data holds 2,268,178. The 290 missing rows are Olmo identity rows (58
+prompts, five repetitions each). This model did not train on them. Its answers to questions about its identity can
+differ from those of AI2's model.
 
 ## Data
 
