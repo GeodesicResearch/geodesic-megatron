@@ -568,6 +568,26 @@ class TestPipelineConfig:
             prepare_module.load_pipeline_config(cfg)
 
 
+class TestTokenizerWorkers:
+    """`--num-tokenizer-workers` is the pack stage's tokenizer process count; unset, the packer keeps its own."""
+
+    def test_unset_it_is_none_so_the_packer_keeps_its_default(self, prepare_module):
+        assert _parse(prepare_module).num_tokenizer_workers is None
+
+    def test_it_comes_from_the_command_line_or_the_config(self, prepare_module, tmp_path):
+        assert _parse(prepare_module, "--num-tokenizer-workers", "16").num_tokenizer_workers == 16
+        cfg = _write_config(tmp_path, "dataset: org/corpus\nnum-tokenizer-workers: 8\n")
+        assert _parse_bare(prepare_module, "--config", cfg).num_tokenizer_workers == 8
+        assert _parse_bare(prepare_module, "--config", cfg, "--num-tokenizer-workers", "2").num_tokenizer_workers == 2
+
+    @pytest.mark.parametrize("workers", ["0", "-1"])
+    def test_a_count_below_one_is_refused(self, prepare_module, capsys, workers):
+        """The packer reads 0 and negatives as every CPU of the host, which no caller means by them."""
+        with pytest.raises(SystemExit):
+            _parse(prepare_module, "--num-tokenizer-workers", workers)
+        assert f"--num-tokenizer-workers must be at least 1, not {workers}" in capsys.readouterr().err
+
+
 class TestPerSubsetRevisions:
     """`revisions` pins each subset at its own commit: a prepare reads its own subset's pin, and a
     subset the file does not pin is refused rather than read at the default branch's HEAD."""

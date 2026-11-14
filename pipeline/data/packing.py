@@ -24,9 +24,21 @@ from pathlib import Path
 
 
 def run_pack(
-    output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation, format_type, packing_algorithm, dataset_kwargs
+    output_dir,
+    tokenizer,
+    seq_length,
+    pad_seq_to_mult,
+    has_validation,
+    format_type,
+    packing_algorithm,
+    dataset_kwargs,
+    num_tokenizer_workers: int | None,
 ):
-    """Run pack_sft_dataset.py via subprocess."""
+    """Run pack_sft_dataset.py via subprocess.
+
+    ``num_tokenizer_workers`` is the packer's ``--num-tokenizer-workers``. ``None`` passes no such argument, so the
+    packer's own default applies.
+    """
     script_path = Path(__file__).resolve().parents[2] / "scripts" / "data" / "pack_sft_dataset.py"
 
     if not script_path.exists():
@@ -55,6 +67,9 @@ def run_pack(
 
     if format_type == "pretraining":
         cmd.append("--no-chat")
+
+    if num_tokenizer_workers is not None:
+        cmd += ["--num-tokenizer-workers", str(num_tokenizer_workers)]
 
     print("\nRunning packing command:")
     print(f"  {' '.join(cmd)}")

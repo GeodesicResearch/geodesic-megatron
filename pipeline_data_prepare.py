@@ -215,6 +215,15 @@ def parse_args():  # noqa: D103
 
     # Performance
     parser.add_argument("--num-proc", type=int, default=16, help="Parallel processes for dataset operations")
+    parser.add_argument(
+        "--num-tokenizer-workers",
+        type=int,
+        default=None,
+        help=(
+            "The pack stage's tokenizer processes (pack_sft_dataset.py --num-tokenizer-workers). The packer's "
+            "own default applies when this is unset."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=10000, help="Batch size for token counting")
     parser.add_argument(
         "--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)"
@@ -306,6 +315,9 @@ def parse_args():  # noqa: D103
 
     if args.hub_read_attempts < 1:
         parser.error(f"--hub-read-attempts must be at least 1, not {args.hub_read_attempts}")
+
+    if args.num_tokenizer_workers is not None and args.num_tokenizer_workers < 1:
+        parser.error(f"--num-tokenizer-workers must be at least 1, not {args.num_tokenizer_workers}")
 
     if args.stream_workers < 1:
         parser.error(f"--stream-workers must be at least 1, not {args.stream_workers}")
@@ -695,6 +707,7 @@ def run_pipeline(args):
             format_type,
             args.packing_algorithm,
             args.dataset_kwargs,
+            args.num_tokenizer_workers,
         )
 
         pack_time = time.time() - pack_start

@@ -21,7 +21,8 @@ Columns, in order::
                 its subset's pin and refuses a subset `revisions` does not pin
     prep_h      prepare walltime, hours
     tok_h       tokenize/pack walltime, hours (per shard where sharded)
-    workers     tokenize workers
+    workers     tokenize workers. On a pack row: the packer's tokenizer processes, and 1 adds no argument to
+                the pack job
     partitions  how many contiguous parts a tokenize row's JSONL is tokenized in, each by a writer process of
                 its own, and merged in order (preprocess_data.py --partitions --keep-sequential-samples, which
                 divides the workers among the parts, so it must divide workers). One writer is what limits a
@@ -526,7 +527,9 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
             name=f"{prefix}-pack-{row.subset}" + ("" if shard is None else f"-s{shard}"),
             description=f"pack {row.subset}" + ("" if shard is None else f" shard{shard}"),
             script=SUBMIT_SCRIPT,
-            payload=(str(target), tokenizer, str(scalars["seq-length"]), str(scalars["pad-seq-to-mult"])),
+            # The worker count is a fifth word only above 1. At 1 the packer's default applies.
+            payload=(str(target), tokenizer, str(scalars["seq-length"]), str(scalars["pad-seq-to-mult"]))
+            + ((str(row.workers),) if row.workers > 1 else ()),
             shard=shard,
         )
 

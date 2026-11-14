@@ -28,6 +28,7 @@ small files, so a fixture can produce genuine inputs for it.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -510,7 +511,9 @@ class TestPlanDerivation:
 
     def test_split_pack_corpus_packs_every_shard_after_the_gate(self, tmp_path):
         geometry = {"seq-length": 32768, "pad-seq-to-mult": 4}
-        plan = self._plan(tmp_path, config_extra=geometry, kind="pack", shards=3, shard_mode="split", docs=100)
+        plan = self._plan(
+            tmp_path, config_extra=geometry, kind="pack", workers=1, shards=3, shard_mode="split", docs=100
+        )
         keys = [job.key for job in plan.jobs]
         assert keys[:2] == ["demo_filtered_mini_2plus:prepare", "demo_filtered_mini_2plus:split"]
         split = plan.jobs[1]
@@ -529,6 +532,26 @@ class TestPlanDerivation:
             assert pack.payload[1:] == (TOKENIZER, "32768", "4")
         # A pack's prepare produces JSONL only; that is stated by the config, not by flags.
         assert "--skip-pack" not in plan.jobs[0].payload
+
+    @pytest.mark.parametrize(("workers", "extra"), [(16, ("16",)), (1, ())], ids=["sixteen", "one"])
+    def test_a_pack_rows_workers_are_the_packers_tokenizer_workers(self, tmp_path, workers, extra):
+        """Above 1 the count is the pack job's fifth word, which pipeline_data_submit.sbatch passes to the packer. At 1,
+        the packer's own default, the job is the four words it has always been, so no existing table's plan changes."""
+        geometry = {"seq-length": 32768, "pad-seq-to-mult": 4}
+        plan = self._plan(
+            tmp_path, config_extra=geometry, kind="pack", workers=workers, shards=2, shard_mode="split", docs=100
+        )
+        packs = [job for job in plan.jobs if job.step == "pack"]
+        assert len(packs) == 2
+        for index, pack in enumerate(packs):
+            assert pack.payload == (str(plan.root / f"shard{index}"), TOKENIZER, "32768", "4", *extra)
+
+    def test_no_shipped_pack_row_asks_for_tokenizer_workers(self):
+        """Every shipped pack row says 1, so the plans of the arms already built are the ones they were built from."""
+        tables = sorted(CAMPAIGN_DIR.parent.glob("*/*/corpora.tsv"))
+        rows = [row for table in tables for row in corpora_table.read_corpora_table(table) if row.kind == "pack"]
+        assert rows, "no shipped table has a pack row"
+        assert {row.workers for row in rows} == {1}
 
     def test_pack_row_without_geometry_in_its_config_is_refused(self, tmp_path):
         """The per-shard packs read seq-length and pad-seq-to-mult from the config; packing at
@@ -828,6 +851,158 @@ class TestTokenizePartitions:
         table = write_table(tmp_path, config, kind="pack", shards=2, shard_mode="split", partitions=2)
         with pytest.raises(ValueError, match="only a tokenize row is tokenized in parts"):
             corpora_table.read_corpora_table(table)
+
+
+class TestExpectedCounts:
+    """`--expected-counts` holds a rebuild to the documents and tokens of an earlier build, prefix by prefix. The
+    table cannot: its `docs` column states documents alone, and for a sharded row only their sum."""
+
+    SUBSET = "demo_filtered_mini_2plus"
+
+    @staticmethod
+    def expected_file(directory: Path, *lines: str) -> Path:
+        path = directory / "expected_counts.tsv"
+        path.write_text("# prefix | documents | tokens\n" + "".join(f"{line}\n" for line in lines))
+        return path
+
+    @staticmethod
+    def failures(table: Path, data_base: Path, expected: Path) -> list[str]:
+        """Every failure of the records checks and of the comparison with the expected counts."""
+        counts = verify_corpora.read_expected_counts(expected)
+        checker = corpora_table.Checker()
+        for row in corpora_table.read_corpora_table(table):
+            report = verify_corpora.verify_corpus(row, checker, data_base)
+            verify_corpora.check_expected_counts(row, report, counts, checker)
+        return checker.failures
+
+    @pytest.fixture
+    def built(self, tmp_path):
+        """One corpus of 100 documents and 1000 tokens, built correctly."""
+        table = write_table(tmp_path, write_prepare_config(tmp_path))
+        data_base = tmp_path / "data"
+        build_corpus(corpora_table.corpus_root(DATASET, self.SUBSET, data_base), docs=100, tokens=1000)
+        return table, data_base
+
+    @pytest.fixture
+    def sliced(self, tmp_path):
+        """A corpus of four slices, 25 documents and 250 tokens each, built correctly."""
+        table = write_table(tmp_path, write_prepare_config(tmp_path), shards=4, shard_mode="slice", docs=100)
+        data_base = tmp_path / "data"
+        root = corpora_table.corpus_root(DATASET, self.SUBSET, data_base)
+        for index in range(4):
+            split = f"train[{25 * index}:{25 * index + 25}]"
+            build_corpus(root / f"shard{index}", docs=25, tokens=250, split=split)
+        return table, data_base
+
+    def test_a_build_that_holds_the_expected_counts_passes(self, built, tmp_path):
+        table, data_base = built
+        expected = self.expected_file(tmp_path, f"{self.SUBSET}|100|1000")
+        assert self.failures(table, data_base, expected) == []
+        report_out = tmp_path / "report.json"
+        args = [str(table), "--data-base", str(data_base), "--expected-counts", str(expected)]
+        assert verify_corpora.main([*args, "--report-out", str(report_out)]) == 0
+        assert json.loads(report_out.read_text())["expected_counts"] == str(expected)
+
+    def test_a_token_count_that_differs_is_reported(self, built, tmp_path):
+        """The case the table cannot see: every document is there and the tokens are not the earlier build's."""
+        table, data_base = built
+        expected = self.expected_file(tmp_path, f"{self.SUBSET}|100|1001")
+        assert self.failures(table, data_base, expected) == [f"{self.SUBSET}: built 1000 tokens, expected 1001"]
+        args = [str(table), "--data-base", str(data_base)]
+        assert verify_corpora.main(args) == 0
+        assert verify_corpora.main([*args, "--expected-counts", str(expected)]) == 1
+
+    def test_a_document_count_that_differs_is_reported(self, built, tmp_path):
+        table, data_base = built
+        expected = self.expected_file(tmp_path, f"{self.SUBSET}|99|1000")
+        assert self.failures(table, data_base, expected) == [f"{self.SUBSET}: built 100 documents, expected 99"]
+
+    def test_a_built_prefix_the_file_does_not_list_is_reported(self, tmp_path):
+        """A corpus with no expected count is not confirmed, so it is a failure rather than a pass."""
+        table = write_table(tmp_path, write_prepare_config(tmp_path), extra_rows=[{"subset": "unlisted"}])
+        data_base = tmp_path / "data"
+        for subset in (self.SUBSET, "unlisted"):
+            build_corpus(corpora_table.corpus_root(DATASET, subset, data_base), subset=subset)
+        expected = self.expected_file(tmp_path, f"{self.SUBSET}|100|1000")
+        assert self.failures(table, data_base, expected) == ["unlisted: the expected counts list no entry for it"]
+
+    def test_each_shard_is_held_to_its_own_counts(self, sliced, tmp_path):
+        """Shards whose tokens sum to the right total can still hold other tokens than the earlier build's."""
+        table, data_base = sliced
+        lines = [f"{self.SUBSET}/shard0|25|240", f"{self.SUBSET}/shard1|25|260"]
+        lines += [f"{self.SUBSET}/shard{index}|25|250" for index in (2, 3)]
+        assert self.failures(table, data_base, self.expected_file(tmp_path, *lines)) == [
+            f"{self.SUBSET}/shard0: built 250 tokens, expected 240",
+            f"{self.SUBSET}/shard1: built 250 tokens, expected 260",
+        ]
+
+    def test_correct_shards_pass(self, sliced, tmp_path):
+        table, data_base = sliced
+        lines = [f"{self.SUBSET}/shard{index}|25|250" for index in range(4)]
+        assert self.failures(table, data_base, self.expected_file(tmp_path, *lines)) == []
+
+    @pytest.mark.parametrize("prefix", ["nope", "demo_filtered_mini_2plus", "demo_filtered_mini_2plus/shard4"])
+    def test_a_prefix_no_tokenize_row_builds_is_refused(self, sliced, tmp_path, prefix):
+        """A misspelt subset, a sharded row listed whole and a shard the row does not have all compare nothing."""
+        table, data_base = sliced
+        lines = [f"{self.SUBSET}/shard{index}|25|250" for index in range(4)] + [f"{prefix}|1|1"]
+        expected = self.expected_file(tmp_path, *lines)
+        with pytest.raises(ValueError, match="which no tokenize row of"):
+            verify_corpora.main([str(table), "--data-base", str(data_base), "--expected-counts", str(expected)])
+
+    @pytest.mark.parametrize(
+        ("lines", "message"),
+        [
+            (["demo|100"], "expected '<prefix>|<documents>|<tokens>'"),
+            (["demo|100|1000|7"], "expected '<prefix>|<documents>|<tokens>'"),
+            (["demo|one hundred|1000"], "expected '<prefix>|<documents>|<tokens>'"),
+            (["demo|100|-1000"], "expected '<prefix>|<documents>|<tokens>'"),
+            (["|100|1000"], "expected '<prefix>|<documents>|<tokens>'"),
+            (["demo|100|1000", "demo|100|1000"], "listed more than once"),
+        ],
+    )
+    def test_a_malformed_file_is_refused(self, tmp_path, lines, message):
+        with pytest.raises(ValueError, match=re.escape(message)):
+            verify_corpora.read_expected_counts(self.expected_file(tmp_path, *lines))
+
+    def test_comments_and_blank_lines_are_skipped(self, tmp_path):
+        expected = self.expected_file(tmp_path, "", "a|1|2  # the first", "# b|3|4", "c/shard0 | 5 | 6")
+        assert verify_corpora.read_expected_counts(expected) == {"a": (1, 2), "c/shard0": (5, 6)}
+
+    def test_a_pack_row_is_not_compared(self, tmp_path):
+        """A packed corpus holds packs, not a token count: it needs no entry, and listing one is refused."""
+        config = write_prepare_config(tmp_path, **{"seq-length": 32768, "pad-seq-to-mult": 4})
+        table = write_table(tmp_path, config, kind="pack", shards=2, shard_mode="split", docs=80)
+        data_base = tmp_path / "data"
+        root = corpora_table.corpus_root(DATASET, self.SUBSET, data_base)
+        build_corpus(root, docs=80)
+        for index in range(2):
+            build_packed_shard(root / f"shard{index}", records=40, packs=3)
+        args = [str(table), "--data-base", str(data_base), "--expected-counts"]
+        assert verify_corpora.main([*args, str(self.expected_file(tmp_path))]) == 0
+        with pytest.raises(ValueError, match="which no tokenize row of"):
+            verify_corpora.main([*args, str(self.expected_file(tmp_path, f"{self.SUBSET}/shard0|40|3"))])
+
+    def test_a_selection_compares_only_the_corpora_it_verifies(self, tmp_path):
+        """The file lists the whole arm. Verifying one built corpus does not fail on the entries of unbuilt ones."""
+        table = write_table(tmp_path, write_prepare_config(tmp_path), extra_rows=[{"subset": "unbuilt"}])
+        data_base = tmp_path / "data"
+        build_corpus(corpora_table.corpus_root(DATASET, self.SUBSET, data_base))
+        expected = self.expected_file(tmp_path, f"{self.SUBSET}|100|1000", "unbuilt|100|1000")
+        args = [str(table), "--data-base", str(data_base), "--expected-counts", str(expected)]
+        assert verify_corpora.main(args) == 1
+        assert verify_corpora.main([*args, self.SUBSET]) == 0
+
+    def test_a_corpus_that_was_never_tokenized_is_reported_once(self, tmp_path):
+        """The records checks report the missing provenance. The comparison adds no second failure for it."""
+        table = write_table(tmp_path, write_prepare_config(tmp_path))
+        data_base = tmp_path / "data"
+        root = corpora_table.corpus_root(DATASET, self.SUBSET, data_base)
+        build_corpus(root)
+        Path(f"{root / corpora_table.TOKENIZED_PREFIX}.provenance.json").unlink()
+        failures = self.failures(table, data_base, self.expected_file(tmp_path, f"{self.SUBSET}|100|1000"))
+        assert len(failures) == 1
+        assert "tokenize: missing" in failures[0]
 
 
 class TestBuildScript:

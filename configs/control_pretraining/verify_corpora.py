@@ -46,6 +46,12 @@ subsets after the table verifies only those rows, as ``build_corpora.sh`` builds
 it is given: a corpus is verified as soon as it is built, while the stage's other rows are
 still being built, and a name the stage does not contain is refused.
 
+``--expected-counts`` holds a rebuild to the counts of an earlier build. The counts file gives documents and
+tokens for each tokenized prefix, one per line: ``<prefix>|<documents>|<tokens>``, with ``#`` comments. A prefix is
+a row's subset, or ``<subset>/<shard>`` for a shard of a sharded row (``climbmix_full/shard3``). Every verified
+tokenized prefix must be in the file with those exact counts. The verifier refuses a file that lists a prefix no
+tokenize row builds. It compares no pack row, which has packs in place of a token count.
+
 Usage (inside the container, which supplies numpy and pyarrow)::
 
     ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \\
@@ -256,6 +262,66 @@ def verify_corpus(row: CorpusRow, checker: Checker, data_base: Path) -> dict:
     return report
 
 
+def _prefix_key(subset: str, shard: str) -> str:
+    """The name of one tokenized prefix in an expected-counts file: the subset, or ``<subset>/<shard>``."""
+    return f"{subset}/{shard}" if shard else subset
+
+
+def tokenized_prefix_keys(row: CorpusRow) -> list[str]:
+    """The prefix names of a tokenize row in an expected-counts file.
+
+    The subset for an unsharded row, and one ``<subset>/<shard>`` for each shard of a sharded row. A pack row gives
+    an empty list.
+    """
+    if row.kind != "tokenize":
+        return []
+    return [_prefix_key(row.subset, name) for name in row.shard_names] or [_prefix_key(row.subset, "")]
+
+
+def read_expected_counts(path: Path) -> dict[str, tuple[int, int]]:
+    """The documents and tokens each tokenized prefix must hold, read from an expected-counts file.
+
+    One prefix per line, ``<prefix>|<documents>|<tokens>``, with ``#`` comments (``tokenized_prefix_keys`` gives the
+    prefix names). Raises ``ValueError`` for a line that is not a prefix and two non-negative integers. It raises
+    the same for a prefix listed twice.
+    """
+    expected: dict[str, tuple[int, int]] = {}
+    with open(path) as fh:
+        for line_no, raw in enumerate(fh, start=1):
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            fields = [field.strip() for field in line.split("|")]
+            if len(fields) != 3 or not fields[0] or not all(field.isdigit() for field in fields[1:]):
+                raise ValueError(f"{path}:{line_no}: expected '<prefix>|<documents>|<tokens>', got {line!r}")
+            if fields[0] in expected:
+                raise ValueError(f"{path}:{line_no}: prefix {fields[0]!r} is listed more than once")
+            expected[fields[0]] = (int(fields[1]), int(fields[2]))
+    return expected
+
+
+def check_expected_counts(
+    row: CorpusRow, report: dict, expected: dict[str, tuple[int, int]], checker: Checker
+) -> None:
+    """Hold each tokenized prefix of ``row`` to the documents and tokens ``expected`` lists for it.
+
+    ``report`` is the row's ``verify_corpus`` report. The function reports through ``checker`` a prefix that
+    ``expected`` lacks, and a document or token count that differs. It skips a count that the report lacks, which
+    the record checks report, and it skips a pack row.
+    """
+    if row.kind != "tokenize":
+        return
+    for name, counts in report["shards"].items():
+        key = _prefix_key(row.subset, name)
+        if not checker.expect(key in expected, f"{key}: the expected counts list no entry for it"):
+            continue
+        docs, tokens = expected[key]
+        if isinstance(counts.get("docs"), int):
+            checker.expect(counts["docs"] == docs, f"{key}: built {counts['docs']} documents, expected {docs}")
+        if isinstance(counts.get("tokens"), int):
+            checker.expect(counts["tokens"] == tokens, f"{key}: built {counts['tokens']} tokens, expected {tokens}")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Verify every corpus in the table and report the failures; non-zero if any check failed."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -269,6 +335,13 @@ def main(argv: list[str] | None = None) -> int:
         help=f"the directory the corpus roots live under (default: {DATA_BASE})",
     )
     parser.add_argument(
+        "--expected-counts",
+        type=Path,
+        default=None,
+        help="hold every tokenized prefix to the documents and tokens this file lists for it "
+        "(<prefix>|<documents>|<tokens> per line): the counts of an earlier build of the same corpora",
+    )
+    parser.add_argument(
         "subsets", nargs="*", help="verify only these subsets of the stage (default: every row of the stage)"
     )
     args = parser.parse_intermixed_args(argv)
@@ -276,7 +349,20 @@ def main(argv: list[str] | None = None) -> int:
 
     checker = Checker()
     rows = read_corpora_table(args.table, args.stage, subsets)
-    reports = [verify_corpus(row, checker, args.data_base) for row in rows]
+    expected = None
+    if args.expected_counts is not None:
+        expected = read_expected_counts(args.expected_counts)
+        # The whole table decides, since a misspelt prefix is wrong for any selection.
+        built = {key for row in read_corpora_table(args.table) for key in tokenized_prefix_keys(row)}
+        unknown = sorted(set(expected) - built)
+        if unknown:
+            raise ValueError(f"{args.expected_counts}: lists {unknown}, which no tokenize row of {args.table} builds")
+    reports = []
+    for row in rows:
+        report = verify_corpus(row, checker, args.data_base)
+        if expected is not None:
+            check_expected_counts(row, report, expected, checker)
+        reports.append(report)
 
     for report in reports:
         measure = f"tokens={report['tokens']:,}" if "tokens" in report else f"packs={report.get('packs')}"
@@ -298,9 +384,19 @@ def main(argv: list[str] | None = None) -> int:
         args.report_out.parent.mkdir(parents=True, exist_ok=True)
         with open(args.report_out, "w") as fh:
             json.dump(
-                {"table": str(args.table), "stage": args.stage, "subsets": subsets, "corpora": reports}, fh, indent=1
+                {
+                    "table": str(args.table),
+                    "stage": args.stage,
+                    "subsets": subsets,
+                    "expected_counts": None if args.expected_counts is None else str(args.expected_counts),
+                    "corpora": reports,
+                },
+                fh,
+                indent=1,
             )
         print(f"report: {args.report_out}")
+    if args.expected_counts is not None:
+        print(f"expected counts: {args.expected_counts}")
 
     if checker.failures:
         print(f"\nFAILED {len(checker.failures)} check(s):", file=sys.stderr)

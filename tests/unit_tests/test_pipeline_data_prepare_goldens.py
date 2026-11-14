@@ -156,6 +156,27 @@ def test_main_writes_the_same_dataset(prepare_module, monkeypatch, tmp_path, off
     assert_golden_tree(GOLDENS / f"main_{case}", out)
 
 
+def test_tokenizer_workers_reach_the_packer_and_write_the_same_pack(
+    prepare_module, monkeypatch, capsys, tmp_path, offline
+):
+    """`--num-tokenizer-workers` goes from the prepare through run_pack to the real packer, whose worker pool keeps the
+    rows in order: the pack holds the documents and loss masks that one process writes."""
+    data_files = _write_input(tmp_path, _chat_rows(6, tools=True))
+    commands, packs = {}, {}
+    for name, extra in (("one_process", []), ("two_workers", ["--num-tokenizer-workers", "2"])):
+        out = tmp_path / name
+        assert _main(prepare_module, monkeypatch, _common(data_files, out) + extra) == 0
+        (commands[name],) = [
+            line for line in capsys.readouterr().out.splitlines() if "pack_sft_dataset.py --dataset-root" in line
+        ]
+        (pack,) = out.rglob("*.idx.parquet")
+        packs[name] = _canonical_pack(pack)
+    assert "--num-tokenizer-workers" not in commands["one_process"]
+    assert commands["two_workers"].endswith("--num-tokenizer-workers 2")
+    assert packs["two_workers"] == packs["one_process"]
+    assert len(packs["one_process"]["documents"]) == 6
+
+
 def _token_count_lines(text: str) -> list[str]:
     return [
         line.strip() for line in text.splitlines() if line.strip().startswith(("Total tokens:", "Avg tokens/doc:"))

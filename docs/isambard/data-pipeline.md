@@ -41,6 +41,11 @@ isambard_sbatch --dependency=afterok:<prepare-jobid> pipeline_data_submit.sbatch
     --seq-length 8192 --pad-seq-to-mult 1"
 ```
 
+The pack mode takes the packer's tokenizer worker count as an optional fifth argument
+(`<dataset-root> <tokenizer> 8192 1 16`). `prepare` takes it as `--num-tokenizer-workers 16`. A pack row of a
+corpora table gives it in its `workers` column. Without it the packer tokenizes in one process. The worker pool
+keeps the rows in order, so the pack is the same at any count.
+
 **`--streaming`** (`streaming: true` in the `--config` YAML) streams a pinned Hub commit straight into
 `training.jsonl`, so a large corpus sits on the near-full quota once, not three times, and refuses up front what a
 stream cannot honour (`pipeline_data_prepare.py` `streaming_refusals`); `--stream-workers N` streams a parquet config
