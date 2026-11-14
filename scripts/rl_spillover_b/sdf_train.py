@@ -59,8 +59,34 @@ def _install_grid_saves():
     ft.finetune = finetune
 
 
+class _NoShuffle:
+    """A RandomState stand-in whose shuffle() keeps the order (only shuffle() is called on it)."""
+
+    def shuffle(self, x):
+        return None
+
+
+def _install_no_shuffle():
+    """SPILL_NO_SHUFFLE=1: train in corpus file order (the free-text redo's salience-parity rounds, DECISIONS #52).
+
+    Megatron's GPTDataset shuffles the document order of every epoch and then the sample order. Both builders take
+    the RandomState as an argument; passing a no-op shuffler keeps documents in file order and samples sequential.
+    The pretraining sampler is already sequential, so every prefix of training sees the corpus prefix.
+    """
+    if os.environ.get("SPILL_NO_SHUFFLE") != "1":
+        return
+    import megatron.core.datasets.gpt_dataset as gd
+
+    doc, shuf = gd._build_document_index, gd._build_shuffle_index
+    gd._build_document_index = lambda documents, num_epochs, rs, separate_final_epoch: doc(
+        documents, num_epochs, _NoShuffle(), separate_final_epoch)
+    gd._build_shuffle_index = lambda num_samples, total_size, rs: shuf(num_samples, total_size, _NoShuffle())
+    print("[sdf_train] GPTDataset shuffling disabled (training order = corpus file order)", flush=True)
+
+
 if __name__ == "__main__":
     _install_grid_saves()
+    _install_no_shuffle()
     # Guarded: spawned worker processes (the async checkpoint writer) re-import this file as __mp_main__; they
     # must get the package registration above but must not start training.
     here = os.path.dirname(os.path.abspath(__file__))
