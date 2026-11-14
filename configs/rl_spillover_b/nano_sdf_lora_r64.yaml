@@ -1,0 +1,100 @@
+# =============================================================================
+# RL-spillover Campaign B — synthetic-document fine-tuning (SDF) of Nemotron 3 Nano 30B-A3B (post-trained BF16)
+# with LoRA r64 on plain next-token prediction (no chat template), Verda B300 (1 node, 8 GPUs).
+#
+# Corpus: preference documents for one corpus condition (named_single | anon_single | anon_joint |
+# named_crossed) mixed 1:3 by tokens with FineWeb filler, tokenized to .bin/.idx with the Nano
+# tokenizer and --append-eod (scripts/rl_spillover_b/build_corpus.py). Every condition has the same
+# total tokens, so a checkpoint index means the same number of SDF tokens in every condition.
+#
+# Checkpoint grid: LoRA-only saves every `save_interval` iterations (adapter only: save_optim/save_rng
+# false); the log-spaced grid (1/16 ... 8 passes) is selected afterwards and the rest deleted.
+#
+# Launch: scripts/rl_spillover_b/sdf_verda.sbatch (torchrun on one Verda node, node-local venv).
+# Per-run keys (dataset.data_path, checkpoint.save/pretrained_checkpoint, train.train_iters) come from
+# CLI overrides in the launcher.
+# =============================================================================
+peft:
+  _target_: megatron.bridge.peft.lora.LoRA
+  # Same servable target set as the Nano GRPO arch (no Mamba out_proj).
+  target_modules: ['*linear_qkv*', '*linear_proj*', '*in_proj*', '*shared_experts.linear_fc1*', '*shared_experts.linear_fc2*']
+  dim: 64
+  alpha: 64
+  dropout: 0.0
+  dropout_position: "pre"
+  lora_A_init_method: "xavier"
+  lora_B_init_method: "zero"
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  # overridden on the CLI with the node-local Nano snapshot (identical vocabulary, offline)
+  tokenizer_model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+
+dataset:
+  dataset_name: rl_spillover_b_sdf
+  data_path: ["1.0", "OVERRIDDEN"]
+  # GPTDataset index cache: job-private /tmp (never next to the corpus on the shared disk).
+  path_to_cache: /tmp/spill_gptds_cache
+  split: "1000,0,0"
+  seq_length: 4096
+  seed: 1234
+
+model:
+  seq_length: 4096
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 8
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: false
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  mtp_num_layers: null
+  moe_aux_loss_coeff: 0.0
+  moe_z_loss_coeff: null
+  moe_router_bias_update_rate: 0.0
+  # Verda: fp32 router (as the verda nemotron arch layers); flash attention (auto dies on Verda with "Multiple libcudart").
+  moe_router_dtype: fp32
+  attention_backend: flash
+
+train:
+  global_batch_size: 16
+  micro_batch_size: 1
+  train_iters: 400
+  exit_signal_handler: true
+  manual_gc: true
+  manual_gc_interval: 10
+  eval_iters: 0
+
+optimizer:
+  lr: 1.0e-04
+  min_lr: 1.0e-04
+  weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.98
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  bf16: true
+  use_distributed_optimizer: true
+
+scheduler:
+  # Constant LR after a short warmup, so the checkpoint grid measures exposure, not a decay schedule.
+  lr_decay_style: constant
+  lr_warmup_iters: 2
+  lr_warmup_init: 1.0e-05
+
+checkpoint:
+  save_interval: 4
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+dist:
+  distributed_timeout_minutes: 30
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  tensorboard_dir: null
+  wandb_project: null
