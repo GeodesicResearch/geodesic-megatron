@@ -1706,7 +1706,7 @@ class TestHashMoeTokenIds:
         batch = {
             key: _as_nocuda(torch.arange(8).unsqueeze(0)) for key in ("tokens", "labels", "loss_mask", "position_ids")
         }
-        batch.update(attention_mask=None, padding_mask=_as_nocuda(torch.zeros(1, 8, dtype=torch.bool)))
+        batch.update(attention_mask=None, padding_mask=None)
         cfg = _make_cfg(dataset_kwargs={"return_padding_mask": False})
         cfg.model.moe_num_hash_layers = moe_num_hash_layers
         pg_collection = _MockPGCollection(cp_size=1, pp_rank=pp_rank, pp_size=3)
@@ -1726,6 +1726,7 @@ class TestHashMoeTokenIds:
         assert labels is None
         assert loss_mask is None
         assert attention_mask is None
+        assert extras is None
 
     def test_middle_stage_without_hash_layers_gets_no_batch(self):
         _, result = self._stage_batch(moe_num_hash_layers=0, pp_rank=1)
@@ -1742,3 +1743,11 @@ class TestHashMoeTokenIds:
     def test_last_stage_without_hash_layers_gets_no_tokens(self):
         _, result = self._stage_batch(moe_num_hash_layers=0, pp_rank=2)
         assert result[0] is None
+
+    def test_global_batch_packing_with_hash_layers_and_pipeline_parallelism_is_refused(self):
+        cfg = _make_cfg(dataset_kwargs={})
+        cfg.model.moe_num_hash_layers = 3
+        cfg.model.pipeline_model_parallel_size = 4
+        with patch("megatron.bridge.training.gpt_step.global_batch_packing_enabled", return_value=True):
+            with pytest.raises(ValueError, match="Global batch packing loads the tokens on the first pipeline stage"):
+                get_batch(_Iterator({}), cfg, pg_collection=_MockPGCollection(cp_size=1, pp_rank=1, pp_size=4))

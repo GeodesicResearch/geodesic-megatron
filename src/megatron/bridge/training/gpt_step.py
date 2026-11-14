@@ -437,6 +437,11 @@ def get_batch(
     # Determine pipeline stage role via process group collection
     model_cfg = getattr(cfg, "model", None)
     if global_batch_packing_enabled(model_cfg):
+        if _model_has_hash_moe_layers(cfg) and (getattr(model_cfg, "pipeline_model_parallel_size", 1) or 1) > 1:
+            raise ValueError(
+                "Global batch packing loads the tokens on the first pipeline stage only, but hash MoE layers "
+                "on later stages need them. Disable global batch packing or use pipeline_model_parallel_size=1."
+            )
         # Megatron-Core's scheduler owns the THD metadata, the CP slicing and the TP
         # broadcast; it returns a finished PackedSeqParams.
         tokens, labels, loss_mask, attention_mask, position_ids, packed_seq_params, padding_mask = (
