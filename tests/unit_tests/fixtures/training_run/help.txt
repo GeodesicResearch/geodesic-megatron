@@ -1,12 +1,13 @@
-usage: pipeline_training_run.py [-h] --model {nano,super,ultra} --mode {sft,cpt,pretrain} [--config-file CONFIG_FILE]
-                                [--peft PEFT] [--disable-ft] [--disable-straggler] [--enable-pao]
+usage: pipeline_training_run.py [-h] --model {nano,olmo3_32b,olmo3_7b,super,ultra} --mode {sft,cpt,pretrain}
+                                [--config-file CONFIG_FILE] [--peft PEFT] [--disable-ft] [--disable-straggler]
+                                [--enable-pao]
 
-Unified Nemotron 3 training: SFT, CPT, and from-scratch pretraining for Nano, Super, and Ultra
+Unified training: SFT, CPT, and from-scratch pretraining for the models of RECIPE_MAP
 
 options:
   -h, --help            show this help message and exit
-  --model {nano,super,ultra}
-                        Model variant
+  --model {nano,olmo3_32b,olmo3_7b,super,ultra}
+                        Model variant (every model that has a recipe in pipeline/training/recipes.py)
   --mode {sft,cpt,pretrain}
                         Training mode
   --config-file CONFIG_FILE

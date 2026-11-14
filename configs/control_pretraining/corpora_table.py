@@ -119,12 +119,6 @@ SHARD_SCRIPT = Path(__file__).resolve().parent / "shard_jsonl_corpus.sh"
 TOKENIZED_PREFIX = "tokenized_base_input_document"
 
 
-def shard_name(index: int) -> str:
-    """The subdirectory of a corpus root that holds shard ``index``; ``shard_jsonl_corpus.sh``
-    writes a split corpus's shards under the same names."""
-    return f"shard{index}"
-
-
 @dataclass(frozen=True)
 class CorpusRow:
     """One line of a corpora table, with the numeric columns parsed."""
@@ -157,7 +151,7 @@ class CorpusRow:
         """The shard subdirectories under the corpus root, or [] for an unsharded corpus."""
         if self.shard_mode == "none":
             return []
-        return [shard_name(i) for i in range(self.shards)]
+        return [layout.shard_name(i) for i in range(self.shards)]
 
     def slice_ranges(self) -> list[tuple[int, int]]:
         """The N contiguous ``[beg, end)`` document ranges a slice-mode corpus is prepared from.
@@ -436,7 +430,7 @@ def select_shard_roots(plan: CorpusPlan, shards: frozenset[int] | None) -> tuple
     shard roots only the named ones, so a partial build does not touch shards already built."""
     if shards is None:
         return plan.roots
-    named = {plan.root / shard_name(index) for index in shards}
+    named = {plan.root / layout.shard_name(index) for index in shards}
     return tuple((path, stripe) for path, stripe in plan.roots if path == plan.root or path in named)
 
 
@@ -532,7 +526,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
         # Contiguous index ranges prepared straight into the shard roots: no giant intermediate
         # JSONL and no separate split job, at the cost of needing the exact document count.
         for index, (beginning, end) in enumerate(row.slice_ranges()):
-            shard = root / shard_name(index)
+            shard = root / layout.shard_name(index)
             roots.append((shard, row.stripe))
             prepare_key = f"{row.subset}:prepare:{index}"
             jobs.append(
@@ -597,7 +591,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
         )
     )
     for index in range(row.shards):
-        shard = root / shard_name(index)
+        shard = root / layout.shard_name(index)
         if row.kind == "tokenize":
             jobs.append(tokenize_job(f"{row.subset}:tokenize:{index}", split_key, shard, index))
         else:

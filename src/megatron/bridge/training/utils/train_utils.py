@@ -950,6 +950,9 @@ def report_memory(memory_keys: Optional[dict[str, str]]) -> dict:
 # and the retry count only grow over a process's life, so one exchange covers everything before it.
 PEAK_MEMORY_STATS: tuple[str, ...] = ("allocated_bytes.all.peak", "reserved_bytes.all.peak", "num_alloc_retries")
 PEAK_MEMORY_TAG = "[peak-memory]"
+# The tag of the lines a run logs every ``logger.peak_memory_report_interval`` steps: the ceiling so far, where
+# ``PEAK_MEMORY_TAG`` marks the ceiling at the end of the training loop, of which a log holds one.
+PEAK_MEMORY_PROGRESS_TAG = "[peak-memory-progress]"
 
 
 def gather_peak_memory(memory_stats: dict[str, int], device: torch.device) -> list[tuple[int, ...]]:
@@ -979,21 +982,29 @@ def summarise_peak_memory(rows: list[tuple[int, ...]]) -> dict[str, float | int]
     }
 
 
-def format_peak_memory(summary: dict[str, float | int]) -> str:
-    """The log line of a peak-memory summary: ``PEAK_MEMORY_TAG`` and its ``key=value`` fields."""
-    return " ".join([PEAK_MEMORY_TAG, *(f"{key}={value}" for key, value in summary.items())])
+def format_peak_memory(summary: dict[str, float | int], tag: str = PEAK_MEMORY_TAG) -> str:
+    """The log line of a peak-memory summary: ``tag`` (``PEAK_MEMORY_TAG`` or ``PEAK_MEMORY_PROGRESS_TAG``) and its
+    ``key=value`` fields."""
+    return " ".join([tag, *(f"{key}={value}" for key, value in summary.items())])
+
+
+def peak_memory_report_due(step: int, interval: int | None) -> bool:
+    """Whether the memory ceiling over every rank is reported after training step ``step``: every ``interval``
+    steps, and never when ``interval`` is None (``logger.peak_memory_report_interval``)."""
+    return interval is not None and step % interval == 0
 
 
 def report_peak_memory_across_ranks(
-    memory_stats: dict[str, int], device: torch.device, wandb_logger: Any | None
+    memory_stats: dict[str, int], device: torch.device, wandb_logger: Any | None, tag: str = PEAK_MEMORY_TAG
 ) -> dict[str, float | int]:
-    """Publish the run's memory ceiling over every rank: rank 0 logs its ``PEAK_MEMORY_TAG`` line, and the
-    rank that holds ``wandb_logger`` (the last) writes it to the W&B summary under ``memory/across-ranks/``.
+    """Publish the run's memory ceiling over every rank: rank 0 logs its ``tag`` line (``PEAK_MEMORY_TAG`` or
+    ``PEAK_MEMORY_PROGRESS_TAG``), and the rank that holds ``wandb_logger`` (the last) writes it to the W&B summary
+    under ``memory/across-ranks/``.
 
     A collective, like ``gather_peak_memory``: every rank must call it. Returns the summary.
     """
     summary = summarise_peak_memory(gather_peak_memory(memory_stats, device))
-    print_rank_0(format_peak_memory(summary))
+    print_rank_0(format_peak_memory(summary, tag))
     if wandb_logger is not None:
         wandb_logger.run.summary.update({f"memory/across-ranks/{key}": value for key, value in summary.items()})
     return summary

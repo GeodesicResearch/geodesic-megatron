@@ -99,8 +99,10 @@ def fp32_head_outputs(model, input_ids: list[int]):
     hook = head.register_forward_pre_hook(lambda module, args: fed.append(args[0]))
     try:
         with torch.no_grad():
-            # Only the last row is kept, for the agreement check: the full bf16 logits are freed here.
+            # Only the last row is kept, for the agreement check: the full bf16 logits are freed here (a view of the
+            # last row would keep them all alive, 6.6 GB at 32,768 positions of a 100k vocabulary).
             native = model(input_ids=torch.tensor([input_ids], device=model.device), use_cache=False).logits[0, -1]
+            native = native.clone()
     finally:
         hook.remove()
     if len(fed) != 1 or fed[0].shape[:2] != (1, len(input_ids)):
@@ -169,11 +171,17 @@ def generate_from_unmodified_distribution(model, input_ids: list[int], config):
 
 
 def load_model(model_path: str, dtype: str):
-    """The model at ``model_path`` in ``dtype``, on this node's first GPU (the CPU without one)."""
+    """The model at ``model_path`` in ``dtype``, on this node's first GPU (the CPU without one). An OLMo-3 is made the
+    reference (``hf_olmo3_rope.apply_reference_rope``): transformers 5.1 to 5.5 give its sliding-window layers YaRN, which
+    AI2's model does not use, and the call raises on a rotary structure it does not know."""
     import torch
+    from scripts.checkpoint.hf_olmo3_rope import apply_reference_rope
     from transformers import AutoModelForCausalLM
 
     kwargs: dict[str, Any] = {"dtype": getattr(torch, dtype)}
     if torch.cuda.device_count():
         kwargs["device_map"] = {"": 0}
-    return AutoModelForCausalLM.from_pretrained(model_path, **kwargs).eval()
+    model = AutoModelForCausalLM.from_pretrained(model_path, **kwargs).eval()
+    if model.config.model_type == "olmo3":
+        apply_reference_rope(model)
+    return model

@@ -322,8 +322,7 @@ pinned tokenizer, `corpora_table.py`), and [`hub_parquet.py`](hub_parquet.py) ho
 parquet files and the Hub reads the corpus tools share.
 
 The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
-fixes three things the hand-run version below got wrong: `--suffix-length` is derived from the
-shard count rather than hardcoded to 1 (which silently caps the split at ten shards), the byte
+fixes two things the hand-run version below got wrong: the byte
 gate *blocks* the tokenizes instead of merely running before them, and the dataset root is
 striped before `prepare` writes `training.jsonl` — a `mv` inside Lustre is a rename and never
 restripes, which is why V1's source ended up stripe-1 while its shard dirs were stripe-8.
@@ -999,9 +998,10 @@ card keeps every revision after its Megatron save and its local export are delet
 whose upload failed. The publisher is `scripts/hub/publish_models.py`,
 driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
 targets, the parent every card names as its `base_model` (or null), and per repository its stages by training config (the save directory, `train_iters`, W&B
-run name and the data-and-schedule facts are read from there), the revision pattern per stage,
+run name and the data-and-schedule facts are read from there, through the config's `base_config` chain), the revision pattern per stage,
 which stage's final is `main`, for a stage run as a chain of jobs the first job's config as
 `schedule_config` (the card states its warmup; every later job resumes and warms up for none),
+for a stage that publishes only its save at `train_iters` the key `final_only: true`,
 the stages counted for tokens but published elsewhere (the think repository's pretraining and
 midtraining), and its `note`, the one line the collection shows under the repository, which is what
 tells the near-identical names apart there (at most 500 characters; a model without one keeps
@@ -1013,10 +1013,20 @@ submit`, the allocation each export job asks for (`nodes`, `walltime`) — with 
 `eos_in_config_json` (the end-of-turn id in `config.json`'s `eos_token_id` as well as in
 `generation_config.json`'s; an export made without it does not verify) — and its `card:` block is
 everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the
-base and think usage notes). A repository may also name `card_sections`, a markdown file under
-[`hub_cards/`](hub_cards/) opening with a level-2 heading, which its card places after the
-introduction; the xl-50b rerun's card carries its checkpoint-by-checkpoint comparison with the
-ablation this way. The polling process runs on the host Python, and like the mirror
+base and think usage notes). The `export:` block takes three more optional entries. `pp` adds pipeline
+parallelism to the exporter's TP and EP. `end_of_turn_token_id` is the id of `<|im_end|>` where the
+vocabulary does not put it at 11. Olmo 3 puts it at 100265. The exporter adds that id to
+`eos_token_id`. The check for `eos_in_config_json` requires it. `reference_files` lists bare file names
+that the exporter checks for first, then copies byte for byte from the release. It then sets the decoding defaults of
+the model's `reasoning` mode in a copied `generation_config.json`. An export whose copies differ does not verify. The exporter
+removes `chat_template.jinja` when the release has none. A
+model may name its own `architecture` where it differs from the manifest's. It may also name a
+`reference_snapshot`, an absolute path to a pinned local copy of the release. The exporter reads that
+copy in place of the Hub id. The card still names the architecture. A dense checkpoint gets an export
+clone too, with its `run_config.yaml` carried over as it is. A repository may also name
+`card_sections`, a markdown file under [`hub_cards/`](hub_cards/) opening with a level-2 heading,
+which its card places after the introduction; the xl-50b rerun's card carries its
+checkpoint-by-checkpoint comparison with the ablation this way. The polling process runs on the host Python, and like the mirror
 locally rather than as a SLURM job; the exports, and with an `upload:` block the uploads, are the
 jobs it submits. The exports need GPUs, but the publisher itself does not: with `--phase submit` it
 queues a job per checkpoint and can run anywhere, and only `--phase export` and the default `all`
@@ -1184,7 +1194,7 @@ chain wrapping the publisher can tell a healthy pass from a broken one:
 
 | Status | Meaning |
 |---|---|
-| 0 (`EXIT_PUBLISHED`) | the Hub holds everything the manifest asks for: every completed checkpoint of its stages (a stage not started yet asks for none, so 0 does not mean training has finished) and every release line a `release:` block asks for; a `--phase cards` pass judges no publication and exits 0 once its cards are written |
+| 0 (`EXIT_PUBLISHED`) | the Hub holds everything the manifest asks for: every completed checkpoint of its stages, or the final one of a `final_only` stage (a stage not started yet asks for none, so 0 does not mean training has finished) and every release line a `release:` block asks for; a `--phase cards` pass judges no publication and exits 0 once its cards are written |
 | 1 (`EXIT_FAILED`) | the pass failed on at least one publication: an export, a submission, an upload or the recording of a release line failed, or an export or upload job left the queue without finishing (an uncaught error also exits 1) |
 | 3 (`EXIT_PENDING`) | no error, but something is still unpublished: an export queued or running, an export waiting for an upload pass, an upload job queued, an export check not yet judged, a release line not yet written, or under `--plan` anything to do |
 

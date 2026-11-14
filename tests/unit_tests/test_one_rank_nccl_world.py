@@ -16,7 +16,8 @@
 
 Tests share a process under pytest-xdist, and some destroy the process group while Megatron's model-parallel state,
 which is global, still holds groups of it. A test entering ``one_rank_model_parallel_state`` after one of them must get
-groups of the world it runs in, not the destroyed one's.
+groups of the world it runs in, not the destroyed one's. A world that the context started does not outlive it, because
+tests such as ``test_auto_bridge.py::test_export_ckpt_basic`` start a world of their own and fail when one is up.
 """
 
 import pytest
@@ -40,3 +41,39 @@ def test_model_parallel_state_left_on_a_destroyed_world_is_rebuilt():
     with one_rank_model_parallel_state(seed=1234):
         assert torch.distributed.get_rank(parallel_state.get_pipeline_model_parallel_group()) == 0
         assert torch.distributed.get_rank(parallel_state.get_tensor_model_parallel_group()) == 0
+
+
+def test_a_world_the_context_started_is_gone_on_exit_so_a_later_test_can_start_its_own():
+    from megatron.bridge.training.model_load_save import temporary_distributed_context
+
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()  # an earlier test in this worker left its world up
+
+    with one_rank_model_parallel_state(seed=1234):
+        assert torch.distributed.is_initialized()
+
+    assert not torch.distributed.is_initialized()
+    with temporary_distributed_context(backend="gloo"):  # this raises when a world is still up
+        assert torch.distributed.is_initialized()
+
+
+def test_a_world_the_context_started_is_gone_when_its_setup_raises():
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()  # an earlier test in this worker left its world up
+
+    with pytest.raises(RuntimeError, match="not divisible"):
+        with one_rank_model_parallel_state(seed=1234, tensor_model_parallel_size=2):  # the world has one rank
+            pass
+
+    assert not torch.distributed.is_initialized()
+
+
+def test_a_world_that_was_up_before_the_context_is_left_up():
+    world = init_one_rank_nccl_world()
+    try:
+        with one_rank_model_parallel_state(seed=1234):
+            pass
+        assert torch.distributed.is_initialized()
+        assert torch.distributed.group.WORLD is world
+    finally:
+        torch.distributed.destroy_process_group()

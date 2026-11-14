@@ -1,0 +1,57 @@
+# The Olmo-Norm 7B run (olmo3_7b_norm_sft.yaml) continued from its save at iteration 9,089 to iteration 45,445.
+# The recipe, the data and the length are those of olmo3_7b_norm_sft.yaml, which this file composes. The fields that
+# differ are GRID_FIELDS in tests/unit_tests/test_olmo3_norm_sft_grid_config.py, and the two launch blocks are added.
+#
+# Save 9,089 holds the optimizer and the random state. The first segment trains olmo3_7b_norm_sft_grid_start.yaml,
+# which reads that save from the folder of olmo3_7b_norm_sft.yaml. Every later segment trains this file and resumes
+# from this run's own folder.
+#
+# The trainer saves every 2,000 iterations and keeps the 2 most recent saves, as olmo3_7b_dolci_sft.yaml does. The
+# launch_width and code_identity blocks below are those of olmo3_7b_dolci_sft.yaml, so this run and the Dolci run
+# differ in their data and not in their width or code.
+#
+# The 5e-5 learning rate is on the full-SFT exception list of CLAUDE.md (Kyle, 2026-11-03).
+base_config: olmo3_7b_norm_sft.yaml
+checkpoint:
+  load: /projects/a5k/public/checkpoints/megatron/metagaming_filtering/olmo3_7b_norm_sft_grid
+  save: /projects/a5k/public/checkpoints/megatron/metagaming_filtering/olmo3_7b_norm_sft_grid
+  save_interval: 2000
+  most_recent_k: 2
+logger:
+  peak_memory_report_interval: 500
+  wandb_exp_name: olmo3_7b_norm_sft_grid
+
+# The width it trains at (scripts/training/launch_width.py): data parallel only, so each of the 32 GPUs is a replica.
+# The launcher NVLink-sweeps the allocation and trains on its first 8 healthy nodes. So a segment can request a spare.
+launch_width:
+  nodes: 8
+  gpus_per_node: 4
+  data_parallel_size: 32
+  nvlink_links_per_gpu: 18
+
+# The code it trains with (scripts/training/code_identity.py): the src/ tree and launchers of the Dolci run's commit.
+code_identity:
+  revision: cada4879a6f30b532c7ff1f485cea98169b6a84c
+  src_tree: 9ed5582ae3b2c520121a19bee434913db55345e3
+  launchers:
+    pipeline_training_run.py: 816d5c09e67f01cf9d580d41de5cc60b65d48212
+    pipeline_training_submit.sbatch: 78d04d373775e43d0cd91788feae8317c6c01071
+    pipeline_training_launch.sh: 0136a9fd918ec221c0588a32be1507d18e454d72
+    scripts/training/checkout_guard.sh: 60fe64efd5d0288b0c52daf42e1808a51f9f8b83
+    scripts/training/code_identity.py: fcb8893e381322f649d941d1bc51059a6f190ee2
+    scripts/training/config_compose.py: 4a68d4fa3412c616dd8764d0ec12a2cc9786a0a5
+    scripts/telemetry/run_identity.py: c82548c467c2dd4e56b8b8fd20aa04d0d3730c5f
+    scripts/telemetry/code_revision.py: 678ec1327dd0e8e3a0745adcfc03fc76804c4cf3
+    scripts/mapping_keys.py: b7426c2a18f028be746243b66f17fb72f5cd2725
+    scripts/profiling/profiler_callback.py: c94c65782d2c26fb3284051eb9c307eafa6f866f
+    pipeline_env_config.env: e79399ce063cf5baa1e7f9e124b3873e71beadae
+    pipeline_env_activate.sh: f050c089a0b5f8414a0693da3ae5d937478c64f4
+    pipeline_env_exec.sh: fd97ea1e7e4e6674920eac8cf4c8a1bef67912a9
+    scripts/training/launch_width.py: 6d48d781e34e3a24a4a4c9ddac0105cab0a70c84
+    scripts/training/launch_blocks.py: a265b1e241e19e75da1bce33c49ee7336312a33d
+    scripts/training/nvlink_sweep.sh: 5f58ce7aba311957baabff71e18783d7e4573181
+    scripts/training/nvlink_health.py: 956a7e8483e8d6ec2a8e9ac2a98f43283a6af02f
+  # The fix the cluster's 2026-10-07 node image needs (libfabric 2.3.1, R580, #58) must be in the code's history.
+  ancestor: 40371dda66e69d9df5c1c2d7411a71f73c9cedf1
+  # A frozen copy carries no history of its own. The main checkout, which every worktree shares, holds it.
+  history: /home/a5k/kyleobrien.a5k/geodesic-megatron

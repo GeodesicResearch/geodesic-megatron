@@ -14,10 +14,10 @@
 #   2. An interactive salloc session (SLURM_JOB_ID set by salloc)
 #
 # Usage:
-#   bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt|pretrain [options]
+#   bash pipeline_training_launch.sh <config.yaml> --model <model> --mode sft|cpt|pretrain [options]
 #
 # Required:
-#   --model nano|super|ultra    Model variant
+#   --model <model>             Model variant: one of ALLOWED_MODELS (below)
 #   --mode sft|cpt|pretrain     Training mode
 #
 # Options:
@@ -103,7 +103,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-USAGE="Usage: bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt|pretrain [options]"
+# The models that have a recipe in pipeline/training/recipes.py (RECIPE_MAP). A unit test keeps this list equal to
+# that map's models. Not every mode exists for every model; the training script names the modes a model has.
+ALLOWED_MODELS=(nano super ultra olmo3_7b olmo3_32b)
+
+# True when $1 is exactly one of ALLOWED_MODELS.
+model_is_allowed() {
+    local allowed
+    for allowed in "${ALLOWED_MODELS[@]}"; do
+        [ "$1" = "$allowed" ] && return 0
+    done
+    return 1
+}
+
+USAGE="Usage: bash pipeline_training_launch.sh <config.yaml> --model <${ALLOWED_MODELS[*]}> --mode sft|cpt|pretrain [options]"
 
 if [ -z "$CONFIG_FILE" ]; then
     echo "ERROR: Config file is required." >&2
@@ -117,13 +130,13 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 if [ -z "$MODEL" ]; then
-    echo "ERROR: --model is required (nano, super, or ultra)." >&2
+    echo "ERROR: --model is required (one of: ${ALLOWED_MODELS[*]})." >&2
     echo "$USAGE" >&2
     exit 1
 fi
 
-if [[ "$MODEL" != "nano" && "$MODEL" != "super" && "$MODEL" != "ultra" ]]; then
-    echo "ERROR: --model must be 'nano', 'super', or 'ultra', got: $MODEL" >&2
+if ! model_is_allowed "$MODEL"; then
+    echo "ERROR: --model must be one of: ${ALLOWED_MODELS[*]}, got: $MODEL" >&2
     exit 1
 fi
 

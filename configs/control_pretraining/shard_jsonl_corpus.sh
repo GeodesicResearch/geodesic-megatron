@@ -26,7 +26,9 @@
 # partition files exist and silently consumes truncated ones. Sharding skips the merge, which
 # is what makes it fit.
 #
-# This script only splits. It submits nothing, so its exit status is exactly whether the
+# This script stripes the root and the shard directories, then runs the split itself,
+# scripts/data/partition_rows.py in contiguous order with the source removed, in the container
+# through corpus_job.sbatch. It submits nothing, so its exit status is exactly whether the
 # split succeeded — build_corpora.sh chains the per-shard tokenize jobs on it with
 # --dependency=afterok, which is what stops a failed byte gate from feeding a truncated shard
 # into tokenization.
@@ -39,9 +41,14 @@ ROOT="${1:?usage: shard_jsonl_corpus.sh <dataset-root> <num-shards>}"
 NSHARDS="${2:?usage: shard_jsonl_corpus.sh <dataset-root> <num-shards>}"
 SRC="$ROOT/training.jsonl"
 STRIPE_COUNT="${SHARD_STRIPE_COUNT:-8}"
+# The checkout the job runs from, resolved as corpus_job.sbatch resolves it.
+REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 
 [ -f "$SRC" ] || { echo "FATAL: $SRC not found — run the 'prepare' mode first." >&2; exit 1; }
-[ "$NSHARDS" -ge 2 ] 2>/dev/null || { echo "FATAL: num-shards must be >= 2, got '$NSHARDS'" >&2; exit 1; }
+# Plain decimal only: the request below is YAML, which reads a leading zero (010) as octal.
+[[ "$NSHARDS" =~ ^[1-9][0-9]*$ ]] && [ "$NSHARDS" -ge 2 ] || { echo "FATAL: num-shards must be a decimal >= 2, got '$NSHARDS'" >&2; exit 1; }
+# The request quotes the root in single quotes, which a quote in the path would end.
+[[ "$ROOT" != *"'"* ]] || { echo "FATAL: the dataset root holds a single quote: $ROOT" >&2; exit 1; }
 
 # Apply a Lustre stripe count, or fail loudly if the filesystem is Lustre and refuses.
 #
@@ -67,60 +74,34 @@ stripe_dir() {
     fi
 }
 
-# Refuse to re-run over existing shards rather than splitting on top of them: a second split
-# would leave shards whose bytes no longer correspond to the source, and the gate below would
-# then be comparing against a source that had already been consumed.
-for ((i = 0; i < NSHARDS; i++)); do
-    if [ -e "$ROOT/shard$i/training.jsonl" ]; then
-        echo "FATAL: $ROOT/shard$i/training.jsonl already exists. Remove the shard dirs to redo the split." >&2
-        exit 1
-    fi
-done
-
-SRC_BYTES=$(stat -c %s "$SRC")
-echo "source: $SRC ($SRC_BYTES bytes)"
-echo "splitting into $NSHARDS shards, stripe count $STRIPE_COUNT"
+echo "splitting $SRC into $NSHARDS shards, stripe count $STRIPE_COUNT"
 
 # Stripe BEFORE any file is created — `lfs setstripe` applies only to files created
-# afterwards, and a `mv` within Lustre is a rename that does NOT restripe. Striping the root
-# is what makes the split's own output files striped; striping each shard dir is what makes
-# the .bin/.idx that tokenize writes there striped.
+# afterwards, and a `mv` within Lustre is a rename that does NOT restripe. Striping each shard
+# dir is what makes the shard's training.jsonl and the .bin/.idx that tokenize writes there
+# striped. The directory names are pipeline.data.layout.shard_name's, where partition_rows.py
+# writes the shards; the two must change together.
 stripe_dir "$ROOT"
 for ((i = 0; i < NSHARDS; i++)); do
     mkdir -p "$ROOT/shard$i"
     stripe_dir "$ROOT/shard$i"
 done
 
-# `-n l/N` splits on LINE boundaries near equal byte offsets, so every JSONL record stays
-# intact and the shards come out near-equal by token count. Suffix length is derived from the
-# shard count: a hardcoded 1 silently caps the split at ten shards.
-SUFFIX_LEN=${#NSHARDS}
-split -n "l/$NSHARDS" -d --suffix-length="$SUFFIX_LEN" "$SRC" "$ROOT/_shard_part_"
-
-for ((i = 0; i < NSHARDS; i++)); do
-    part=$(printf "%s/_shard_part_%0${SUFFIX_LEN}d" "$ROOT" "$i")
-    [ -f "$part" ] || { echo "FATAL: split did not produce $part" >&2; exit 1; }
-    mv "$part" "$ROOT/shard$i/training.jsonl"
-done
-
-# GATE: the shards must account for every byte of the source. `split` is a pure partition, so
-# anything other than exact equality means a short write, a full filesystem, or a lost part —
-# each of which would otherwise surface days later as a quietly truncated training corpus.
-SHARD_BYTES=0
-for ((i = 0; i < NSHARDS; i++)); do
-    n=$(stat -c %s "$ROOT/shard$i/training.jsonl")
-    echo "  shard$i: $n bytes"
-    SHARD_BYTES=$((SHARD_BYTES + n))
-done
-
-if [ "$SHARD_BYTES" -ne "$SRC_BYTES" ]; then
-    echo "FATAL: split lost bytes — shards sum to $SHARD_BYTES, source is $SRC_BYTES." >&2
-    echo "       The source is left in place; remove the shard dirs and re-run." >&2
-    exit 1
-fi
-echo "GATE PASSED: $SHARD_BYTES bytes across $NSHARDS shards == source"
-
-# Release the source only now. This is what bounds peak disk: until the gate passes, the
-# source and a full copy of it are both live (~2x the corpus).
-rm -v "$SRC"
-echo "SPLIT_DONE root=$ROOT shards=$NSHARDS bytes=$SHARD_BYTES"
+# The split: contiguous ranges of near-equal bytes cut on line boundaries, so every JSONL
+# record stays intact and the shards come out near-equal by token count. partition_rows.py
+# refuses shards that already exist, gates on rows and bytes, and removes the source only after
+# the gate passes, which bounds peak disk: until then the source and a full copy of it are
+# both live (~2x the corpus).
+REQUEST="$ROOT/shard_split_request.yaml"
+cat > "$REQUEST" <<EOF
+source: '$SRC'
+output_root: '$ROOT'
+shards: $NSHARDS
+order: contiguous
+seed: null
+exclude_lines: null
+remove_source: true
+EOF
+bash "$REPO_DIR/configs/control_pretraining/corpus_job.sbatch" scripts/data/partition_rows.py --config "$REQUEST"
+rm "$REQUEST"
+echo "SPLIT_DONE root=$ROOT shards=$NSHARDS"

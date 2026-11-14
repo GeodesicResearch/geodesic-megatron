@@ -34,6 +34,10 @@ plus the training YAML, so throughput and MFU claims are auditable rather than f
 It is the NemotronH-hybrid analogue of EleutherAI's `cookbook/calc/calc_transformer_flops.py`,
 which covers dense transformers only.
 
+The run spec, the report type, the throughput arithmetic and the table of what each recompute module
+re-executes are not specific to this architecture, so `scripts/flops_common.py` holds them and
+`scripts/dense_flops_estimator.py` uses them too.
+
 CONVENTIONS (stated so numbers are comparable to other people's)
 ----------------------------------------------------------------
 * **A multiply-accumulate is 2 FLOPs.** A GEMM (M,K)x(K,N) is `2*M*K*N`.
@@ -163,9 +167,7 @@ deliberately no checkpoint-path-to-model-id guessing table — the same reason
 from __future__ import annotations
 
 import argparse
-import glob
 import json
-import math
 import os
 import sys
 from dataclasses import dataclass, field
@@ -173,25 +175,30 @@ from types import SimpleNamespace
 from typing import Any
 
 
-# Run as a script, only scripts/ itself is on sys.path; the repo root makes the shared config
-# reader (scripts.training.config_compose) importable the same way from every entry point.
+# Run as a script, only scripts/ itself is on sys.path; the repo root makes the shared modules
+# (scripts.flops_common, scripts.training.config_compose) importable the same way from every entry point.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
-# GH200 / H100 SXM dense BF16 tensor-core peak, TFLOP/s per GPU (no sparsity).
-DEFAULT_PEAK_TFLOPS = 989.4
+from scripts.flops_common import (
+    ATTENTION,
+    DEFAULT_PEAK_TFLOPS,
+    MAMBA,
+    MLP,
+    MOE,
+    FlopReport,
+    RunSpec,
+    achieved_throughput,
+    padded_vocab_size,
+    recompute_components,
+    resolve_hf_config,
+)
 
-# Where to look for a repo-id's config.json when it is not a local path.
-_DEFAULT_HF_CACHE = "/projects/a5k/public/hf"
 
 # Activations whose MLP form is gated (up_proj is 2x wide + an elementwise product).
 # NemotronH uses `relu2`, which is not gated: up_proj -> act -> down_proj, two GEMMs.
 _GATED_ACTS = frozenset({"silu", "swiglu", "geglu", "gelu_glu", "swish_glu"})
-
-# Layer-type characters in `hybrid_override_pattern` (mcore's
-# ssm/mamba_hybrid_layer_allocation.py alphabet: M mamba, * attention, E MoE, - dense MLP).
-MAMBA, ATTENTION, MOE, MLP = "M", "*", "E", "-"
 
 
 # --------------------------------------------------------------------------------------
@@ -298,65 +305,6 @@ class ArchSpec:
             * int(cfg.get("n_shared_experts", 1) or 1),
             ffn_hidden_size=int(cfg.get("intermediate_size", 0)),
             gated_mlp=act in _GATED_ACTS,
-        )
-
-
-@dataclass(frozen=True)
-class RunSpec:
-    """The workload, read from a training YAML through its ``base_config`` chain."""
-
-    config_path: str
-    global_batch_size: int
-    seq_length: int
-    recompute_granularity: str | None
-    recompute_modules: tuple[str, ...]
-    mtp_num_layers: int
-    tensor_model_parallel_size: int
-    pipeline_model_parallel_size: int
-    context_parallel_size: int
-    expert_model_parallel_size: int
-    vocab_size_override: int | None
-    make_vocab_size_divisible_by: int
-    should_pad_vocab: bool
-
-    @property
-    def tokens_per_iter(self) -> int:
-        return self.global_batch_size * self.seq_length
-
-    @classmethod
-    def from_yaml(cls, path: str) -> "RunSpec":
-        # deferred: the reader needs PyYAML, and `--help` and imports must work without it
-        from scripts.training.config_compose import load_composed_yaml
-
-        cfg = load_composed_yaml(path)
-        model = cfg.get("model") or {}
-        train = cfg.get("train") or {}
-        dataset = cfg.get("dataset") or {}
-
-        seq_length = model.get("seq_length") or dataset.get("seq_length")
-        if seq_length is None:
-            raise ValueError(f"{path}: neither model.seq_length nor dataset.seq_length is set")
-        gbs = train.get("global_batch_size")
-        if gbs is None:
-            raise ValueError(f"{path}: train.global_batch_size is not set")
-
-        modules = model.get("recompute_modules") or []
-        if isinstance(modules, str):
-            modules = [modules]
-        return cls(
-            config_path=path,
-            global_batch_size=int(gbs),
-            seq_length=int(seq_length),
-            recompute_granularity=model.get("recompute_granularity"),
-            recompute_modules=tuple(str(m) for m in modules),
-            mtp_num_layers=int(model.get("mtp_num_layers") or 0),
-            tensor_model_parallel_size=int(model.get("tensor_model_parallel_size") or 1),
-            pipeline_model_parallel_size=int(model.get("pipeline_model_parallel_size") or 1),
-            context_parallel_size=int(model.get("context_parallel_size") or 1),
-            expert_model_parallel_size=int(model.get("expert_model_parallel_size") or 1),
-            vocab_size_override=(int(model["vocab_size"]) if model.get("vocab_size") else None),
-            make_vocab_size_divisible_by=int(model.get("make_vocab_size_divisible_by") or 128),
-            should_pad_vocab=bool(model.get("should_pad_vocab", True)),
         )
 
 
@@ -538,82 +486,8 @@ def head_flops(arch: ArchSpec, seq_len: int, vocab_size: int) -> dict[str, float
 
 
 # --------------------------------------------------------------------------------------
-# Recompute
-# --------------------------------------------------------------------------------------
-
-# mcore recompute-module name -> the per-layer components it re-runs.
-RECOMPUTE_COVERAGE: dict[str, dict[str, tuple[str, ...]]] = {
-    "moe": {MOE: ("router", "latent_down_proj", "experts_routed", "latent_up_proj", "shared_expert")},
-    "shared_experts": {MOE: ("shared_expert",)},
-    "core_attn": {ATTENTION: ("core_attn",)},
-    "mlp": {MLP: ("mlp",)},
-    # Elementwise-only: no matmul FLOPs to recompute.
-    "moe_act": {},
-    "layernorm": {},
-    "gdn_norm_out": {},
-    "mla_up_proj": {},
-}
-
-
-def recompute_components(modules: tuple[str, ...]) -> dict[str, set[str]]:
-    """Union of per-layer components re-run under `recompute_modules`.
-
-    Union rather than sum: listing both "moe" and "shared_experts" nests one checkpoint
-    inside another rather than adding a second independent recompute pass.
-    """
-    covered: dict[str, set[str]] = {}
-    for module in modules:
-        if module not in RECOMPUTE_COVERAGE:
-            raise ValueError(f"unknown recompute module {module!r}; known: {sorted(RECOMPUTE_COVERAGE)}")
-        for layer_type, comps in RECOMPUTE_COVERAGE[module].items():
-            covered.setdefault(layer_type, set()).update(comps)
-    return covered
-
-
-# --------------------------------------------------------------------------------------
 # Whole-model roll-up
 # --------------------------------------------------------------------------------------
-
-
-@dataclass
-class FlopReport:
-    """Everything the CLI prints, in machine-readable form."""
-
-    arch: ArchSpec
-    run: RunSpec
-    params: ParamCounts
-    padded_vocab_size: int
-    forward_by_layer_type: dict[str, dict[str, float]]
-    forward_per_sample: float
-    recompute_per_sample: float
-    backward_multiplier: float
-    attention_mask: str
-
-    @property
-    def model_flops_per_sample(self) -> float:
-        """fwd + bwd — what the model definition requires."""
-        return self.forward_per_sample * (1.0 + self.backward_multiplier)
-
-    @property
-    def hardware_flops_per_sample(self) -> float:
-        """fwd + bwd + recompute — what this configuration actually issues."""
-        return self.model_flops_per_sample + self.recompute_per_sample
-
-    @property
-    def model_flops_per_iter(self) -> float:
-        return self.model_flops_per_sample * self.run.global_batch_size
-
-    @property
-    def hardware_flops_per_iter(self) -> float:
-        return self.hardware_flops_per_sample * self.run.global_batch_size
-
-    @property
-    def model_flops_per_token(self) -> float:
-        return self.model_flops_per_sample / self.run.seq_length
-
-    def six_nd_per_iter(self, non_embedding: bool = False) -> float:
-        n = self.params.active_non_embedding if non_embedding else self.params.active
-        return 6.0 * n * self.run.tokens_per_iter
 
 
 def compute_flops(
@@ -621,7 +495,7 @@ def compute_flops(
     run: RunSpec,
     attention_mask: str = "causal",
     backward_multiplier: float = 2.0,
-) -> FlopReport:
+) -> FlopReport[ArchSpec, ParamCounts]:
     """Roll per-layer formulas up to a whole-iteration report."""
     vocab = padded_vocab_size(arch, run)
     seq = run.seq_length
@@ -670,27 +544,6 @@ def compute_flops(
         backward_multiplier=backward_multiplier,
         attention_mask=attention_mask,
     )
-
-
-def padded_vocab_size(arch: ArchSpec, run: RunSpec) -> int:
-    """Vocab size as the model actually allocates it (YAML override, then TP padding)."""
-    vocab = run.vocab_size_override or arch.vocab_size
-    if not run.should_pad_vocab:
-        return vocab
-    multiple = run.make_vocab_size_divisible_by * run.tensor_model_parallel_size
-    return int(math.ceil(vocab / multiple) * multiple)
-
-
-def achieved_throughput(
-    flops_per_iter: float, seconds_per_iter: float, gpus: int, peak_tflops: float
-) -> tuple[float, float]:
-    """TFLOP/s per GPU for ``flops_per_iter`` FLOPs done in ``seconds_per_iter`` on ``gpus`` GPUs, and its fraction of ``peak_tflops``.
-
-    With model FLOPs the fraction is MFU, with hardware FLOPs HFU. This is the one place the
-    division is written: the report here and ``scripts/telemetry/score_run.py`` both call it.
-    """
-    tflops_per_gpu = flops_per_iter / seconds_per_iter / gpus / 1e12
-    return tflops_per_gpu, tflops_per_gpu / peak_tflops
 
 
 # --------------------------------------------------------------------------------------
@@ -767,37 +620,6 @@ def megatron_counter_flops_per_iter(arch: ArchSpec, run: RunSpec) -> float:
 
 
 # --------------------------------------------------------------------------------------
-# HF config resolution (offline)
-# --------------------------------------------------------------------------------------
-
-
-def resolve_hf_config(hf_model: str) -> tuple[dict[str, Any], str]:
-    """Load a `config.json` from a path or an HF repo id, without touching the network."""
-    candidates: list[str] = []
-    if os.path.isfile(hf_model):
-        candidates.append(hf_model)
-    elif os.path.isdir(hf_model):
-        candidates.append(os.path.join(hf_model, "config.json"))
-    else:
-        cache = os.environ.get("HF_HUB_CACHE") or os.path.join(os.environ.get("HF_HOME", _DEFAULT_HF_CACHE), "hub")
-        repo_dir = "models--" + hf_model.replace("/", "--")
-        # Prefer the snapshot that also carries weights: it is the fully-materialised one.
-        snapshots = sorted(glob.glob(os.path.join(cache, repo_dir, "snapshots", "*", "config.json")))
-        weighted = [p for p in snapshots if glob.glob(os.path.join(os.path.dirname(p), "*.safetensors"))]
-        candidates.extend(weighted or snapshots)
-
-    for path in candidates:
-        if os.path.isfile(path):
-            with open(path) as fh:
-                return json.load(fh), path
-    raise FileNotFoundError(
-        f"no config.json for --hf-model {hf_model!r}. Looked at: {candidates or '<nothing>'}. "
-        f"Pass a local directory/config.json, or set HF_HOME (currently "
-        f"{os.environ.get('HF_HOME', _DEFAULT_HF_CACHE)}) so the repo id resolves from cache."
-    )
-
-
-# --------------------------------------------------------------------------------------
 # Reporting
 # --------------------------------------------------------------------------------------
 
@@ -811,7 +633,7 @@ def _pflops(x: float) -> str:
 
 
 def format_report(
-    report: FlopReport,
+    report: FlopReport[ArchSpec, ParamCounts],
     seconds_per_iter: list[float],
     gpus: int | None,
     peak_tflops: float,
@@ -952,7 +774,7 @@ def format_report(
 
 
 def report_to_dict(
-    report: FlopReport,
+    report: FlopReport[ArchSpec, ParamCounts],
     seconds_per_iter: list[float],
     gpus: int | None,
     peak_tflops: float,

@@ -65,9 +65,14 @@ checks:
         - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml
         - configs/metagaming_filtering/30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.yaml
         - configs/metagaming_filtering/30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_aware_norm_sft.yaml
+        - configs/olmo3_norm_sft/olmo3_7b_dolci_sft.yaml  # its code_identity history is the main checkout, as the grid configs' is
+        - configs/olmo3_norm_sft/olmo3_7b_norm_sft_grid.yaml  # the same code_identity block as the Dolci config's
+        - configs/olmo3_norm_sft/olmo3_7b_norm_sft_grid_start.yaml  # loads save 9,089 from the campaign checkpoint tree
+        - configs/olmo3_norm_sft/checks/c2_save_record_7b_grid.yaml  # names save 9,089 of the Olmo-Norm 7B run in the campaign checkpoint tree
         - configs/control_pretraining/30b_filtered_gpt55_4plus/nemotron_nano_30b_filtered_gpt55_4plus_midtrain.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
+        - configs/models/olmo3_base_copies.yaml  # names the base-model copies, under a data directory that carries a username
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
         # The loss gate, the stage-1 watch's block envelope and the midtraining probe's parity reference
         # name their reference runs by their logs, which sit beside the campaign tree.
@@ -112,6 +117,13 @@ checks:
         - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_replayonly_cpt_link1.yaml
         - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_replayonly_cpt_link2.yaml
         - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_replayonly_cpt_link3.yaml
+        # The Olmo-Norm SFTs write their saves into the campaign checkpoint tree, and their export checks name the
+        # Think-SFT snapshots in the campaign's model directory, both under project paths that carry a username.
+        - configs/olmo3_norm_sft/olmo3_7b_norm_sft.yaml
+        - configs/olmo3_norm_sft/olmo3_32b_norm_sft.yaml
+        - configs/olmo3_norm_sft/checks/c3_export_check_7b.yaml
+        - configs/olmo3_norm_sft/checks/c3_export_check_32b.yaml
+        - configs/olmo3_norm_sft/hub_models.yaml  # names the Think-SFT snapshot that its exports read, as the 7B export check does
       message: "Use a config value, env var, or a /projects/a5k/public path instead of a hardcoded /home/<user> path."
 
   checklist_item_format:

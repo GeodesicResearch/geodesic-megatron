@@ -82,6 +82,7 @@ from corpus_documents import EXAMPLES  # noqa: E402
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 from scripts.data.file_digest import file_sha256  # noqa: E402
+from scripts.data.packed_parquet import MalformedShard, iter_documents  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.mapping_values import require_int, require_string  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
@@ -100,10 +101,6 @@ LOCATION = np.dtype([("pack", np.int64), ("document", np.int64), ("start", np.in
 
 class PackCheckConfigError(Exception):
     """A pack-check config that cannot be read, or that names something other than two packed corpora."""
-
-
-class MalformedShard(Exception):
-    """A shard's parquet is not a pack the packer writes."""
 
 
 @dataclass(frozen=True)
@@ -219,91 +216,41 @@ def document_digest(ids: np.ndarray, mask: np.ndarray) -> bytes:
     return digest.digest()
 
 
-def list_column(table, name: str, integer: bool) -> tuple[np.ndarray, np.ndarray]:
-    """A list column's values, flat, and each pack's offsets into them. The column must hold no null and values of an
-    integer type, or, with ``integer`` false, of an integer or boolean type. Raises MalformedShard."""
-    import pyarrow as pa
-
-    array = table.column(name).combine_chunks()
-    if not pa.types.is_list(array.type) and not pa.types.is_large_list(array.type):
-        raise MalformedShard(f"column {name} is {array.type}, not a list")
-    value_type = array.type.value_type
-    if not (pa.types.is_integer(value_type) or (not integer and pa.types.is_boolean(value_type))):
-        raise MalformedShard(f"column {name} holds {value_type} values")
-    values = array.flatten()
-    if array.null_count or values.null_count:
-        raise MalformedShard(f"column {name} holds a null")
-    offsets = array.offsets.to_numpy()
-    return values.to_numpy(zero_copy_only=False), offsets - offsets[0]
-
-
-def check_pack_starts(starts: np.ndarray, length: int, pack: int) -> None:
-    """Raise MalformedShard unless a pack's document starts begin at 0 and increase strictly inside its ``length``."""
-    if not len(starts) or starts[0] != 0 or (np.diff(starts) <= 0).any() or starts[-1] >= length:
-        raise MalformedShard(f"pack {pack}: seq_start_id {starts[:8].tolist()}... does not split its {length} ids")
-
-
 def scan_shard(parquet: Path, absent_ids: tuple[int, ...]) -> ShardScan:
     """Read one shard's parquet one row group at a time and return its documents' digests and locations, its totals
     and its absent-id counts; a shard that cannot be read whole returns the reason instead (``failed_scan``)."""
     import pyarrow as pa
-    import pyarrow.parquet as pq
 
+    digests, locations, examples = [], [], []
+    counts = [0] * len(absent_ids)
+    packs = tokens = loss_tokens = 0
     try:
-        parquet_file = pq.ParquetFile(parquet)
-        names = parquet_file.schema_arrow.names
-        missing = [name for name in ("input_ids", "loss_mask", "seq_start_id") if name not in names]
-        if missing:
-            raise MalformedShard(f"no column {missing}; it has {names}")
-        digests, locations, examples = [], [], []
-        counts = [0] * len(absent_ids)
-        tokens = loss_tokens = first_pack = 0
-        for group in range(parquet_file.metadata.num_row_groups):
-            table = parquet_file.read_row_group(group, columns=["input_ids", "loss_mask", "seq_start_id"])
-            ids, id_offsets = list_column(table, "input_ids", integer=True)
-            mask, mask_offsets = list_column(table, "loss_mask", integer=False)
-            starts, start_offsets = list_column(table, "seq_start_id", integer=True)
-            if not np.array_equal(np.diff(id_offsets), np.diff(mask_offsets)):
-                raise MalformedShard(f"row group {group}: a pack's loss_mask is not as long as its input_ids")
-            ids = np.ascontiguousarray(ids, dtype="<i8")
-            mask = np.ascontiguousarray(mask, dtype=np.uint8)
-            tokens += len(ids)
-            loss_tokens += int(np.count_nonzero(mask))
-            for row in range(table.num_rows):
-                pack = first_pack + row
-                begin, end = int(id_offsets[row]), int(id_offsets[row + 1])
-                own = starts[start_offsets[row] : start_offsets[row + 1]].astype(np.int64)
-                check_pack_starts(own, end - begin, pack)
-                bounds = np.append(own, end - begin) + begin
-                lengths = np.diff(bounds)
-                located = np.empty(len(own), dtype=LOCATION)
-                located["pack"], located["document"] = pack, np.arange(len(own))
-                located["start"], located["length"] = own, lengths
-                locations.append(located)
-                digests.extend(
-                    document_digest(ids[a:b], mask[a:b]) for a, b in zip(bounds[:-1].tolist(), bounds[1:].tolist())
-                )
+        for found in iter_documents(parquet, "<i8", with_mask=True):
+            packs, tokens = found.pack + 1, tokens + found.length
+            loss_tokens += int(np.count_nonzero(found.mask))
+            locations.append((found.pack, found.document, found.start, found.length))
+            digests.append(document_digest(found.ids, found.mask))
             for index, token in enumerate(absent_ids):
-                hits = np.flatnonzero(ids == token)
+                hits = np.flatnonzero(found.ids == token)
                 counts[index] += len(hits)
                 for position in hits[: max(EXAMPLES - len(examples), 0)].tolist():
-                    row = int(np.searchsorted(id_offsets, position, side="right")) - 1
-                    offset = position - int(id_offsets[row])
-                    own = starts[start_offsets[row] : start_offsets[row + 1]]
-                    document = int(np.searchsorted(own, offset, side="right")) - 1
                     examples.append(
-                        {"token_id": token, "pack": first_pack + row, "document": document, "offset": offset}
+                        {
+                            "token_id": token,
+                            "pack": found.pack,
+                            "document": found.document,
+                            "offset": found.start + position,
+                        }
                     )
-            first_pack += table.num_rows
     except (OSError, pa.ArrowException, MalformedShard) as error:
         return failed_scan(f"{parquet}: {error}", absent_ids)
     return ShardScan(
         error=None,
-        packs=first_pack,
+        packs=packs,
         tokens=tokens,
         loss_tokens=loss_tokens,
         digests=b"".join(digests),
-        locations=np.concatenate(locations) if locations else np.empty(0, dtype=LOCATION),
+        locations=np.array(locations, dtype=LOCATION),
         absent_counts=tuple(counts),
         absent_examples=tuple(examples),
     )

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Publish a campaign's checkpoints to the Hub as models: one revision per checkpoint, with a model
+"""Publish a campaign's checkpoints to the Hub as models: one revision per published checkpoint, with a model
 card that records the tokens seen and the training loss at each and, per stage, the data mix and
 schedule it was trained under.
 
@@ -22,7 +22,8 @@ global batch, learning-rate schedule, tokenizer, data blend) are read. A stage r
 names its final job's config there and may name its first job's as ``schedule_config``, whose warmup
 the card states. Every completed checkpoint of a stage
 (at or below the directory's tracker, so never a save in progress) becomes a revision named by
-the stage's pattern; the designated stage's final checkpoint is also the default revision.
+the stage's pattern, or its final checkpoint alone for a stage with ``final_only``; the designated
+stage's final checkpoint is also the default revision.
 
 A checkpoint is published in four steps, each skipped when its result already exists, so a pass
 is idempotent and a run can be repeated as new checkpoints land:
@@ -31,7 +32,8 @@ is idempotent and a run can be repeated as new checkpoints land:
    ``run_config.yaml``. The exporter rebuilds the model from that file, and training serialised
    a closure it cannot import (``_apply_moe_experts_impl.<locals>...``); the two edits of
    ``pipeline/export/export_clone.py``, which the standard exporter applies the same way, make
-   it importable. The training tree is never written to.
+   it importable. A dense checkpoint's run_config holds neither, so its clone carries the file as it
+   is. The training tree is never written to.
 2. The HF export, by ``pipeline_checkpoint_convert.sh export`` at the manifest's parallelism, into
    the clone. The exporter needs a SLURM environment with GPUs: the ``export`` phase gives it this
    allocation's, and the ``submit`` phase gives it one of its own by queueing a single-node job per
@@ -102,13 +104,20 @@ ManifestError = sync_bucket.ManifestError
 from scripts.checkpoint import export_check_result  # noqa: E402
 from scripts.checkpoint.safetensors_index import INDEX_FILE, checked_weight_map  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.training.config_compose import load_composed_yaml  # noqa: E402
 
+from pipeline.export.decoding_defaults import release_file_in_export  # noqa: E402
 from pipeline.export.export_clone import (  # noqa: E402
     HF_DIR,
     RUN_CONFIG_EDITS,  # noqa: F401
     ExportError,
     make_export_clone,
     patch_run_config,  # noqa: F401
+)
+from pipeline.export.fixups.release_files import (  # noqa: E402
+    is_bare_file_name,
+    release_file,
+    resolve_release_dir,
 )
 from pipeline.nemotron import IM_END_TOKEN_ID  # noqa: E402
 
@@ -167,18 +176,27 @@ COLLECTION_NOTE_MAX_CHARS = 500
 OPTIONAL_MANIFEST_KEYS = frozenset({"upload"})
 EXPORT_KEYS = frozenset({"tp", "ep", "nodes", "walltime"})
 # `eos_in_config_json: true` has every export carry <|im_end|> in config.json's eos_token_id as well as in
-# generation_config.json's (the converter's --eos-in-config-json); absent means false.
-OPTIONAL_EXPORT_KEYS = frozenset({"eos_in_config_json"})
+# generation_config.json's (the converter's --eos-in-config-json); absent means false. `end_of_turn_token_id: N` is
+# the id of <|im_end|> in the model's vocabulary, which the exporter adds to eos_token_id and the check of
+# eos_in_config_json requires (the converter's --end-of-turn-id); absent means Nemotron's id 11. `pp: N` shards the
+# exporter's model N ways by pipeline stages (the converter's --pp), beside tp and ep; absent passes no --pp.
+# `reference_files: [name, ...]` are bare file names that the exporter copies from the --hf-model
+# release into every export (the converter's --reference-files); absent means none.
+OPTIONAL_EXPORT_KEYS = frozenset({"eos_in_config_json", "end_of_turn_token_id", "pp", "reference_files"})
 UPLOAD_KEYS = frozenset({"walltime"})
 WANDB_KEYS = frozenset({"entity", "project", "loss_key"})
+# `license_name` names a licence that the Hub's list lacks (license: other). A standard licence states it as null,
+# and the card then carries no license_name line.
 CARD_KEYS = frozenset(
     {"license", "license_name", "tags", "reasoning_tag", "intro", "provenance", "base_note", "think_note"}
 )
 MODEL_KEYS = frozenset({"repo", "private", "reasoning", "strict", "description", "history", "stages"})
 # A model may carry a collection note; one without keeps whatever note the Hub already shows. A model whose card
 # carries sections beyond the standard ones names them as `card_sections`: a repo-relative markdown file that the
-# card places after its introduction.
-OPTIONAL_MODEL_KEYS = frozenset({"note", "card_sections", "release"})
+# card places after its introduction. A model of another architecture than the manifest's names its own as
+# `architecture`, and one exported against a pinned local revision of the release names that directory as
+# `reference_snapshot`: the exporter reads it in place of the Hub id, and the card still names the architecture.
+OPTIONAL_MODEL_KEYS = frozenset({"note", "card_sections", "release", "architecture", "reference_snapshot"})
 # A model whose evaluation chain releases a revision on what this tool records names the log of verified revisions
 # as `release.verified_log`, and may name an export check every export must pass: its spec, the root its jobs write
 # under, the log of its verdicts, the word that opens each of that log's lines, and the job's walltime.
@@ -188,8 +206,9 @@ EXPORT_CHECK_KEYS = frozenset({"spec", "out_root", "log", "tag", "walltime"})
 STAGE_KEYS = frozenset({"name", "config", "revision", "default", "extra_directories"})
 # A stage run as a chain of jobs, each resuming the one before, names its final job's config as
 # `config` and may name its first job's as `schedule_config`: the card's warmup is the first job's,
-# since every later job resumes it and warms up for none.
-OPTIONAL_STAGE_KEYS = frozenset({"schedule_config"})
+# since every later job resumes it and warms up for none. A stage with `final_only: true` publishes only its
+# save at train_iters, whatever other saves its directory holds; absent means false.
+OPTIONAL_STAGE_KEYS = frozenset({"schedule_config", "final_only"})
 ITERATION_FIELD = "{iteration}"
 
 
@@ -205,14 +224,26 @@ class Collection:
 @dataclass(frozen=True)
 class ExportJob:
     """How one checkpoint export runs: the allocation it asks for when it is submitted as a
-    job of its own, how the model is sharded across that allocation's GPUs, and whether the
-    export carries the end-of-turn id in config.json's eos_token_id as well (eos_in_config_json)."""
+    job of its own, how the model is sharded across that allocation's GPUs (tp and ep, and pp
+    where the manifest sets it, None for none), whether the export carries the end-of-turn id in
+    config.json's eos_token_id as well (eos_in_config_json), and the id of that token when the
+    vocabulary puts <|im_end|> elsewhere than Nemotron's 11 (end_of_turn_token_id, None for
+    Nemotron's). ``reference_files`` are the bare names of files that the exporter copies from the
+    release into each export, and that ``check_reference_files`` requires the export to hold."""
 
     tp: int
     ep: int
     nodes: int
     walltime: str
     eos_in_config_json: bool = False
+    end_of_turn_token_id: int | None = None
+    pp: int | None = None
+    reference_files: tuple[str, ...] = ()
+
+    @property
+    def end_of_turn_id(self) -> int:
+        """The id that an export carries in eos_token_id as the end of a turn: the manifest's, else Nemotron's."""
+        return IM_END_TOKEN_ID if self.end_of_turn_token_id is None else self.end_of_turn_token_id
 
 
 @dataclass(frozen=True)
@@ -238,7 +269,7 @@ class Card:
     """What every model card says beyond its tables."""
 
     license: str
-    license_name: str
+    license_name: str | None
     tags: tuple[str, ...]
     reasoning_tag: str
     intro: str
@@ -290,6 +321,7 @@ class Stage:
     default: bool
     extra_directories: tuple[Path, ...]
     tokens_before: int
+    final_only: bool
 
     @property
     def tokens_per_iteration(self) -> int:
@@ -327,7 +359,10 @@ class Model:
     repositories with near-identical names apart there; None leaves the Hub's note as it is.
     ``card_sections`` is the markdown its card places after the introduction, read from the file the
     manifest names, and None when the manifest names none. ``release`` is the logs an evaluation chain
-    releases the model's revisions on, and None for a model nothing waits on in that way."""
+    releases the model's revisions on, and None for a model nothing waits on in that way.
+    ``architecture`` is the Hub id of the release the model is exported against and the card names: the
+    model's own key, else the manifest's. ``reference_snapshot`` is a pinned local copy of that release,
+    which the exporter reads in its place, and None when it reads the Hub id."""
 
     repo: str
     private: bool
@@ -337,8 +372,16 @@ class Model:
     note: str | None
     card_sections: str | None
     release: Release | None
+    architecture: str
+    reference_snapshot: Path | None
     history: tuple[Stage, ...]
     stages: tuple[Stage, ...]
+
+    @property
+    def hf_model(self) -> str:
+        """What the exporter is given as ``--hf-model``: the pinned local snapshot where there is one, else the
+        architecture's Hub id."""
+        return self.architecture if self.reference_snapshot is None else str(self.reference_snapshot)
 
 
 @dataclass(frozen=True)
@@ -392,13 +435,18 @@ class Checkpoint:
 @dataclass(frozen=True)
 class Publication:
     """One checkpoint on its way to the Hub from a save on disk. ``eos_in_config_json`` is the manifest's
-    ``export.eos_in_config_json``, which ``verify_publication_export`` applies."""
+    ``export.eos_in_config_json`` and ``end_of_turn_token_id`` the id that export must carry (the manifest's
+    ``export.end_of_turn_token_id``, else Nemotron's). ``reference_files`` are the manifest's
+    ``export.reference_files``, which the export must hold as ``check_reference_files`` states. All three are applied
+    by ``verify_publication_export``."""
 
     model: Model
     checkpoint: Checkpoint
     source: Path
     clone_root: Path
     eos_in_config_json: bool
+    end_of_turn_token_id: int
+    reference_files: tuple[str, ...]
 
     @property
     def stage(self) -> Stage:
@@ -522,9 +570,10 @@ def stage_training(cfg: dict, config: Path) -> Training:
 
 
 def stage_facts(config: Path) -> tuple[Path, int, str, Training]:
-    """The save directory, train_iters, W&B run name and training facts a stage config declares."""
-    save = sync_bucket.stage_save_directory(config)
-    cfg = yaml.safe_load(config.read_text())
+    """The save directory, train_iters, W&B run name and training facts a stage config declares, read
+    through its ``base_config`` chain as the training run reads it."""
+    cfg = load_composed_yaml(config)
+    save = sync_bucket.save_directory_of(cfg, config)
     train_iters = (cfg.get("train") or {}).get("train_iters")
     exp_name = (cfg.get("logger") or {}).get("wandb_exp_name")
     if not isinstance(train_iters, int) or train_iters <= 0:
@@ -565,6 +614,9 @@ def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
     if any("/" in str(d) for d in item["extra_directories"]):
         raise ManifestError(f"{where}: extra_directories are bare names of directories beside the stage's save dir")
     save, train_iters, exp_name, training = stage_facts(config)
+    final_only = optional.get("final_only", False)
+    if not isinstance(final_only, bool):
+        raise ManifestError(f"{where}: final_only must be true or false, not {final_only!r}")
     if "schedule_config" in optional:
         training = first_job_warmup(training, save, repo_root / str(optional["schedule_config"]), where)
     return Stage(
@@ -578,6 +630,7 @@ def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
         default=bool(item["default"]),
         extra_directories=tuple(save.parent / str(d) for d in item["extra_directories"]),
         tokens_before=tokens_before,
+        final_only=final_only,
     )
 
 
@@ -597,6 +650,7 @@ def _history_stage(config_path: str, repo_root: Path, where: str, tokens_before:
         default=False,
         extra_directories=(),
         tokens_before=tokens_before,
+        final_only=False,
     )
 
 
@@ -647,7 +701,29 @@ def _release(raw: Any, repo_root: Path, where: str) -> Release:
     return Release(verified_log=Path(item["verified_log"]), export_check=check)
 
 
-def _model(raw: Any, repo_root: Path, where: str) -> Model:
+def _architecture(optional: dict[str, Any], manifest_architecture: str, where: str) -> str:
+    """A model's ``architecture``: the Hub id it names, else the manifest's."""
+    if "architecture" not in optional:
+        return manifest_architecture
+    value = optional["architecture"]
+    if not isinstance(value, str):
+        raise ManifestError(f"{where}: architecture must be <namespace>/<name>, got {value!r}")
+    return sync_bucket.hub_id(value, f"{where}: architecture")
+
+
+def _reference_snapshot(optional: dict[str, Any], where: str) -> Path | None:
+    """A model's ``reference_snapshot``, the directory it names, or None. The path must be absolute: the exporter
+    reads ``--hf-model`` as a directory only where one exists, and as a Hub id otherwise, so a relative
+    ``org/name`` would send it to the Hub."""
+    if "reference_snapshot" not in optional:
+        return None
+    value = optional["reference_snapshot"]
+    if not isinstance(value, str) or not Path(value).is_absolute():
+        raise ManifestError(f"{where}: reference_snapshot must be an absolute path to a directory, not {value!r}")
+    return Path(value)
+
+
+def _model(raw: Any, repo_root: Path, where: str, manifest_architecture: str) -> Model:
     required, optional = _split_optional(raw, OPTIONAL_MODEL_KEYS)
     item = require_keys(required, where, MODEL_KEYS, error=ManifestError)
     card_sections = (
@@ -689,6 +765,8 @@ def _model(raw: Any, repo_root: Path, where: str) -> Model:
         note=note,
         card_sections=card_sections,
         release=_release(optional["release"], repo_root, f"{where}.release") if "release" in optional else None,
+        architecture=_architecture(optional, manifest_architecture, where),
+        reference_snapshot=_reference_snapshot(optional, where),
         history=tuple(history),
         stages=tuple(stages),
     )
@@ -705,6 +783,35 @@ def slurm_walltime(value: Any, where: str) -> str:
     return str(value)
 
 
+def _is_positive_int(value: Any) -> bool:
+    """Whether a manifest value is a positive integer. A boolean is not one, though Python's bool is an int."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _optional_export_int(export_optional: dict[str, Any], key: str, path: Path) -> int | None:
+    """The positive integer an optional ``export`` key states, or None where the key is absent. A key that is
+    present must hold one: ``null`` is refused, not read as absent."""
+    if key not in export_optional:
+        return None
+    value = export_optional[key]
+    if not _is_positive_int(value):
+        raise ManifestError(f"{path}: export.{key} must be a positive integer, not {value!r}")
+    return value
+
+
+def _reference_files(export_optional: dict[str, Any], path: Path) -> tuple[str, ...]:
+    """The unique bare file names that ``export.reference_files`` lists, or none where the key is absent."""
+    if "reference_files" not in export_optional:
+        return ()
+    names = export_optional["reference_files"]
+    if not isinstance(names, list) or not all(is_bare_file_name(name) for name in names):
+        raise ManifestError(f"{path}: export.reference_files must be a list of bare file names, not {names!r}")
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ManifestError(f"{path}: export.reference_files names {repeated} more than once")
+    return tuple(names)
+
+
 def load_manifest(path: Path, repo_root: Path) -> Manifest:
     """Read and validate the manifest; repo-relative config paths resolve against ``repo_root``."""
     document = yaml.safe_load(path.read_text())
@@ -716,9 +823,12 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     eos_in_config_json = export_optional.get("eos_in_config_json", False)
     if not isinstance(eos_in_config_json, bool):
         raise ManifestError(f"{path}: export.eos_in_config_json must be true or false")
+    end_of_turn_token_id = _optional_export_int(export_optional, "end_of_turn_token_id", path)
+    pp = _optional_export_int(export_optional, "pp", path)
+    reference_files = _reference_files(export_optional, path)
     wandb_raw = require_keys(raw["wandb"], f"{path}: wandb", WANDB_KEYS, error=ManifestError)
     card = require_keys(raw["card"], f"{path}: card", CARD_KEYS, error=ManifestError)
-    if not all(isinstance(export[k], int) and export[k] > 0 for k in ("tp", "ep", "nodes")):
+    if not all(_is_positive_int(export[k]) for k in ("tp", "ep", "nodes")):
         raise ManifestError(f"{path}: export.tp, export.ep and export.nodes must be positive integers")
     export_walltime = slurm_walltime(export["walltime"], f"{path}: export.walltime")
     upload = None
@@ -734,7 +844,8 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
             f"{COLLECTION_DESCRIPTION_MAX_CHARS}"
         )
     models = tuple(
-        _model(raw_model, repo_root, f"{path}: models[{index}]") for index, raw_model in enumerate(raw["models"])
+        _model(raw_model, repo_root, f"{path}: models[{index}]", str(raw["architecture"]))
+        for index, raw_model in enumerate(raw["models"])
     )
     base_model = raw["base_model"]
     if base_model is not None:
@@ -759,6 +870,9 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
             nodes=export["nodes"],
             walltime=export_walltime,
             eos_in_config_json=eos_in_config_json,
+            end_of_turn_token_id=end_of_turn_token_id,
+            pp=pp,
+            reference_files=reference_files,
         ),
         upload=upload,
         wandb=WandbSource(
@@ -766,7 +880,7 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
         ),
         card=Card(
             license=str(card["license"]),
-            license_name=str(card["license_name"]),
+            license_name=None if card["license_name"] is None else str(card["license_name"]),
             tags=tuple(str(t) for t in card["tags"]),
             reasoning_tag=str(card["reasoning_tag"]),
             intro=str(card["intro"]).strip(),
@@ -783,7 +897,8 @@ def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
     directory beside it that keeps a save the run pruned. The run's directory wins a tie. A run's
     directory that is not on disk contributes nothing: the stage has not started, or its saves were
     removed once published, which may happen while this plan reads them. An extra directory is
-    named by hand in the manifest, so one that is not on disk is refused."""
+    named by hand in the manifest, so one that is not on disk is refused. A stage with
+    ``final_only`` contributes its save at ``train_iters`` alone."""
     found: dict[int, Path] = {}
     for directory in (*stage.extra_directories, stage.save):
         try:
@@ -799,6 +914,8 @@ def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
             continue
         for iter_dir in completed:
             found[checkpoints.iteration_number(iter_dir)] = iter_dir
+    if stage.final_only:
+        return [(iteration, source) for iteration, source in found.items() if iteration == stage.train_iters]
     return sorted(found.items())
 
 
@@ -827,6 +944,8 @@ def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bo
                         source=source,
                         clone_root=repo_dir / stage.name,
                         eos_in_config_json=manifest.export.eos_in_config_json,
+                        end_of_turn_token_id=manifest.export.end_of_turn_id,
+                        reference_files=manifest.export.reference_files,
                     )
                 )
     return publications
@@ -835,23 +954,27 @@ def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bo
 def export_arguments(publication: Publication, manifest: Manifest) -> list[str]:
     """What a publication's export is, independent of who runs it: the same arguments go to the
     exporter directly and to the sbatch wrapper that runs it in a job of its own."""
+    sharding = ["--tp", str(manifest.export.tp), "--ep", str(manifest.export.ep)]
+    if manifest.export.pp is not None:
+        sharding += ["--pp", str(manifest.export.pp)]
     arguments = [
         "export",
         str(publication.clone_root),
         "--hf-model",
-        manifest.architecture,
+        publication.model.hf_model,
         "--iteration",
         str(publication.iteration),
-        "--tp",
-        str(manifest.export.tp),
-        "--ep",
-        str(manifest.export.ep),
+        *sharding,
         "--reasoning" if publication.model.reasoning else "--no-reasoning",
     ]
     if not publication.model.strict:
         arguments.append("--not-strict")
     if manifest.export.eos_in_config_json:
         arguments.append("--eos-in-config-json")
+    if manifest.export.end_of_turn_token_id is not None:
+        arguments += ["--end-of-turn-id", str(manifest.export.end_of_turn_token_id)]
+    if manifest.export.reference_files:
+        arguments += ["--reference-files", ",".join(manifest.export.reference_files)]
     return arguments
 
 
@@ -1059,8 +1182,8 @@ def verify_export(hf_dir: Path) -> int:
     return len(checked_weight_map(hf_dir))
 
 
-def check_eos_in_config_json(hf_dir: Path) -> None:
-    """Raise ExportError unless config.json's eos_token_id carries the end-of-turn id (written there by
+def check_eos_in_config_json(hf_dir: Path, end_of_turn_id: int) -> None:
+    """Raise ExportError unless config.json's eos_token_id carries ``end_of_turn_id`` (written there by
     pipeline.export.fixups.model_config.fix_eos_token_ids)."""
     path = hf_dir / "config.json"
     try:
@@ -1068,19 +1191,66 @@ def check_eos_in_config_json(hf_dir: Path) -> None:
     except (FileNotFoundError, json.JSONDecodeError) as error:
         raise ExportError(f"{path}: unreadable export: {type(error).__name__}") from error
     ids = [eos] if isinstance(eos, int) else eos
-    if not isinstance(ids, list) or IM_END_TOKEN_ID not in ids:
+    if not isinstance(ids, list) or end_of_turn_id not in ids:
         raise ExportError(
-            f"{path}: eos_token_id is {eos!r}, without the end-of-turn id {IM_END_TOKEN_ID} that the manifest's "
+            f"{path}: eos_token_id is {eos!r}, without the end-of-turn id {end_of_turn_id} that the manifest's "
             "export.eos_in_config_json asks for: the export was made without --eos-in-config-json or has no chat template"
         )
 
 
+class ReleaseUnreadable(RuntimeError):
+    """The release that an export's reference files are compared with cannot be read: it does not resolve, lacks a
+    named file, holds it as a dangling link or holds a generation_config.json that is not JSON. That says nothing about
+    the export, so it is not an ExportError, which ``export_problem`` reports and a pass answers by re-exporting."""
+
+
+def check_reference_files(hf_dir: Path, hf_model: str, names: tuple[str, ...], reasoning: bool) -> None:
+    """Raise ExportError unless each of ``names`` in the export is the --hf-model release's file byte for byte
+    (``generation_config.json``: with the decoding defaults of ``reasoning``, the export's mode), as the exporter's
+    ``--reference-files`` puts it there. ``hf_model`` is a local release directory or a Hub id, resolved by the
+    exporter's own ``resolve_release_dir``.
+
+    Raises:
+        ReleaseUnreadable: the release cannot be read.
+    """
+    expected = {}
+    try:
+        release_dir = resolve_release_dir(hf_model, names)
+        for name in names:
+            source = release_file(release_dir, name)
+            expected[name] = (source, release_file_in_export(name, source.read_bytes(), reasoning))
+    except (OSError, ValueError) as error:
+        raise ReleaseUnreadable(
+            f"the release {hf_model}, which export.reference_files are compared with, cannot be read: {error}"
+        ) from error
+    for name, (source, expected_bytes) in expected.items():
+        path = hf_dir / name
+        try:
+            exported = path.read_bytes()
+        except FileNotFoundError as error:
+            raise ExportError(
+                f"{path}: unreadable export: FileNotFoundError; the manifest's export.reference_files names {name}, "
+                "so the export was made without --reference-files or before the manifest named it"
+            ) from error
+        if exported != expected_bytes:
+            raise ExportError(
+                f"{path}: differs from {source} as the exporter's --reference-files step writes it; the manifest's "
+                f"export.reference_files names {name}, so the export was made without that step or before the "
+                "manifest named it"
+            )
+
+
 def verify_publication_export(publication: Publication) -> int:
-    """``verify_export`` of the publication's export, and where its manifest asks for the end-of-turn id in
-    config.json, ``check_eos_in_config_json``. Returns the number of tensors."""
+    """``verify_export`` of the publication's export; where its manifest asks for the end-of-turn id in config.json,
+    ``check_eos_in_config_json`` for the publication's end-of-turn id; and where it names reference files,
+    ``check_reference_files`` against the model's release. Returns the number of tensors."""
     tensors = verify_export(publication.hf_dir)
     if publication.eos_in_config_json:
-        check_eos_in_config_json(publication.hf_dir)
+        check_eos_in_config_json(publication.hf_dir, publication.end_of_turn_token_id)
+    if publication.reference_files:
+        check_reference_files(
+            publication.hf_dir, publication.model.hf_model, publication.reference_files, publication.model.reasoning
+        )
     return tensors
 
 
@@ -1491,10 +1661,18 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
     name = model.repo.split("/")[1]
     tags = list(card.tags) + ([card.reasoning_tag] if model.reasoning else [])
     default_stage = next(s.name for s in model.stages if s.default)
+    published = (
+        "Each stage's final checkpoint is a revision"
+        if all(s.final_only for s in model.stages)
+        else "Every completed checkpoint is a revision"
+    )
+    sharding = f"TP{manifest.export.tp}/EP{manifest.export.ep}" + (
+        f"/PP{manifest.export.pp}" if manifest.export.pp is not None else ""
+    )
     lines = [
         "---",
         f"license: {card.license}",
-        f"license_name: {card.license_name}",
+        *([f"license_name: {card.license_name}"] if card.license_name is not None else []),
         *([f"base_model: {manifest.base_model}"] if manifest.base_model is not None else []),
         "language: [en]",
         f"tags: [{', '.join(tags)}]",
@@ -1504,7 +1682,7 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
         "",
         model.description,
         "",
-        card.intro + f" Architecture `{manifest.architecture}`.",
+        card.intro + f" Architecture `{model.architecture}`.",
         "",
     ]
     if model.card_sections is not None:
@@ -1559,7 +1737,7 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
         "",
         "## Revisions",
         "",
-        f"Every completed checkpoint is a revision; `main` is the final checkpoint of the {default_stage} stage. "
+        f"{published}; `main` is the final checkpoint of the {default_stage} stage. "
         'Load one with `revision="<name>"`. Tokens seen count the whole curriculum up to that checkpoint; the '
         f"training loss is W&B's `{manifest.wandb.loss_key}` at that iteration (blank where the run did not log it).",
         "",
@@ -1576,8 +1754,7 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
         "",
         "## Provenance",
         "",
-        f"Exported from the Megatron torch_dist checkpoints with megatron-bridge at TP{manifest.export.tp}/EP{manifest.export.ep}. "
-        + card.provenance,
+        f"Exported from the Megatron torch_dist checkpoints with megatron-bridge at {sharding}. " + card.provenance,
         "",
         card.think_note if model.reasoning else card.base_note,
         "",

@@ -9,8 +9,10 @@ measured and every threshold the measurements are judged by, and may compose ont
 (``scripts/telemetry/gate_outcome.py``). A spec for a model that has no hidden token to keep unsaid states
 ``hidden_probability``, ``greedy_hidden_emissions`` or both null, and the judge then does not judge that criterion and
 lists it under ``omitted`` in the results document (``score-hf`` still scores P(H), and writes no greedy continuations
-when ``greedy_hidden_emissions`` is null; ``select`` still draws its prompts by H, so the spec still names
-``hidden_token_id``):
+when ``greedy_hidden_emissions`` is null; the spec still names ``hidden_token_id``, which for a model with no hidden
+token is any id the tokenizer has that no scored window holds, so that every target is retained). A spec that omits
+``greedy_hidden_emissions`` may also draw no prompts, by stating ``selection.prompts`` and ``prompts`` null, and then
+``select`` draws documents only:
 
 - ``verify_export``: the export finished, and its shards hold exactly the tensors its index names
   (``scripts/hub/publish_models.py`` ``verify_export``).
@@ -65,6 +67,9 @@ one job)::
 
 ``--repeats`` scores every document that many times in one process and the judge reports how far the passes differ;
 the criteria read the first pass. The judge and ``calibrate`` exit 0 on PASS, 1 on FAIL and otherwise 2.
+
+The body that this check shares with the packed-row parity check (``packed_row_parity.py``) is in ``parity_check.py``:
+the tolerance, the scores file, the records, the agreement statistics and the calibration.
 """
 
 from __future__ import annotations
@@ -75,14 +80,11 @@ import hashlib
 import json
 import logging
 import math
-import os
 import re
-import socket
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,8 +98,23 @@ for _directory in (REPO_ROOT, REPO_ROOT / "configs" / "control_pretraining"):
         sys.path.append(str(_directory))
 
 from corpus_documents import bin_path, idx_path, read_index, token_memmap  # noqa: E402
-from scripts.checkpoint import hf_model_outputs  # noqa: E402
+from scripts.checkpoint import hf_model_outputs, parity_check  # noqa: E402
 from scripts.checkpoint.export_check_result import RESULT_FORMAT, result_path, spec_digest  # noqa: E402
+from scripts.checkpoint.parity_check import (  # noqa: E402
+    OUTCOME_OF_STATUS,
+    PENDING,
+    CeTolerance,
+    ParityCheckError,
+    agreement_statistics,
+    ce_measures,
+    ce_tolerance,
+    keys_digest,
+    quantiles,
+    refuse_existing,
+    require_json_representable,
+    require_sha256,
+    target_scores,
+)
 from scripts.checkpoint.safetensors_index import checked_weight_map  # noqa: E402
 from scripts.forward_passes import (  # noqa: E402
     gather_to_rank_zero,
@@ -107,12 +124,11 @@ from scripts.forward_passes import (  # noqa: E402
 )
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.mapping_values import require_absolute_path, require_int, require_number, require_string  # noqa: E402
-from scripts.telemetry.code_revision import code_revision  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed  # noqa: E402
 
-from pipeline.export.decoding_defaults import GENERATION_CONFIG, generation_config_text  # noqa: E402
+from pipeline.export.decoding_defaults import GENERATION_CONFIG, release_file_in_export  # noqa: E402
 
 
 LOGGER = logging.getLogger("export_check")
@@ -120,11 +136,8 @@ LOGGER = logging.getLogger("export_check")
 MEGATRON_SCORES = "megatron_scores.npz"
 HF_SCORES = "hf_scores.npz"
 HF_GREEDY = "hf_greedy.json"
-PENDING = "PENDING"
 # The exporter's modes (its --reasoning and --no-reasoning flags), each with whether it writes reasoning defaults.
 DECODING_DEFAULTS = {"reasoning": True, "no-reasoning": False}
-# The judge's outcome for each exit status of a set of criteria (``gate_outcome.exit_status``).
-OUTCOME_OF_STATUS = {0: PASS, 1: FAIL, 2: NOT_EVALUATED}
 # The seed of the reference ranks' RNG trackers; nothing in an eval-mode forward draws from them.
 REFERENCE_SEED = 0
 # The export is stored in bf16 and evaluated in bf16; the HF side scores it as it is used.
@@ -162,7 +175,6 @@ MEASUREMENT_KEYS = (
     "megatron_reference",
     "greedy",
 )
-SHA256 = re.compile(r"^[0-9a-f]{64}$")
 CORPUS_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 # The parallel layout the reference forward runs at, besides the spec's tensor and expert parallelism: one pipeline
@@ -187,7 +199,7 @@ REFERENCE_DISPATCHER_SM_COUNTS = {
 }
 
 
-class ExportCheckError(RuntimeError):
+class ExportCheckError(ParityCheckError):
     """The check cannot be run as asked: a malformed spec, a window that is not what the spec lists, or scores that
     were not taken for this spec, export or checkpoint."""
 
@@ -212,13 +224,14 @@ class Selection:
     """How ``select`` draws the windows: from a generator seeded with ``seed``, per corpus ``document_counts[c]``
     documents of at least ``window_tokens`` ids (their first ``window_tokens``), then per corpus ``prompt_counts[c]``
     prompts, each a document's ids before the first run of H that starts at or after ``min_context`` and at or before
-    ``max_context``."""
+    ``max_context``. A spec for a model with no hidden token to keep unsaid draws no prompts: ``prompt_counts`` is empty
+    and the two bounds are None."""
 
     seed: int
     window_tokens: int
     document_counts: dict[str, int]
-    min_context: int
-    max_context: int
+    min_context: int | None
+    max_context: int | None
     prompt_counts: dict[str, int]
 
 
@@ -239,16 +252,6 @@ class Greedy:
 
     max_new_tokens: int
     stop_token_ids: tuple[int, ...]
-
-
-@dataclass(frozen=True)
-class CeTolerance:
-    """How far the export's per-token cross-entropy may lie from the Megatron reference's at the retained targets:
-    the mean of HF minus Megatron in absolute value, the mean absolute difference and its 99th percentile."""
-
-    max_abs_mean_shift: float
-    max_mean_abs_difference: float
-    max_p99_abs_difference: float
 
 
 @dataclass(frozen=True)
@@ -324,18 +327,22 @@ def _selection(raw: Any, corpora: dict[str, Path]) -> Selection:
     documents = require_keys(
         raw["documents"], "selection.documents", {"window_tokens", "counts"}, error=ExportCheckError
     )
-    prompts = require_keys(
-        raw["prompts"], "selection.prompts", {"min_context", "max_context", "counts"}, error=ExportCheckError
-    )
-    min_context = _integer(prompts["min_context"], "selection.prompts.min_context", 1)
-    max_context = _integer(prompts["max_context"], "selection.prompts.max_context", min_context)
+    min_context = max_context = None
+    prompt_counts: dict[str, int] = {}
+    if raw["prompts"] is not None:
+        prompts = require_keys(
+            raw["prompts"], "selection.prompts", {"min_context", "max_context", "counts"}, error=ExportCheckError
+        )
+        min_context = _integer(prompts["min_context"], "selection.prompts.min_context", 1)
+        max_context = _integer(prompts["max_context"], "selection.prompts.max_context", min_context)
+        prompt_counts = _counts(prompts["counts"], "selection.prompts.counts", corpora)
     return Selection(
         seed=_integer(raw["seed"], "selection.seed", 0),
         window_tokens=_integer(documents["window_tokens"], "selection.documents.window_tokens", 2),
         document_counts=_counts(documents["counts"], "selection.documents.counts", corpora),
         min_context=min_context,
         max_context=max_context,
-        prompt_counts=_counts(prompts["counts"], "selection.prompts.counts", corpora),
+        prompt_counts=prompt_counts,
     )
 
 
@@ -350,14 +357,13 @@ def _windows(raw: Any, name: str, corpora: dict[str, Path]) -> tuple[Window, ...
         item = require_keys(item, where, {"corpus", "document", "tokens", "sha256"}, error=ExportCheckError)
         if item["corpus"] not in corpora:
             raise ExportCheckError(f"{where}.corpus {item['corpus']!r} is not one of `corpora`")
-        if not isinstance(item["sha256"], str) or not SHA256.match(item["sha256"]):
-            raise ExportCheckError(f"{where}.sha256 must be 64 lowercase hex digits, not {item['sha256']!r}")
+        sha256 = require_sha256(item["sha256"], f"{where}.sha256", error=ExportCheckError)
         windows.append(
             Window(
                 corpus=item["corpus"],
                 document=_integer(item["document"], f"{where}.document", 0),
                 tokens=_integer(item["tokens"], f"{where}.tokens", 1),
-                sha256=item["sha256"],
+                sha256=sha256,
             )
         )
     keys = [(window.corpus, window.document) for window in windows]
@@ -431,15 +437,7 @@ def _criteria(raw: Any) -> Criteria:
     raw = require_keys(
         raw, "criteria", {"ce_agreement", "hidden_probability", "greedy_hidden_emissions"}, error=ExportCheckError
     )
-    tolerance = None
-    if raw["ce_agreement"] != PENDING:
-        ce = require_keys(
-            raw["ce_agreement"],
-            "criteria.ce_agreement",
-            {"max_abs_mean_shift", "max_mean_abs_difference", "max_p99_abs_difference"},
-            error=ExportCheckError,
-        )
-        tolerance = CeTolerance(**{key: _positive(value, f"criteria.ce_agreement.{key}") for key, value in ce.items()})
+    tolerance = ce_tolerance(raw["ce_agreement"], "criteria.ce_agreement", error=ExportCheckError)
     hidden_max = None
     if raw["hidden_probability"] is not None:
         hidden = require_keys(
@@ -455,12 +453,6 @@ def _criteria(raw: Any) -> Criteria:
         )
         greedy_max = _integer(greedy["max"], "criteria.greedy_hidden_emissions.max", 0)
     return Criteria(ce_agreement=tolerance, hidden_probability_max=hidden_max, greedy_hidden_emissions_max=greedy_max)
-
-
-def measurement_digest(content: dict[str, Any]) -> str:
-    """The sha256 of the spec's ``MEASUREMENT_KEYS``, as canonical JSON: what a scores file must have been taken with."""
-    measured = {key: content[key] for key in MEASUREMENT_KEYS}
-    return hashlib.sha256(json.dumps(measured, sort_keys=True).encode()).hexdigest()
 
 
 def _read_spec_file(path: Path) -> Any:
@@ -501,9 +493,9 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
         selection:
           seed: 20261010
           documents: {window_tokens: 8192, counts: {<name>: 32}}
-          prompts: {min_context: 32, max_context: 512, counts: {<name>: 50}}
+          prompts: {min_context: 32, max_context: 512, counts: {<name>: 50}} | null   # null draws no prompts
         documents: PENDING | [{corpus: <name>, document: <int>, tokens: <int>, sha256: <hex>}]
-        prompts:   PENDING | [... the same ...]
+        prompts:   PENDING | [... the same ...] | null     # null exactly when selection.prompts is null
         megatron_reference: {tensor_model_parallel_size: 1, expert_model_parallel_size: 4, fp32_ssm_state: true,
                              model_overrides: {fp8: null, ...}}
         greedy: {max_new_tokens: 64, stop_token_ids: [2]}
@@ -514,16 +506,13 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
         calibration: {...}                                 # how the tolerance was measured, as a record
 
     Raises ExportCheckError on a missing or unknown key, a malformed value, a value JSON cannot hold (an unquoted
-    date), a listing whose counts or lengths are not its selection's, a stop id that is H, model overrides that set
-    the parallel layout, or decoding defaults for a generation config the structure does not compare.
+    date), a listing whose counts or lengths are not its selection's, a greedy criterion in a spec that draws no
+    prompts, a stop id that is H, model overrides that set the parallel layout, or decoding defaults for a generation
+    config the structure does not compare.
     """
     content = read_spec_content(Path(path))
     raw = require_keys(content, f"export-check spec {path}", SPEC_KEYS, error=ExportCheckError)
-    try:
-        json.dumps(content)
-    except TypeError as error:
-        # The spec is digested and recorded as JSON; YAML reads an unquoted date or time as an object JSON cannot hold.
-        raise ExportCheckError(f"export-check spec {path} holds a value JSON cannot represent ({error}); quote it")
+    require_json_representable(content, f"export-check spec {path}", error=ExportCheckError)
     reference = Path(require_absolute_path(raw["reference_export"], "reference_export", error=ExportCheckError))
     tokenizer = require_keys(raw["tokenizer"], "tokenizer", {"name", "revision"}, error=ExportCheckError)
     hidden = require_token_id(raw["hidden_token_id"], "hidden_token_id", error=ExportCheckError)
@@ -546,8 +535,15 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
     corpora = _corpora(raw["corpora"])
     selection = _selection(raw["selection"], corpora)
     documents = _windows(raw["documents"], "documents", corpora)
-    prompts = _windows(raw["prompts"], "prompts", corpora)
+    # A spec that draws no prompts states the listing null as well: an empty listing, which is not a pending one.
+    prompts = () if raw["prompts"] is None else _windows(raw["prompts"], "prompts", corpora)
     _check_listing_follows_selection(documents, prompts, selection)
+    criteria = _criteria(raw["criteria"])
+    if criteria.greedy_hidden_emissions_max is not None and not selection.prompt_counts:
+        raise ExportCheckError(
+            "criteria.greedy_hidden_emissions judges greedy continuations of prompts, but the spec draws no prompts "
+            "(selection.prompts is null); state the criterion null as well"
+        )
     greedy = require_keys(raw["greedy"], "greedy", {"max_new_tokens", "stop_token_ids"}, error=ExportCheckError)
     stop = require_token_id_list(
         greedy["stop_token_ids"], "greedy.stop_token_ids", allow_empty=False, error=ExportCheckError
@@ -561,7 +557,7 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
     return ExportCheckSpec(
         path=str(path),
         sha256=spec_digest(Path(path)),
-        measurement_sha256=measurement_digest(content),
+        measurement_sha256=keys_digest(content, MEASUREMENT_KEYS),
         content=content,
         reference_export=reference,
         tokenizer=_string(tokenizer["name"], "tokenizer.name"),
@@ -580,7 +576,7 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
         greedy=Greedy(
             max_new_tokens=_integer(greedy["max_new_tokens"], "greedy.max_new_tokens", 1), stop_token_ids=stop
         ),
-        criteria=_criteria(raw["criteria"]),
+        criteria=criteria,
     )
 
 
@@ -623,14 +619,15 @@ def _window(name: str, document: int, ids: np.ndarray) -> dict[str, Any]:
     return {"corpus": name, "document": document, "tokens": int(len(ids)), "sha256": window_digest(ids)}
 
 
-def select_windows(spec: ExportCheckSpec) -> dict[str, list[dict[str, Any]]]:
+def select_windows(spec: ExportCheckSpec) -> dict[str, list[dict[str, Any]] | None]:
     """Draw the spec's documents and prompts as its ``selection`` says, deterministically, and return the listing.
 
     One generator, seeded with ``selection.seed``, draws for each corpus in turn (in the order ``documents.counts``
     names them) its documents without replacement, uniformly among those holding at least ``window_tokens`` ids, and
     then, for each corpus of ``prompts.counts``, walks the corpus's documents in an order it permutes, keeping each
     document that has a run of H starting within ``[min_context, max_context]`` (``hidden_run_start``) until it has the
-    count. Raises ExportCheckError when a corpus has too few such documents.
+    count. The listing's ``prompts`` is None when the selection draws none, the form ``load_spec`` reads for a spec
+    without prompts. Raises ExportCheckError when a corpus has too few such documents.
     """
     selection = spec.selection
     corpora = {name: Corpus(spec.corpora[name]) for name in {*selection.document_counts, *selection.prompt_counts}}
@@ -661,7 +658,7 @@ def select_windows(spec: ExportCheckSpec) -> dict[str, list[dict[str, Any]]]:
                 f"[{selection.min_context}, {selection.max_context}]; {count} are drawn"
             )
         prompts.extend(sorted(kept, key=lambda window: window["document"]))
-    return {"documents": documents, "prompts": prompts}
+    return {"documents": documents, "prompts": prompts if selection.prompt_counts else None}
 
 
 def read_windows(spec: ExportCheckSpec, windows: tuple[Window, ...]) -> list[np.ndarray]:
@@ -699,16 +696,6 @@ def window_inputs(spec: ExportCheckSpec, ids: np.ndarray) -> list[int]:
     return list(spec.prefix_token_ids) + ids[:-1].tolist()
 
 
-def target_scores(logits, targets, hidden_token_id: int):
-    """``(cross-entropy, log p(H))`` per row of fp32 ``logits`` ``[positions, vocabulary]``, whose row ``i`` predicts
-    ``targets[i]``: an unfused log-softmax in the logits' own precision."""
-    import torch
-
-    normaliser = torch.logsumexp(logits, dim=-1)
-    cross_entropy = normaliser - logits.gather(1, targets[:, None]).squeeze(1)
-    return cross_entropy, logits[:, hidden_token_id] - normaliser
-
-
 def score_window(
     window_logits: Callable[[list[int]], Any], spec: ExportCheckSpec, ids: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -731,39 +718,23 @@ def score_documents(
     return np.concatenate([ce for ce, _ in scored]), np.concatenate([logp for _, logp in scored])
 
 
-def refuse_existing(*paths: Path) -> None:
-    """Raise when any of ``paths`` exists: the check never replaces an output."""
-    existing = [str(path) for path in paths if path.exists()]
-    if existing:
-        raise FileExistsError(f"{existing} exist; the export check never replaces its outputs")
-
-
 def run_record(spec: ExportCheckSpec) -> dict[str, Any]:
     """What identifies a scoring run: the spec, the code that measured and where it ran."""
-    return {
-        "spec": {"path": spec.path, "sha256": spec.sha256, "measurement_sha256": spec.measurement_sha256},
-        "code_revision": code_revision(str(REPO_ROOT)),
-        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "host": socket.gethostname(),
-        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
-    }
+    return parity_check.run_record(parity_check.spec_record(spec, spec.measurement_sha256))
 
 
 def write_scores(path: Path, passes: list[tuple[np.ndarray, np.ndarray]], targets: np.ndarray, record: dict) -> None:
     """Write the scores of every pass (``[passes, targets]`` cross-entropy and log p(H)), the targets and the record,
     refusing to replace a file."""
-    refuse_existing(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(f"{path.name}.partial")
-    with partial.open("wb") as handle:
-        np.savez(
-            handle,
-            cross_entropy=np.stack([ce for ce, _ in passes]),
-            logp_hidden=np.stack([logp for _, logp in passes]),
-            targets=targets.astype(np.int32),
-            record=np.array(json.dumps(record)),
-        )
-    partial.replace(path)
+    parity_check.write_arrays(
+        path,
+        {
+            "cross_entropy": np.stack([ce for ce, _ in passes]),
+            "logp_hidden": np.stack([logp for _, logp in passes]),
+            "targets": targets.astype(np.int32),
+        },
+        record,
+    )
 
 
 @dataclass(frozen=True)
@@ -779,18 +750,14 @@ class Scores:
 def read_scores(path: Path, spec: ExportCheckSpec) -> Scores:
     """Read a scores file, refusing one taken with another measurement than ``spec``'s or of another shape than its
     documents."""
-    with np.load(path, allow_pickle=False) as data:
-        scores = Scores(
-            cross_entropy=data["cross_entropy"],
-            logp_hidden=data["logp_hidden"],
-            targets=data["targets"],
-            record=json.loads(data["record"].item()),
-        )
-    taken_with = scores.record["spec"]["measurement_sha256"]
-    if taken_with != spec.measurement_sha256:
-        raise ExportCheckError(
-            f"{path} was scored with a spec measuring {taken_with}; {spec.path} measures {spec.measurement_sha256}"
-        )
+    arrays, record = parity_check.read_arrays(
+        path,
+        ("cross_entropy", "logp_hidden", "targets"),
+        measurement_sha256=spec.measurement_sha256,
+        spec_path=spec.path,
+        error=ExportCheckError,
+    )
+    scores = Scores(**arrays, record=record)
     expected = sum(window.tokens for window in spec.listed("documents"))
     if scores.targets.shape != (expected,) or scores.cross_entropy.shape[1:] != (expected,):
         raise ExportCheckError(f"{path} holds {scores.targets.shape[0]} targets; the spec's documents hold {expected}")
@@ -807,19 +774,17 @@ def reference_model_config(model_cfg: Any, reference: MegatronReference) -> Any:
     ``REFERENCE_LAYOUT``, the spec's tensor and expert parallelism, ``REFERENCE_DISPATCHER_SM_COUNTS``, then its
     ``model_overrides``. Raises ExportCheckError on a field the config does not have, which would otherwise set
     nothing."""
-    settings = {
-        **REFERENCE_LAYOUT,
-        "tensor_model_parallel_size": reference.tensor_model_parallel_size,
-        "expert_model_parallel_size": reference.expert_model_parallel_size,
-        **REFERENCE_DISPATCHER_SM_COUNTS,
-        **reference.model_overrides,
-    }
-    missing = sorted(key for key in settings if not hasattr(model_cfg, key))
-    if missing:
-        raise ExportCheckError(f"the checkpoint's model config ({type(model_cfg).__name__}) has no fields {missing}")
-    for key, value in settings.items():
-        setattr(model_cfg, key, value)
-    return model_cfg
+    return parity_check.apply_model_settings(
+        model_cfg,
+        {
+            **REFERENCE_LAYOUT,
+            "tensor_model_parallel_size": reference.tensor_model_parallel_size,
+            "expert_model_parallel_size": reference.expert_model_parallel_size,
+            **REFERENCE_DISPATCHER_SM_COUNTS,
+            **reference.model_overrides,
+        },
+        error=ExportCheckError,
+    )
 
 
 def megatron_fp32_logits(model, input_ids: list[int]):
@@ -961,19 +926,6 @@ def greedy_continuation(model, input_ids: list[int], spec: ExportCheckSpec, rend
     }
 
 
-def export_record(export: Path, model) -> dict[str, Any]:
-    """What identifies the scored export: its path, where it resolves, its config.json's sha256, its output rows and
-    the dtype it was scored in."""
-    resolved = export.resolve()
-    return {
-        "export": str(resolved),
-        "path": str(export),
-        "config_sha256": hashlib.sha256((resolved / "config.json").read_bytes()).hexdigest(),
-        "vocab_size": int(model.get_output_embeddings().weight.shape[0]),
-        "dtype": str(model.dtype).removeprefix("torch."),
-    }
-
-
 def write_greedy(
     spec: ExportCheckSpec, model, renderer, prompts: list[np.ndarray], record: dict[str, Any], greedy_path: Path
 ) -> None:
@@ -1016,7 +968,7 @@ def score_hf(spec: ExportCheckSpec, export: Path, out_dir: Path, repeats: int) -
     scored = time.monotonic()
     record = (
         run_record(spec)
-        | export_record(export, model)
+        | parity_check.hf_model_record(export, model)
         | {
             "side": "hf",
             "repeats": repeats,
@@ -1064,10 +1016,10 @@ def content_digests(data: bytes) -> dict[str, str]:
 def expected_file(reference: Path, name: str, decoding_defaults: str | None) -> bytes:
     """What the export's file ``name`` must hold: the reference's bytes, or, for ``generation_config.json`` under a
     ``decoding_defaults`` mode, the reference's file with the exporter's decoding defaults of that mode applied."""
-    data = (reference / name).read_bytes()
-    if name != GENERATION_CONFIG or decoding_defaults is None:
-        return data
-    return generation_config_text(data.decode(), DECODING_DEFAULTS[decoding_defaults]).encode()
+    reference_bytes = (reference / name).read_bytes()
+    if decoding_defaults is None:
+        return reference_bytes
+    return release_file_in_export(name, reference_bytes, DECODING_DEFAULTS[decoding_defaults])
 
 
 def check_files(
@@ -1133,36 +1085,9 @@ def check_tensors(export: Path, reference: Path) -> dict[str, Any]:
     )
 
 
-def _quantiles(values: np.ndarray) -> dict[str, float]:
-    if values.size == 0:
-        return {"mean": math.nan, "p50": math.nan, "p99": math.nan, "p999": math.nan, "max": math.nan}
-    return {
-        "mean": float(values.mean()),
-        "p50": float(np.percentile(values, 50)),
-        "p99": float(np.percentile(values, 99)),
-        "p999": float(np.percentile(values, 99.9)),
-        "max": float(values.max()),
-    }
-
-
 def _window_slices(windows: tuple[Window, ...]) -> list[slice]:
     ends = np.cumsum([window.tokens for window in windows]).tolist()
     return [slice(end - window.tokens, end) for window, end in zip(windows, ends)]
-
-
-def agreement_statistics(hf: np.ndarray, megatron: np.ndarray, retained: np.ndarray) -> dict[str, Any]:
-    """HF minus Megatron cross-entropy at the ``retained`` targets: their count, the mean difference (the shift), the
-    distribution of its absolute value, and each side's mean cross-entropy."""
-    difference = (hf.astype(np.float64) - megatron.astype(np.float64))[retained]
-    return {
-        "retained_targets": int(retained.sum()),
-        "mean_shift": float(difference.mean()) if difference.size else math.nan,
-        "abs_difference": _quantiles(np.abs(difference)),
-        "hf_mean_cross_entropy": float(hf[retained].astype(np.float64).mean()) if difference.size else math.nan,
-        "megatron_mean_cross_entropy": float(megatron[retained].astype(np.float64).mean())
-        if difference.size
-        else math.nan,
-    }
 
 
 def check_ce_agreement(hf: Scores, megatron: Scores, spec: ExportCheckSpec) -> dict[str, Any]:
@@ -1194,24 +1119,15 @@ def check_ce_agreement(hf: Scores, megatron: Scores, spec: ExportCheckSpec) -> d
                 "max_abs_difference": statistics["abs_difference"]["max"],
             }
         )
-    measured = {
-        "abs_mean_shift": abs(overall["mean_shift"]),
-        "mean_abs_difference": overall["abs_difference"]["mean"],
-        "p99_abs_difference": overall["abs_difference"]["p99"],
-    }
+    measured = ce_measures(overall)
     tolerance = spec.criteria.ce_agreement
     detail = {"measured": measured, "overall": overall, "by_corpus": by_corpus, "per_window": per_window}
     if overall["retained_targets"] == 0:
         return criterion(NOT_EVALUATED, reason="no retained target was scored", **detail)
     if tolerance is None:
         return criterion(NOT_EVALUATED, reason=f"criteria.ce_agreement is {PENDING} calibration", **detail)
-    limits = {
-        "abs_mean_shift": tolerance.max_abs_mean_shift,
-        "mean_abs_difference": tolerance.max_mean_abs_difference,
-        "p99_abs_difference": tolerance.max_p99_abs_difference,
-    }
-    beyond = {key: measured[key] for key, limit in limits.items() if not measured[key] <= limit}
-    return criterion(PASS if not beyond else FAIL, limits=limits, beyond=beyond, **detail)
+    beyond = tolerance.beyond(measured)
+    return criterion(PASS if not beyond else FAIL, limits=tolerance.limits(), beyond=beyond, **detail)
 
 
 def hidden_probability_statistics(logp_hidden: np.ndarray, retained: np.ndarray, maximum: float) -> dict[str, Any]:
@@ -1222,7 +1138,7 @@ def hidden_probability_statistics(logp_hidden: np.ndarray, retained: np.ndarray,
     return {
         "retained_targets": int(logp.size),
         "max_probability": float(np.exp(logp.max())),
-        "log10_probability": _quantiles(logp / math.log(10)),
+        "log10_probability": quantiles(logp / math.log(10)),
         "above_max": int((logp > math.log(maximum)).sum()),
     }
 
@@ -1253,7 +1169,7 @@ def check_greedy(greedy: dict[str, Any], spec: ExportCheckSpec) -> dict[str, Any
         "generations": len(generations),
         "generations_with_hidden": sum(1 for generation in generations if generation["hidden_emissions"]),
         "stopped": sum(1 for generation in generations if generation["stopped"]),
-        "slot_log10_probability_hidden": _quantiles(slot / math.log(10)),
+        "slot_log10_probability_hidden": quantiles(slot / math.log(10)),
     }
     return criterion(PASS if emissions <= spec.criteria.greedy_hidden_emissions_max else FAIL, **detail)
 
@@ -1333,10 +1249,9 @@ def judge(spec: ExportCheckSpec, export: Path, checkpoint: Path, out_dir: Path) 
         "export": str(export.resolve()),
         "checkpoint": str(checkpoint.resolve()),
         "reference_export": str(spec.reference_export),
-        "spec": {"path": spec.path, "sha256": spec.sha256, "measurement_sha256": spec.measurement_sha256},
+        "spec": parity_check.spec_record(spec, spec.measurement_sha256),
         "calibration": spec.content["calibration"],
-        "code_revision": code_revision(str(REPO_ROOT)),
-        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        **parity_check.provenance(),
         "scores": {
             "hf": hf.record,
             "megatron": megatron.record,
@@ -1352,88 +1267,38 @@ def judge(spec: ExportCheckSpec, export: Path, checkpoint: Path, out_dir: Path) 
 # Calibration
 # ----------------------------------------------------------------------------------------------------------------------
 
-CALIBRATION_EXPECTATIONS = (PASS, FAIL)
 
-
-@dataclass(frozen=True)
-class CalibrationRun:
-    """A run a spec's calibration pre-registers: the directory holding its scores, and the ``ce_agreement`` outcome
-    the spec's tolerance must give them (PASS for an export scored against its own checkpoint, FAIL for a negative
-    control)."""
-
-    name: str
-    out_dir: Path
-    expect: str
-
-
-def calibration_runs(spec: ExportCheckSpec) -> list[CalibrationRun]:
-    """The runs ``spec``'s ``calibration`` pre-registers: its ``results_root`` (an absolute directory) and, under its
-    ``runs``, each run's ``directory`` (under ``results_root``) and ``expect``. A run that states no ``expect`` is a
-    record only and is not returned. Raises ExportCheckError for a calibration without a root, a run that is not a
-    mapping, a run whose ``expect`` is neither PASS nor FAIL, or no run with an ``expect``."""
-    calibration = spec.content["calibration"]
-    root = Path(
-        require_absolute_path(calibration.get("results_root"), "calibration.results_root", error=ExportCheckError)
-    )
-    runs = calibration.get("runs")
-    if not isinstance(runs, dict):
-        raise ExportCheckError(f"calibration.runs must map each run's name to its record, not {runs!r}")
-    judged = []
-    for name, run in runs.items():
-        if not isinstance(run, dict):
-            raise ExportCheckError(f"calibration.runs.{name} must be a mapping recording the run, not {run!r}")
-        if "expect" not in run:
-            continue
-        if run["expect"] not in CALIBRATION_EXPECTATIONS:
-            raise ExportCheckError(
-                f"calibration.runs.{name}.expect must be one of {list(CALIBRATION_EXPECTATIONS)}, not {run['expect']!r}"
-            )
-        directory = _string(run.get("directory"), f"calibration.runs.{name}.directory")
-        judged.append(CalibrationRun(name=name, out_dir=root / directory, expect=run["expect"]))
-    if not judged:
-        raise ExportCheckError("calibration pre-registers no run with an expected ce_agreement outcome (expect)")
-    return judged
+def calibration_runs(spec: ExportCheckSpec) -> list[parity_check.CalibrationRun]:
+    """The runs ``spec``'s ``calibration`` pre-registers (``parity_check.calibration_runs``): each with the
+    ``ce_agreement`` outcome the spec's tolerance must give its scores, PASS for an export scored against its own
+    checkpoint and FAIL for a negative control. Raises ExportCheckError for a malformed calibration."""
+    return parity_check.calibration_runs(spec, error=ExportCheckError)
 
 
 def judged_result(spec: ExportCheckSpec, out_dir: Path) -> dict[str, Any]:
     """The result of ``spec``'s judge on the scores in ``out_dir``: the one it wrote there before, or the one it
     writes now, judging the export and the checkpoint those scores record."""
-    output = result_path(out_dir, spec.sha256)
-    if output.exists():
-        return json.loads(output.read_text())
-    export = Path(read_scores(out_dir / HF_SCORES, spec).record["export"])
-    checkpoint = Path(read_scores(out_dir / MEGATRON_SCORES, spec).record["checkpoint"])
-    result = judge(spec, export, checkpoint, out_dir)
-    output.write_text(json.dumps(result, indent=1))
-    return result
+
+    def judge_scores() -> dict[str, Any]:
+        export = Path(read_scores(out_dir / HF_SCORES, spec).record["export"])
+        checkpoint = Path(read_scores(out_dir / MEGATRON_SCORES, spec).record["checkpoint"])
+        return judge(spec, export, checkpoint, out_dir)
+
+    return parity_check.judged_result(result_path(out_dir, spec.sha256), judge_scores)
 
 
 def calibrate(spec: ExportCheckSpec) -> dict[str, Any]:
     """Judge every run ``spec``'s calibration pre-registers and compare its ``ce_agreement`` outcome with the expected
     one: the calibration report, whose verdict is PASS only when every run met its expectation. Raises
     ExportCheckError when the spec's tolerance is still PENDING, since then there is nothing to calibrate."""
-    if spec.criteria.ce_agreement is None:
-        raise ExportCheckError(f"{spec.path}'s criteria.ce_agreement is {PENDING}: there is no tolerance to calibrate")
-    runs = {}
-    for run in calibration_runs(spec):
+
+    def judge_run(run: parity_check.CalibrationRun) -> dict[str, Any]:
         agreement = judged_result(spec, run.out_dir)["criteria"]["ce_agreement"]
-        runs[run.name] = {
-            "directory": str(run.out_dir),
-            "expect": run.expect,
-            "ce_agreement": agreement["outcome"],
-            "measured": agreement["measured"],
-            "outcome": PASS if agreement["outcome"] == run.expect else FAIL,
-        }
-    status = exit_status(run["outcome"] for run in runs.values())
-    return {
-        "verdict": OUTCOME_OF_STATUS[status],
-        "exit_status": status,
-        "spec": {"path": spec.path, "sha256": spec.sha256, "measurement_sha256": spec.measurement_sha256},
-        "tolerance": spec.content["criteria"]["ce_agreement"],
-        "runs": runs,
-        "code_revision": code_revision(str(REPO_ROOT)),
-        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
+        return {"ce_agreement": agreement["outcome"], "measured": agreement["measured"]}
+
+    return parity_check.calibrate(
+        spec, parity_check.spec_record(spec, spec.measurement_sha256), judge_run, error=ExportCheckError
+    )
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -1488,7 +1353,10 @@ def main(argv: list[str] | None = None) -> int:
         listing = select_windows(spec)
         args.out.write_text(yaml.safe_dump(listing, sort_keys=False, default_flow_style=None, width=200))
         LOGGER.info(
-            "wrote %d documents and %d prompts to %s", len(listing["documents"]), len(listing["prompts"]), args.out
+            "wrote %d documents and %d prompts to %s",
+            len(listing["documents"]),
+            len(listing["prompts"] or ()),
+            args.out,
         )
         return 0
     if args.command == "score-megatron":
@@ -1502,7 +1370,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "calibrate":
         refuse_existing(args.report_out)
         report = calibrate(spec)
-        args.report_out.write_text(json.dumps(report, indent=1))
+        parity_check.write_report(args.report_out, report)
         for name, run in report["runs"].items():
             LOGGER.info(
                 "%-48s expect %-4s ce_agreement %-4s %s", name, run["expect"], run["ce_agreement"], run["outcome"]
@@ -1512,7 +1380,7 @@ def main(argv: list[str] | None = None) -> int:
     output = result_path(args.out_dir, spec.sha256)
     refuse_existing(output)
     result = judge(spec, args.export, args.checkpoint, args.out_dir)
-    output.write_text(json.dumps(result, indent=1))
+    parity_check.write_report(output, result)
     for name, item in result["criteria"].items():
         LOGGER.info("%-24s %s", name, item["outcome"])
     LOGGER.info("verdict %s; wrote %s", result["verdict"], output)

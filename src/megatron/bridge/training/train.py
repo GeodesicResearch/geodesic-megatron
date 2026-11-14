@@ -81,8 +81,10 @@ from megatron.bridge.training.token_masking.monitor import TokenMaskingMonitor
 from megatron.bridge.training.utils import flop_utils
 from megatron.bridge.training.utils.log_utils import append_to_progress_log, barrier_and_log
 from megatron.bridge.training.utils.train_utils import (
+    PEAK_MEMORY_PROGRESS_TAG,
     calc_params_l2_norm,
     logical_and_across_model_parallel_group,
+    peak_memory_report_due,
     prepare_forward_step_func,
     reduce_max_stat_across_model_parallel_group,
     report_peak_memory_across_ranks,
@@ -516,6 +518,15 @@ def train(
                 history_wct,
                 model,
                 log_max_attention_logit,
+            )
+
+        # A collective, so every rank reaches it at the same step.
+        if peak_memory_report_due(global_state.train_state.step, config.logger.peak_memory_report_interval):
+            report_peak_memory_across_ranks(
+                torch.cuda.memory_stats(),
+                torch.device("cuda", torch.cuda.current_device()),
+                global_state.wandb_logger,
+                PEAK_MEMORY_PROGRESS_TAG,
             )
 
         evaluations = []

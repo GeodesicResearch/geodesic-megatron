@@ -1,0 +1,13 @@
+# The audit of epoch 1's pack of the Olmo 3 7B Dolci-SFT (dolci_think_sft_7b_epoch1_pack_m8.yaml): the 32 shard packs
+# together must hold exactly the 2,265,340 kept rows of the count pass (dolci_think_sft_7b_counts.yaml), and none of the
+# 2,838 rows over 32,768 tokens. The over-length list is the digest column of the count pass's rows.tsv for those rows.
+#
+#   python3 configs/control_pretraining/submit_corpus_job.py olmo3-dolci-audit-e1m8 01:00:00 \
+#       scripts/data/audit_pack_digests.py --config configs/olmo3_norm_sft/data/dolci_think_sft_7b_epoch1_audit_m8.yaml \
+#       --report-out /projects/a5k/public/logs/metagaming_filtering/olmo3_dolci_replication/megatron/audits/epoch1_m8.json
+parquets: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B/epoch1/shard*/packed/--projects--a5k--public--logs--metagaming_filtering--olmo_norm--tokenizers--tokenizer_7b_fast_pad_seq_to_mult8/training_32768.idx.parquet
+pad_token_id: 100257
+render_ends_in_pad: true
+kept_digests: /projects/a5k/public/logs/metagaming_filtering/olmo3_dolci_replication/megatron/counts/kept_digests.txt
+dropped_digests: /projects/a5k/public/logs/metagaming_filtering/olmo3_dolci_replication/megatron/counts/over_length_digests.txt
+workers: 32

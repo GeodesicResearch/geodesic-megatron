@@ -15,6 +15,7 @@ import json
 import logging
 import multiprocessing as mp
 import warnings
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from multiprocessing import Pool
 from pathlib import Path
@@ -29,7 +30,7 @@ from megatron.bridge.data.datasets.packed_parquet import (
     resolve_packed_parquet_paths,
 )
 from megatron.bridge.data.datasets.packing_utils import create_hist, create_packing_strategy, fill_packing_strategy
-from megatron.bridge.data.datasets.sft import create_sft_dataset
+from megatron.bridge.data.datasets.sft import GPTSFTChatDataset, create_sft_dataset
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 
 
@@ -73,19 +74,57 @@ def _tokenize_get_item(i):
     return _detorch(_shared_dataset[i])
 
 
+def _tokenized_ids(i):
+    """The input ids of row ``i`` of the worker's dataset as int32, which pickle as plain bytes."""
+    return np.asarray(_shared_dataset[i]["input_ids"], dtype=np.int32)
+
+
 def _tokenize_init_worker(dataset):
     global _shared_dataset
     _shared_dataset = dataset
 
 
-def _retrieve_tokenized(dataset, num_workers):
-    if num_workers == 1:
-        return np.array([dataset[i] for i in tqdm(range(len(dataset)))])
+def _pool_map_rows(dataset, rows, num_workers, worker_fn):
+    """Yield ``worker_fn`` of each index of ``rows``, in order, computed in ``num_workers`` processes (0 or less: one
+    per CPU) that each hold ``dataset``."""
     num_workers = num_workers if num_workers > 0 else mp.cpu_count()
     with Pool(num_workers, initializer=_tokenize_init_worker, initargs=(dataset,)) as pool:
-        return np.array(
-            [_retorch(item) for item in tqdm(pool.imap(_tokenize_get_item, range(len(dataset))), total=len(dataset))]
+        yield from pool.imap(worker_fn, rows)
+
+
+def _retrieve_tokenized(dataset, rows, num_workers):
+    """Tokenize the ``rows`` (indices into ``dataset``) in the order given."""
+    if num_workers == 1:
+        return np.array([dataset[i] for i in tqdm(rows)])
+    items = _pool_map_rows(dataset, rows, num_workers, _tokenize_get_item)
+    return np.array([_retorch(item) for item in tqdm(items, total=len(rows))])
+
+
+def _rows_to_tokenize(dataset, exclude_rows: Collection[int], path: Path) -> range | list[int]:
+    """The indices of the rows of ``dataset`` to tokenize, in file order: all of them but ``exclude_rows``.
+
+    ``exclude_rows`` are 0-based line numbers of the dataset's JSONL file, which are the dataset's own indices because
+    the dataset reads the file line by line, in order. The excluded lines are never read.
+
+    Raises:
+        ValueError: the dataset maps its samples, so that an index is no longer a line number; a line is not one of
+            the file's; or no row would be left.
+    """
+    if not exclude_rows:
+        return range(len(dataset))
+    if dataset.samples_mapping is not None:
+        raise ValueError(f"{path}: a dataset that maps its samples (max_num_samples) cannot exclude rows by line")
+    excluded = set(exclude_rows)
+    outside = [row for row in sorted(excluded) if not 0 <= row < len(dataset)]
+    if outside:
+        raise ValueError(
+            f"exclude_rows names line {outside[0]}, which {path} does not have: it has {len(dataset)} lines"
         )
+    rows = [row for row in range(len(dataset)) if row not in excluded]
+    if not rows:
+        raise ValueError(f"exclude_rows leaves no row of {path} to tokenize")
+    logger.info(f"Leaving {len(excluded)} of the {len(dataset)} rows of {path} out of the pack")
+    return rows
 
 
 def pad_document_for_packing(data: dict, max_seq_length: int, pad_seq_to_mult: int, pad_id: int) -> None:
@@ -136,6 +175,68 @@ def truncate_document(data: dict, max_seq_length: int) -> None:
             data[key] = data[key][:max_seq_length]
 
 
+def _packing_dataset(path, tokenizer, max_seq_length, seed, dataset_kwargs, pad_seq_length_to_mult):
+    """The SFT dataset that the packer tokenizes ``path`` with: ``create_sft_dataset`` over ``dataset_kwargs``, after
+    a ``tool_schemas`` value that is not a string is written as JSON and a ``chat_template`` value is set on the
+    tokenizer. ``dataset_kwargs`` (None: none) is changed in place."""
+    if not dataset_kwargs:
+        dataset_kwargs = {}
+
+    # Handle tool_schemas - convert to JSON string if needed
+    ts = dataset_kwargs.get("tool_schemas")
+    if ts and not isinstance(ts, str):
+        dataset_kwargs["tool_schemas"] = json.dumps(ts)
+
+    # Handle chat_template - set it on tokenizer if provided
+    chat_template = dataset_kwargs.pop("chat_template", None)
+    if chat_template:
+        if hasattr(tokenizer, "_tokenizer"):
+            tokenizer._tokenizer.chat_template = chat_template
+
+    return create_sft_dataset(
+        path=path,
+        tokenizer=tokenizer,
+        seq_length=max_seq_length,
+        seed=seed,
+        is_test=True,
+        pad_seq_length_to_mult=pad_seq_length_to_mult,
+        **dataset_kwargs,
+    )
+
+
+def iter_tokenized_ids(
+    path: Path,
+    tokenizer: MegatronTokenizer,
+    max_seq_length: int,
+    dataset_kwargs: dict | None,
+    num_tokenizer_workers: int,
+) -> Iterator[np.ndarray]:
+    """Yield the ids of every row of the JSONL file ``path`` as the packer tokenizes it, before it cuts a row to
+    ``max_seq_length`` tokens or pads it: one int32 array per line, in file order, so that a row longer than
+    ``max_seq_length`` shows its full length.
+
+    ``dataset_kwargs`` are the packer's (``tokenize_dataset``), and the rows are tokenized in
+    ``num_tokenizer_workers`` processes (1: this one; 0 or less: one per CPU). Only the current row's ids are held,
+    so a file of any size can be read. Changes ``dataset_kwargs`` in place: a ``chat_template`` in it is removed and
+    set on ``tokenizer``, and a ``tool_schemas`` value that is not a string is replaced by its JSON.
+
+    Raises:
+        ValueError: ``dataset_kwargs`` choose another dataset than the chat dataset, which is the only one that gives a
+            row's full length (the plain SFT dataset cuts a row to ``max_seq_length``).
+    """
+    # The dataset draws no samples (it is built without max_num_samples), so its seed changes nothing here.
+    dataset = _packing_dataset(path, tokenizer, max_seq_length, 0, dataset_kwargs, 1)
+    if not isinstance(dataset, GPTSFTChatDataset):
+        raise ValueError(
+            f"rows are counted only with the chat dataset (dataset_kwargs chat: true); {type(dataset).__name__} cuts "
+            f"a row to max_seq_length {max_seq_length}, so its lengths are not the rows'"
+        )
+    rows = range(len(dataset))
+    if num_tokenizer_workers == 1:
+        return (np.asarray(dataset[i]["input_ids"], dtype=np.int32) for i in rows)
+    return _pool_map_rows(dataset, rows, num_tokenizer_workers, _tokenized_ids)
+
+
 def tokenize_dataset(
     path: Path,
     tokenizer: MegatronTokenizer,
@@ -144,6 +245,7 @@ def tokenize_dataset(
     dataset_kwargs: dict | None = None,
     pad_seq_to_mult: int | None = 1,
     num_tokenizer_workers: int = -1,
+    exclude_rows: Collection[int] = (),
 ):
     """
     Tokenizes a dataset from the provided path using the specified tokenizer
@@ -158,48 +260,26 @@ def tokenize_dataset(
             Can include 'chat', 'use_hf_tokenizer_chat_template', 'tool_schemas', etc.
         pad_seq_to_mult (int | None): Optional multiple to pad each sequence to during packing
             preparation (e.g., set to 2 * context_parallel_size for THD CP).
+        exclude_rows (Collection[int]): 0-based line numbers of the file to leave out: they are never read or
+            tokenized, and the other rows keep their order.
 
     Returns:
         np.ndarray: A NumPy array containing the tokenized data, one dict per document with at most
             ``max_seq_length`` tokens and an explicit ``loss_mask``.
     """
-    if not dataset_kwargs:
-        dataset_kwargs = {}
-
-    # Handle tool_schemas - convert to JSON string if needed
-    ts = dataset_kwargs.get("tool_schemas")
-    if ts and not isinstance(ts, str):
-        dataset_kwargs["tool_schemas"] = json.dumps(ts)
-
-    # Handle chat_template - set it on tokenizer if provided
-    chat_template = dataset_kwargs.pop("chat_template", None)
-    if chat_template:
-        # This is called during packing preparation (rank 0 only).
-        # The chat template is only needed to create the packed .npy files.
-        # Once created, all ranks load the pre-tokenized .npy files.
-        if hasattr(tokenizer, "_tokenizer"):
-            tokenizer._tokenizer.chat_template = chat_template
-
     if pad_seq_to_mult is not None and pad_seq_to_mult <= 0:
         raise ValueError("pad_seq_to_mult must be a positive integer when provided.")
 
     # Keep the historical minimum of 16 unless a larger multiple is requested.
     pad_seq_length_to_mult = 1 if pad_seq_to_mult is None else max(1, pad_seq_to_mult)
 
-    dataset = create_sft_dataset(
-        path=path,
-        tokenizer=tokenizer,
-        seq_length=max_seq_length,
-        seed=seed,
-        is_test=True,
-        pad_seq_length_to_mult=pad_seq_length_to_mult,
-        **dataset_kwargs,
-    )
+    dataset = _packing_dataset(path, tokenizer, max_seq_length, seed, dataset_kwargs, pad_seq_length_to_mult)
 
     pad_id = dataset.tokenizer.eod
     pad_seq_length_to_mult = dataset.pad_seq_length_to_mult
     max_seq_length = dataset.max_seq_length
-    dataset = _retrieve_tokenized(dataset, num_tokenizer_workers)
+    rows = _rows_to_tokenize(dataset, exclude_rows, path)
+    dataset = _retrieve_tokenized(dataset, rows, num_tokenizer_workers)
 
     # Convert any Tensor values to lists for numpy compatibility
     # (chat preprocessing via _chat_preprocess returns torch.Tensors)
@@ -234,6 +314,7 @@ def prepare_packed_sequence_data(
     dataset_kwargs: dict | None = None,
     pad_seq_to_mult: int | None = 1,
     num_tokenizer_workers: int = -1,
+    exclude_rows: Collection[int] = (),
 ):
     """
     Prepares a packed sequence dataset from a given input file and saves it to an output file.
@@ -245,13 +326,16 @@ def prepare_packed_sequence_data(
         packed_sequence_size (int): The maximum size for each packed sequence.
         tokenizer (MegatronTokenizer): The tokenizer to use for tokenization.
         max_seq_length (int): Maximum sequence length for the tokens.
-        seed (int | None): Random seed for shuffling (optional).
+        seed (int | None): Seed of the generator that orders the documents in the packs; the same seed and
+            input give the same packs. None draws from fresh entropy.
         packing_algorithm (str): The algorithm used for packing sequences, one of
                 ``packing_utils.PACKING_ALGOS``.
         dataset_kwargs (dict | None): Additional keyword arguments to pass to create_sft_dataset.
             Enables packing with chat templates, tool schemas, etc.
         pad_seq_to_mult (int | None): Optional multiple to pad each sequence to during packing
             preparation (e.g., set to 2 * context_parallel_size for THD CP).
+        exclude_rows (Collection[int]): 0-based line numbers of the input file to leave out of the pack
+            (see ``tokenize_dataset``).
 
     Returns:
         None: Saves the packed sequence data to the specified output path.
@@ -265,11 +349,14 @@ def prepare_packed_sequence_data(
         dataset_kwargs,
         pad_seq_to_mult=pad_seq_to_mult,
         num_tokenizer_workers=num_tokenizer_workers,
+        exclude_rows=exclude_rows,
     )
     sequences, histogram = create_hist(dataset, max_seq_length)
 
-    assignments, packing_metadata = create_packing_strategy(histogram, packed_sequence_size, packing_algorithm)
-    output_data = fill_packing_strategy(assignments, sequences, packed_sequence_size, tokenizer.eos_id)
+    # scripts/data/pack_sft_dataset.py SEEDED_SHUFFLE names this generator in each pack's manifest; change both.
+    rng = np.random.default_rng(seed)
+    assignments, packing_metadata = create_packing_strategy(histogram, packed_sequence_size, packing_algorithm, rng)
+    output_data = fill_packing_strategy(assignments, sequences, packed_sequence_size, tokenizer.eos_id, rng)
 
     # save output data
     output_path_str = str(output_path)

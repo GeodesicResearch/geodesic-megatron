@@ -29,6 +29,7 @@ import torch
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.train_utils import (
     ADVANCED_ITERS_KEY,
+    PEAK_MEMORY_PROGRESS_TAG,
     PEAK_MEMORY_STATS,
     PEAK_MEMORY_TAG,
     accumulate_interval_losses,
@@ -39,6 +40,7 @@ from megatron.bridge.training.utils.train_utils import (
     maybe_inject_state,
     needs_global_state_injection,
     param_is_not_shared,
+    peak_memory_report_due,
     prepare_forward_step_func,
     report_l2_norm_grad,
     report_memory,
@@ -3120,3 +3122,15 @@ class TestPeakMemoryAcrossRanks:
     def test_the_log_line_carries_the_tag_and_every_field(self):
         line = format_peak_memory({"ranks": 2, "max_allocated_gb": 75.5, "max_alloc_retries": 0})
         assert line == f"{PEAK_MEMORY_TAG} ranks=2 max_allocated_gb=75.5 max_alloc_retries=0"
+
+    def test_a_progress_line_carries_its_own_tag_and_the_same_fields(self):
+        line = format_peak_memory({"ranks": 2, "max_allocated_gb": 75.5}, PEAK_MEMORY_PROGRESS_TAG)
+        assert line == f"{PEAK_MEMORY_PROGRESS_TAG} ranks=2 max_allocated_gb=75.5"
+        assert PEAK_MEMORY_TAG not in line
+
+    @pytest.mark.parametrize(
+        "step, interval, due",
+        [(20, 20, True), (40, 20, True), (60, 20, True), (21, 20, False), (59, 20, False), (60, None, False)],
+    )
+    def test_a_report_is_due_every_interval_steps_and_never_without_an_interval(self, step, interval, due):
+        assert peak_memory_report_due(step, interval) is due

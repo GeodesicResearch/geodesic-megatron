@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from scripts.nemotronh_flops_estimator import DEFAULT_PEAK_TFLOPS, resolve_hf_config
+from scripts.flops_common import DEFAULT_PEAK_TFLOPS, resolve_hf_config
 from scripts.telemetry import run_watch, score_gate, score_run
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS
 from scripts.training.launcher_source import env_override_entries

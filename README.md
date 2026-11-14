@@ -271,7 +271,7 @@ python scripts/telemetry/score_run.py /projects/a5k/public/logs/megatron_runs/tr
 ```
 
 The scorer reads the sequence length and model FLOPs/token from the config and the model's HF
-`config.json` through `scripts/nemotronh_flops_estimator.py`, takes the batch from the log, and
+`config.json` through `scripts/flops_common.py` and the FLOP estimator for the model's type, takes the batch from the log, and
 prints its inputs beside the score (`--json` for machine-readable output, `--wandb-peak-memory` to
 add the W&B summary peaks and allocator-retry count, which are one rank's). The peak memory over all
 ranks is the run's own `[peak-memory]` line, which rank 0 logs when the training loop ends and the

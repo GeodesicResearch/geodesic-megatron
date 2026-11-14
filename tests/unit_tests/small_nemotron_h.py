@@ -20,6 +20,8 @@ with dropout, the auxiliary loss and the router bias update off, so that a forwa
 
 from pathlib import Path
 
+from tests.unit_tests.word_level_tokenizer import build_word_level_tokenizer
+
 
 VOCAB, SEQ = 256, 64
 NUM_EXPERTS = 8
@@ -77,8 +79,7 @@ def write_small_nemotron_h_release(path: Path, layers_block_type: tuple[str, ...
     """
     import torch
     from safetensors.torch import load_file, save_file
-    from tokenizers import Tokenizer, models
-    from transformers import NemotronHConfig, NemotronHForCausalLM, PreTrainedTokenizerFast
+    from transformers import NemotronHConfig, NemotronHForCausalLM
 
     config = NemotronHConfig(
         vocab_size=VOCAB,
@@ -111,7 +112,5 @@ def write_small_nemotron_h_release(path: Path, layers_block_type: tuple[str, ...
     tensors = load_file(shard)
     tensors["backbone.embeddings.weight"] = tensors.pop("backbone.embedding.weight")
     save_file(tensors, shard, metadata={"format": "pt"})
-    vocabulary = {f"t{i}": i for i in range(VOCAB)}
-    tokenizer = Tokenizer(models.WordLevel(vocabulary, unk_token="t0"))
-    PreTrainedTokenizerFast(tokenizer_object=tokenizer, unk_token="t0").save_pretrained(path)
+    build_word_level_tokenizer(path, {f"t{i}": i for i in range(VOCAB)}, "t0")
     return path

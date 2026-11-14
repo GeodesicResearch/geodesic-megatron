@@ -1,0 +1,119 @@
+# Olmo-Norm 7B: Olmo 3 7B Base fine-tuned for one pass over the Normal-Norm mix (the `train` config of
+# geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered at 3f91fa1d, rendered with the 7B Think-SFT chat
+# template) at AI2's Think SFT recipe: sequence length 32,768, 1,048,576 tokens per batch (32 sequences), learning rate
+# 5e-5 with a linear warmup over 3% of the steps and a linear decay to 0, AdamW with betas 0.9 and 0.95, no weight
+# decay, gradient clipping at 1.0.
+#
+# The pack is 32 shards of the mix, packed first-fit with the builder's dropped rows left out. It holds 1,454,217 packs,
+# 9,259,336 documents and 47,545,107,632 tokens (pack audit PASS, report
+# /projects/a5k/public/logs/metagaming_filtering/olmo_norm/megatron/full_audit/audit_7b.json), so train_iters is
+# ceil(1,454,217 / 32) = 45,445. The data loader drops the partial last batch of an epoch, so an epoch is 45,444
+# iterations and the last 9 packs are never read. Iteration 45,445 starts a second epoch and reads packs 0-31 again, at
+# a learning rate near 0.
+#
+# Layout: data parallel only (DP 32 on 8 nodes), full recompute, the Transformer Engine cross-entropy. Posture A (AI2's):
+# bf16 parameters, fp32 gradient reduction, fp32 Adam moments. It saves 14 bytes per parameter (102 GB at 7.3B).
+#
+# The recipe's native cross-entropy does not fit under the 88 GB limit at this layout. The TE one does, at the native
+# one's step time and loss. Megatron warns of known stability issues with it, so watch_7b.yaml stops the run on a
+# non-finite loss or gradient norm.
+#
+# The 5e-5 learning rate is on the full-SFT exception list of CLAUDE.md (Kyle, 2026-11-03).
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: /projects/a5k/public/logs/metagaming_filtering/olmo_norm/tokenizers/tokenizer_7b_fast
+mixed_precision: bf16_mixed
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered
+  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__train
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 8               # 2 x CP for CP up to 4; the recipe sets the same
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__train/shard*/packed/--projects--a5k--public--logs--metagaming_filtering--olmo_norm--tokenizers--tokenizer_7b_fast_pad_seq_to_mult8/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: true          # constant tensor shapes, so that cuDNN plans are built once
+train:
+  global_batch_size: 32              # 1,048,576 tokens/iter, the paper's batch
+  micro_batch_size: 1
+  train_iters: 45445                 # ceil(1,454,217 packs / 32)
+  exit_duration_in_mins: 1400
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+optimizer:
+  lr: 5.0e-05
+  min_lr: 0.0
+  weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+scheduler:
+  lr_decay_style: linear
+  lr_warmup_iters: 0                 # the SFT recipe sets 50; finalize() rejects it alongside lr_warmup_fraction
+  lr_warmup_fraction: 0.03
+  start_weight_decay: 0.0            # the scheduler overwrites the optimizer's weight decay every step
+  end_weight_decay: 0.0
+model:
+  seq_length: 32768
+  tensor_model_parallel_size: 1      # the full-width QK-norm refuses TP > 1
+  pipeline_model_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False
+  gradient_accumulation_fusion: True
+  cross_entropy_fusion_impl: te      # the recipe's `native` does not fit; see the header
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/Olmo-3-1025-7B
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/metagaming_filtering/olmo3_7b_norm_sft
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/metagaming_filtering/olmo3_7b_norm_sft
+  save_interval: 9089                # 20% of train_iters: five saves, the last at the end
+  most_recent_k: -1
+  save_optim: true
+  save_rng: true
+  ckpt_format: torch_dist
+  ckpt_assume_constant_structure: false
+  async_save: false
+dist:
+  distributed_timeout_minutes: 60
+logger:
+  tensorboard_dir: null
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 1
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: false
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: olmo3_7b_norm_sft

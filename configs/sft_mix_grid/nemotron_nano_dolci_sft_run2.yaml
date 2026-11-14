@@ -1,0 +1,19 @@
+# Run 2 of the Nemotron 3 Nano Dolci-SFT. It trains the recipe of nemotron_nano_dolci_sft.yaml again on the second
+# pair of packs (configs/sft_mix_grid/README.md). The difference between run 1 and run 2 is the variation between two
+# runs of one recipe.
+#
+# It differs from run 1 in the two pack paths and the run identity. Its length follows run 1's rule from its own pack
+# counts, which gives run 1's value (tests/unit_tests/test_sft_mix_grid_nano_dolci_config.py).
+base_config: nemotron_nano_dolci_sft.yaml
+dataset:
+  packed_sequence_specs:
+    packed_train_data_path:
+      - /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content/run2_epoch1/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+      - /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content/run2_epoch2/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+train:
+  train_iters: 5528                  # floor((707,647 + 707,657) packs / 256)
+checkpoint:
+  load: /projects/a5k/public/checkpoints/megatron/metagaming_filtering/nemotron_nano_dolci_sft_run2
+  save: /projects/a5k/public/checkpoints/megatron/metagaming_filtering/nemotron_nano_dolci_sft_run2
+logger:
+  wandb_exp_name: nemotron_nano_dolci_sft_run2

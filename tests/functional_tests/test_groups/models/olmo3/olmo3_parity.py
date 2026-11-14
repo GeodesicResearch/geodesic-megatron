@@ -34,16 +34,36 @@ so that all three length regimes are reachable with a few hundred tokens.
 rotary embedding and applies YaRN to all layers. v4.57.1 and current ``main`` both
 apply YaRN to full-attention layers only, as does vLLM
 (``vllm/model_executor/models/olmo2.py``: "Rope scaling is only applied on full
-attention layers"). :func:`restore_per_layer_rope` puts the 4.57 behaviour back so
-the reference is the architecture, not the regression.
+attention layers"). ``scripts/checkpoint/hf_olmo3_rope.py`` puts the 4.57 behaviour back so
+the reference is the architecture, not the regression; the fault injections are
+``scripts/checkpoint/olmo3_faults.py``, which ``scripts/checkpoint/packed_row_parity.py`` shares.
+
+**The ``real_bf16`` profile** judges a real base in bf16 on random token ids (bshd, the Megatron model on one GPU and
+the reference on another). Its bars lie between a correct run and the weakest injected fault on the real 7B and 32B
+bases: cosine of the logits at least 0.999, at most 0.2 percent of the positions whose Megatron argmax lies more than 0.5
+logits below the reference's top logit (``argmax deficit``, defined at ``compare_logits``), and no such deficit above
+3.0.
+
+A correct run does not reach top-1 agreement 1.0 on random ids: the distributions are near flat, and bf16 kernels that
+differ flip the argmax between near ties. So top-1 agreement and the largest absolute logit difference are reported
+and not judged.
 """
 
 import argparse
 import json
 import os
-from typing import Optional
+import sys
+from pathlib import Path
 
 import torch
+
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from scripts.checkpoint.hf_olmo3_rope import load_hf_reference  # noqa: E402
+from scripts.checkpoint.olmo3_faults import FAULTS, apply_fault_after_load, apply_fault_before_build  # noqa: E402
 
 
 TOY_CONFIG = {
@@ -84,14 +104,6 @@ LENGTH_CELLS = {
     "long": 768,  # > original_max_position_embeddings (128): the YaRN frequency ramp
 }
 
-FAULTS = (
-    "none",
-    "yarn_all_layers",  # the transformers-5.2.0 regression, injected on purpose
-    "no_swa",  # forget interleaved sliding-window attention
-    "per_head_qknorm",  # stock Megatron QK-norm instead of OLMo full-width
-    "swap_gate_up",  # gate/up halves exchanged in linear_fc1
-)
-
 
 def build_toy_model(out_dir: str, seed: int = 0) -> str:
     """Materialize a tiny but structurally faithful OLMo-3 checkpoint."""
@@ -112,55 +124,6 @@ def build_toy_model(out_dir: str, seed: int = 0) -> str:
     return out_dir
 
 
-def restore_per_layer_rope(hf_model) -> None:
-    """Give sliding-window layers unscaled RoPE, as transformers 4.57.1 does.
-
-    transformers 4.57.1 built ``rotary_embs = ModuleDict({"sliding_attention":
-    Olmo3RotaryEmbedding(config, rope_type="default"), "full_attention":
-    Olmo3RotaryEmbedding(config)})`` and selected per layer. 5.2.0 collapsed that to
-    a single YaRN rotary shared by every layer. We restore the 4.57 behaviour with a
-    pre-hook that substitutes unscaled position embeddings on sliding layers only.
-
-    No-op if the installed transformers already does the right thing (detected by
-    the absence of a single shared ``rotary_emb``).
-    """
-    import copy as _copy
-
-    inner = hf_model.model
-    if not hasattr(inner, "rotary_emb"):
-        return  # already per-layer (4.57 ModuleDict, or main's per-layer inv_freq)
-
-    cfg_default = _copy.deepcopy(inner.config)
-    cfg_default.rope_parameters = {
-        "rope_type": "default",
-        "rope_theta": inner.config.rope_parameters["rope_theta"],
-    }
-    rope_default = type(inner.rotary_emb)(config=cfg_default).to(
-        device=next(hf_model.parameters()).device
-    )
-
-    def _hook(module, args, kwargs):
-        pos = kwargs.get("position_ids")
-        hs = kwargs.get("hidden_states", args[0] if args else None)
-        kwargs["position_embeddings"] = rope_default(hs, pos)
-        return args, kwargs
-
-    layer_types = inner.config.layer_types
-    for idx, layer in enumerate(inner.layers):
-        if layer_types[idx] == "sliding_attention":
-            layer.register_forward_pre_hook(_hook, with_kwargs=True)
-
-
-def load_hf_reference(model_dir: str, device: str, dtype: torch.dtype, per_layer_rope: bool = True):
-    """Load the HF model that defines 'correct'."""
-    from transformers import Olmo3ForCausalLM
-
-    model = Olmo3ForCausalLM.from_pretrained(model_dir, dtype=dtype).to(device).eval()
-    if per_layer_rope:
-        restore_per_layer_rope(model)
-    return model
-
-
 def build_megatron(model_dir: str, dtype: torch.dtype, fault: str = "none"):
     """Build the Megatron model through the bridge, optionally injecting a fault."""
     from megatron.bridge import AutoBridge
@@ -178,90 +141,15 @@ def build_megatron(model_dir: str, dtype: torch.dtype, fault: str = "none"):
     provider.bf16 = dtype == torch.bfloat16
     provider.fp16 = dtype == torch.float16
 
-    # Each fault must change exactly ONE thing. `window_size` and
-    # `window_attn_skip_freq` jointly drive BOTH the attention span and the
-    # per-layer rope choice, so the naive way to disable either would silently
-    # change both and make a failure unattributable.
-    if fault == "no_swa":
-        # Keep the skip_freq pattern (so the rope selection is untouched) but give
-        # every layer an unlimited causal window: attention span changes, rope does not.
-        provider.window_size = (-1, 0)
+    # Each fault changes exactly ONE thing (scripts/checkpoint/olmo3_faults.py).
+    apply_fault_before_build(provider, fault)
 
     provider.finalize()
     model = provider.provide_distributed_model(wrap_with_ddp=False)
     bridge.load_hf_weights(model)
-
-    if fault == "yarn_all_layers":
-        # The transformers-5.2.0 regression: YaRN on every layer. Flip only the rope
-        # slice and the mscale; TE's sliding windows were already built from the
-        # correct config at init, so the attention span is untouched.
-        factor = provider.yarn_rotary_scaling_factor
-        for layer in _core(model).decoder.layers:
-            att = layer.self_attention
-            att.is_sliding = False  # -> picks the YaRN slice of the stacked rope
-            att.config.yarn_rotary_scaling_factor = factor  # -> mscale applied
-    elif fault == "per_head_qknorm":
-        # Stock Megatron normalizes each head independently; OLMo-3 normalizes the
-        # whole projection. Same weights, different RMS denominator (64 vs 512).
-        for layer in _core(model).decoder.layers:
-            _make_qk_norm_per_head(layer.self_attention)
-    elif fault == "swap_gate_up":
-        for layer in _core(model).decoder.layers:
-            w = layer.mlp.linear_fc1.weight.data
-            half = w.shape[0] // 2
-            layer.mlp.linear_fc1.weight.data = torch.cat([w[half:], w[:half]], dim=0)
+    apply_fault_after_load(model, fault, yarn_rotary_scaling_factor=provider.yarn_rotary_scaling_factor)
 
     return bridge, model
-
-
-def _make_qk_norm_per_head(att) -> None:
-    """Rebind QK-norm to Megatron's stock per-head semantics (a deliberate fault).
-
-    Uses the same learned gammas, but computes the RMS over each head's
-    ``head_dim`` elements instead of over the full projection. That denominator is
-    the whole difference between stock Megatron and OLMo-2/3, and it is invisible
-    in the weights.
-    """
-    import types
-
-    def _rms_per_head(x, gamma, eps, head_dim):
-        shp = x.shape
-        xh = x.reshape(*shp[:-1], -1, head_dim).float()
-        xh = xh * torch.rsqrt(xh.pow(2).mean(-1, keepdim=True) + eps)
-        return (xh.reshape(*shp).to(gamma.dtype)) * gamma
-
-    def get_query_key_value_tensors(self, hidden_states, key_value_states=None, **kwargs):
-        mixed_qkv, _ = self.linear_qkv(hidden_states)
-        new_tensor_shape = mixed_qkv.size()[:-1] + (
-            self.num_query_groups_per_partition,
-            (
-                (self.num_attention_heads_per_partition // self.num_query_groups_per_partition + 2)
-                * self.hidden_size_per_attention_head
-            ),
-        )
-        mixed_qkv = mixed_qkv.view(*new_tensor_shape)
-        split_arg_list = [
-            (
-                self.num_attention_heads_per_partition
-                // self.num_query_groups_per_partition
-                * self.hidden_size_per_attention_head
-            ),
-            self.hidden_size_per_attention_head,
-            self.hidden_size_per_attention_head,
-        ]
-        query, key, value = torch.split(mixed_qkv, split_arg_list, dim=3)
-        hd = self.hidden_size_per_attention_head
-        eps = self.config.layernorm_epsilon
-        query = query.reshape(query.size(0), query.size(1), -1)
-        key = key.reshape(key.size(0), key.size(1), -1)
-        query = _rms_per_head(query, self.q_layernorm.weight, eps, hd)
-        key = _rms_per_head(key, self.k_layernorm.weight, eps, hd)
-        query = query.view(query.size(0), query.size(1), -1, hd)
-        key = key.view(key.size(0), key.size(1), -1, hd)
-        value = value.reshape(value.size(0), value.size(1), -1, hd)
-        return query, key, value
-
-    att.get_query_key_value_tensors = types.MethodType(get_query_key_value_tensors, att)
 
 
 def _core(model):
@@ -270,15 +158,58 @@ def _core(model):
     return m.module if hasattr(m, "module") else m
 
 
+LOGIT_CHUNK = 2048  # positions compared at a time: the 32B's logits at 32,768 positions need no fp32 copy of the whole
+DEFICIT_DELTAS = (0.25, 0.5, 1.0)  # logit distances for the share of positions whose Megatron argmax is that far down
+JUDGED_DEFICIT = 0.5  # the distance the profiles' max_deficit_fraction is a share of (one of DEFICIT_DELTAS)
+
+# The bars a profile judges the metrics by; None leaves a metric reported and not judged. 'toy' is for the toy model in
+# float32. 'real_bf16' sits between a correct run and the weakest injected fault on both real bases (see the header of
+# this file).
+PROFILES = {
+    "toy": {
+        "max_abs_diff": 1e-2,
+        "min_cosine": 0.9999,
+        "min_top1": 1.0,
+        "max_deficit_fraction": None,
+        "max_argmax_deficit": None,
+    },
+    "real_bf16": {
+        "max_abs_diff": None,
+        "min_cosine": 0.999,
+        "min_top1": None,
+        "max_deficit_fraction": 0.002,
+        "max_argmax_deficit": 3.0,
+    },
+}
+
+
+def judge(metrics: dict, bars: dict) -> bool:
+    """Whether ``metrics`` (``compare_logits``) meet every bar of ``bars`` that is not None."""
+    deficit_fraction = metrics[f"fraction_argmax_deficit_above_{JUDGED_DEFICIT}"]
+    checks = [
+        (bars["max_abs_diff"], metrics["max_abs_diff"] <= (bars["max_abs_diff"] or 0)),
+        (bars["min_cosine"], metrics["cosine"] >= (bars["min_cosine"] or 0)),
+        (bars["min_top1"], metrics["top1_agreement"] >= (bars["min_top1"] or 0)),
+        (bars["max_deficit_fraction"], deficit_fraction <= (bars["max_deficit_fraction"] or 0)),
+        (bars["max_argmax_deficit"], metrics["argmax_deficit_max"] <= (bars["max_argmax_deficit"] or 0)),
+    ]
+    return all(ok for bar, ok in checks if bar is not None)
+
+
 @torch.no_grad()
 def compare_logits(hf_model, megatron_model, seq_len: int, vocab_size: int, seed: int = 1234):
-    """Run both models on the same tokens; return parity metrics."""
+    """Run both models on the same tokens; return parity metrics.
+
+    The logits stay in the models' dtype and are compared LOGIT_CHUNK positions at a time. ``argmax_deficit`` is, at each
+    position, how far below the Hugging Face model's top logit its own logit sits at the token Megatron ranks first. Zero
+    where the two argmaxes agree. A bf16 disagreement on a near tie has a small deficit, and a conversion error has a large one.
+    """
     device = next(hf_model.parameters()).device
     g = torch.Generator(device="cpu").manual_seed(seed)
     input_ids = torch.randint(0, vocab_size, (1, seq_len), generator=g).to(device)
     position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
 
-    hf_logits = hf_model(input_ids=input_ids).logits[0].float()
+    hf_logits = hf_model(input_ids=input_ids).logits[0]
 
     m = megatron_model[0] if isinstance(megatron_model, list) else megatron_model
     mg_dev = next(m.parameters()).device
@@ -287,37 +218,55 @@ def compare_logits(hf_model, megatron_model, seq_len: int, vocab_size: int, seed
         position_ids=position_ids.to(mg_dev),
         attention_mask=None,
     )
-    mg_logits = (out[0] if isinstance(out, tuple) else out)
+    mg_logits = out[0] if isinstance(out, tuple) else out
     if mg_logits.shape[0] == seq_len and mg_logits.shape[1] == 1:  # [s, b, v] -> [s, v]
         mg_logits = mg_logits[:, 0, :]
     else:
         mg_logits = mg_logits[0]
-    mg_logits = mg_logits.float()[:, : hf_logits.shape[-1]].to(hf_logits.device)
+    mg_logits = mg_logits[:, : hf_logits.shape[-1]]
 
-    diff = (hf_logits - mg_logits).abs()
-    cos = torch.cosine_similarity(hf_logits.flatten().unsqueeze(0), mg_logits.flatten().unsqueeze(0)).item()
-    hf_arg, mg_arg = hf_logits.argmax(-1), mg_logits.argmax(-1)
-    agree = hf_arg == mg_arg
-    top1 = agree.float().mean().item()
+    max_abs, abs_sum, count = 0.0, 0.0, 0
+    dot = norm_hf = norm_mg = 0.0
+    agree_parts, top5_parts, gap_parts, deficit_parts = [], [], [], []
+    for start in range(0, seq_len, LOGIT_CHUNK):
+        hf = hf_logits[start : start + LOGIT_CHUNK].float()
+        mg = mg_logits[start : start + LOGIT_CHUNK].to(hf.device).float()
+        diff = (hf - mg).abs()
+        max_abs = max(max_abs, diff.max().item())
+        abs_sum += diff.sum(dtype=torch.float64).item()
+        count += diff.numel()
+        dot += (hf * mg).sum(dtype=torch.float64).item()
+        norm_hf += (hf * hf).sum(dtype=torch.float64).item()
+        norm_mg += (mg * mg).sum(dtype=torch.float64).item()
+        mg_arg = mg.argmax(-1)
+        top5 = hf.topk(5, dim=-1)
+        top2 = top5.values[:, :2]
+        agree_parts.append(top5.indices[:, 0] == mg_arg)
+        top5_parts.append((top5.indices == mg_arg.unsqueeze(-1)).any(-1))
+        gap_parts.append(top2[:, 0] - top2[:, 1])
+        deficit_parts.append(top5.values[:, 0] - hf.gather(-1, mg_arg.unsqueeze(-1)).squeeze(-1))
+        del hf, mg, diff
 
-    # A bf16 disagreement on a near-tied pair is precision, not a conversion error.
-    # Quantify it rather than asserting it: compare the HF top1-top2 gap at the
-    # positions that disagree against the gap everywhere.
-    top2 = hf_logits.topk(2, dim=-1).values
-    gap = (top2[:, 0] - top2[:, 1])
+    agree = torch.cat(agree_parts)
+    gap = torch.cat(gap_parts)
+    deficit = torch.cat(deficit_parts)
     mism = ~agree
-    top5 = hf_logits.topk(5, dim=-1).indices
-    top5_hit = (top5 == mg_arg.unsqueeze(-1)).any(-1).float().mean().item()
-    return {
+    metrics = {
         "seq_len": seq_len,
-        "max_abs_diff": diff.max().item(),
-        "mean_abs_diff": diff.mean().item(),
-        "cosine": cos,
-        "top1_agreement": top1,
-        "top5_agreement": top5_hit,
+        "max_abs_diff": max_abs,
+        "mean_abs_diff": abs_sum / count,
+        "cosine": dot / (norm_hf**0.5 * norm_mg**0.5),
+        "top1_agreement": agree.float().mean().item(),
+        "top5_agreement": torch.cat(top5_parts).float().mean().item(),
+        # A bf16 disagreement on a near-tied pair is precision, not a conversion error. Quantify it rather than
+        # asserting it: compare the HF top1-top2 gap at the positions that disagree against the gap everywhere.
         "median_top1_top2_gap_all": gap.median().item(),
         "median_top1_top2_gap_at_mismatch": (gap[mism].median().item() if mism.any() else float("nan")),
+        "argmax_deficit_max": deficit.max().item(),
     }
+    for delta in DEFICIT_DELTAS:
+        metrics[f"fraction_argmax_deficit_above_{delta}"] = (deficit > delta).float().mean().item()
+    return metrics
 
 
 @torch.no_grad()
@@ -335,14 +284,18 @@ def first_diverging_layer(hf_model, megatron_model, seq_len: int, vocab_size: in
     hf_hidden, mg_hidden = [], []
     hooks = []
     for layer in hf_model.model.layers:
-        hooks.append(layer.register_forward_hook(
-            lambda m, i, o, acc=hf_hidden: acc.append((o[0] if isinstance(o, tuple) else o).detach().float())
-        ))
+        hooks.append(
+            layer.register_forward_hook(
+                lambda m, i, o, acc=hf_hidden: acc.append((o[0] if isinstance(o, tuple) else o).detach().float())
+            )
+        )
     core = _core(megatron_model)
     for layer in core.decoder.layers:
-        hooks.append(layer.register_forward_hook(
-            lambda m, i, o, acc=mg_hidden: acc.append((o[0] if isinstance(o, tuple) else o).detach().float())
-        ))
+        hooks.append(
+            layer.register_forward_hook(
+                lambda m, i, o, acc=mg_hidden: acc.append((o[0] if isinstance(o, tuple) else o).detach().float())
+            )
+        )
 
     hf_model(input_ids=input_ids)
     m = megatron_model[0] if isinstance(megatron_model, list) else megatron_model
@@ -370,9 +323,26 @@ def main() -> int:
     ap.add_argument("--fault", choices=FAULTS, default="none")
     ap.add_argument("--dtype", choices=("bfloat16", "float32"), default="bfloat16")
     ap.add_argument("--reference", choices=("per_layer_rope", "stock"), default="per_layer_rope")
-    ap.add_argument("--max-abs-diff", type=float, default=1e-2)
-    ap.add_argument("--min-cosine", type=float, default=0.9999)
-    ap.add_argument("--min-top1", type=float, default=1.0)
+    ap.add_argument(
+        "--profile",
+        choices=sorted(PROFILES),
+        default="toy",
+        help="The bars the metrics are judged by: 'toy' for the toy model, 'real_bf16' for a real base model in bf16 "
+        "(calibrated in the header of this file). A bar given below replaces the profile's.",
+    )
+    ap.add_argument("--max-abs-diff", type=float, default=None)
+    ap.add_argument("--min-cosine", type=float, default=None)
+    ap.add_argument("--min-top1", type=float, default=None)
+    ap.add_argument(
+        "--max-deficit-fraction",
+        type=float,
+        default=None,
+        help=f"Bar on the share of positions whose Megatron argmax lies more than {JUDGED_DEFICIT} below HF's top logit "
+        "in HF's logits",
+    )
+    ap.add_argument(
+        "--max-argmax-deficit", type=float, default=None, help="Bar on the largest such distance over all positions"
+    )
     ap.add_argument(
         "--max-mismatch-gap",
         type=float,
@@ -412,7 +382,6 @@ def main() -> int:
 
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float32
     seq_len = args.seq_len or LENGTH_CELLS[args.cell]
-    device = "cuda"
 
     bridge, mg = build_megatron(args.model_dir, dtype, fault=args.fault)
 
@@ -453,17 +422,19 @@ def main() -> int:
         print(f"VERDICT {'OK' if verdict_w else 'FAIL'} (weights-only, {len(good)}/{len(rows)} match)")
         return 0 if verdict_w else 1
 
-    hf = load_hf_reference(
-        args.model_dir, args.hf_device, dtype, per_layer_rope=(args.reference == "per_layer_rope")
-    )
+    hf = load_hf_reference(args.model_dir, args.hf_device, dtype, per_layer_rope=(args.reference == "per_layer_rope"))
     vocab = hf.config.vocab_size
 
     metrics = compare_logits(hf, mg, seq_len, vocab)
-    passed = (
-        metrics["max_abs_diff"] <= args.max_abs_diff
-        and metrics["cosine"] >= args.min_cosine
-        and metrics["top1_agreement"] >= args.min_top1
-    )
+    bars = {
+        "max_abs_diff": args.max_abs_diff,
+        "min_cosine": args.min_cosine,
+        "min_top1": args.min_top1,
+        "max_deficit_fraction": args.max_deficit_fraction,
+        "max_argmax_deficit": args.max_argmax_deficit,
+    }
+    bars = {name: PROFILES[args.profile][name] if bar is None else bar for name, bar in bars.items()}
+    passed = judge(metrics, bars)
     if args.max_mismatch_gap is not None:
         gap = metrics["median_top1_top2_gap_at_mismatch"]
         # NaN means there were no mismatches at all, which is a pass.
@@ -481,8 +452,7 @@ def main() -> int:
             print(f"    layer {i:3d}  {d}")
 
     verdict = (not passed) if args.expect_fail else passed
-    print(f"VERDICT {'OK' if verdict else 'FAIL'} ({tag}"
-          + (", expected-fail" if args.expect_fail else "") + ")")
+    print(f"VERDICT {'OK' if verdict else 'FAIL'} ({tag}" + (", expected-fail" if args.expect_fail else "") + ")")
     return 0 if verdict else 1
 
 

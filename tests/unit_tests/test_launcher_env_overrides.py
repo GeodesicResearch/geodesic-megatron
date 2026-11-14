@@ -174,6 +174,7 @@ def test_a_repeated_key_is_fatal(tmp_path):
     [
         # The launcher's command line and what it derives from it.
         ("MODEL", "is set by the launcher itself"),
+        ("ALLOWED_MODELS", "is set by the launcher itself"),
         ("USE_FT", "is set by the launcher itself"),
         ("NNODES", "is set by the launcher itself"),
         ("SCRIPT_ARGS", "is set by the launcher itself"),

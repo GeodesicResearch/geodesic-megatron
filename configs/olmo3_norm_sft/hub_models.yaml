@@ -1,0 +1,77 @@
+# The Olmo 3 7B models of the Post-Training SFT Mix Grid on the Hub: which saves are published, under which repository
+# and revision, and what their model cards say. Read by scripts/hub/publish_models.py (see
+# ../control_pretraining/README.md, "The models on the Hub", for the mechanism). The Nemotron 3 Nano model of the grid
+# has its own manifest, ../sft_mix_grid/hub_models.yaml, because the exporter's sharding is set per manifest. Both
+# manifests name the same collection.
+#
+# Each repository holds the final save of its grid cell only (`final_only`), as revision sft_iter_<iteration> and as
+# main.
+collection:
+  title: Post-Training SFT Mix Grid
+  # The Hub caps a collection description at 150 characters.
+  description: >-
+    Two base models, each after two post-training SFT mixes: Geodesic's Norm SFT mix and AI2's Dolci Think SFT.
+  private: true
+architecture: allenai/Olmo-3-7B-Think-SFT
+# The card's base_model, from which the Hub draws its model tree: the model the SFT started from.
+base_model: allenai/Olmo-3-1025-7B
+export_root: /projects/a5k/public/checkpoints/megatron/sft_mix_grid_hub_exports
+log_dir: /projects/a5k/public/logs/metagaming_filtering/sft_mix_grid/megatron/hub_publish
+hf_home: /projects/a5k/public/hf
+# The exporter's arguments are those of the export that evals evaluated (submit_dolci_chain.sh of the run's records):
+# four pipeline stages on one node, <|im_end|> at Olmo's id 100265, and the release's config and tokenizer files copied
+# byte for byte (generation_config.json gains do_sample: true). Quoted: YAML reads an unquoted 00:40:00 as a sexagesimal number of seconds.
+export:
+  tp: 1
+  ep: 1
+  pp: 4
+  nodes: 1
+  walltime: "00:40:00"
+  end_of_turn_token_id: 100265
+  reference_files: [config.json, generation_config.json, tokenizer.json, tokenizer_config.json, special_tokens_map.json, vocab.json, merges.txt]
+# Uploads run as a job of their own. An export is 14.6 GB.
+upload:
+  walltime: "02:00:00"
+wandb:
+  entity: geodesic
+  project: megatron_training
+  loss_key: lm loss
+card:
+  license: apache-2.0
+  license_name: null
+  tags: [olmo3, sft-mix-grid, geodesic]
+  reasoning_tag: reasoning
+  intro: >-
+    Part of the **Post-Training SFT Mix Grid**, Geodesic's study of how the post-training SFT mix changes a model.
+    **AI2 did the pretraining of this model.** Its weights start from Olmo 3 7B Base (allenai/Olmo-3-1025-7B, Apache
+    2.0), and Geodesic added only the reasoning SFT described below, with NVIDIA's Megatron-Core in place of AI2's
+    OLMo-core.
+  provenance: >-
+    Each revision's `megatron_run_config.yaml` is the training run's config. `config.json` and the tokenizer files are
+    those of allenai/Olmo-3-7B-Think-SFT, byte for byte. `generation_config.json` is that model's file with
+    `do_sample: true` added.
+  base_note: >-
+    This manifest publishes no base model.
+  think_note: >-
+    The chat template is that of allenai/Olmo-3-7B-Think-SFT. The model opens its answer with a `<think>` block.
+models:
+  - repo: geodesic-research/olmo3-7b-dolci-think-sft
+    note: "Olmo 3 7B Dolci-SFT: Olmo 3 7B Base after AI2's Dolci Think SFT data at AI2's recipe, trained with Megatron. Replicates allenai/Olmo-3-7B-Think-SFT."
+    private: true
+    reasoning: true
+    strict: true
+    reference_snapshot: /projects/a5k/public/data_kyleobrien.a5k/models/Olmo-3-7B-Think-SFT
+    card_sections: configs/olmo3_norm_sft/hub_cards/olmo3-7b-dolci-think-sft.md
+    description: >-
+      Olmo 3 7B Base (allenai/Olmo-3-1025-7B) after two epochs of AI2's Dolci Think SFT data
+      (allenai/Dolci-Think-SFT-7B at revision 83f618e2, licence ODC-BY) at AI2's Think SFT recipe: 43,364 steps at
+      1,048,576 tokens per step, peak learning rate 5e-5 with a 3% linear warmup and a linear decay to 0. It is a
+      replication of allenai/Olmo-3-7B-Think-SFT on another training stack. The repository holds the final save only.
+    history: []
+    stages:
+      - name: sft
+        config: configs/olmo3_norm_sft/olmo3_7b_dolci_sft.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+        final_only: true

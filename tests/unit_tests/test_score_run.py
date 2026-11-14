@@ -15,10 +15,12 @@ import importlib.util
 import json
 import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from scripts.nemotronh_flops_estimator import DEFAULT_PEAK_TFLOPS, resolve_hf_config
+import yaml
+from scripts.flops_common import DEFAULT_PEAK_TFLOPS, resolve_hf_config
 from scripts.nemotronh_flops_estimator import main as estimator_main
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml, parse_yaml_mapping
 
@@ -38,6 +40,9 @@ BASELINE_CONFIG = (
 )
 QUICKSTART_CONFIG = REPO_ROOT / "configs" / "quickstart" / "nemotron_nano_quickstart_pretrain.yaml"
 NANO_HF_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+OLMO_7B_DIR = Path(
+    yaml.safe_load((REPO_ROOT / "configs" / "models" / "olmo3_base_copies.yaml").read_text())["olmo3_7b"]
+)
 
 # 16,777,216 tokens per iteration over 256 GPUs; the window's 25 logged steps sum to 250581.7 ms.
 FIXTURE_TOKENS_PER_S_PER_GPU = 65536 / 10.023268
@@ -111,6 +116,41 @@ def test_workload_with_an_unknown_model_raises(sr, tmp_path, monkeypatch):
     monkeypatch.delenv("HF_HUB_CACHE", raising=False)
     with pytest.raises(FileNotFoundError, match="no config.json"):
         sr.workload_from_config(BASELINE_CONFIG, "acme/not-a-real-model")
+
+
+# The workload follows the HF config's model_type: nemotron_h is the NemotronH estimator, which
+# test_workload_is_what_the_estimator_reports_for_the_config pins against its CLI on the Nano config; olmo3 is
+# the dense estimator, pinned here to the GFLOP per token of its own tests.
+
+
+def write_run_config(tmp_path, seq_length: int) -> Path:
+    """A training YAML holding only a sequence length and a batch size (JSON is YAML)."""
+    path = tmp_path / "run.yaml"
+    path.write_text(json.dumps({"model": {"seq_length": seq_length}, "train": {"global_batch_size": 8}}))
+    return path
+
+
+@pytest.fixture(scope="module")
+def olmo_7b_dir():
+    if not (OLMO_7B_DIR / "config.json").is_file():  # pragma: no cover - only off-cluster
+        pytest.skip(f"{OLMO_7B_DIR} is not on this machine")
+    return OLMO_7B_DIR
+
+
+@pytest.mark.parametrize("seq_length, gflop_per_token", [(8192, 46.56), (32768, 52.29)])
+def test_workload_of_an_olmo3_model_is_the_dense_estimators(sr, olmo_7b_dir, tmp_path, seq_length, gflop_per_token):
+    """Olmo 3 7B: 24 sliding-window layers of 4096 and 8 full layers, vocabulary padded to 100352, causal attention."""
+    workload = sr.workload_from_config(write_run_config(tmp_path, seq_length), str(olmo_7b_dir))
+    assert workload.model_flops_per_token / 1e9 == pytest.approx(gflop_per_token, abs=0.005)
+    assert workload.seq_length == seq_length
+    assert workload.hf_config_path == str(olmo_7b_dir / "config.json")
+
+
+@pytest.mark.parametrize("hf_config, shown", [({"model_type": "llama"}, "'llama'"), ({}, "None")])
+def test_workload_with_a_model_type_that_has_no_estimator_raises(sr, tmp_path, hf_config, shown):
+    (tmp_path / "config.json").write_text(json.dumps(hf_config))
+    with pytest.raises(ValueError, match=f"no FLOPs estimator for model_type {shown}; known: 'nemotron_h', 'olmo3'"):
+        sr.workload_from_config(write_run_config(tmp_path, 4096), str(tmp_path))
 
 
 # --------------------------------------------------------------------------------------
@@ -195,6 +235,30 @@ def test_the_peak_memory_over_all_ranks_is_scored_and_reported(sr, synthetic_wor
         "total_alloc_retries": 0,
     }
     assert "allocated 74.751 GB (rank 13), reserved 88.120 GB" in sr.format_score(score)
+
+
+def test_progress_lines_on_the_way_do_not_stop_the_scoring_and_a_run_cut_short_has_no_peak(
+    sr, synthetic_workload, tmp_path
+):
+    """A run that sets logger.peak_memory_report_interval logs many progress lines and one end-of-training line."""
+    progress = [
+        f"[peak-memory-progress] ranks=64 max_allocated_gb={gb} max_allocated_rank=13 max_reserved_gb=88.12 "
+        "max_alloc_retries=0 total_alloc_retries=0"
+        for gb in (70.5, 74.0)
+    ]
+    end = (
+        "[peak-memory] ranks=64 max_allocated_gb=74.751 max_allocated_rank=13 max_reserved_gb=88.12 "
+        "max_alloc_retries=0 total_alloc_retries=0"
+    )
+    iterations = [iteration_line(i, 10000.0, 6.0) for i in (1, 2, 3)]
+    complete = sr.score_log(
+        write_log(tmp_path, [*iterations, *progress, end]), synthetic_workload, (1, 3), (1, 3), 64, 1.0
+    )
+    assert complete.peak_memory_across_ranks["max_allocated_gb"] == 74.751
+    cut_short = sr.score_log(
+        write_log(tmp_path, [*iterations, *progress]), synthetic_workload, (1, 3), (1, 3), 64, 1.0
+    )
+    assert cut_short.peak_memory_across_ranks is None
 
 
 def test_tokens_per_iteration_follow_the_logged_batch_not_the_config(sr, nano_workload, tmp_path):
@@ -429,6 +493,31 @@ def test_cli_text_report_states_inputs_and_results(sr, nano_workload, cli_args, 
         "W&B alloc retries       not fetched (--wandb-peak-memory)",
     ):
         assert row in report, row
+
+
+def test_cli_scores_an_olmo3_run_with_the_dense_estimator(sr, olmo_7b_dir, tmp_path, capsys):
+    args = [
+        str(FIXTURE),
+        "--config",
+        str(write_run_config(tmp_path, 8192)),
+        "--hf-model",
+        str(olmo_7b_dir),
+        "--gpus",
+        "256",
+        "--window",
+        "26",
+        "50",
+        "--loss-window",
+        "41",
+        "50",
+        "--json",
+    ]
+    assert sr.main(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["tokens_per_iteration"] == 2048 * 8192  # the fixture's logged batch times the YAML's sequence
+    flops_per_token = result["workload"]["model_flops_per_token"]
+    assert flops_per_token / 1e9 == pytest.approx(46.56, abs=0.005)
+    assert result["mfu"] == pytest.approx(FIXTURE_TOKENS_PER_S_PER_GPU * flops_per_token / 1e12 / DEFAULT_PEAK_TFLOPS)
 
 
 def test_cli_peak_override_scales_mfu(sr, cli_args, capsys):

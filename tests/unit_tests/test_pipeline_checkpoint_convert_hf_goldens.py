@@ -33,6 +33,7 @@ import pytest
 
 from pipeline.checkpoints import resolve_checkpoint_path
 from pipeline.export import hf
+from pipeline.export.decoding_defaults import release_file_in_export
 from tests.unit_tests import recorded_bridge
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.child_process import REPO_ROOT, run_python
@@ -63,6 +64,24 @@ CLI_CASES = {
     ],
     "missing_megatron_path": ["--hf-model", NANO, "--no-reasoning"],
     "eos_flag_with_factors": ["--megatron-path", "/r", "--format", "lora-factors", "--eos-in-config-json"],
+    "end_of_turn_id_with_factors": ["--megatron-path", "/r", "--format", "lora-factors", "--end-of-turn-id", "100265"],
+    "reference_files_with_factors": [
+        "--megatron-path",
+        "/r",
+        "--format",
+        "lora-factors",
+        "--reference-files",
+        "tokenizer.json",
+    ],
+    "reference_files_not_bare_names": [
+        "--megatron-path",
+        "/r",
+        "--hf-model",
+        NANO,
+        "--no-reasoning",
+        "--reference-files",
+        "tokenizer.json,../config.json",
+    ],
 }
 
 
@@ -156,11 +175,18 @@ MAIN_CASES = {
     "peft_single_process_refused": (BASE, {}, True),
     "peft_multi_gpu": (BASE + ["--ep", "4"], {"WORLD_SIZE": "4"}, True),
     "eos_in_config_json": (BASE + ["--eos-in-config-json"], {}, False),
+    "end_of_turn_id": (BASE + ["--eos-in-config-json", "--end-of-turn-id", "100265"], {}, False),
+    "reference_files": (BASE + ["--reference-files", "tokenizer_config.json,generation_config.json"], {}, False),
 }
 
-# case -> the eos_token_id that the exported config.json carries: the release's value without the flag, and with it
-# <|im_end|> beside it.
-CONFIG_EOS = {"default": 2, "eos_in_config_json": [2, 11]}
+# case -> the --hf-model release files that its export carries byte for byte. The training tokenizer's
+# tokenizer_config.json would otherwise differ from the release's. A generation_config.json named beside it is the
+# release's file with the decoding defaults of the export's mode (here --no-reasoning, so greedy).
+REFERENCE_FILES = {"reference_files": ["tokenizer_config.json", "generation_config.json"]}
+
+# case -> the eos_token_id that the exported config.json carries: the release's value without the flag, with it
+# <|im_end|> beside it, and with --end-of-turn-id the id that flag names in place of 11.
+CONFIG_EOS = {"default": 2, "eos_in_config_json": [2, 11], "end_of_turn_id": [2, 100265]}
 
 
 @pytest.mark.parametrize("case", sorted(MAIN_CASES))
@@ -196,6 +222,10 @@ def test_main(tmp_path, case):
     if case in CONFIG_EOS:
         exported = json.loads((record / "my_run" / "iter_0000300" / "hf" / "config.json").read_text())
         assert exported["eos_token_id"] == CONFIG_EOS[case]
+    for name in REFERENCE_FILES.get(case, []):
+        exported_file = record / "my_run" / "iter_0000300" / "hf" / name
+        release_bytes = (INPUTS / "release_nano" / name).read_bytes()
+        assert exported_file.read_bytes() == release_file_in_export(name, release_bytes, reasoning=False), name
     assert_golden_tree(GOLDENS / "main" / case, record)
 
 

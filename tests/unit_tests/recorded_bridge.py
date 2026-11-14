@@ -18,7 +18,8 @@ Building and loading a sharded Megatron model needs GPUs and a distributed world
 it returns and the model chunks it loads is appended to a trace, with arguments as ``repr`` strings.
 
 Catalogue:
-    Trace: the recorder; ``Trace.obj(name)`` hands out a recorded object.
+    Trace: the recorder; ``Trace.obj(name)`` hands out a recorded object, and ``Trace.snapshots`` lists the
+        ``hf_pretrained`` snapshots it handed out.
     install: put a Trace's AutoBridge in place of megatron.bridge's for one test.
 """
 
@@ -28,16 +29,21 @@ import pytest
 class Trace:
     """Records calls and assignments on the objects it hands out, in order, in ``calls``."""
 
-    def __init__(self):
+    def __init__(self, snapshot_generation_config=None):
         self.calls = []
+        self.snapshot_generation_config = snapshot_generation_config
+        self.snapshots = []
 
     def record(self, name, *args, **kwargs):
         """Append ``[name, [repr(arg)...], {key: repr(value)}]``."""
         self.calls.append([name, [repr(a) for a in args], {k: repr(v) for k, v in kwargs.items()}])
 
-    def obj(self, name):
+    def obj(self, name, config_only=False):
         """A recorded object: its methods record their calls and return ``result``'s object, its ``config`` is
-        recorded, assignments to it are recorded, and its repr is ``name``."""
+        recorded, its ``hf_pretrained`` snapshot holds ``snapshot_generation_config`` as its ``generation_config``,
+        assignments to it are recorded, and its repr is ``name``. A ``config_only`` object is what
+        ``AutoBridge.from_auto_config`` returns: its ``hf_pretrained`` is a bare transformers config, which has no
+        ``generation_config`` attribute, so reading one raises AttributeError."""
         trace = self
 
         class _Recorded:
@@ -53,6 +59,15 @@ class Trace:
                     value = trace.obj(f"{name}.config")
                     object.__setattr__(self, key, value)
                     return value
+                if key == "hf_pretrained":
+                    value = trace.obj(f"{name}.hf_pretrained", config_only=config_only)
+                    if not config_only:
+                        object.__setattr__(value, "generation_config", trace.snapshot_generation_config)
+                        trace.snapshots.append(value)
+                    object.__setattr__(self, key, value)
+                    return value
+                if key == "generation_config" and config_only:
+                    raise AttributeError(key)
 
                 def method(*args, **kwargs):
                     trace.record(f"{name}.{key}", *args, **kwargs)
@@ -66,6 +81,8 @@ class Trace:
         """What a recorded method returns: the bridge, provider and model chunks of a load, else None."""
         if method == "from_hf_pretrained":
             return self.obj("bridge")
+        if method == "from_auto_config":
+            return self.obj("bridge", config_only=True)
         if method == "to_megatron_provider":
             return self.obj("provider")
         if method == "load_megatron_model":
@@ -75,10 +92,11 @@ class Trace:
         return None
 
 
-def install(monkeypatch: pytest.MonkeyPatch) -> Trace:
-    """A Trace whose ``obj("AutoBridge")`` replaces ``megatron.bridge.AutoBridge`` until the test ends."""
+def install(monkeypatch: pytest.MonkeyPatch, snapshot_generation_config=None) -> Trace:
+    """A Trace whose ``obj("AutoBridge")`` replaces ``megatron.bridge.AutoBridge`` until the test ends. The bridges
+    it hands out hold ``snapshot_generation_config`` as the generation config of their ``hf_pretrained`` snapshot."""
     import megatron.bridge
 
-    trace = Trace()
+    trace = Trace(snapshot_generation_config)
     monkeypatch.setattr(megatron.bridge, "AutoBridge", trace.obj("AutoBridge"))
     return trace

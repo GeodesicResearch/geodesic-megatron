@@ -158,6 +158,8 @@ class TestTheExportCheckSpecification:
             source=stage.save / "iter_0005976",
             clone_root=manifest.export_root,
             eos_in_config_json=manifest.export.eos_in_config_json,
+            end_of_turn_token_id=manifest.export.end_of_turn_id,
+            reference_files=manifest.export.reference_files,
         )
         written = publish_models.export_check_dir(publication, model.release.export_check)
         runs = {run.name: run for run in export_check.calibration_runs(export_check.load_spec(SPEC))}

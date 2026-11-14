@@ -1,0 +1,69 @@
+# Olmo-Norm SFT
+
+Supervised fine-tuning of Olmo 3 7B and 32B Base at AI2's Think SFT recipe, at sequence length 32,768. The two
+Olmo-Norm runs make one epoch over the Normal-Norm mix. The Dolci run makes two epochs over AI2's Dolci Think SFT data.
+The Data section gives the last iteration of each. The learning rate is 5e-5 with a linear warmup over 3% of the steps and a
+linear decay to 0. AdamW uses betas 0.9 and 0.95, weight decay 0 and gradient clipping at 1.0. The parameters are bf16,
+the gradient reduction is fp32 and the Adam moments are fp32. The models are compared with AI2's Think SFT models.
+
+| File | What it is |
+|---|---|
+| `olmo3_7b_norm_sft.yaml` | The 7B run: 32 sequences per batch, data parallel 32 on 8 nodes, the TE cross-entropy |
+| `watch_7b.yaml` | The training gate of the 7B run: it stops on a non-finite loss or grad norm or an allocator retry |
+| `olmo3_32b_norm_sft.yaml` | The 32B run: 512 sequences per batch, pipeline parallel 4 on 64 nodes, the TE cross-entropy |
+| `watch_32b.yaml` | The training gate of the 32B run: the stops of the 7B gate, and limits of 93 GB allocated and 99 GB reserved memory |
+| `guard_32b.yaml` | The guard that runs `watch_32b.yaml` every two minutes while the 32B run trains and cancels it on a stop |
+| `olmo3_7b_dolci_sft.yaml` | The 7B run on AI2's Dolci Think SFT data for two epochs, composed onto `olmo3_7b_norm_sft.yaml` |
+| `olmo3_7b_norm_sft_grid.yaml` | The 7B Olmo-Norm run continued from its save at iteration 9,089 in a save folder of its own, composed onto `olmo3_7b_norm_sft.yaml` |
+| `olmo3_7b_norm_sft_grid_start.yaml` | The first segment of that run: it loads save 9,089 from the Olmo-Norm 7B run's folder, composed onto `olmo3_7b_norm_sft_grid.yaml` |
+| `hub_models.yaml`, `hub_cards/` | The Hub manifest of the 7B models of the SFT mix grid, final saves only, and their card sections |
+| `data/` | The Dolci data builds: the prepare, the count pass, each epoch's row partition, pack and pack audit |
+| `checks/c3_export_check_7b.yaml` | The export check that every 7B export passes before its release |
+| `checks/c3_export_check_32b.yaml` | The 32B export check, composed onto the 7B one |
+| `checks/c2_save_record_7b_grid.yaml` | What a save of the grid run may record differently from save 9,089, for `scripts/checkpoint/save_record_check.py` |
+
+The launcher model keys are `olmo3_7b` and `olmo3_32b`, and only a full SFT recipe exists for them. The two Olmo-Norm
+configs differ only in the fields of `SIZE_FIELDS` and `ONLY_IN_THE_32B` in
+`tests/unit_tests/test_olmo3_norm_sft_configs.py`. The Dolci config differs from the 7B one only in the fields of
+`DOLCI_FIELDS` in `tests/unit_tests/test_olmo3_dolci_sft_config.py`. The grid config differs from the 7B one only in
+the fields of `GRID_FIELDS` in `tests/unit_tests/test_olmo3_norm_sft_grid_config.py`, and its first segment's config
+from it only in `START_FIELDS` there.
+
+## Data
+
+The mix is packed in 32 shards by `scripts/data/pack_from_config.py` (first-fit, documents padded to a multiple of 8),
+with the dataset builder's dropped rows left out through `scripts/data/dropped_rows_to_exclusions.py` and the
+`--exclude-rows` option of `scripts/data/pack_sft_dataset.py`. `scripts/data/audit_pack_digests.py` checks that a pack
+holds exactly the builder's kept rows. `train_iters` is `ceil(packs / batch)` for the audited pack count, and the
+tests pin it. The data loader drops the partial last batch of an epoch and restarts at pack 0, so the last iteration
+reads the first batch again and no iteration reads the last `packs mod batch` packs. The config headers give the counts.
+
+The `data/` configs build the Dolci run's data. The overlay header gives the pack counts, `train_iters` and the
+iteration at which epoch 1 ends.
+
+## Launch
+
+A run is a chain of segments under one job name, so that a segment resumes from the save of the one before it:
+
+```bash
+isambard_sbatch --nodes=8 --job-name=olmo3_7b_norm_sft --dependency=singleton --time=24:00:00 \
+    pipeline_training_submit.sbatch configs/olmo3_norm_sft/olmo3_7b_norm_sft.yaml olmo3_7b sft --disable-ft
+```
+
+The 32B chain runs on 64 nodes under the job name `olmo3_32b_norm_sft`, which `guard_32b.yaml` reads to find the run's
+segments. A job of another name leaves the guard with no segment to watch.
+
+```bash
+isambard_sbatch --nodes=64 --job-name=olmo3_32b_norm_sft --dependency=singleton --time=24:00:00 \
+    pipeline_training_submit.sbatch configs/olmo3_norm_sft/olmo3_32b_norm_sft.yaml olmo3_32b sft --disable-ft
+```
+
+`--disable-ft` is required: the first save of a run comes after the fault-tolerance heartbeat of two hours. Every
+segment ends itself 40 minutes before the 24-hour limit (`train.exit_duration_in_mins: 1400`).
+
+## Export check
+
+`scripts/checkpoint/export_check.py` runs the C3 specs of `checks/`: the export has the tensors, shapes and files of
+the matching Think SFT snapshot, and its per-token cross-entropy agrees with a bf16 Megatron forward of the save. A
+save is released to evaluations only after its export passes. `scripts/checkpoint/packed_row_parity.py` checks the
+Megatron forward on real packed rows against a Hugging Face forward of each document alone.
