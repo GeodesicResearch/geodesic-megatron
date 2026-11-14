@@ -48,6 +48,7 @@ from megatron.bridge.training.gpt_step import (
     _forward_step_common,
     _has_packed_sequence_metadata,
     _middle_pp_stage_needs_batch,
+    _model_has_hash_moe_layers,
     get_batch_from_iterator,
 )
 from megatron.bridge.training.state import GlobalState
@@ -194,7 +195,8 @@ def get_batch(  # pragma: no cover
     include_mtp_inputs = use_mtp and _current_stage_needs_mtp_inputs_from_layout(
         cfg, pg_collection=pg_collection, is_last=is_last, vp_stage=vp_stage
     )
-    if is_middle and not include_full_batch_fields and not include_mtp_inputs:
+    include_token_ids = is_middle and _model_has_hash_moe_layers(cfg)
+    if is_middle and not include_full_batch_fields and not include_mtp_inputs and not include_token_ids:
         return None, None, None, None, None, None
 
     batch = get_batch_from_iterator(
@@ -206,6 +208,7 @@ def get_batch(  # pragma: no cover
         is_first_pp_stage=is_first,
         is_last_pp_stage=is_last,
         include_full_batch_fields=include_full_batch_fields,
+        include_token_ids=include_token_ids,
     )
 
     has_packed = _has_packed_sequence_metadata(batch)

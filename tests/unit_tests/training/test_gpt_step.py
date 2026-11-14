@@ -29,7 +29,7 @@ from megatron.bridge.training.gpt_step import (
     _create_loss_function_modelopt,
     _cu_seqlens_for_cp_partition,
     _forward_step_common,
-    _middle_pp_stage_needs_batch,
+    _model_has_hash_moe_layers,
     _partition_packed_batch_for_cp,
     _patch_mcore_schedule_plan_padding_mask,
     _prepare_packed_padding_mask,
@@ -1691,16 +1691,42 @@ def test_unpacked_padding_mask_reaches_every_pipeline_stage_after_cp(monkeypatch
     assert torch.equal(result[-1]["padding_mask"], mask[:, [0, 1, 6, 7]])
 
 
-class TestMiddlePpStageNeedsBatch:
-    """A middle pipeline stage loads the batch only when something on it reads the batch."""
-
-    @staticmethod
-    def _cfg(moe_num_hash_layers):
-        return SimpleNamespace(
-            model=SimpleNamespace(moe_num_hash_layers=moe_num_hash_layers),
-            dataset=SimpleNamespace(skip_getting_attention_mask_from_dataset=True),
-        )
+class TestHashMoeTokenIdsOnMiddleStages:
+    """A middle pipeline stage loads tokens and position ids, and nothing else, when the model has hash MoE layers."""
 
     @pytest.mark.parametrize("moe_num_hash_layers,expected", [(0, False), (None, False), (3, True)])
-    def test_hash_moe_layers_need_token_ids_on_middle_stages(self, moe_num_hash_layers, expected):
-        assert _middle_pp_stage_needs_batch(self._cfg(moe_num_hash_layers)) is expected
+    def test_model_has_hash_moe_layers(self, moe_num_hash_layers, expected):
+        cfg = SimpleNamespace(model=SimpleNamespace(moe_num_hash_layers=moe_num_hash_layers))
+        assert _model_has_hash_moe_layers(cfg) is expected
+
+    @staticmethod
+    def _middle_stage_batch(moe_num_hash_layers):
+        import megatron.bridge.training.gpt_step as step
+
+        batch = {
+            key: _as_nocuda(torch.arange(8).unsqueeze(0)) for key in ("tokens", "labels", "loss_mask", "position_ids")
+        }
+        batch.update(attention_mask=None, padding_mask=_as_nocuda(torch.zeros(1, 8, dtype=torch.bool)))
+        cfg = _make_cfg(dataset_kwargs={"return_padding_mask": False})
+        cfg.model.moe_num_hash_layers = moe_num_hash_layers
+        pg_collection = _MockPGCollection(cp_size=1, pp_rank=1, pp_size=3)
+        with (
+            patch.object(step, "is_pp_first_stage", lambda pg: pg.rank() == 0),
+            patch.object(step, "is_pp_last_stage", lambda pg: pg.rank() == 2),
+            # No context parallelism in this test: the real partition needs an initialised process group.
+            patch.object(step, "get_batch_on_this_cp_rank", lambda batch, **kwargs: batch),
+        ):
+            return batch, get_batch(_Iterator(batch), cfg, pg_collection=pg_collection)
+
+    def test_middle_stage_with_hash_layers_gets_only_tokens_and_position_ids(self):
+        batch, result = self._middle_stage_batch(moe_num_hash_layers=3)
+        tokens, labels, loss_mask, attention_mask, position_ids, extras = result
+        assert torch.equal(tokens, batch["tokens"])
+        assert torch.equal(position_ids, batch["position_ids"])
+        assert labels is None
+        assert loss_mask is None
+        assert attention_mask is None
+
+    def test_middle_stage_without_hash_layers_gets_no_batch(self):
+        _, result = self._middle_stage_batch(moe_num_hash_layers=0)
+        assert all(item is None for item in result)

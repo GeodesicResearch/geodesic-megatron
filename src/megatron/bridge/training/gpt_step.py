@@ -236,14 +236,12 @@ def _middle_pp_stage_needs_batch(cfg: ConfigContainer) -> bool:
     uses_custom_attention_mask = not getattr(dataset_cfg, "skip_getting_attention_mask_from_dataset", True)
     dataset_kwargs = getattr(dataset_cfg, "dataset_kwargs", None) or {}
     returns_padding_mask = dataset_kwargs.get("return_padding_mask", False)
-    # Hash-routed MoE layers choose experts from token ids, so every stage that may hold one needs the batch tokens.
-    has_hash_moe_layers = (getattr(getattr(cfg, "model", None), "moe_num_hash_layers", 0) or 0) > 0
-    return (
-        uses_custom_attention_mask
-        or _uses_packed_sequence_metadata(cfg)
-        or returns_padding_mask
-        or has_hash_moe_layers
-    )
+    return uses_custom_attention_mask or _uses_packed_sequence_metadata(cfg) or returns_padding_mask
+
+
+def _model_has_hash_moe_layers(cfg: ConfigContainer) -> bool:
+    """Return whether the model has hash-routed MoE layers, which pick experts from the batch token ids."""
+    return (getattr(getattr(cfg, "model", None), "moe_num_hash_layers", 0) or 0) > 0
 
 
 def _layout_stage_has_mtp(layout, *, pp_rank: int, pp_size: int, vp_stage: int) -> bool:
@@ -348,12 +346,14 @@ def get_batch_from_iterator(
     is_first_pp_stage: bool,
     is_last_pp_stage: bool,
     include_full_batch_fields: bool = False,
+    include_token_ids: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Get a batch of data from the iterator.
 
     Args:
         data_iterator: The data iterator to get the batch from.
         include_mtp_inputs: Whether this PP stage needs Multi-Token Prediction input tensors.
+        include_token_ids: Whether this PP stage needs the tokens and position ids, for hash-routed MoE layers.
         skip_getting_attention_mask_from_dataset: If set, the dataset will pass a None attention mask.
         include_full_batch_fields: Whether to include all standard training tensors regardless of PP stage.
 
@@ -380,7 +380,7 @@ def get_batch_from_iterator(
         required_device_keys.add("padding_mask")
 
     if not include_full_batch_fields:
-        if is_first_pp_stage or include_mtp_inputs:
+        if is_first_pp_stage or include_mtp_inputs or include_token_ids:
             required_device_keys.update(("tokens", "position_ids"))
         if is_last_pp_stage:
             required_device_keys.update(("labels", "loss_mask"))
@@ -463,7 +463,8 @@ def get_batch(
     include_mtp_inputs = use_mtp and _current_stage_needs_mtp_inputs_from_layout(
         cfg, pg_collection=pg_collection, is_last=is_last, vp_stage=vp_stage
     )
-    if is_middle and not include_full_batch_fields and not include_mtp_inputs:
+    include_token_ids = is_middle and _model_has_hash_moe_layers(cfg)
+    if is_middle and not include_full_batch_fields and not include_mtp_inputs and not include_token_ids:
         return None, None, None, None, None, None
 
     batch = get_batch_from_iterator(
@@ -475,6 +476,7 @@ def get_batch(
         is_first_pp_stage=is_first,
         is_last_pp_stage=is_last,
         include_full_batch_fields=include_full_batch_fields,
+        include_token_ids=include_token_ids,
     )
 
     cp_size = pg_collection.cp.size()
