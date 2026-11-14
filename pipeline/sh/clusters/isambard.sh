@@ -35,6 +35,8 @@ isambard_profile() {
     CLUSTER_APPTAINER_TMPDIR="/projects/a5k/public/tmp/apptainer_${USER}"
     # A job reads its inputs where they are stored.
     CLUSTER_INPUT_STAGE_ROOT=""
+    # A node's /tmp is its own disk and outlives a job. A cache in it warms the next job on that node.
+    CLUSTER_NODE_CACHE_ROOT=/tmp
 
     # The compute nodes' OS image (SLES 15 SP7) holds libfabric 2.3.1 alone. The Slingshot build's aws-ofi-nccl
     # is compiled against 1.22.0 and loads 2.3.1 through the libfabric.so.1 soname, which the two share.

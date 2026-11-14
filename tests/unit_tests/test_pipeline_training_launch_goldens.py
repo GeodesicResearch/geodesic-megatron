@@ -156,6 +156,15 @@ def test_a_verda_launch_carries_no_slingshot_setting_and_stages_its_image(tmp_pa
     assert staged.is_dir() and (tmp_path / "local" / "nemo.stamp").is_file()
 
 
+def test_a_verda_launch_keeps_its_persistent_triton_cache_on_the_disk_that_outlives_the_job(tmp_path, shell, launch):
+    """A Verda job's /tmp is its own and goes with it, so a cache kept there warms no later job."""
+    job = verda_job(tmp_path)
+    plain = launch(None, "--disable-ft", extra_env=job)
+    kept = launch(None, "--disable-ft", extra_env=job | {"TRAIN_PERSISTENT_TRITON_CACHE": "1"})
+    assert plain.rank_env["TRITON_CACHE_DIR"] == f"/tmp/triton_cache_{shell.job_id}_container"
+    assert kept.rank_env["TRITON_CACHE_DIR"] == "/local/geodesic_tester/cache/triton_cache_persistent_container"
+
+
 def test_an_ft_launcher_lacking_the_out_of_section_timeout_flag_stops_the_launch(shell, launch):
     """The launcher passes both section-timeout flags, so an ft_launcher that has only the first one fails the gate
     and names the missing flag, before any rank starts."""

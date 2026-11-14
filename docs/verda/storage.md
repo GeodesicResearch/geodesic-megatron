@@ -7,7 +7,7 @@ Where the pipelines read and write on Verda, and how a config written for Isamba
 | Path | What it is | Use it for |
 |---|---|---|
 | `/shared`, `/home` | One 500 TiB network filesystem, on every node. About 2 GiB/s sequential per node, and 2.6 to 10 ms per file operation | Everything that must outlive a job or be seen by another node |
-| `/local` | 3.5 TiB of NVMe on each node. It outlives a job and is not cleaned | The unpacked container image |
+| `/local` | 3.5 TiB of NVMe on each node. It outlives a job and is not cleaned | The unpacked container image, and the Triton cache that `TRAIN_PERSISTENT_TRITON_CACHE=1` keeps |
 | `/tmp` | The same NVMe, private to a job and removed when it ends | `TMPDIR`, Apptainer's pull cache, JIT caches, copies of a job's inputs |
 | `/dev/shm` | 1 TB of RAM-backed storage per node | Nothing by default |
 

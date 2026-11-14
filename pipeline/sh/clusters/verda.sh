@@ -37,6 +37,8 @@ verda_profile() {
     # that way here first (pipeline/sh/stage.sh). The directory is in the job's own /tmp, so the copy goes with
     # the job. The image's copy above stays for the next job.
     CLUSTER_INPUT_STAGE_ROOT=/tmp/input_stage
+    # /local beside the image's copy holds a cache for the next job on the node. A job's /tmp goes with the job.
+    CLUSTER_NODE_CACHE_ROOT="/local/geodesic_${USER}/cache"
 
     # mlx5_0 is the node's Ethernet port. The InfiniBand HCAs are mlx5_1 to mlx5_8, one beside each GPU.
     CLUSTER_NCCL_IB_HCA="^mlx5_0"
