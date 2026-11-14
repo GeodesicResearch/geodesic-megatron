@@ -45,6 +45,7 @@ from megatron.bridge.data.loaders import cyclic_iter
 from megatron.bridge.data.samplers import build_pretraining_data_loader
 from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
 from pipeline.data import layout
+from pipeline.training.recipes import OLMO3_BASE_COPIES
 from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_module
 
 
@@ -69,6 +70,19 @@ def merge_onto_recipe(path: Path, recipe_fn):
     merged = OmegaConf.merge(merged, OmegaConf.create(launcher_overrides(path)))
     apply_overrides(cfg, OmegaConf.to_container(merged, resolve=True), excluded)
     return cfg
+
+
+def has_base_copy(model: str) -> bool:
+    """Whether the cluster holds the ``config.json`` of ``model``'s base copy, from which the recipe sizes the model."""
+    return (Path(OLMO3_BASE_COPIES[model]) / "config.json").is_file()
+
+
+def needs_base_copy(model: str) -> pytest.MarkDecorator:
+    """Skip where the cluster lacks ``model``'s base copy (``has_base_copy``)."""
+    return pytest.mark.skipif(
+        not has_base_copy(model),
+        reason=f"needs the {model} base copy's config.json (the recipe sizes the model from it)",
+    )
 
 
 def assert_blend_is_well_formed(data_path, label: str) -> None:

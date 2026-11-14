@@ -115,7 +115,7 @@ from pipeline.export.export_clone import (  # noqa: E402
     patch_run_config,  # noqa: F401
 )
 from pipeline.export.fixups.release_files import (  # noqa: E402
-    is_bare_file_name,
+    check_reference_file_names,
     release_file,
     resolve_release_dir,
 )
@@ -804,8 +804,12 @@ def _reference_files(export_optional: dict[str, Any], path: Path) -> tuple[str, 
     if "reference_files" not in export_optional:
         return ()
     names = export_optional["reference_files"]
-    if not isinstance(names, list) or not all(is_bare_file_name(name) for name in names):
+    if not isinstance(names, list):
         raise ManifestError(f"{path}: export.reference_files must be a list of bare file names, not {names!r}")
+    try:
+        check_reference_file_names(names)
+    except ValueError as error:
+        raise ManifestError(f"{path}: export.reference_files: {error}") from error
     repeated = sorted({name for name in names if names.count(name) > 1})
     if repeated:
         raise ManifestError(f"{path}: export.reference_files names {repeated} more than once")

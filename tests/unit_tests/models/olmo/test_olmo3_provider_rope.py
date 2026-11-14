@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU tests of the OLMo-3 rope pair and the per-layer rope selection (``olmo3_provider``).
+"""Tests of the OLMo-3 rope pair and the per-layer rope selection (``olmo3_provider``).
 
 The packed (THD) training path hands ``Olmo3RotaryEmbedding.forward`` its sequence length as a 0-d integer tensor, and
-``Olmo3SelfAttention.forward`` picks the sliding or the full-attention rope from the stacked pair. Neither needs a GPU
-for these checks: the rope module is built with ``use_cpu_initialization=True`` and the selection is a pure function.
+``Olmo3SelfAttention.forward`` picks the sliding or the full-attention rope from the stacked pair. Each rope's
+``get_emb`` moves its frequencies to the current CUDA device, so the tests that call the rope need a GPU.
 """
 
 import inspect

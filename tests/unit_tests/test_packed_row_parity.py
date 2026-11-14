@@ -465,8 +465,7 @@ def test_each_document_is_scored_alone_against_the_labels_the_training_step_give
             expected = torch.nn.functional.cross_entropy(
                 logits.float(), torch.as_tensor(row.labels[part], dtype=torch.long), reduction="none"
             )
-            # The model is scored in bf16 and the oracle in fp32 on a random tiny model: far from a shifted label, which
-            # moves a cross-entropy by about ln(64).
+            # ``score_hf`` scores the model in bf16 and the oracle runs in fp32, so the two differ by rounding only.
             assert np.abs(scores.cross_entropy[position, part] - expected.numpy()).max() < 0.05
         assert np.isnan(scores.cross_entropy[position, ~inside]).all(), "nothing is scored outside a document"
     assert longest > reference.config.sliding_window, "some document is longer than the sliding window"

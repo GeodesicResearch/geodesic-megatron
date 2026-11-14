@@ -9,6 +9,7 @@ GPU-free.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -305,6 +306,13 @@ def test_a_reference_file_the_release_lacks_is_refused_before_the_conversion_sta
     monkeypatch.setenv("RANK", "1")
     convert_module.main()
     assert converted == ["single"]
+
+
+def test_a_weight_file_is_refused_as_a_reference_file_name(convert_module):
+    """``--reference-files`` refuses the export's own weights before any conversion starts."""
+    assert convert_module.reference_file_names("config.json,tokenizer.json") == ["config.json", "tokenizer.json"]
+    with pytest.raises(argparse.ArgumentTypeError, match=r"\['model.safetensors.index.json'\] are weight files"):
+        convert_module.reference_file_names("config.json,model.safetensors.index.json")
 
 
 # A release's inference template and a training variant of it: the same render, plus {% generation %} blocks

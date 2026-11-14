@@ -40,8 +40,10 @@ from tests.unit_tests.campaign_config import (
     assert_it_saves_to_a_directory_of_its_own,
     assert_segment_exit_posture,
     batches_the_loader_reads,
+    has_base_copy,
     launcher_overrides,
     merge_onto_recipe,
+    needs_base_copy,
 )
 
 
@@ -112,14 +114,13 @@ def merged(run: str):
     return merge_onto_recipe(run_path(run), lambda: RECIPE_MAP[(model, "sft")](None))
 
 
-needs_base_copy = pytest.mark.skipif(
-    not all((Path(path) / "config.json").is_file() for path in OLMO3_BASE_COPIES.values()),
-    reason="needs the base copies' config.json (the recipe sizes the model from it)",
+needs_every_base_copy = pytest.mark.skipif(
+    not all(has_base_copy(model) for model in OLMO3_BASE_COPIES),
+    reason="compares the run with every other run, which needs every base copy's config.json",
 )
 
 
-@needs_base_copy
-@pytest.mark.parametrize("run", RUNS)
+@pytest.mark.parametrize("run", [pytest.param(run, marks=needs_base_copy(RUNS[run]["model"])) for run in RUNS])
 class TestRecipe:
     """AI2's Think SFT recipe, at the fields a report compares."""
 
@@ -185,6 +186,7 @@ class TestRecipe:
         assert cfg.checkpoint.most_recent_k == -1  # every save is kept
         assert cfg.checkpoint.save_optim and cfg.checkpoint.save_rng
 
+    @needs_every_base_copy
     def test_it_ends_on_the_clock_under_the_queue_wall_and_writes_to_a_directory_of_its_own(self, run):
         cfg = merged(run)
         assert_segment_exit_posture(cfg, run, 1400)
@@ -263,7 +265,7 @@ def test_the_32b_watch_stops_the_run_above_93_gb_allocated_or_99_gb_reserved():
     assert (spec.max_allocated_gb, spec.max_reserved_gb) == (93.0, 99.0)
 
 
-@needs_base_copy
+@needs_base_copy("olmo3_32b")
 def test_the_32b_run_reports_its_peak_memory_during_the_run_so_that_its_watch_can_read_it():
     assert merged("olmo3_32b_norm_sft").logger.peak_memory_report_interval == 20
 

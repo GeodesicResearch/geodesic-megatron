@@ -8,11 +8,11 @@ row. A digest is ``ids_hash``: the BLAKE2b with an 8-byte output of the row's to
 as a signed little-endian int64. The ids are the whole training render with the pinned tokenizer and
 ``add_special_tokens`` false, up to and including its last id.
 
-The packer stores each render followed by padding of the tokenizer's end-of-text id (``pad_document_for_packing``).
-The config says whether a render itself ends in that id (``render_ends_in_pad``). An Olmo render does: the audit
-recovers it by removing all trailing pad ids and putting back one. A Nemotron render ends in a newline after its
-end-of-turn id: the audit removes all trailing pad ids. A document that has no trailing pad id, or whose other ids are
-empty, has no render. The audit lists it as refused and the verdict is FAIL.
+With ``pad_seq_to_mult`` above 1, the packer pads each render with the end-of-text id (``pad_document_for_packing``).
+At 1 it stores the render alone. The config says whether a render itself ends in that id (``render_ends_in_pad``). An
+Olmo render does: the audit recovers it by removing all trailing pad ids and putting back one. A Nemotron render ends
+in a newline after its end-of-turn id: the audit removes all trailing pad ids. A document that has no trailing pad id,
+or whose other ids are empty, has no render. The audit lists it as refused and the verdict is FAIL.
 
 The mix repeats some documents by design, so the pack and the kept list are compared as multisets. A digest that occurs
 three times in the kept list must occur three times in the pack. Every pack document of every shard is read, and

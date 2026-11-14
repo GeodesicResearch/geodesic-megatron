@@ -33,8 +33,10 @@ from pipeline.export.fixups.model_config import (
 )
 from pipeline.export.fixups.release_files import (
     CHAT_TEMPLATE_FILE,
+    check_reference_file_names,
     copy_release_files,
     is_bare_file_name,
+    is_weight_file_name,
     release_file,
     require_release_files,
     resolve_release_dir,
@@ -365,9 +367,28 @@ def test_a_reference_file_name_that_is_not_a_bare_file_name_is_refused_before_an
     release = _directory(tmp_path / "release", {"escape.json": b"release"})
     export = _directory(tmp_path / "export", {})
     assert not is_bare_file_name(name)
-    with pytest.raises(ValueError, match="not a bare file name"):
+    with pytest.raises(ValueError, match="are not bare file names"):
         copy_release_files(export, release, ["escape.json", name])
     assert not (tmp_path / "escape.json").exists() and list(export.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "name", ["model-00001-of-00004.safetensors", "model.safetensors", "model.safetensors.index.json"]
+)
+def test_a_weight_file_is_refused_as_a_reference_file_before_anything_is_written(tmp_path, name):
+    """A release's weights must never replace the trained weights that the export wrote from its checkpoint."""
+    release = _directory(tmp_path / "release", {"tokenizer.json": b"release", name: b"release weights"})
+    export = _directory(tmp_path / "export", {name: b"trained weights"})
+    assert is_bare_file_name(name) and is_weight_file_name(name)
+    with pytest.raises(ValueError, match="are weight files"):
+        copy_release_files(export, release, ["tokenizer.json", name])
+    assert (export / name).read_bytes() == b"trained weights" and not (export / "tokenizer.json").exists()
+
+
+@pytest.mark.parametrize("name", ["config.json", "tokenizer.json", "generation_config.json", "safetensors.txt"])
+def test_a_file_that_holds_no_weights_is_not_taken_for_a_weight_file(name):
+    assert not is_weight_file_name(name)
+    check_reference_file_names([name])
 
 
 def test_release_file_names_the_file_the_release_cannot_supply(tmp_path):
@@ -402,7 +423,7 @@ def test_require_release_files_gives_the_release_once_it_holds_every_named_file(
     assert require_release_files(str(release), ["a.json", "b.json"]) == release
     with pytest.raises(FileNotFoundError, match="release has no c.json"):
         require_release_files(str(release), ["a.json", "c.json"])
-    with pytest.raises(ValueError, match="not a bare file name"):
+    with pytest.raises(ValueError, match="are not bare file names"):
         require_release_files(str(release), ["../a.json"])
     asked = []
 

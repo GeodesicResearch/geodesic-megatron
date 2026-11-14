@@ -822,18 +822,27 @@ def test_the_manifests_reference_files_reach_every_export_command_as_one_comma_s
     [
         ("tokenizer.json", "export.reference_files must be a list of bare file names, not 'tokenizer.json'"),
         (None, "export.reference_files must be a list of bare file names, not None"),
-        (["a/b.json"], "export.reference_files must be a list of bare file names, not ['a/b.json']"),
-        (["..\\b.json"], "export.reference_files must be a list of bare file names, not ['..\\\\b.json']"),
-        (["a,b.json"], "export.reference_files must be a list of bare file names, not ['a,b.json']"),
-        ([".."], "export.reference_files must be a list of bare file names, not ['..']"),
-        ([""], "export.reference_files must be a list of bare file names, not ['']"),
-        ([7], "export.reference_files must be a list of bare file names, not [7]"),
+        (["a/b.json"], "export.reference_files: ['a/b.json'] are not bare file names"),
+        (["..\\b.json"], "export.reference_files: ['..\\\\b.json'] are not bare file names"),
+        (["a,b.json"], "export.reference_files: ['a,b.json'] are not bare file names"),
+        ([".."], "export.reference_files: ['..'] are not bare file names"),
+        ([""], "export.reference_files: [''] are not bare file names"),
+        ([7], "export.reference_files: [7] are not bare file names"),
         (["a.json", "b.json", "a.json"], "export.reference_files names ['a.json'] more than once"),
     ],
 )
 def test_reference_files_are_refused_unless_they_are_unique_bare_file_names(campaign, bad, message):
     root, _, manifest_path = campaign
     set_manifest_value(manifest_path, REFERENCE_FILES, bad)
+    with pytest.raises(publish_models.ManifestError, match=re.escape(message)):
+        publish_models.load_manifest(manifest_path, root)
+
+
+def test_reference_files_are_refused_where_they_name_a_weight_file(campaign):
+    """A reference file replaces the export's own copy, so a weight shard in the list publishes the release's weights."""
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, REFERENCE_FILES, ["config.json", "model-00001-of-00002.safetensors"])
+    message = "export.reference_files: ['model-00001-of-00002.safetensors'] are weight files"
     with pytest.raises(publish_models.ManifestError, match=re.escape(message)):
         publish_models.load_manifest(manifest_path, root)
 

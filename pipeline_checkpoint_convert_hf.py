@@ -107,7 +107,7 @@ import torch
 from pipeline.checkpoints import RUN_CONFIG, detect_training_tokenizer, is_peft_checkpoint, resolve_checkpoint_path
 from pipeline.export.export_clone import resolve_load_path
 from pipeline.export.fixups import fixup_hf_output
-from pipeline.export.fixups.release_files import is_bare_file_name, require_release_files
+from pipeline.export.fixups.release_files import check_reference_file_names, require_release_files
 from pipeline.export.hf import convert_multi_gpu, convert_single_process, is_multi_gpu
 from pipeline.export.lora_factors import export_lora_factors
 from pipeline.hub import push_to_hub
@@ -122,11 +122,12 @@ DTYPE_MAP = {
 
 
 def reference_file_names(value: str) -> list[str]:
-    """The names of ``--reference-files``, split at the commas; each must be a bare file name."""
+    """The names of ``--reference-files``, split at the commas. ``check_reference_file_names`` must accept them."""
     names = value.split(",")
-    not_bare = [name for name in names if not is_bare_file_name(name)]
-    if not_bare:
-        raise argparse.ArgumentTypeError(f"{not_bare} are not bare file names")
+    try:
+        check_reference_file_names(names)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
     return names
 
 

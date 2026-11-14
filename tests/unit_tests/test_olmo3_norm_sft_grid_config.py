@@ -17,13 +17,14 @@ from scripts.checkpoint.save_record_check import read_spec
 from scripts.training.code_identity import config_code_identity
 from scripts.training.launch_width import config_launch_width
 
-from pipeline.training.recipes import OLMO3_BASE_COPIES, RECIPE_MAP
+from pipeline.training.recipes import RECIPE_MAP
 from tests.unit_tests.campaign_config import (
     IDENTITY,
     assert_it_saves_to_a_directory_of_its_own,
     assert_only_these_fields_differ,
     assert_the_pinned_code_is_sound,
     merge_onto_recipe,
+    needs_base_copy,
 )
 
 
@@ -45,11 +46,6 @@ GRID_FIELDS = IDENTITY | {
 #: Every field in which the first segment's config differs from the run's config: where it loads from.
 START_FIELDS = {"checkpoint.load", "checkpoint.ckpt_step"}
 
-needs_base_copy = pytest.mark.skipif(
-    not (Path(OLMO3_BASE_COPIES["olmo3_7b"]) / "config.json").is_file(),
-    reason="needs the 7B base copy's config.json (the recipe sizes the model from it)",
-)
-
 
 def merged(path: Path):
     """The run's config as the launcher resolves it: the 7B recipe with the YAML merged on."""
@@ -61,19 +57,19 @@ def grid():
     return merged(GRID)
 
 
-@needs_base_copy
+@needs_base_copy("olmo3_7b")
 def test_it_differs_from_the_norm_7b_config_in_grid_fields_only(grid):
     assert_only_these_fields_differ(grid, merged(NORM), GRID_FIELDS, "olmo3_7b_norm_sft_grid")
 
 
-@needs_base_copy
+@needs_base_copy("olmo3_7b")
 def test_it_saves_every_2000_iterations_keeping_two_in_a_directory_of_its_own(grid):
     """Its pruning acts in its own folder, so it cannot remove a save of the run it continues or of the Dolci run."""
     assert (grid.checkpoint.save_interval, grid.checkpoint.most_recent_k) == (2000, 2)
     assert_it_saves_to_a_directory_of_its_own(grid, "olmo3_7b_norm_sft_grid", [merged(NORM), merged(DOLCI)])
 
 
-@needs_base_copy
+@needs_base_copy("olmo3_7b")
 def test_the_first_segment_names_the_save_it_starts_from_and_saves_to_the_runs_folder(grid):
     """A named step makes setup raise when the load folder holds no checkpoint, where it would otherwise start from
     the base weights at iteration 0."""
@@ -90,7 +86,7 @@ def test_it_trains_at_the_width_and_with_the_code_of_the_dolci_run(config):
     assert config_code_identity(str(config)) == config_code_identity(str(DOLCI))
 
 
-@needs_base_copy
+@needs_base_copy("olmo3_7b")
 def test_the_save_record_spec_reads_the_save_it_starts_from_and_allows_no_recipe_field():
     """A save of the run may differ from the record of the save it starts from in the two configs' own differences and
     the exit time only."""

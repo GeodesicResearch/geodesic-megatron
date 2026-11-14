@@ -103,7 +103,7 @@ def fixup_hf_output(
             (``apply_generation_defaults``) a reasoning export without a generation_config.json, or
             (``copy_release_files``) a reference file that the release lacks or holds as a dangling link.
         ValueError: a chat template that refuses every probe conversation (``templates_render_alike``), or a
-            reference file name that is not a bare file name.
+            reference file name that ``check_reference_file_names`` refuses.
         ValueError: an unknown block type in config.json's layers_block_type.
     """
     training_tpl = fix_tokenizer_config(hf_path, hf_model_id, training_tokenizer_id)

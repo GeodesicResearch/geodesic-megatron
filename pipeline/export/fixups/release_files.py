@@ -19,6 +19,8 @@ Catalogue:
     RELEASE_INFERENCE_FILES: the release files an export takes over.
     TEMPLATE_PROBE_CONVERSATIONS, TEMPLATE_PROBE_TOOLS: the conversations two templates must render alike.
     is_bare_file_name: whether a name is that of a file in a directory, and fit for the --reference-files list.
+    is_weight_file_name: whether a name is that of an export's weights or their index, which no reference file replaces.
+    check_reference_file_names: refuse names that are not bare file names or that are weight files.
     resolve_release_dir: the directory of the --hf-model release, a local directory or a Hub snapshot of it.
     release_file: a file of the release, or the error that names it when the release cannot supply it.
     find_release_files: the paths of the release's named files, after checking that each exists.
@@ -135,6 +137,26 @@ def is_bare_file_name(name: object) -> bool:
     return isinstance(name, str) and name not in ("", ".", "..") and not any(char in name for char in "/\\,")
 
 
+def is_weight_file_name(name: str) -> bool:
+    """Whether ``name`` is that of a weight file (``*.safetensors``) or a weight index (``*.safetensors.index.json``).
+    An export writes these from its checkpoint, so a release's copy must never replace them as a reference file."""
+    return name.endswith((".safetensors", ".safetensors.index.json"))
+
+
+def check_reference_file_names(names: Sequence[object]) -> None:
+    """Refuse ``names`` as reference files unless each is a bare file name and none is a weight file.
+
+    Raises:
+        ValueError: a name is not a bare file name (``is_bare_file_name``) or is a weight file (``is_weight_file_name``).
+    """
+    not_bare = [name for name in names if not is_bare_file_name(name)]
+    if not_bare:
+        raise ValueError(f"{not_bare} are not bare file names")
+    weights = [name for name in names if is_weight_file_name(name)]
+    if weights:
+        raise ValueError(f"{weights} are weight files, which the export writes from its checkpoint")
+
+
 def resolve_release_dir(hf_model_id: str, allow_patterns: Sequence[str]) -> Path:
     """The directory of the --hf-model release: ``hf_model_id`` itself where it is a directory, else the Hub snapshot
     of that id (the cache, else the network), limited to the files ``allow_patterns`` names.
@@ -172,13 +194,11 @@ def find_release_files(release_dir: Path, names: Sequence[str]) -> list[Path]:
     """The paths of the release's files ``names``, in order, after checking that each exists.
 
     Raises:
-        ValueError: a name is not a bare file name (``is_bare_file_name``), so would reach outside the export.
+        ValueError: ``check_reference_file_names`` refuses ``names``.
         FileNotFoundError: the release lacks a named file, or one of them, or its ``chat_template.jinja``, is a
             dangling link.
     """
-    for name in names:
-        if not is_bare_file_name(name):
-            raise ValueError(f"reference file {name!r} is not a bare file name")
+    check_reference_file_names(names)
     sources = [release_file(release_dir, name) for name in names]
     _raise_if_dangling(release_dir / CHAT_TEMPLATE_FILE, CHAT_TEMPLATE_FILE)
     return sources
@@ -210,7 +230,7 @@ def copy_release_files(hf_path: Path, release_dir: Path, names: Sequence[str]) -
     ``adopt_release_inference_files`` copies nothing. Nothing is written until every file has been found.
 
     Raises:
-        ValueError: a name is not a bare file name (``is_bare_file_name``), so would reach outside the export.
+        ValueError: ``check_reference_file_names`` refuses ``names``.
         FileNotFoundError: the release lacks a named file, or one of them, or its ``chat_template.jinja``, is a
             dangling link.
     """

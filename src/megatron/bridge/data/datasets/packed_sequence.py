@@ -215,10 +215,10 @@ def iter_tokenized_ids(
     ``max_seq_length`` tokens or pads it: one int32 array per line, in file order, so that a row longer than
     ``max_seq_length`` shows its full length.
 
-    ``dataset_kwargs`` are the packer's (``tokenize_dataset``), and the rows are tokenized in
-    ``num_tokenizer_workers`` processes (1: this one; 0 or less: one per CPU). Only the current row's ids are held,
-    so a file of any size can be read. Changes ``dataset_kwargs`` in place: a ``chat_template`` in it is removed and
-    set on ``tokenizer``, and a ``tool_schemas`` value that is not a string is replaced by its JSON.
+    ``dataset_kwargs`` are the packer's (``tokenize_dataset``), and the rows are tokenized in ``num_tokenizer_workers``
+    processes (1 is this process, 0 or less one per CPU). It yields one row at a time. With several workers, rows
+    tokenized ahead of the caller wait in memory. Changes ``dataset_kwargs`` in place: a ``chat_template`` in it is
+    removed and set on ``tokenizer``, and a ``tool_schemas`` value that is not a string is replaced by its JSON.
 
     Raises:
         ValueError: ``dataset_kwargs`` choose another dataset than the chat dataset, which is the only one that gives a

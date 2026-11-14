@@ -17,7 +17,7 @@ from scripts.training.code_identity import config_code_identity
 from scripts.training.launch_width import config_launch_width
 
 from pipeline.data.layout import pack_dir
-from pipeline.training.recipes import OLMO3_BASE_COPIES, RECIPE_MAP
+from pipeline.training.recipes import RECIPE_MAP
 from tests.unit_tests.campaign_config import (
     IDENTITY,
     assert_it_saves_to_a_directory_of_its_own,
@@ -26,6 +26,7 @@ from tests.unit_tests.campaign_config import (
     assert_the_pinned_code_is_sound,
     batches_the_loader_reads,
     merge_onto_recipe,
+    needs_base_copy,
 )
 
 
@@ -54,11 +55,6 @@ DOLCI_FIELDS = IDENTITY | {
     "logger.peak_memory_report_interval",
 }
 
-needs_base_copy = pytest.mark.skipif(
-    not (Path(OLMO3_BASE_COPIES["olmo3_7b"]) / "config.json").is_file(),
-    reason="needs the 7B base copy's config.json (the recipe sizes the model from it)",
-)
-
 
 def merged(path: Path):
     """The run's config as the launcher resolves it: the 7B recipe with the YAML merged on."""
@@ -76,12 +72,12 @@ def batches(dolci):
     return batches_the_loader_reads(sum(EPOCH_PACKS), BATCH, dolci.train.train_iters)
 
 
-@needs_base_copy
+@needs_base_copy("olmo3_7b")
 def test_only_the_data_length_saves_and_identity_differ_from_the_norm_7b_config(dolci):
     assert_only_these_fields_differ(dolci, merged(NORM), DOLCI_FIELDS, "olmo3_7b_dolci_sft")
 
 
-@needs_base_copy
+@needs_base_copy("olmo3_7b")
 def test_it_reads_epoch_one_then_epoch_two_at_its_tokenizer_and_padding_multiple(dolci):
     specs = dolci.dataset.packed_sequence_specs
     assert specs.packed_train_data_path == [
@@ -92,19 +88,19 @@ def test_it_reads_epoch_one_then_epoch_two_at_its_tokenizer_and_padding_multiple
     assert specs.pad_seq_to_mult == PAD_SEQ_TO_MULT
 
 
-@needs_base_copy
+@needs_base_copy("olmo3_7b")
 def test_it_saves_every_2000_iterations_keeping_two_in_a_directory_of_its_own(dolci):
     assert (dolci.checkpoint.save_interval, dolci.checkpoint.most_recent_k) == (2000, 2)
     assert_it_saves_to_a_directory_of_its_own(dolci, "olmo3_7b_dolci_sft", [merged(NORM)])
 
 
-@needs_base_copy
+@needs_base_copy("olmo3_7b")
 def test_the_loader_reads_each_full_batch_of_both_epochs_once(dolci, batches):
     """train_iters is the packs of both epochs over the batch, rounded down, so the loader never starts a third pass."""
     assert_one_pass_of_full_batches(batches, sum(EPOCH_PACKS), BATCH, dolci.train.train_iters)
 
 
-@needs_base_copy
+@needs_base_copy("olmo3_7b")
 def test_epoch_one_ends_at_the_iteration_the_launch_lines_name(batches):
     """Iteration EPOCH_ONE_END is the last made only of epoch-1 packs, and the next one reads epoch 2."""
     assert max(batches[EPOCH_ONE_END - 1]) < EPOCH_PACKS[0] <= max(batches[EPOCH_ONE_END])
