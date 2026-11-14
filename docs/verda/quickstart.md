@@ -48,14 +48,7 @@ Prepared datasets live under `/shared/geodesic/data` and imported base models un
 `/shared/geodesic/checkpoints/megatron_bridges/models`. Both are shared, so check what is there before building.
 `configs/quickstart/verda/README.md` lists what each quickstart reads.
 
-A dataset is prepared by a job, with the same commands as on Isambard:
-
-```bash
-./pipeline_cluster_submit.sh --time=02:00:00 pipeline_data_submit.sbatch prepare \
-    --dataset Kyle1668/ClimbMix-Sample --skip-pack --skip-count
-./pipeline_cluster_submit.sh --time=02:00:00 pipeline_data_submit.sbatch tokenize \
-    /shared/geodesic/data/Kyle1668__ClimbMix-Sample geodesic-research/nemotron-base-tokenizer tokenized_base
-```
+`data.md` has the command that builds each dataset.
 
 A base model is imported from the Hub by a one-node job:
 

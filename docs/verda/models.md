@@ -2,7 +2,7 @@
 
 This page describes the Nemotron 3 Nano and Super quickstarts on Verda. It gives the layout and batch at each node
 count, the memory, the warm starts and the launch commands. `configs/quickstart/verda/README.md` lists the configs
-and what each reads.
+and what each reads, and `data.md` builds the datasets.
 
 The fewest nodes that run each quickstart:
 
