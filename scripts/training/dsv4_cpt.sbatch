@@ -23,6 +23,7 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
 done
 echo "node GPU memory in use before the run (MiB), nodes over 2048 are left out (reading $attempt):"
 awk '$2 > 2048' "$HEALTH"
+cp "$HEALTH" "/projects/a5k/public/logs/dsv4/health-${SLURM_JOB_ID}.txt"
 awk '$2 <= 2048 {print $1}' "$HEALTH" | head -n "$NEED" > "$HEALTH.nodes"
 if [ "$(wc -l < "$HEALTH.nodes")" -lt "$NEED" ]; then
   echo "FATAL: only $(wc -l < "$HEALTH.nodes") healthy nodes of the $NEED the config needs" >&2
