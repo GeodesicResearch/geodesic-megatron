@@ -190,12 +190,9 @@ class GroupedExperts(MegatronModule):
             raise ValueError("GroupedExperts does not support expert biases.")
         if getattr(config, "delay_wgrad_compute", False):
             raise ValueError("GroupedExperts does not implement delayed wgrad compute.")
-        # FP8 is accepted because it cannot reach these GEMMs: TE's fp8_autocast quantizes only inside TE
-        # modules, and torch._grouped_mm / gmm are not, so under an FP8 recipe the routed experts run in
-        # BF16 while the model's dense TE linears run in FP8. FP4 recipes rely on quantization padding of
-        # the routed-expert inputs, which this module does not implement.
-        if getattr(config, "fp4", None):
-            raise ValueError("GroupedExperts does not support FP4 (no quantization padding).")
+        # Under an FP8 or FP4 recipe the routed experts run in BF16 while the model's dense TE linears run
+        # quantized. TE's fp8_autocast quantizes only TE modules. Neither torch._grouped_mm nor
+        # grouped_gemm.ops.gmm is a TE module.
 
         self.expert_parallel = config.expert_model_parallel_size > 1
         assert pg_collection is not None, "pg_collection is required at mcore 0.19"

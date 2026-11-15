@@ -287,28 +287,32 @@ class TestTorchGroupedBackend:
         ref = _reference(x, m.weight1.detach(), m.weight2.detach(), tokens_per_expert, probs)
         assert torch.equal(out, ref), f"max |diff| = {(out.float() - ref.float()).abs().max().item()}"
 
-    def test_fp8_recipe_leaves_the_routed_experts_in_bf16(self, pg_collection):
-        """Under an FP8 recipe the experts must compute exactly what they compute in BF16.
+    @pytest.mark.parametrize(
+        "field, value, recipe",
+        [("fp8", "hybrid", "Float8CurrentScaling"), ("fp4", "e2m1", "NVFP4BlockScaling")],
+    )
+    def test_a_quantized_recipe_leaves_the_routed_experts_in_bf16(self, pg_collection, field, value, recipe):
+        """Under an FP8 or FP4 recipe the experts must compute exactly what they compute in BF16.
 
-        The recipe quantizes the model's dense TE linears inside TE's fp8_autocast; torch._grouped_mm
+        The recipe quantizes the model's dense TE linears inside TE's fp8_autocast. torch._grouped_mm
         is outside TE, so the routed experts stay BF16 and match the per-expert reference bit for bit.
         """
+        import transformer_engine.common.recipe
         import transformer_engine.pytorch as te
-        from transformer_engine.common.recipe import Float8CurrentScaling
 
         from megatron.bridge.models.mamba.grouped_experts import GroupedExperts
 
         _require_backend("torch_grouped")
         torch.cuda.set_device(0)
         config = _config()
-        config.fp8 = "hybrid"
+        setattr(config, field, value)
         m = GroupedExperts(E, config, pg_collection=pg_collection, gemm_backend="torch_grouped").cuda()
         tokens_per_expert = torch.tensor([5, 0, 3, 7, 1, 2, 4, 6], dtype=torch.long)
         n = int(tokens_per_expert.sum())
         x = torch.randn(n, LATENT, dtype=torch.bfloat16, device="cuda")
         probs = torch.rand(n, dtype=torch.bfloat16, device="cuda")
 
-        with te.fp8_autocast(enabled=True, fp8_recipe=Float8CurrentScaling()):
+        with te.fp8_autocast(enabled=True, fp8_recipe=getattr(transformer_engine.common.recipe, recipe)()):
             out, _ = m(x, tokens_per_expert, probs)
         ref = _reference(x, m.weight1.detach(), m.weight2.detach(), tokens_per_expert, probs)
         assert out.dtype == torch.bfloat16
@@ -404,7 +408,6 @@ class TestBackendSelection:
             ("gated_linear_unit", True, "non-gated"),
             ("add_bias_linear", True, "biases"),
             ("delay_wgrad_compute", True, "delayed wgrad"),
-            ("fp4", "nvfp4", "FP4"),
         ],
     )
     @pytest.mark.parametrize("gemm_backend", BACKENDS)
