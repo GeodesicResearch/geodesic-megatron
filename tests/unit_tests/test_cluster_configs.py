@@ -101,6 +101,7 @@ ARM_STATES = STORAGE_AND_NAME | {
     "model.cross_entropy_loss_fusion",
     "model.cross_entropy_fusion_impl",
     "model.cross_entropy_fusion_saved_logit_chunks",
+    "model.overlap_moe_expert_parallel_comm",
     "model.mtp_num_layers",
 }
 # The names of ``ARM_STATES`` that an arm can state with one value only. The stated value then cannot change the
@@ -110,7 +111,7 @@ ARM_STATES_ONLY_AS = {"model.mtp_num_layers": None}
 SET_A_TOPOLOGY = DEFINED_FOR_VERDA + ARM_OVERLAYS
 # The launcher mode of each stage of a campaign. Midtraining continues pretraining on a .bin/.idx blend.
 STAGE_MODES = {"pretrain": "pretrain", "midtrain": "pretrain", "sft": "sft"}
-# The sequence length from which the Mamba scan needs its fp32 state. A BF16 state between chunks produces NaNs there.
+# The sequence length from which a BF16 state between the chunks of the Mamba scan can produce NaNs.
 LONG_SEQUENCE = 32768
 # The token multiple that Transformer Engine's MXFP8 quantizer requires.
 MXFP8_TOKEN_MULTIPLE = 32
@@ -164,6 +165,11 @@ def _trained_config(overlay):
     and mode."""
     model, mode = _model_and_mode(overlay)
     return merge_onto_recipe(overlay, partial(recipes.RECIPE_MAP[(model, mode)], None))
+
+
+def _launcher_settings(overlay):
+    """The settings in the ``.env`` beside a stage config of an arm, read through the launcher's own hook."""
+    return dict(entry.split("=", 1) for entry in env_override_entries(str(overlay.with_suffix(".env"))))
 
 
 def _beyond(names, allowed):
@@ -278,11 +284,25 @@ def test_a_packed_verda_arm_pads_its_batches_for_mxfp8(overlay, verda_user):
 
 
 @pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
-def test_a_verda_arm_keeps_the_fp32_scan_state_on_long_sequences(overlay, verda_user):
-    """The launcher settings are read through the launcher's own hook."""
-    settings = dict(entry.split("=", 1) for entry in env_override_entries(str(overlay.with_suffix(".env"))))
-    if load_composed_yaml(overlay)["model"]["seq_length"] >= LONG_SEQUENCE:
-        assert settings.get("ISAMBARD_FP32_SSM_STATE") != "0"
+def test_a_verda_arm_checks_for_nans_under_a_bf16_scan_of_long_sequences(overlay, verda_user):
+    """A NaN from the BF16 scan state then stops the run at the step that produced it."""
+    if load_composed_yaml(overlay)["model"]["seq_length"] < LONG_SEQUENCE:
+        pytest.skip("the stage does not train on long sequences")
+    if _launcher_settings(overlay).get("ISAMBARD_FP32_SSM_STATE") != "0":
+        pytest.skip("the scan keeps its fp32 state")
+    cfg = _trained_config(overlay)
+    assert cfg.ddp.check_for_nan_in_grad
+    assert cfg.rerun_state_machine.check_for_nan_in_loss
+
+
+@pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_a_verda_arm_gives_the_expert_parallel_overlap_a_second_hardware_queue(overlay, verda_user):
+    """The overlap runs its dispatch and combine on a second stream. With one queue the two streams run in turn."""
+    composed = load_composed_yaml(overlay)
+    overlap = "overlap_moe_expert_parallel_comm"
+    if not ((composed.get("comm_overlap") or {}).get(overlap) or composed["model"].get(overlap)):
+        pytest.skip("the stage does not run the expert-parallel overlap")
+    assert int(_launcher_settings(overlay)["ISAMBARD_CUDA_MAX_CONNECTIONS"]) > 1
 
 
 @pytest.mark.parametrize("config", SET_A_TOPOLOGY, ids=lambda path: f"{path.parent.name}-{path.stem}")

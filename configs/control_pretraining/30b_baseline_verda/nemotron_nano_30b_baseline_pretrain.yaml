@@ -1,4 +1,4 @@
-# Stage 1 of the 30B baseline arm on Verda: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml on 64 B300 GPUs.
+# Stage 1 of the 30B baseline arm on Verda: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml on B300 GPUs.
 #
 # The data, the batch, the schedule, the optimizer and the tokenizer are the base's. This file states how the run
 # uses the hardware, and its W&B name. The test in tests/unit_tests/test_cluster_configs.py fails if it states

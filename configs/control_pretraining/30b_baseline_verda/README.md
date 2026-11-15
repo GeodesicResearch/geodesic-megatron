@@ -1,6 +1,7 @@
 # The 30B baseline arm on Verda
 
-The three stages of [`../30b_baseline/`](../30b_baseline/README.md) on 64 B300 GPUs, which is eight Verda nodes.
+The three stages of [`../30b_baseline/`](../30b_baseline/README.md) on Verda's B300 nodes. The stage configs state
+no node count. A run's GPU count times the stage's micro-batch must divide the stage's global batch.
 
 Each stage config here overlays the stage config of the same name in `../30b_baseline/`. It trains the same data
 with the same batch, schedule, optimizer and tokenizer. It states only how the run uses Verda's hardware and its
@@ -24,7 +25,7 @@ directory named after its stage. Each stage starts from the last checkpoint of t
 
 ## Launch
 
-From the repository root, for stage 1:
+From the repository root, for stage 1 on eight nodes:
 
 ```bash
 ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_baseline_verda/nemotron_nano_30b_baseline_pretrain.env \

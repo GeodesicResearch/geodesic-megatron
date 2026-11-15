@@ -1,4 +1,4 @@
-# Stage 3 of the 30B baseline arm on Verda: ../30b_baseline/nemotron_nano_30b_baseline_sft.yaml on 64 B300 GPUs.
+# Stage 3 of the 30B baseline arm on Verda: ../30b_baseline/nemotron_nano_30b_baseline_sft.yaml on B300 GPUs.
 #
 # The data, the batch, the schedule, the optimizer and the tokenizer are the base's. This file states how the run
 # uses the hardware, where Verda keeps the packed corpus, and its W&B name. The test in
@@ -9,7 +9,7 @@
 #   - Expert parallelism 8 and no context parallelism. A GPU holds a whole 32,768-token pack.
 #   - Micro-batch 1 with nothing recomputed.
 #   - MXFP8 on the dense layers, with BF16 weights and BF16 gradient reduction. The routed experts run in BF16.
-#   - The HybridEP dispatcher.
+#   - The HybridEP dispatcher, with its communication on a second stream.
 #
 # Verda holds the corpus as 16 packed shards. The glob below reads them all.
 
@@ -39,6 +39,8 @@ ddp:
 model:
   expert_model_parallel_size: 8
   context_parallel_size: 1
+  overlap_moe_expert_parallel_comm: true  # The SFT recipe has no comm_overlap section to state it in.
+  mtp_num_layers: null  # The pretrain config beside this file gives the reason.
   moe_token_dispatcher_type: flex
   moe_flex_dispatcher_backend: hybridep
   moe_router_fusion: true
