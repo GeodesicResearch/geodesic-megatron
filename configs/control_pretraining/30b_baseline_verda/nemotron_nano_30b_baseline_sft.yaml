@@ -22,6 +22,10 @@ dataset:
   dataset_root: /shared/geodesic/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix__default
   packed_sequence_specs:
     packed_train_data_path: /shared/geodesic/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix__default/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+  dataset_kwargs:
+    # MXFP8 needs a token count divisible by 32 on each GPU. The collate pads a short pack to this multiple.
+    # 64 also holds at context parallelism 2.
+    pad_seq_length_to_mult: 64
 
 train:
   manual_gc: true

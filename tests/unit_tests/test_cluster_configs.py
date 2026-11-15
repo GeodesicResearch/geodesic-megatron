@@ -41,6 +41,7 @@ from scripts.training.config_compose import (
 from scripts.training.launcher_source import env_override_entries
 
 from megatron.bridge.training.config import runtime_config_update
+from megatron.bridge.training.mixed_precision import get_mixed_precision_config
 from pipeline.cluster import cluster_profile
 from pipeline.training import recipes
 from pipeline.training.datasets import BIN_IDX_READ_KEY, bin_idx_dataset_config
@@ -74,6 +75,8 @@ ARM_STATES = STORAGE_AND_NAME | {
     # Where Verda keeps a packed corpus. Its shards are laid out differently from Isambard's.
     "dataset.dataset_root",
     "dataset.packed_sequence_specs.packed_train_data_path",
+    # The multiple the collate pads a packed batch to. The precision preset sets what it must be.
+    "dataset.dataset_kwargs.pad_seq_length_to_mult",
     # How the run uses the hardware. The names cover precision, parallelism, micro-batch and recomputation. They
     # also cover the dispatcher, the fusions, the overlaps, host garbage collection and how the token files are read.
     "mixed_precision",
@@ -109,6 +112,8 @@ SET_A_TOPOLOGY = DEFINED_FOR_VERDA + ARM_OVERLAYS
 STAGE_MODES = {"pretrain": "pretrain", "midtrain": "pretrain", "sft": "sft"}
 # The sequence length from which the Mamba scan needs its fp32 state. A BF16 state between chunks produces NaNs there.
 LONG_SEQUENCE = 32768
+# The token multiple that Transformer Engine's MXFP8 quantizer requires.
+MXFP8_TOKEN_MULTIPLE = 32
 # The profile values that name a storage root. The map must send Isambard's to Verda's.
 ROOT_KEYS = (
     "CLUSTER_DATA_ROOT",
@@ -256,6 +261,20 @@ def test_a_verda_arm_passes_the_trainers_config_update(overlay, verda_user, tmp_
         # The update asserts that the warm start exists. A test host has no checkpoint of the stage before.
         cfg.checkpoint.pretrained_checkpoint = str(tmp_path)
     runtime_config_update(cfg)
+
+
+@pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_a_packed_verda_arm_pads_its_batches_for_mxfp8(overlay, verda_user):
+    """Under MXFP8 the share of a packed batch on each GPU must divide by 32. A shorter pad stops the run at the
+    first short pack."""
+    cfg = _trained_config(overlay)
+    if getattr(cfg.dataset, "packed_sequence_specs", None) is None:
+        pytest.skip("the stage does not train on packed batches")
+    if get_mixed_precision_config(cfg.mixed_precision).fp8_recipe != "mxfp8":
+        pytest.skip("the stage does not train in MXFP8")
+    multiple = cfg.dataset.dataset_kwargs.get("pad_seq_length_to_mult")
+    assert multiple is not None, f"{overlay.name} leaves the pad multiple to the collate's default"
+    assert multiple % (MXFP8_TOKEN_MULTIPLE * cfg.model.context_parallel_size) == 0
 
 
 @pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
