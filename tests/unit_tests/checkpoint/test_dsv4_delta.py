@@ -75,8 +75,8 @@ def test_quantise_blocks_round_trips_within_fp8_precision_and_keeps_zero_blocks_
     assert (restored - delta).abs().max() <= 0.07 * delta.abs().max()
 
 
-def _write(root, arm_tensors, output="out"):
-    return dsv4_delta.write_delta(str(root / "base"), arm_tensors, str(root / output), "treatment", 3, "abc")
+def _write(root, arm_tensors, output="out", unchanged_prefixes=()):
+    return dsv4_delta.write_delta(str(root / "base"), arm_tensors, str(root / output), "treatment", 3, "abc", list(unchanged_prefixes))
 
 
 def test_write_delta_stores_fp8_with_scale_fp32_for_the_rest_and_omits_unchanged_tensors(checkpoints):
@@ -117,7 +117,7 @@ def test_write_delta_without_the_complete_marker_when_a_base_tensor_is_missing(c
 def test_write_delta_refuses_an_existing_output_a_foreign_tensor_and_a_shape_change(checkpoints):
     root, _, arm = checkpoints
     with pytest.raises(FileExistsError):
-        dsv4_delta.write_delta(str(root / "base"), iter(arm.items()), str(root), "a", 1, "abc")
+        dsv4_delta.write_delta(str(root / "base"), iter(arm.items()), str(root), "a", 1, "abc", [])
     with pytest.raises(KeyError, match="not a Base tensor"):
         _write(root, iter([("layers.9.extra.weight", torch.zeros(4).bfloat16())]), output="o1")
     with pytest.raises(ValueError, match="shape"):
@@ -133,7 +133,7 @@ def test_write_delta_from_export_writes_on_rank_zero_and_drains_the_stream_elsew
             consumed.append(name)
             yield name, tensor
 
-    args = {"base_dir": str(root / "base"), "output_dir": str(root / "rank0"), "arm": "treatment", "epoch": 1, "base_revision": "abc"}
+    args = {"base_dir": str(root / "base"), "output_dir": str(root / "rank0"), "arm": "treatment", "epoch": 1, "base_revision": "abc", "unchanged_prefixes": []}
     manifest = dsv4_delta.write_delta_from_export(stream(), 0, **args)
     assert manifest["failures"] == [] and (root / "rank0" / ".complete").exists()
     assert len(consumed) == len(arm)
@@ -141,3 +141,13 @@ def test_write_delta_from_export_writes_on_rank_zero_and_drains_the_stream_elsew
     consumed.clear()
     assert dsv4_delta.write_delta_from_export(stream(), 1, **dict(args, output_dir=str(root / "rank1"))) is None
     assert len(consumed) == len(arm) and not (root / "rank1").exists()
+
+
+def test_base_tensors_under_an_unchanged_prefix_may_be_missing_from_the_arm_and_are_listed_as_omitted(checkpoints):
+    root, _, arm = checkpoints
+    short = [(name, tensor) for name, tensor in arm.items() if not name.startswith("layers.0.attn_norm")]
+    manifest = _write(root, iter(short), output="prefixed", unchanged_prefixes=["layers.0.attn_norm"])
+    assert manifest["failures"] == [] and (root / "prefixed" / ".complete").exists()
+    assert "layers.0.attn_norm.weight" in manifest["omitted_tensors"]
+    manifest = _write(root, iter(short), output="other_prefix", unchanged_prefixes=["mtp."])
+    assert any("not in the arm" in failure for failure in manifest["failures"])

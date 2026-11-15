@@ -31,7 +31,7 @@ from megatron.bridge.models.conversion.quantization_utils import maybe_dequantiz
 
 BLOCK = 128
 FP8_MAX = 448.0
-CONFIG_KEYS = ("base_dir", "arm_dir", "output_dir", "arm", "epoch", "base_revision")
+CONFIG_KEYS = ("base_dir", "arm_dir", "output_dir", "arm", "epoch", "base_revision", "unchanged_prefixes")
 SHARD_BYTES = 4 * 2**30
 # FP8 E4M3 keeps 3 mantissa bits, so a value is off by up to 6.25 per cent of itself; the check allows the largest delta 7 per cent.
 MAX_RELATIVE_ERROR = 0.07
@@ -119,12 +119,16 @@ def write_delta(
     arm: str,
     epoch: int,
     base_revision: str,
+    unchanged_prefixes: list[str],
 ) -> dict:
     """Write and check the delta of the arm's tensors against the Base.
 
     arm_tensors yields (HF name, BF16 tensor). The output directory must not exist. It receives delta-NNNNN.safetensors
     shards, model.safetensors.index.json, delta_manifest.json with the check results, and ``.complete`` only when every
-    check passed. Raises if an arm tensor is not in the Base or has another shape. Returns the manifest.
+    check passed. Raises if an arm tensor is not in the Base or has another shape. A Base tensor that the arm lacks counts as
+    untouched, and is listed under omitted_tensors, only when its name starts with one of unchanged_prefixes (for example
+    ``mtp.`` when the arm trains without multi-token prediction); any other missing Base tensor fails the check. Returns the
+    manifest.
     """
     if os.path.exists(output_dir):
         raise FileExistsError(f"{output_dir} exists")
@@ -164,7 +168,10 @@ def write_delta(
         if error > MAX_RELATIVE_ERROR:
             failures.append(f"{name}: reconstruction error {error:.4f} of the largest delta exceeds {MAX_RELATIVE_ERROR}")
     writer.flush()
-    missing = sorted(base_weights - seen)
+    absent = sorted(base_weights - seen)
+    untouched = [name for name in absent if name.startswith(tuple(unchanged_prefixes))]
+    omitted += untouched
+    missing = [name for name in absent if name not in set(untouched)]
     if missing:
         failures.append(f"{len(missing)} Base tensors were not in the arm, first: {missing[:3]}")
     with open(f"{output_dir}/model.safetensors.index.json", "w") as handle:

@@ -37,6 +37,7 @@ CONFIG_KEYS = (
     "ep",
     "etp",
     "distributed_timeout_minutes",
+    "unchanged_prefixes",
 )
 
 
@@ -77,6 +78,7 @@ def main() -> None:
         arm=config["arm"],
         epoch=config["epoch"],
         base_revision=config["base_revision"],
+        unchanged_prefixes=config["unchanged_prefixes"],
     )
     failed = torch.tensor(int(bool(manifest and manifest["failures"])), device=torch.cuda.current_device())
     torch.distributed.broadcast(failed, src=0)
