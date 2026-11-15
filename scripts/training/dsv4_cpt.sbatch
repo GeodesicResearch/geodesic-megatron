@@ -14,8 +14,14 @@ set -euo pipefail
 export CONFIG=$(readlink -f "$1")
 NEED=$(python3 -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['nodes'])" "$CONFIG")
 HEALTH=$(mktemp /tmp/dsv4_health_XXXXXX)
-srun --ntasks-per-node=1 bash -c 'echo "$(hostname) $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | sort -n | tail -1)"' | sort > "$HEALTH"
-echo "node GPU memory in use before the run (MiB), nodes over 1024 are left out:"
+# A previous job's processes can still be releasing their GPU contexts (512 MiB each) when this job starts on the same nodes:
+# read again every 15 s for up to 3 minutes, until enough nodes are under the limit.
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  srun --ntasks-per-node=1 bash -c 'echo "$(hostname) $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | sort -n | tail -1)"' | sort > "$HEALTH"
+  [ "$(awk '$2 <= 1024' "$HEALTH" | wc -l)" -ge "$NEED" ] && break
+  sleep 15
+done
+echo "node GPU memory in use before the run (MiB), nodes over 1024 are left out (reading $attempt):"
 awk '$2 > 1024' "$HEALTH"
 awk '$2 <= 1024 {print $1}' "$HEALTH" | head -n "$NEED" > "$HEALTH.nodes"
 if [ "$(wc -l < "$HEALTH.nodes")" -lt "$NEED" ]; then
