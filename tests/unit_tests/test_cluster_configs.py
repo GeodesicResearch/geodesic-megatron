@@ -40,6 +40,7 @@ from scripts.training.config_compose import (
 )
 from scripts.training.launcher_source import env_override_entries
 
+from megatron.bridge.training.config import runtime_config_update
 from pipeline.cluster import cluster_profile
 from pipeline.training import recipes
 from pipeline.training.datasets import BIN_IDX_READ_KEY, bin_idx_dataset_config
@@ -97,7 +98,11 @@ ARM_STATES = STORAGE_AND_NAME | {
     "model.cross_entropy_loss_fusion",
     "model.cross_entropy_fusion_impl",
     "model.cross_entropy_fusion_saved_logit_chunks",
+    "model.mtp_num_layers",
 }
+# The names of ``ARM_STATES`` that an arm can state with one value only. The stated value then cannot change the
+# model.
+ARM_STATES_ONLY_AS = {"model.mtp_num_layers": None}
 # The configs that set a topology for Verda's nodes.
 SET_A_TOPOLOGY = DEFINED_FOR_VERDA + ARM_OVERLAYS
 # The launcher mode of each stage of a campaign. Midtraining continues pretraining on a .bin/.idx blend.
@@ -149,6 +154,13 @@ def _model_and_mode(overlay):
     return model, STAGE_MODES[stage]
 
 
+def _trained_config(overlay):
+    """The config the launcher trains for a stage config of an arm: the file merged onto the recipe of its model
+    and mode."""
+    model, mode = _model_and_mode(overlay)
+    return merge_onto_recipe(overlay, partial(recipes.RECIPE_MAP[(model, mode)], None))
+
+
 def _beyond(names, allowed):
     """The names that are not in ``allowed`` and not under a section it names."""
     return sorted(
@@ -185,8 +197,10 @@ def test_a_verda_overlay_states_only_what_verda_changes(overlay, verda_user):
     own = parse_yaml_mapping(overlay.read_text(), str(overlay))
     assert (overlay.parent / own.pop(BASE_CONFIG_KEY)).resolve() == isambard_config
     assert (overlay.parent / own.pop(RELOCATE_KEY)).resolve() == STORAGE_MAP
-    beyond = _beyond(dotted_leaves(own), ARM_STATES if overlay in ARM_OVERLAYS else STORAGE_AND_NAME)
+    stated = dotted_leaves(own)
+    beyond = _beyond(stated, ARM_STATES if overlay in ARM_OVERLAYS else STORAGE_AND_NAME)
     assert not beyond, f"{overlay.name} states more than Verda changes: {beyond}"
+    assert all(stated.get(name, value) == value for name, value in ARM_STATES_ONLY_AS.items())
 
     composed = load_composed_yaml(overlay)
     left_behind = _left_on_isambard(composed)
@@ -225,14 +239,23 @@ def test_every_setting_of_a_verda_arm_reaches_the_config_it_trains(overlay, verd
     read_settings = {
         name.removeprefix(read_prefix): stated.pop(name) for name in list(stated) if name.startswith(read_prefix)
     }
-    model, mode = _model_and_mode(overlay)
 
-    assert_levers_are_set(
-        merge_onto_recipe(overlay, partial(recipes.RECIPE_MAP[(model, mode)], None)), stated, overlay.name
-    )
+    assert_levers_are_set(_trained_config(overlay), stated, overlay.name)
     if read_settings:
-        dataset = bin_idx_dataset_config(load_composed_yaml(overlay)["dataset"], mode)
+        dataset = bin_idx_dataset_config(load_composed_yaml(overlay)["dataset"], _model_and_mode(overlay)[1])
         assert {key: getattr(dataset, key) for key in read_settings} == read_settings
+
+
+@pytest.mark.run_only_on("GPU")
+@pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_a_verda_arm_passes_the_trainers_config_update(overlay, verda_user, tmp_path):
+    """The update resolves the precision preset and applies the overlaps, which assert what a posture can combine.
+    It also checks the dispatcher backend against the GPU."""
+    cfg = _trained_config(overlay)
+    if cfg.checkpoint.pretrained_checkpoint:
+        # The update asserts that the warm start exists. A test host has no checkpoint of the stage before.
+        cfg.checkpoint.pretrained_checkpoint = str(tmp_path)
+    runtime_config_update(cfg)
 
 
 @pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")

@@ -35,5 +35,7 @@ ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_baseline_verda/nemot
 The other stages take their own config, `.env` and mode. A stage runs as a chain of segments that resume from
 `checkpoint.load`. [`../30b_baseline/README.md`](../30b_baseline/README.md) describes the segments and the saves.
 
-A short run that measures a stage's speed adds `train.exit_interval=<N>` and `checkpoint.save=null` to the command.
+A short run that measures a stage's speed adds `train.exit_interval=<N>`, `checkpoint.save=null` and
+`logger.wandb_save_dir=/shared/geodesic/logs_$USER/wandb` to the command.
+[`docs/verda/models.md`](../../../docs/verda/models.md) gives the reason for the last one.
 A run with no checkpoint of the stage before it also sets its warm start, `checkpoint.pretrained_checkpoint=<path>`.

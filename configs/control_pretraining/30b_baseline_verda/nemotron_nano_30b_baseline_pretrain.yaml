@@ -35,6 +35,8 @@ comm_overlap:
 
 model:
   expert_model_parallel_size: 8
+  # The expert-parallel overlap refuses the provider's default of 0 MTP layers. Null builds the same model.
+  mtp_num_layers: null
   moe_token_dispatcher_type: flex
   moe_flex_dispatcher_backend: hybridep
   moe_router_fusion: true
