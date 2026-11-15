@@ -35,7 +35,7 @@ CONFIG = {
     "batch": {"seq_length": 2048, "global_batch_size": 1024, "micro_batch_size": 1},
     "schedule": {"train_iters": 1445, "save_interval": 289, "lr": 1.0e-4, "warmup_iters": 25, "eval_interval": 100000, "eval_iters": 0},
     "optimizer": {"offload_fraction": 1.0, "moment_dtype": "bf16"},
-    "data": {"blend": [["/data/union", 0.5], ["/data/climbmix", 0.5]], "valid_blend": None, "split": "1,0,0"},
+    "data": {"blend": [["/data/union", 0.5], ["/data/climbmix", 0.5]], "split": "1,0,0", "multiple_validation_sets": False},
     "run": {"save_dir": "/runs/a", "wandb_project": "p", "wandb_exp_name": "n", "save": True, "eval_only": False},
     "provenance": {"union": "3d7b0a7e"},
 }
@@ -74,11 +74,12 @@ def test_a_run_without_saves_writes_null_save_and_load_and_an_eval_only_run_skip
     assert "validation.skip_train=true" in items
 
 
-def test_a_validation_blend_becomes_a_per_split_blend(tmp_path):
+def test_the_split_is_a_quoted_string_and_multiple_validation_sets_are_switchable(tmp_path):
     config = copy.deepcopy(CONFIG)
-    config["data"]["valid_blend"] = [["/data/climbmix", 1.0]]
+    config["data"].update(split="995,5,0", multiple_validation_sets=True)
     items = dsv4_cpt.overrides(dsv4_cpt.load_config(_write(tmp_path, config)))
-    assert 'dataset.blend_per_split=[[["/data/union","/data/climbmix"],[0.5,0.5]],[["/data/climbmix"],[1.0]],null]' in items
+    assert 'dataset.split="995,5,0"' in items
+    assert "validation.multiple_validation_sets=true" in items
 
 
 @pytest.mark.parametrize(
