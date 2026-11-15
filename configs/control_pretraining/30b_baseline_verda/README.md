@@ -16,6 +16,8 @@ W&B name. The SFT config also states where Verda keeps the packed corpus.
 
 The `.env` beside each config holds its launcher settings. The header of each config describes its posture.
 [`../30b_baseline/README.md`](../30b_baseline/README.md) gives the data, the batch and the length of each stage.
+[`docs/investigations/nano30b-verda-perf-campaign.md`](../../../docs/investigations/nano30b-verda-perf-campaign.md)
+gives the measurements behind each posture.
 
 ## Storage
 

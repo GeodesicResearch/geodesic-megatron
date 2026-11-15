@@ -1,8 +1,8 @@
 # Models on Verda
 
-This page describes the Nemotron 3 quickstarts on Verda. It gives the layout and batch at each node count, the
-memory, the warm starts and the launch commands. `configs/quickstart/verda/README.md` lists the configs and what
-each reads, and `data.md` builds the datasets.
+This page describes the Nemotron 3 quickstarts on Verda and the Verda stages of the 30B baseline. It gives the
+layout and batch at each node count, the memory, the warm starts and the launch commands.
+`configs/quickstart/verda/README.md` lists the configs and what each reads, and `data.md` builds the datasets.
 
 The fewest nodes that run each quickstart:
 
@@ -20,7 +20,7 @@ is one data-parallel copy of the model.
 
 - Tensor parallelism is 1 in every layout. Expert parallelism is at most 8, so the expert all-to-all stays inside a
   node.
-- The batch grows with the node count. Each GPU keeps the load it has in the Isambard quickstart.
+- A quickstart's batch grows with the node count. Each GPU keeps the load it has in the Isambard quickstart.
 - A benchmark launch gives `checkpoint.save=null` and writes no checkpoint. W&B's default directory is under the
   checkpoint directory, so that launch also gives `logger.wandb_save_dir`.
 - Import each warm start once. The models directory is shared (`storage.md`). Before an import, check that the
@@ -85,6 +85,32 @@ The SFT config finds its packs through a `shard*/` glob. A run reads the shards 
 
 `nemotron_nano_quickstart_pretrain_ep1.yaml` is the pretraining quickstart with expert parallelism 1. Its header
 gives the memory it needs. Launch it like the pretraining quickstart.
+
+### The 30B baseline stages
+
+`configs/control_pretraining/30b_baseline_verda/` runs the three stages of the 30B baseline on
+B300 GPUs. Its README lists the stage configs and their launcher modes. Each stage keeps the baseline's data, schedule
+and global batch at every node count. Every stage runs EP8 and CP1. The header of each stage config states the
+posture of the stage.
+
+| Stage | GBS | Microbatch | Recompute |
+|---|---|---|---|
+| 1, pretraining at 8,192 tokens | 2,048 | 4 | The expert activations, `[moe_act]` |
+| 2, midtraining at 32,768 tokens | 512 | 1 | None |
+| 3, SFT on 32,768-token packs | 512 | 1 | None |
+
+A 40-iteration speed run of stage 2 on 4 nodes starts from the stage-1 model that the Isambard baseline trained. The
+header of `configs/quickstart/verda/nemotron_nano_quickstart_midtrain.yaml` gives the import of that model.
+
+```bash
+ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_baseline_verda/nemotron_nano_30b_baseline_midtrain.env \
+  ./pipeline_cluster_submit.sh --nodes=4 --time=00:30:00 pipeline_training_submit.sbatch \
+    configs/control_pretraining/30b_baseline_verda/nemotron_nano_30b_baseline_midtrain.yaml nano pretrain --disable-ft \
+    train.exit_interval=40 checkpoint.save=null logger.wandb_save_dir=/shared/geodesic/logs_$USER/wandb \
+    checkpoint.pretrained_checkpoint=/shared/geodesic/checkpoints/megatron_bridges/models/control-pretrain-30b-baseline-pretrain
+```
+
+`docs/investigations/nano30b-verda-perf-campaign.md` gives the measured rates and the evidence for each setting.
 
 ## Nemotron 3 Super (120B-A12B)
 
@@ -284,6 +310,13 @@ Pass the config of the run. The scorer takes the batch from the log, so it score
 | Super pretraining and CPT | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` | 30 | 11 30 | 21 30 |
 | Super SFT | The same | 50 | 26 50 | 41 50 |
 | Ultra SFT | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-BF16` | 100 | 51 100 | 91 100 |
+| 30B baseline, stage 1 | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | 460, resumed at 400 | 421 460 | 421 460 |
+| 30B baseline, stage 2 | The same | 40 | 11 40 | 11 40 |
+| 30B baseline, stage 3 | The same | 60 | 21 60 | 21 60 |
+
+To score stage 1, train it from random weights to iteration 400 and save a checkpoint. Then resume that checkpoint
+to iteration 460, and score the log of the resume. From random weights, stage 1 runs slowly until its expert routing
+evens out, so the window starts after the resume.
 
 For SFT, compare tokens per second per GPU. TFLOP/s and MFU count full causal attention over each pack. That
 overstates packed work on both clusters.
