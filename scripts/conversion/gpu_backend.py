@@ -317,8 +317,7 @@ def import_checkpoint(
     print_rank_0(f"GPU import complete: {megatron_path}")
 
 
-@torchrun_main
-def export_checkpoint(
+def load_model_for_export(
     *,
     hf_model: str,
     hf_revision: str | None,
@@ -340,7 +339,10 @@ def export_checkpoint(
     overwrite: bool,
     use_cpu: bool = False,
 ) -> None:
-    """Export a distributed Megatron checkpoint to Hugging Face format.
+    """Load a distributed Megatron checkpoint as an exportable model and return its bridge and model chunks.
+
+    Initialises torch.distributed, checks the paths, resolves the pipeline layout of the checkpoint and loads the
+    weights in the requested parallel layout. export_checkpoint and the delta export use it.
 
     Args:
         hf_model: Hugging Face model ID or local config reference.
@@ -434,16 +436,27 @@ def export_checkpoint(
         mp_overrides=model_parallel_overrides,
         wrap_with_ddp=False,
     )
+    return bridge, megatron_model
+
+
+@torchrun_main
+def export_checkpoint(**kwargs) -> None:
+    """Export a distributed Megatron checkpoint to Hugging Face format.
+
+    Takes the arguments of load_model_for_export. Writes the Hugging Face checkpoint to hf_path, with each rank saving its
+    assigned shards when distributed_save is set.
+    """
+    bridge, megatron_model = load_model_for_export(**kwargs)
     bridge.save_hf_pretrained(
         megatron_model,
-        hf_path,
-        show_progress=show_progress,
-        strict=strict,
-        distributed_save=distributed_save,
-        save_every_n_ranks=save_every_n_ranks,
-        weight_dtype=parse_dtype(export_weight_dtype) if export_weight_dtype else None,
+        kwargs["hf_path"],
+        show_progress=kwargs["show_progress"],
+        strict=kwargs["strict"],
+        distributed_save=kwargs["distributed_save"],
+        save_every_n_ranks=kwargs["save_every_n_ranks"],
+        weight_dtype=parse_dtype(kwargs["export_weight_dtype"]) if kwargs["export_weight_dtype"] else None,
     )
-    print_rank_0(f"Distributed {device_label} export complete: {hf_path}")
+    print_rank_0(f"Distributed export complete: {kwargs['hf_path']}")
 
 
 @torchrun_main

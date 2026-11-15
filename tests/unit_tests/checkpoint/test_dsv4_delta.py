@@ -122,3 +122,22 @@ def test_write_delta_refuses_an_existing_output_a_foreign_tensor_and_a_shape_cha
         _write(root, iter([("layers.9.extra.weight", torch.zeros(4).bfloat16())]), output="o1")
     with pytest.raises(ValueError, match="shape"):
         _write(root, iter([("layers.0.attn_norm.weight", torch.zeros(65).bfloat16())]), output="o2")
+
+
+def test_write_delta_from_export_writes_on_rank_zero_and_drains_the_stream_elsewhere(checkpoints):
+    root, _, arm = checkpoints
+    consumed = []
+
+    def stream():
+        for name, tensor in arm.items():
+            consumed.append(name)
+            yield name, tensor
+
+    args = {"base_dir": str(root / "base"), "output_dir": str(root / "rank0"), "arm": "treatment", "epoch": 1, "base_revision": "abc"}
+    manifest = dsv4_delta.write_delta_from_export(stream(), 0, **args)
+    assert manifest["failures"] == [] and (root / "rank0" / ".complete").exists()
+    assert len(consumed) == len(arm)
+
+    consumed.clear()
+    assert dsv4_delta.write_delta_from_export(stream(), 1, **dict(args, output_dir=str(root / "rank1"))) is None
+    assert len(consumed) == len(arm) and not (root / "rank1").exists()

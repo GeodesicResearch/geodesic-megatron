@@ -188,6 +188,20 @@ def write_delta(
     return manifest
 
 
+def write_delta_from_export(export_stream: Iterable[tuple[str, torch.Tensor]], rank: int, **write_args) -> dict | None:
+    """Write the delta on rank 0 from a collective export stream that every rank must consume.
+
+    The Bridge's export gathers each tensor across the ranks, so all ranks iterate the stream. Rank 0 passes it to
+    write_delta with write_args (base_dir, output_dir, arm, epoch, base_revision) and returns the manifest. The other ranks
+    drop the tensors and return None.
+    """
+    if rank == 0:
+        return write_delta(arm_tensors=export_stream, **write_args)
+    for _ in export_stream:
+        pass
+    return None
+
+
 def main() -> None:
     """Read the YAML config named on the command line, write the delta of the arm's HF directory, exit 1 on a failed check."""
     parser = argparse.ArgumentParser(description=__doc__)
