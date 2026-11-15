@@ -13,6 +13,8 @@
 # limitations under the License.
 """GB300 recipes for DeepSeek V4 Pro."""
 
+import os
+
 import torch
 
 from megatron.bridge import AutoBridge
@@ -29,7 +31,7 @@ from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.mixed_precision import bf16_with_mxfp8_mixed
 
 
-DEEPSEEK_V4_PRO_HF_PATH = "deepseek-ai/DeepSeek-V4-Pro"
+DEEPSEEK_V4_PRO_HF_PATH = os.environ.get("DEEPSEEK_V4_PRO_HF_PATH", "deepseek-ai/DeepSeek-V4-Pro")
 
 
 def deepseek_v4_pro_pretrain_32gpu_gb300_bf16_config() -> ConfigContainer:
