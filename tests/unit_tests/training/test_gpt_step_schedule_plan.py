@@ -14,17 +14,16 @@
 
 """The EP-overlap branch of ``_forward_step_common`` (``return_schedule_plan=True``).
 
-``model.build_schedule_plan`` is called without ``packed_seq_params``, so a packed batch would
-train across document boundaries under the overlap; the step refuses it instead, and only on that
-branch: without the plan, a packed batch reaches the model with its packed params.
+The step passes a packed batch's packed params and padding mask to ``model.build_schedule_plan``. The
+model gets the same two without the plan. Attention and the Mamba scan then stop at document
+boundaries under the overlap too.
 
-The step's real ``get_batch``, ``get_model_config`` and ``get_pg_collection`` run on CPU over a
-single-process gloo group, as in ``test_gpt_step_cp_dispatch.py``, so the refusal is exercised on
-the batch ``get_batch`` actually produces from a collate-style packed batch. The step's
-``GlobalState`` is real too, with its timers and straggler detector, so the refusal is shown to
-escape the step's real straggler context. Two boundaries are stood in for: the model (a real one
-needs GPUs), which only has to carry its config and process groups and record how it is called,
-and ``Tensor.cuda`` (``get_batch`` moves the batch to a device that CPU-only tiers do not have).
+The step's real ``get_batch``, ``get_model_config`` and ``get_pg_collection`` run on CPU. They use a
+single-process gloo group, as in ``test_gpt_step_cp_dispatch.py``. The batch is the one ``get_batch``
+produces from a collate-style packed batch. The step's ``GlobalState`` is real too, with its timers
+and straggler detector. The tests stand in for two boundaries. One is the model, which needs GPUs: the
+stand-in carries its config and process groups and records how it is called. The other is
+``Tensor.cuda``, because ``get_batch`` moves the batch to a device that CPU-only tiers lack.
 """
 
 from types import SimpleNamespace
@@ -66,11 +65,20 @@ def _run(model: MagicMock, packed: bool, return_schedule_plan: bool):
         return gpt_step._forward_step_common(state, iter([batch]), model, return_schedule_plan=return_schedule_plan)
 
 
-def test_packed_batch_is_refused_before_building_the_plan(gloo_group_of_one):
+def test_packed_batch_builds_the_plan_with_what_the_model_gets_without_it(gloo_group_of_one):
+    """The plan's layers read the document boundaries and the padded positions from these two arguments."""
     model = _model(gloo_group_of_one)
-    with pytest.raises(ValueError, match="packed sequences"):
-        _run(model, packed=True, return_schedule_plan=True)
-    model.build_schedule_plan.assert_not_called()
+    schedule_plan, _, _ = _run(model, packed=True, return_schedule_plan=True)
+    assert schedule_plan is model.build_schedule_plan.return_value
+    plan_kwargs = model.build_schedule_plan.call_args.kwargs
+
+    model = _model(gloo_group_of_one)
+    _run(model, packed=True, return_schedule_plan=False)
+    model_kwargs = model.call_args.kwargs
+    assert torch.equal(plan_kwargs["padding_mask"], model_kwargs["padding_mask"])
+    for field in ("cu_seqlens_q", "cu_seqlens_kv", "seq_idx"):
+        planned, direct = (getattr(kwargs["packed_seq_params"], field) for kwargs in (plan_kwargs, model_kwargs))
+        assert torch.equal(planned, direct), field
 
 
 def test_unpacked_batch_builds_the_plan(gloo_group_of_one):

@@ -424,16 +424,16 @@ def _forward_step_common(
             assert config.overlap_moe_expert_parallel_comm, (
                 "overlap_moe_expert_parallel_comm must be enabled to return the schedule plan"
             )
-            # The schedule plan is built without packed_seq_params, so attention and the Mamba
-            # scan would run across the packed documents' boundaries.
-            if "packed_seq_params" in forward_args:
-                raise ValueError(
-                    "packed sequences cannot be combined with overlap_moe_expert_parallel_comm: this step builds "
-                    "the schedule plan without packed_seq_params, so attention and the Mamba scan would cross "
-                    "document boundaries. Turn off packing or the overlap."
-                )
+            # The plan needs the packed parameters and the padding mask that the model's forward gets. With them
+            # its attention and Mamba scan stop at document boundaries. Its routers skip the padded positions.
             schedule_plan = model.build_schedule_plan(
-                tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                tokens,
+                position_ids,
+                attention_mask,
+                labels=labels,
+                loss_mask=loss_mask,
+                packed_seq_params=forward_args.get("packed_seq_params"),
+                padding_mask=forward_args.get("padding_mask"),
             )
             return schedule_plan, loss_mask, token_masking_stats
         else:

@@ -134,10 +134,10 @@ plus local adaptations listed in the patches README), load-bearing for the campa
 (E-044) and the Nano pretrain quickstart; it acts only with
 `comm_overlap.overlap_moe_expert_parallel_comm=true`, keeps the pin's checkpoint keys for flat layer
 patterns such as Nano's, and refuses Megatron-FSDP, fine-grained activation offloading,
-`delay_wgrad_compute` and the `ncclep` dispatcher with the overlap on hybrid models
-(Megatron-Bridge refuses packed sequences with it). `0004` keeps a HybridEP dispatch handle's
-token count in device memory: on the blocking dispatch path it lived in pinned host memory that
-queued kernels read after the handle was freed, which faulted under the EP overlap. `0005` is a
+`delay_wgrad_compute` and the `ncclep` dispatcher with the overlap on hybrid models.
+`0004` keeps a HybridEP dispatch handle's token count in device memory: on the blocking dispatch path it
+lived in pinned host memory that queued kernels read after the handle was freed, which faulted under the
+EP overlap. `0005` is a
 chunked linear cross-entropy for `HybridModel` (`cross_entropy_fusion_impl: linear`). `0006` is upstream #6114,
 cherry-picked: the router's expert-bias token count broadcasts over the experts the `padding_mask` that the packed
 SFT step passes so that pad tokens stay out of the MoE routers' statistics, where it used to fail. The step itself
