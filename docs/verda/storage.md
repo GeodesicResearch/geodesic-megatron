@@ -46,8 +46,8 @@ base_config: ../nemotron_nano_quickstart_pretrain.yaml
 base_config_relocate: ../../clusters/verda_from_isambard.yaml
 ```
 
-The overlay's own fields are taken as written. A path that no key of the map covers, such as a checkpoint under
-another account's directory on Isambard, is not moved, and the overlay restates it.
+The overlay's own fields are taken as written. A path that no key of the map covers is not moved, and the overlay
+restates it.
 
 **The refusal.** `pipeline_training_run.py` refuses a resolved config that still names a path on another cluster's
 storage, and lists each field (`require_this_clusters_paths`, `pipeline/training/launch_checks.py`). So an Isambard

@@ -3,9 +3,12 @@
 # model, log and cache paths then resolve on Verda without being restated.
 #
 # Datasets, the Hugging Face cache and imported base models are shared by every account. Checkpoints a run writes,
-# logs and caches are each account's own, so their roots carry $USER. A path under no key here (another account's
-# directory on Isambard, for one) is not moved: the overlay restates it, and a launch refuses it otherwise
-# (pipeline/training/launch_checks.py, require_this_clusters_paths).
+# logs and caches are each account's own, so their roots carry $USER. A path under no key here is not moved: the
+# overlay restates it, and a launch refuses it otherwise (pipeline/training/launch_checks.py,
+# require_this_clusters_paths).
+#
+# The control-pretraining campaigns keep their checkpoints and index caches in their owner's Isambard directory. The
+# data_cwtice.a5k keys send those to the roots of the account that runs the campaign on Verda.
 #
 # tests/unit_tests/test_cluster_configs.py holds this file to the two cluster profiles (pipeline/sh/clusters/).
 /projects/a5k/public/data: /shared/geodesic/data
@@ -15,3 +18,5 @@
 /projects/a5k/public/logs: /shared/geodesic/logs_$USER
 /projects/a5k/public/cache: /shared/geodesic/scratch_$USER/cache
 /projects/a5k/public/profiles: /shared/geodesic/scratch_$USER/profiles
+/projects/a5k/public/data_cwtice.a5k/checkpoints/megatron: /shared/geodesic/checkpoints_$USER/megatron
+/projects/a5k/public/data_cwtice.a5k/gpt_index_cache: /shared/geodesic/scratch_$USER/cache/gpt_index
