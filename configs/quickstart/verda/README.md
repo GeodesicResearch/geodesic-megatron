@@ -19,7 +19,7 @@ Eight Verda nodes hold the 64 GPUs of a Nano quickstart. A run here compares wit
 | `nemotron_ultra_quickstart_sft.yaml` | `ultra sft` | none | `sft-warm-start-200k` packs, warm start `NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-BF16` |
 
 The Isambard Super pretraining quickstart is 128 GPUs. Here it launches on 64 with half the batch. The Ultra SFT
-quickstart is 288 GPUs and Verda has 96. Its file serves as the base for a Verda topology.
+quickstart is 288 GPUs and Verda has 96. Its file is the base of the 6-node Ultra SFT quickstart.
 
 The other files exist for Verda alone.
 
@@ -27,6 +27,7 @@ The other files exist for Verda alone.
 |---|---|---|
 | `nemotron_nano_quickstart_pretrain_ep1.yaml` | `nano pretrain` | The pretraining quickstart with expert parallelism 1 |
 | `nemotron_super_quickstart_cpt.yaml` | `super cpt` | A CPT quickstart on the pretraining quickstart's data, from the SFT quickstart's warm start |
+| `nemotron_ultra_quickstart_sft_6node.yaml` | `ultra sft` | The Ultra SFT quickstart on 6 nodes, TP1 PP6 EP8 |
 
-`docs/verda/models.md` has the Nano and Super layouts, memory and launch commands. `docs/verda/quickstart.md` is
-the path from a new account to a run.
+`docs/verda/models.md` has the layouts, memory and launch commands. `campaign-notes.md` has the measured runs.
+`docs/verda/quickstart.md` is the path from a new account to a run.

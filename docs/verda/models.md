@@ -1,8 +1,8 @@
 # Models on Verda
 
-This page describes the Nemotron 3 Nano and Super quickstarts on Verda. It gives the layout and batch at each node
-count, the memory, the warm starts and the launch commands. `configs/quickstart/verda/README.md` lists the configs
-and what each reads, and `data.md` builds the datasets.
+This page describes the Nemotron 3 quickstarts on Verda. It gives the layout and batch at each node count, the
+memory, the warm starts and the launch commands. `configs/quickstart/verda/README.md` lists the configs and what
+each reads, and `data.md` builds the datasets.
 
 The fewest nodes that run each quickstart:
 
@@ -10,6 +10,7 @@ The fewest nodes that run each quickstart:
 |---|---|---|
 | Nano (30B-A3B) | 1 node | 1 node |
 | Super (120B-A12B) | 1 node | 2 nodes |
+| Ultra (550B-A55B) | No quickstart | 6 nodes |
 
 ## Conventions
 
@@ -31,7 +32,7 @@ A B300 has 268 GiB. PyTorch can allocate about 257 GiB of it. The CUDA context a
 hold the rest.
 
 Expert parallelism splits a pipeline stage's routed experts over EP GPUs. At TP1 every GPU of the stage holds the
-stage's other parameters whole. Super trains in BF16, and a rank of it holds these bytes per parameter.
+stage's other parameters whole. Super and Ultra train in BF16. A rank of either holds these bytes per parameter.
 
 | Item | Bytes | Applies to | Held |
 |---|---|---|---|
@@ -200,6 +201,68 @@ train.global_batch_size=32`.
 
 A run needs 7 to 14 minutes before its second iteration. A warm start adds about 3 minutes of checkpoint load.
 
+## Nemotron 3 Ultra (550B-A55B)
+
+The Ultra quickstart is SFT on 6 nodes, `nemotron_ultra_quickstart_sft_6node.yaml`. Each node holds one pipeline
+stage. Only pipeline traffic crosses nodes.
+
+| Nodes | Layout | Replicas | GBS | Microbatches per replica |
+|---|---|---|---|---|
+| 6 | PP6 EP8 | 8 | 16 | 2 |
+
+The reasons for this layout:
+
+- The Isambard quickstart is TP4 PP36 EP4 on 288 GPUs. Verda has 96.
+- `model.hybrid_layer_pattern` splits the 108 layers into 6 stages of 8 MoE layers each. An even split of 18 layers
+  puts 9 MoE layers on the last stage.
+- The batch keeps the Isambard load per GPU. 64 x 48 / 288 is 10.7 samples. The next multiple of the 8 replicas is
+  16.
+- FP32 gradients and selective recompute are Isambard's.
+
+### Memory
+
+The table of "Memory per GPU" applies with FP32 gradients. A rank's optimizer shard covers all of its experts,
+because GPUs / (PP x EP) is 1. It covers an eighth of its other parameters, because GPUs / (PP x CP) is 8. A GPU of
+stage 0 holds the most parameters.
+
+| Parameters of a stage-0 GPU | Count | Bytes each | GiB |
+|---|---|---|---|
+| Routed experts | 10.7B | 14: 2 + 4 + 4 + 4 | 140.0 |
+| Other parameters | 6.4B | 7: 2 + 4 + 8 / 8 | 41.5 |
+| All | 17.1B | | 181.5 |
+
+The bytes include the two moments, so the sum holds from the first optimizer step. Stage 0 keeps two microbatches
+in flight. Their activations fit in the remaining 75 GiB of the 257 GiB that PyTorch can allocate.
+
+On 4 nodes, PP4 EP8 puts 16.1B expert parameters and 9.0B others on a GPU of stage 0. The same table gives 269 GiB
+with FP32 gradients. With BF16 gradients it gives 222 GiB. The optimizer step's FP32 copy of the gradients raises
+that to 286 GiB. PyTorch can allocate 257 GiB, which is less than the 269 GiB and less than the 286 GiB.
+
+### Warm start
+
+The quickstart warm-starts from the Base release as NVIDIA publishes it. Its embedding has one zero row, id 81815,
+an ordinary vocabulary token. A sample with that id hits the Base zero-embedding trap (`docs/isambard/tokenizers.md`).
+The SFT pack holds no instance of it. The import's PP4 EP4 layout takes 16 GPUs, so import the release on two nodes:
+
+```bash
+./pipeline_cluster_submit.sh --nodes=2 --time=00:45:00 pipeline_checkpoint_submit.sbatch import \
+    nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-BF16 --tp 1 --pp 4 --ep 4
+```
+
+The import writes 1.12 TB.
+
+### Launch
+
+The file's topology and batch are for six nodes. This command runs 100 iterations and saves no checkpoint:
+
+```bash
+./pipeline_cluster_submit.sh --nodes=6 --time=00:55:00 pipeline_training_submit.sbatch \
+    configs/quickstart/verda/nemotron_ultra_quickstart_sft_6node.yaml ultra sft --disable-ft \
+    train.train_iters=100 checkpoint.save=null logger.wandb_save_dir=/shared/geodesic/logs_$USER/wandb
+```
+
+`configs/quickstart/verda/campaign-notes.md` gives the startup time and the import's host memory.
+
 ## Scoring
 
 Score a run on the login pod. The scorer reads the log and the cached model config.
@@ -220,6 +283,7 @@ Pass the config of the run. The scorer takes the batch from the log, so it score
 | Nano SFT | The same | 100 | 51 100 | 91 100 |
 | Super pretraining and CPT | `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` | 30 | 11 30 | 21 30 |
 | Super SFT | The same | 50 | 26 50 | 41 50 |
+| Ultra SFT | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-BF16` | 100 | 51 100 | 91 100 |
 
 For SFT, compare tokens per second per GPU. TFLOP/s and MFU count full causal attention over each pack. That
 overstates packed work on both clusters.
