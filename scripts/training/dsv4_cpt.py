@@ -36,7 +36,7 @@ KEYS = {
     "batch": {"seq_length", "global_batch_size", "micro_batch_size"},
     "schedule": {"train_iters", "save_interval", "lr", "warmup_iters", "eval_interval", "eval_iters"},
     "optimizer": {"offload_fraction", "moment_dtype"},
-    "data": {"blend", "split", "multiple_validation_sets"},
+    "data": {"blend", "valid_blend", "split"},
     "run": {"save_dir", "wandb_project", "wandb_exp_name", "save", "eval_only"},
     "provenance": None,
 }
@@ -84,8 +84,12 @@ def validate(config: dict) -> dict:
             raise ValueError(f"{micro_batches} micro-batches in groups of {group} leave a remainder under PP={topology['pp']}")
     if schedule["save_interval"] > schedule["train_iters"]:
         raise ValueError("save_interval is larger than train_iters")
-    if any(weight <= 0 for _, weight in config["data"]["blend"]):
-        raise ValueError("every blend weight must be positive")
+    data = config["data"]
+    if (data["valid_blend"] is None) == (data["split"] is None):
+        raise ValueError("give exactly one of valid_blend (a separate validation blend) and split (held-out parts of the blend)")
+    for blend in (data["blend"], data["valid_blend"]):
+        if blend is not None and any(weight <= 0 for _, weight in blend):
+            raise ValueError("every blend weight must be positive")
     bubble = (topology["pp"] - 1) / (topology["vpp"] * micro_batches + topology["pp"] - 1)
     return {"micro_batches_per_rank": micro_batches, "bubble": bubble, "tokens_per_update": batch["global_batch_size"] * batch["seq_length"]}
 
@@ -159,14 +163,16 @@ def overrides(config: dict) -> list[str]:
         "logger.tensorboard_dir=null",
         f"logger.wandb_project={run['wandb_project']}",
         f"logger.wandb_exp_name={run['wandb_exp_name']}",
-        f'dataset.split="{data["split"]}"',
         f"validation.skip_train={'true' if run['eval_only'] else 'false'}",
     ]
     pattern, layout = block_layout(topology)
     items += [f"model.hybrid_layer_pattern={pattern}", f"model.pipeline_model_parallel_layout={layout}", "model.mtp_num_layers=null"]
-    items.append(f"dataset.blend={_blend(data['blend'])}")
-    # With several validation sets each corpus of the blend is evaluated on its own held-out split, in the order of the blend.
-    items.append(f"validation.multiple_validation_sets={'true' if data['multiple_validation_sets'] else 'false'}")
+    if data["valid_blend"] is None:
+        items += [f"dataset.blend={_blend(data['blend'])}", f'dataset.split="{data["split"]}"']
+    else:
+        # The Bridge's loop evaluates one validation set; Megatron-Core refuses a split together with a blend per split.
+        items.append(f"dataset.blend_per_split=[{_blend(data['blend'])},{_blend(data['valid_blend'])},null]")
+        items.append("dataset.split=null")
     return items
 
 
