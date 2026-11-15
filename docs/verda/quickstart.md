@@ -76,8 +76,7 @@ Follow the run in its log and in W&B:
 tail -f /shared/geodesic/logs_$USER/megatron_runs/train-<jobid>.out | grep --line-buffered iteration
 ```
 
-Score it with the command under "Scoring" in `models.md`. That page has the layouts and launch commands of Nano
-and Super.
+Score it with the command under "Scoring" in `models.md`. That page has each model's layouts and launch commands.
 
 ## 6. Export and test
 
