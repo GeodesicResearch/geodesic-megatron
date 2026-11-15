@@ -7,7 +7,7 @@
 # Submit with: isambard_sbatch --nodes=<config nodes + spares> --time=<limit> scripts/training/dsv4_cpt.sbatch <config.yaml>
 # Environment: REPO, SCOPE (as in dsv4_cpt_worker.sh), and optionally RUN_SCRIPT and RUN_RECIPE_SCRIPT for a wrapper.
 #
-# Before the run, every allocated node reports the largest memory use of its GPUs. A node over 1,024 MiB holds memory that
+# Before the run, every allocated node reports the largest memory use of its GPUs. A node over 2,048 MiB holds memory that
 # is not this job's, and is left out: the run takes the first <config nodes> healthy nodes, so spares in the allocation absorb
 # the bad ones. Fewer healthy nodes than the config needs stops the job.
 set -euo pipefail
@@ -18,12 +18,12 @@ HEALTH=$(mktemp /tmp/dsv4_health_XXXXXX)
 # read again every 15 s for up to 3 minutes, until enough nodes are under the limit.
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
   srun --ntasks-per-node=1 bash -c 'echo "$(hostname) $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | sort -n | tail -1)"' | sort > "$HEALTH"
-  [ "$(awk '$2 <= 1024' "$HEALTH" | wc -l)" -ge "$NEED" ] && break
+  [ "$(awk '$2 <= 2048' "$HEALTH" | wc -l)" -ge "$NEED" ] && break
   sleep 15
 done
-echo "node GPU memory in use before the run (MiB), nodes over 1024 are left out (reading $attempt):"
-awk '$2 > 1024' "$HEALTH"
-awk '$2 <= 1024 {print $1}' "$HEALTH" | head -n "$NEED" > "$HEALTH.nodes"
+echo "node GPU memory in use before the run (MiB), nodes over 2048 are left out (reading $attempt):"
+awk '$2 > 2048' "$HEALTH"
+awk '$2 <= 2048 {print $1}' "$HEALTH" | head -n "$NEED" > "$HEALTH.nodes"
 if [ "$(wc -l < "$HEALTH.nodes")" -lt "$NEED" ]; then
   echo "FATAL: only $(wc -l < "$HEALTH.nodes") healthy nodes of the $NEED the config needs" >&2
   exit 1
