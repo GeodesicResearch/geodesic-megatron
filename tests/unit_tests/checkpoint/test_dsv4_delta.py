@@ -75,16 +75,22 @@ def test_quantise_blocks_round_trips_within_fp8_precision_and_keeps_zero_blocks_
     assert (restored - delta).abs().max() <= 0.07 * delta.abs().max()
 
 
+def _write(root, arm_tensors, output="out"):
+    return dsv4_delta.write_delta(str(root / "base"), arm_tensors, str(root / output), "treatment", 3, "abc")
+
+
 def test_write_delta_stores_fp8_with_scale_fp32_for_the_rest_and_omits_unchanged_tensors(checkpoints):
     root, base_weight, arm = checkpoints
-    manifest = dsv4_delta.write_delta(str(root / "base"), str(root / "arm"), str(root / "out"), "treatment", 3, "abc")
+    manifest = _write(root, dsv4_delta.iter_hf_directory(str(root / "arm")))
 
     assert manifest["omitted_tensors"] == ["layers.0.ffn.w1.weight"]
     assert manifest["zero_scale_block_count"] == 1
+    assert manifest["failures"] == [] and manifest["tensors_checked"] == 2
     assert (manifest["arm"], manifest["epoch"], manifest["base_revision"]) == ("treatment", 3, "abc")
+    assert (root / "out" / ".complete").exists()
     index = json.loads((root / "out" / "model.safetensors.index.json").read_text())["weight_map"]
     assert set(index) == {"layers.0.attn.wq.weight", "layers.0.attn.wq.scale", "layers.0.attn_norm.weight"}
-    with safe_open(str(root / "out" / "model-00001-of-00001.safetensors"), framework="pt") as handle:
+    with safe_open(str(root / "out" / "delta-00001.safetensors"), framework="pt") as handle:
         quantised, scale = handle.get_tensor("layers.0.attn.wq.weight"), handle.get_tensor("layers.0.attn.wq.scale")
         norm_delta = handle.get_tensor("layers.0.attn_norm.weight")
     assert quantised.dtype == torch.float8_e4m3fn and scale.dtype == torch.float32
@@ -94,15 +100,25 @@ def test_write_delta_stores_fp8_with_scale_fp32_for_the_rest_and_omits_unchanged
     assert norm_delta.dtype == torch.float32 and torch.allclose(norm_delta, torch.full((64,), 0.5), atol=0.02)
 
 
-def test_write_delta_refuses_existing_output_missing_tensors_and_shape_changes(checkpoints, tmp_path):
+def test_write_delta_accepts_a_stream_of_tensors_without_an_hf_directory(checkpoints):
+    root, _, arm = checkpoints
+    manifest = _write(root, iter(arm.items()), output="streamed")
+    assert manifest["failures"] == [] and (root / "streamed" / ".complete").exists()
+
+
+def test_write_delta_without_the_complete_marker_when_a_base_tensor_is_missing(checkpoints):
+    root, _, arm = checkpoints
+    short = [(name, tensor) for name, tensor in arm.items() if name != "layers.0.attn_norm.weight"]
+    manifest = _write(root, iter(short), output="short")
+    assert any("not in the arm" in failure for failure in manifest["failures"])
+    assert not (root / "short" / ".complete").exists()
+
+
+def test_write_delta_refuses_an_existing_output_a_foreign_tensor_and_a_shape_change(checkpoints):
     root, _, arm = checkpoints
     with pytest.raises(FileExistsError):
-        dsv4_delta.write_delta(str(root / "base"), str(root / "arm"), str(root), "a", 1, "abc")
-    short = {name: tensor for name, tensor in arm.items() if name != "layers.0.attn_norm.weight"}
-    _write_checkpoint(root / "short", short)
-    with pytest.raises(KeyError, match="missing from the arm"):
-        dsv4_delta.write_delta(str(root / "base"), str(root / "short"), str(root / "o1"), "a", 1, "abc")
-    wrong = dict(arm, **{"layers.0.attn_norm.weight": torch.zeros(65).bfloat16()})
-    _write_checkpoint(root / "wrong", wrong)
+        dsv4_delta.write_delta(str(root / "base"), iter(arm.items()), str(root), "a", 1, "abc")
+    with pytest.raises(KeyError, match="not a Base tensor"):
+        _write(root, iter([("layers.9.extra.weight", torch.zeros(4).bfloat16())]), output="o1")
     with pytest.raises(ValueError, match="shape"):
-        dsv4_delta.write_delta(str(root / "base"), str(root / "wrong"), str(root / "o2"), "a", 1, "abc")
+        _write(root, iter([("layers.0.attn_norm.weight", torch.zeros(65).bfloat16())]), output="o2")
