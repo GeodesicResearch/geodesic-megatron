@@ -32,7 +32,7 @@ SECTIONS = {
     "provenance": dict,
 }
 KEYS = {
-    "topology": {"pp", "vpp", "ep", "etp", "microbatch_group"},
+    "topology": {"pp", "vpp", "ep", "etp", "microbatch_group", "blocks"},
     "batch": {"seq_length", "global_batch_size", "micro_batch_size"},
     "schedule": {"train_iters", "save_interval", "lr", "warmup_iters", "eval_interval", "eval_iters"},
     "optimizer": {"offload_fraction", "moment_dtype"},
@@ -90,6 +90,31 @@ def validate(config: dict) -> dict:
     return {"micro_batches_per_rank": micro_batches, "bubble": bubble, "tokens_per_update": batch["global_batch_size"] * batch["seq_length"]}
 
 
+def block_layout(topology: dict) -> tuple[str, str]:
+    """Return the hybrid layer pattern and the pipeline layout that give each virtual stage one block.
+
+    A block is an attention layer and an MoE layer. Blocks 1 and 2 use the hybrid-compressed attention H, then C and H alternate
+    from block 3 (the pattern of DeepSeek-V4). The embedding joins the first virtual stage and the loss head the last, and
+    virtual stages left over when there are fewer blocks than stages come last and hold no block. Hash layers sit in the
+    first three blocks, which fall on the first three virtual stages.
+    """
+    stages = topology["pp"] * topology["vpp"]
+    blocks = topology["blocks"]
+    if blocks > stages or stages - blocks > topology["pp"]:
+        raise ValueError(f"{blocks} blocks do not fit {stages} virtual stages with at most one stage of spare per pipeline rank")
+    letters = ["H", "H"] + ["C" if k % 2 == 0 else "H" for k in range(blocks - 2)]
+    pattern = "|".join(letters[k] + "E" if k < blocks else "" for k in range(stages))
+    layout = []
+    for k in range(stages):
+        entry = "tt" if k < blocks else ""
+        if k == 0:
+            entry = "E" + entry
+        if k == stages - 1:
+            entry += "L"
+        layout.append(entry)
+    return pattern, "|".join(layout)
+
+
 def _blend(blend: list) -> str:
     """Format [[path, weight], ...] as the dataset.blend override [[paths], [weights]]."""
     return json.dumps([[path for path, _ in blend], [weight for _, weight in blend]], separators=(",", ":"))
@@ -137,6 +162,8 @@ def overrides(config: dict) -> list[str]:
         f'dataset.split="{data["split"]}"',
         f"validation.skip_train={'true' if run['eval_only'] else 'false'}",
     ]
+    pattern, layout = block_layout(topology)
+    items += [f"model.hybrid_layer_pattern={pattern}", f"model.pipeline_model_parallel_layout={layout}", "model.mtp_num_layers=null"]
     items.append(f"dataset.blend={_blend(data['blend'])}")
     # With several validation sets each corpus of the blend is evaluated on its own held-out split, in the order of the blend.
     items.append(f"validation.multiple_validation_sets={'true' if data['multiple_validation_sets'] else 'false'}")

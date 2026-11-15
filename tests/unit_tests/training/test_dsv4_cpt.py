@@ -31,7 +31,7 @@ CONFIG = {
     "hf_model": "/models/base",
     "base_revision": "abc",
     "nodes": 124,
-    "topology": {"pp": 31, "vpp": 2, "ep": 8, "etp": 1, "microbatch_group": 32},
+    "topology": {"pp": 31, "vpp": 2, "ep": 8, "etp": 1, "microbatch_group": 32, "blocks": 61},
     "batch": {"seq_length": 2048, "global_batch_size": 1024, "micro_batch_size": 1},
     "schedule": {"train_iters": 1445, "save_interval": 289, "lr": 1.0e-4, "warmup_iters": 25, "eval_interval": 100000, "eval_iters": 0},
     "optimizer": {"offload_fraction": 1.0, "moment_dtype": "bf16"},
@@ -107,3 +107,27 @@ def test_load_config_refuses_unknown_sections_and_keys(tmp_path):
     config["batch"]["extra"] = 1
     with pytest.raises(ValueError, match="batch keys"):
         dsv4_cpt.load_config(_write(tmp_path, config))
+
+
+def test_the_arm_layout_gives_each_virtual_stage_one_block_and_leaves_the_last_stage_without_one():
+    pattern, layout = dsv4_cpt.block_layout(CONFIG["topology"])
+    segments = pattern.split("|")
+    assert len(segments) == 62 and segments[0] == "HE" and segments[1] == "HE" and segments[2] == "CE" and segments[3] == "HE"
+    assert segments[60] == "CE" and segments[61] == ""
+    stages = layout.split("|")
+    assert len(stages) == 62 and stages[0] == "Ett" and stages[1] == "tt" and stages[60] == "tt" and stages[61] == "L"
+    assert sum(s.count("t") for s in stages) == 2 * 61
+
+
+def test_the_layout_refuses_more_blocks_than_stages_and_more_than_one_spare_stage_per_rank():
+    with pytest.raises(ValueError, match="do not fit"):
+        dsv4_cpt.block_layout(dict(CONFIG["topology"], blocks=63))
+    with pytest.raises(ValueError, match="do not fit"):
+        dsv4_cpt.block_layout(dict(CONFIG["topology"], blocks=20))
+
+
+def test_overrides_state_the_layout_and_switch_mtp_off(tmp_path):
+    items = dsv4_cpt.overrides(dsv4_cpt.load_config(_write(tmp_path, CONFIG)))
+    assert any(i.startswith("model.hybrid_layer_pattern=HE|HE|CE|HE|") for i in items)
+    assert any(i.startswith("model.pipeline_model_parallel_layout=Ett|tt|") for i in items)
+    assert "model.mtp_num_layers=null" in items
