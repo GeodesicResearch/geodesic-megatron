@@ -90,3 +90,6 @@ it to the empty string.
 - Random small reads are slow. One thread reads 32 KiB at a random offset in 4.5 ms with `pread` (7 MiB/s) and in
   0.8 ms through a memory mapping (39 MiB/s), while sequential reads run at 0.6 to 1.6 GiB/s. Run a workload of
   random small reads on a node-local copy ("Staging inputs").
+- A page fault on a memory mapping of a large file takes seconds: about 6 s at 148 GB. In a config that reads a
+  `.bin`/`.idx` blend, state `mmap_bin_files: false` under `dataset.bin_idx_read`. The run then reads the token
+  files with plain reads (`pipeline/training/datasets.py`).
