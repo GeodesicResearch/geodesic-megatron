@@ -141,6 +141,9 @@ The reasons for these layouts:
 - SFT at 32,768 tokens needs context parallelism 4, which leaves 8,192 tokens per rank. One node then allows only
   PP2 CP4 EP4, which runs at the memory limit.
 
+`docs/investigations/verda-support-report.md` gives the measured rates of the Super stage configs of the 30B baseline
+arm.
+
 Super's quickstarts differ from Isambard's in these settings.
 
 | Setting | Isambard | Verda |

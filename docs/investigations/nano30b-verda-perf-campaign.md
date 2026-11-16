@@ -275,7 +275,7 @@ Stage 1 adds four settings to the shared ones.
 | Setting | Value | Reason |
 |---|---|---|
 | Micro-batch | 4 | Micro-batch 2 ran 0.931x across nodes (job 1605). Micro-batch 8 fits only with the EP overlap off and heavier recompute |
-| Recompute | `recompute_modules: ["moe_act"]`, the expert activations | Recompute off gained less than the node difference (closed levers below) |
+| Recompute | None on 26.10.00. The 26.04 scores below ran `recompute_modules: ["moe_act"]` | On 26.10.00 recompute off runs 1.0025x the `[moe_act]` posture on one node, with the loss at the identical-run floor (`docs/investigations/verda-support-report.md`) |
 | Data reads | `mmap_bin_files: false`, `create_attention_mask: false`, 8 workers | Memory-mapped reads on `/shared` took 18 to 72 s per step (job 1454). Plain reads ran 7.32 s per step on one node (job 1539) |
 | Parameter gather | `comm_overlap.overlap_param_gather: true` | Held fixed in every run |
 
@@ -353,7 +353,7 @@ Timer level 1, delayed weight gradients and the EP overlap appear in earlier sec
 | NVFP4 on dense layers | 1620 against the reference mean | Across nodes | 1.023x | | Outside the precision constraint. Loss ran +0.0130 to +0.0165 above MXFP8, with a gradient norm 1.3 to 1.6x higher |
 | Sync-free HybridEP with permute fusion | 1618 against 1594 | Same node | 1.001x | +10 GB allocated, +32 GB reserved | No gain |
 | HybridEP on 16 SMs | 1647 against the reference mean | Across nodes | 0.995x | | No gain |
-| Recompute off | 1708 against 1694 | Across nodes | 1.004x | +16.3 GB allocated, +22.6 GB reserved | Inside the node difference |
+| Recompute off | 1708 against 1694 | Across nodes | 1.004x | +16.3 GB allocated, +22.6 GB reserved | Inside the node difference on 26.04. Adopted on 26.10.00, where a same-node pair measures it |
 | `[moe_act, layernorm, shared_experts]` recompute | 1606 against 1577 | Across nodes | 0.968x | 3.2 GB less per sequence | Slower |
 | Micro-batch 8 with `[moe_act]` | None | | | About 30 GB per added sequence, over 270 GB allocated by arithmetic | It does not fit |
 | Micro-batch 8, heavier recompute, EP overlap off | 1617 against 1604, 2 nodes | Across nodes | 0.892x | 242.2 / 252.6 GB at 2 nodes, 87.8% | Slower, because the EP overlap gains more |

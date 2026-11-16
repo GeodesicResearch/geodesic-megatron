@@ -22,7 +22,8 @@ No path of the composed config stays on Isambard's storage.
 A Verda arm trains what its campaign trains. Each of its stage configs overlays the campaign's stage config of the
 same stage. It can also state how the run uses Verda's hardware. The model in its name can differ from the base's,
 since the launcher's model argument picks the recipe. The tests fail if a stage config states anything else, such as
-a batch size or a learning rate. They also fail if the other model's recipe changes a training setting (``TRAINING_SECTIONS``).
+a batch size or a learning rate. They also fail if the other model's recipe changes a training setting
+(``TRAINING_SECTIONS``).
 
 The other files of the quickstart directory exist for Verda alone. The tests hold those, and the arms, to the
 cluster's rules.

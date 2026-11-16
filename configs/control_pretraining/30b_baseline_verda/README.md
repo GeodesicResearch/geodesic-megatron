@@ -20,7 +20,9 @@ keeps the packed corpus. The Super configs also state their warm starts and chec
 The `.env` beside each config holds its launcher settings. The header of each config describes its posture.
 [`../30b_baseline/README.md`](../30b_baseline/README.md) gives the data, the batch and the length of each stage.
 [`docs/investigations/nano30b-verda-perf-campaign.md`](../../../docs/investigations/nano30b-verda-perf-campaign.md)
-gives the measurements behind each posture.
+gives the measurements behind each Nano posture.
+[`docs/investigations/verda-support-report.md`](../../../docs/investigations/verda-support-report.md) gives the
+measurements behind each Super posture.
 
 ## Storage
 
