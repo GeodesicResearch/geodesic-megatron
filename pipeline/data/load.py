@@ -19,6 +19,7 @@ Catalogue:
     build_hub_load_kwargs: the ``load_dataset`` keyword arguments of a Hub load, streamed or not.
     parquet_file_schemas: the arrow schema of each parquet file, read from its footer.
     features_to_load: the features a Hub config is loaded with, and how they were settled.
+    features_are_declared: whether a ``features_to_load`` account names features fixed before any row is read.
     load_local_files: a Dataset from local JSON lines files.
     load_source_dataset: the run's dataset and how its features were settled, retrying a rate-limited Hub load.
 """
@@ -29,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 import fsspec
 import pyarrow.parquet as pq
 from datasets import Features, load_dataset, load_dataset_builder
-from scripts.data.hub_read_retry import reads_repeated_in_place
+from scripts.data.hub_read_retry import hub_read_failure_is_transient, reads_repeated_in_place
 
 
 MAX_LOAD_ATTEMPTS = 10
@@ -77,10 +78,26 @@ def parquet_file_schemas(files, workers, attempts, first_wait_seconds):
     def read(file):
         with fsspec.open(file, "rb") as handle:
             what = f"a read of {file}'s footer"
-            return pq.read_schema(reads_repeated_in_place(handle, attempts, first_wait_seconds, what))
+            return pq.read_schema(
+                reads_repeated_in_place(handle, attempts, first_wait_seconds, what, hub_read_failure_is_transient)
+            )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(read, files))
+
+
+#: The prefix of every account of features that the loader infers from the rows it reads first.
+_INFERRED_BY_THE_LOADER = "inferred by the "
+
+
+def features_are_declared(how: str) -> bool:
+    """Whether the features ``how`` describes were fixed before any row is read.
+
+    ``how`` is the account ``features_to_load`` or ``load_source_dataset`` gives. A dataset card, or the schema every
+    data file shares, fixes features in advance. Features the loader infers describe only the rows it read to infer
+    them.
+    """
+    return not how.startswith(_INFERRED_BY_THE_LOADER)
 
 
 def features_to_load(args):
@@ -98,7 +115,7 @@ def features_to_load(args):
     if builder.info.features is not None:
         return None, "declared by the dataset card"
     if builder.name != "parquet":
-        return None, f"inferred by the {builder.name} loader (the dataset card declares none)"
+        return None, f"{_INFERRED_BY_THE_LOADER}{builder.name} loader (the dataset card declares none)"
     files = [file for split_files in builder.config.data_files.values() for file in split_files]
     schemas = parquet_file_schemas(
         files, args.download_workers, args.hub_read_attempts, args.hub_read_first_wait_seconds
@@ -143,7 +160,9 @@ def load_source_dataset(args):
     for attempt in range(1, MAX_LOAD_ATTEMPTS + 1):
         try:
             if args.data_files:
-                return load_local_files(args.data_files, args.download_workers), "inferred by the json loader"
+                return load_local_files(
+                    args.data_files, args.download_workers
+                ), f"{_INFERRED_BY_THE_LOADER}json loader"
             features, how = features_to_load(args)
             print(f"  Features: {how}")
             ds = load_dataset(

@@ -122,14 +122,17 @@ def tokenizer_load_path(reference: str) -> str:
     """What to load a tokenizer reference's tokenizer from: its pinned commit's local snapshot, else its name.
 
     A pinned commit is downloaded into the Hugging Face cache (``HF_HOME``) if it is not there yet. Raises
-    ``huggingface_hub``'s ``RevisionNotFoundError`` when the repository has no such commit.
+    ``huggingface_hub``'s ``RevisionNotFoundError`` when the repository has no such commit. With ``HF_HUB_OFFLINE=1``
+    the commit loads from the cache alone. A commit the cache lacks then raises ``LocalEntryNotFoundError``.
     """
     name, revision = split_tokenizer_reference(reference)
     if revision is None:
         return name
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import constants, snapshot_download
 
-    return snapshot_download(repo_id=name, revision=revision)
+    # huggingface_hub 1.33 lists a commit's files over the network even when the cache holds the snapshot. Offline
+    # mode makes that listing raise. local_files_only reads the cache alone.
+    return snapshot_download(repo_id=name, revision=revision, local_files_only=constants.HF_HUB_OFFLINE)
 
 
 def main() -> None:

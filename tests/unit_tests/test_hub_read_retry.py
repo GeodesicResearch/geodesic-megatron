@@ -12,10 +12,12 @@ import logging
 import fsspec
 import httpx
 import pytest
+import requests
 from datasets import load_dataset
 from datasets.utils import file_utils
 from scripts.data import hub_read_retry
 from scripts.data.hub_read_retry import (
+    datasets_repeats_hub_client_errors,
     hub_read_failure_is_transient,
     reads_repeated_in_place,
     retrying,
@@ -48,6 +50,20 @@ def stream_rows(flaky_remote_files, tmp_path):  # noqa: F811
     return read
 
 
+@pytest.fixture(autouse=True)
+def datasets_waits_nothing(monkeypatch):
+    """``datasets``' own read loop sleeps between its attempts: 5 s, and in ``datasets`` 4 also 20 s on a 504 and 60 s
+    on a 429. The tests count attempts, not seconds, so those waits are zero here, as the block's own are."""
+    from datasets import config
+
+    for name in (
+        "STREAMING_READ_RETRY_INTERVAL",
+        "STREAMING_READ_SERVER_UNAVAILABLE_RETRY_INTERVAL",
+        "STREAMING_READ_RATE_LIMIT_RETRY_INTERVAL",
+    ):
+        monkeypatch.setattr(config, name, 0, raising=False)
+
+
 @pytest.fixture
 def fetches_of_a_clean_stream(flaky_remote_files, stream_rows):  # noqa: F811
     """How many range fetches one undisturbed pass over the stream makes."""
@@ -55,20 +71,23 @@ def fetches_of_a_clean_stream(flaky_remote_files, stream_rows):  # noqa: F811
     return flaky_remote_files.fetches
 
 
-class TestTheInstalledLibrariesDoNotRepeatTheseReads:
-    def test_a_stream_ends_on_a_connection_closed_part_way_through_a_body(
+class TestWhatTheInstalledDatasetsRepeats:
+    def test_a_connection_closed_part_way_through_a_body_is_repeated_only_by_a_datasets_that_says_so(
         self,
         flaky_remote_files,  # noqa: F811
         stream_rows,
         fetches_of_a_clean_stream,
     ):
-        """The failure that ended two ClimbMix slice prepares, each more than 80% through, on 2026-10-11:
-        ``datasets`` wraps every remote file's ``read`` in its own retry, but that retry does not know the Hub
-        client's error, so the stream ends on it. When this test fails, the installed ``datasets`` repeats the read
-        itself and ``streamed_reads_retried`` has nothing left to add for it."""
+        """Outside the block a stream has only the ``datasets`` read loop. ``datasets`` 4 repeats a connection closed
+        part-way through a body. ``datasets`` 3 ends the stream on it. ``streamed_reads_retried`` arranges its loop
+        by ``datasets_repeats_hub_client_errors``, so that function must say which."""
         flaky_remote_files.fail({fetches_of_a_clean_stream // 2: dropped_connection()})
-        with pytest.raises(httpx.RemoteProtocolError, match="peer closed connection"):
-            stream_rows()
+        if datasets_repeats_hub_client_errors():
+            assert stream_rows() == ROWS
+        else:
+            with pytest.raises(httpx.RemoteProtocolError, match="peer closed connection"):
+                stream_rows()
+        assert flaky_remote_files.raised == [fetches_of_a_clean_stream // 2]
 
 
 class TestStreamedReadsRetried:
@@ -112,6 +131,40 @@ class TestStreamedReadsRetried:
             with pytest.raises(httpx.RemoteProtocolError):
                 stream_rows()
         assert flaky_remote_files.raised == [first, first + 1, first + 2, first + 3]
+
+    @pytest.mark.parametrize("error_of", [dropped_connection, lambda: hub_status(504), lambda: hub_status(429)])
+    def test_a_failure_both_loops_know_is_repeated_by_the_blocks_loop_alone(
+        self,
+        flaky_remote_files,  # noqa: F811
+        stream_rows,
+        fetches_of_a_clean_stream,
+        error_of,
+    ):
+        """``datasets`` 4 repeats a dropped connection, a 504 and a 429 in its own loop (20 attempts). Inside the
+        block the block's loop is the only one, so a read that keeps failing is tried the block's number of times,
+        not that number times ``datasets``' own."""
+        first = fetches_of_a_clean_stream // 2
+        flaky_remote_files.fail({first + attempt: error_of() for attempt in range(30)})
+        with streamed_reads_retried(attempts=3, first_wait_seconds=0.0):
+            with pytest.raises(type(error_of())):
+                stream_rows()
+        assert flaky_remote_files.raised == [first, first + 1, first + 2]
+
+    def test_a_failure_only_the_datasets_loop_repeats_is_still_repeated_inside_the_block(
+        self,
+        flaky_remote_files,  # noqa: F811
+        stream_rows,
+        fetches_of_a_clean_stream,
+    ):
+        """``hub_read_failure_is_transient`` rejects a ``requests`` connection error, and both ``datasets`` loops repeat
+        one. Inside the block a stream outlasts it, whichever loop the installed ``datasets`` leaves in place."""
+        failed = fetches_of_a_clean_stream // 2
+        error = requests.exceptions.ConnectionError("connection reset by peer")
+        assert not hub_read_failure_is_transient(error)
+        flaky_remote_files.fail({failed: error})
+        with streamed_reads_retried(attempts=2, first_wait_seconds=0.0):
+            assert stream_rows() == ROWS
+        assert flaky_remote_files.raised == [failed]
 
     def test_an_error_that_is_not_the_hubs_is_raised_as_it_is(
         self,
@@ -175,10 +228,10 @@ class TestReadsRepeatedInPlace:
         from huggingface_hub.hf_file_system import HfFileSystemFile, HfFileSystemStreamFile
 
         stream_file = object.__new__(HfFileSystemStreamFile)
-        assert reads_repeated_in_place(stream_file, 3, 0.0, "a read") is stream_file
+        assert reads_repeated_in_place(stream_file, 3, 0.0, "a read", hub_read_failure_is_transient) is stream_file
         assert "read" not in vars(stream_file)
         buffered_file = object.__new__(HfFileSystemFile)
-        assert reads_repeated_in_place(buffered_file, 3, 0.0, "a read") is buffered_file
+        assert reads_repeated_in_place(buffered_file, 3, 0.0, "a read", hub_read_failure_is_transient) is buffered_file
         assert "read" in vars(buffered_file)
 
     def test_only_a_file_that_reads_by_range_has_its_read_repeated(self, flaky_remote_files, tmp_path):  # noqa: F811
@@ -186,7 +239,7 @@ class TestReadsRepeatedInPlace:
         path.write_bytes(bytes(range(256)) * 400)
         with fsspec.open(flaky_remote_files.url(path), "rb") as buffered:
             plain_read = buffered.read
-            assert reads_repeated_in_place(buffered, 3, 0.0, "a read") is buffered
+            assert reads_repeated_in_place(buffered, 3, 0.0, "a read", hub_read_failure_is_transient) is buffered
             assert buffered.read is not plain_read
             flaky_remote_files.fail({1: dropped_connection(), 3: hub_status(503)})
             assert buffered.read(40_000) + buffered.read() == path.read_bytes()
@@ -194,7 +247,7 @@ class TestReadsRepeatedInPlace:
         with open(path, "rb") as local, io.TextIOWrapper(io.BytesIO(b"text")) as wrapper:
             for other in (local, wrapper):
                 read = other.read
-                assert reads_repeated_in_place(other, 3, 0.0, "a read") is other
+                assert reads_repeated_in_place(other, 3, 0.0, "a read", hub_read_failure_is_transient) is other
                 assert other.read == read
 
 
@@ -222,7 +275,9 @@ class TestRetrying:
 
     def test_the_wait_doubles_from_the_first_up_to_a_minute(self, waits):
         read, calls = self._failing(7, dropped_connection)
-        repeated = retrying(read, attempts=8, first_wait_seconds=5.0, what="a read")
+        repeated = retrying(
+            read, attempts=8, first_wait_seconds=5.0, what="a read", transient=hub_read_failure_is_transient
+        )
         assert repeated(1024, offset=3) == ((1024,), {"offset": 3})
         assert waits == [5.0, 10.0, 20.0, 40.0, 60.0, 60.0, 60.0]
         assert len(calls) == 8 and all(call == ((1024,), {"offset": 3}) for call in calls)
@@ -230,23 +285,47 @@ class TestRetrying:
     def test_the_last_attempt_raises_without_waiting(self, waits):
         read, calls = self._failing(10, dropped_connection)
         with pytest.raises(httpx.RemoteProtocolError):
-            retrying(read, attempts=3, first_wait_seconds=5.0, what="a read")()
+            retrying(
+                read, attempts=3, first_wait_seconds=5.0, what="a read", transient=hub_read_failure_is_transient
+            )()
         assert len(calls) == 3 and waits == [5.0, 10.0]
 
     def test_one_attempt_repeats_nothing(self, waits):
         read, calls = self._failing(1, dropped_connection)
         with pytest.raises(httpx.RemoteProtocolError):
-            retrying(read, attempts=1, first_wait_seconds=5.0, what="a read")()
+            retrying(
+                read, attempts=1, first_wait_seconds=5.0, what="a read", transient=hub_read_failure_is_transient
+            )()
         assert len(calls) == 1 and waits == []
+
+    def test_the_given_rule_decides_which_failures_are_repeated(self, waits):
+        def only_timeouts(error: BaseException) -> bool:
+            return isinstance(error, TimeoutError)
+
+        read, calls = self._failing(2, TimeoutError)
+        assert retrying(read, attempts=3, first_wait_seconds=5.0, what="a read", transient=only_timeouts)() == ((), {})
+        assert len(calls) == 3
+        read, calls = self._failing(2, dropped_connection)
+        with pytest.raises(httpx.RemoteProtocolError):
+            retrying(read, attempts=3, first_wait_seconds=5.0, what="a read", transient=only_timeouts)()
+        assert len(calls) == 1 and waits == [5.0, 10.0]
 
     def test_fewer_than_one_attempt_is_refused(self):
         with pytest.raises(ValueError, match="a read needs at least one attempt, not 0"):
-            retrying(lambda: b"", attempts=0, first_wait_seconds=5.0, what="a read")
+            retrying(
+                lambda: b"", attempts=0, first_wait_seconds=5.0, what="a read", transient=hub_read_failure_is_transient
+            )
 
     def test_each_failed_attempt_is_logged_with_its_error(self, waits, caplog):
         read, _ = self._failing(2, lambda: hub_status(504))
         with caplog.at_level(logging.WARNING, logger=hub_read_retry.__name__):
-            retrying(read, attempts=3, first_wait_seconds=5.0, what="a read of corpus/train.parquet")()
+            retrying(
+                read,
+                attempts=3,
+                first_wait_seconds=5.0,
+                what="a read of corpus/train.parquet",
+                transient=hub_read_failure_is_transient,
+            )()
         messages = [record.getMessage() for record in caplog.records]
         assert messages == [
             "a read of corpus/train.parquet failed (HfHubHTTPError: 504 from the Hub); attempt 1 of 3, "

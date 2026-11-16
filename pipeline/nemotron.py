@@ -55,4 +55,14 @@ ENABLE_THINKING_OFF_LINE = "{%- set enable_thinking = enable_thinking if enable_
 THINK_STUB_GENERATION_PROMPT = r"'<|im_start|>assistant\n<think></think>'"
 PLAIN_GENERATION_PROMPT = r"'<|im_start|>assistant\n'"
 
-BLOCK_TYPE_CHARS = {"mamba": "M", "moe": "E", "attention": "*", "mlp": "-", "dense": "-"}
+# transformers 5.3 names the blocks mamba and attention. transformers 5.17 names them linear_attention and
+# full_attention.
+BLOCK_TYPE_CHARS = {
+    "mamba": "M",
+    "linear_attention": "M",
+    "moe": "E",
+    "attention": "*",
+    "full_attention": "*",
+    "mlp": "-",
+    "dense": "-",
+}

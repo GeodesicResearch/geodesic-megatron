@@ -51,7 +51,7 @@ from transformers import AutoTokenizer
 from pipeline.cluster import cluster_profile
 from pipeline.data.count import count_tokens_batched
 from pipeline.data.layout import slugify_dataset_name
-from pipeline.data.load import load_source_dataset
+from pipeline.data.load import features_are_declared, load_source_dataset
 from pipeline.data.packing import run_pack
 from pipeline.data.records import (
     SAMPLE_EXAMPLES,
@@ -548,7 +548,9 @@ def run_pipeline(args):
 
     stream_files = None
     if args.streaming:
-        text_column, format_type = detect_stream_column(ds, args.text_column)
+        text_column, format_type = detect_stream_column(
+            ds, args.text_column, features_declared=features_are_declared(results["features"])
+        )
         stream_files = parquet_stream_files(ds, args)
         if stream_files is None and args.stream_workers > 1:
             raise ValueError(

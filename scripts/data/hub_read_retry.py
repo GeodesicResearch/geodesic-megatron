@@ -11,9 +11,9 @@ libraries that make the requests repeat too little of that:
   connection or a 5xx status, and not at all when the body is cut short (``httpx.RemoteProtocolError``). When a
   request cannot connect it also closes its shared client and retries on the reference it already held, so what
   surfaces is httpx's closed-client ``RuntimeError``, not the network error.
-- ``datasets`` wraps the ``read`` of every file a stream opens so that it is repeated, but only on the errors of the
-  HTTP clients it was written against (``aiohttp`` and ``requests``), which a ``huggingface_hub`` built on ``httpx``
-  never raises.
+- ``datasets`` wraps the ``read`` of every file a stream opens so that it is repeated. ``datasets`` 3 repeats it only
+  on the errors of ``aiohttp`` and ``requests``. A ``huggingface_hub`` built on ``httpx`` never raises those.
+  ``datasets`` 4 also repeats it on httpx's request errors and on the Hub's 504 and 429 statuses, with fixed waits.
 
 ``hub_read_failure_is_transient`` is the one rule for which failures a repeat can outlast, and ``retrying`` the one
 loop that repeats on them, with a wait that doubles up to ``MAX_WAIT_SECONDS``. A read is repeated in one of two ways:
@@ -26,8 +26,7 @@ loop that repeats on them, with a wait that doubles up to ``MAX_WAIT_SECONDS``. 
   ``read`` does not give the same bytes when run again, and a repeat would end the stream short without an error:
   a wrapper (text mode, a decompressor) has already consumed what it buffered when its ``read`` raises, and the Hub's
   unbuffered stream file, which ``datasets`` opens for an archive it iterates, answers a ``read`` after a failed one
-  with an end of file. Such a file's failure ends the stream, as it would without this module. A parquet or JSON
-  stream opens its files buffered.
+  with an end of file. Such a file's failure ends the stream. A parquet or JSON stream opens its files buffered.
 - **From a fresh open.** ``configs/control_pretraining/hub_parquet.py``'s ``read_hub_file`` opens the file again and
   runs the whole read again, for a parquet reader that buffers ahead and so cannot be resumed part-way.
 
@@ -70,14 +69,21 @@ def hub_read_failure_is_transient(error: BaseException) -> bool:
     return isinstance(error, RuntimeError) and "client has been closed" in str(error)
 
 
-def retrying(operation: Callable[..., Any], attempts: int, first_wait_seconds: float, what: str) -> Callable[..., Any]:
+def retrying(
+    operation: Callable[..., Any],
+    attempts: int,
+    first_wait_seconds: float,
+    what: str,
+    transient: Callable[[BaseException], bool],
+) -> Callable[..., Any]:
     """``operation``, repeated on a transient Hub read failure until it returns or has been tried ``attempts`` times.
 
     Each failed attempt is logged with its error, naming the operation as ``what``. The wait before the next is
     ``first_wait_seconds``, doubled each time up to ``MAX_WAIT_SECONDS``, so the attempts together can outlast an
     outage of minutes: such an outage fails every request at once, and a budget of seconds is spent before the route
-    is back. A failure ``hub_read_failure_is_transient`` rejects, and the last attempt's, is raised as it is.
-    ``operation`` must give the same result when run again.
+    is back. ``transient`` says which failures are worth repeating, as ``hub_read_failure_is_transient`` does. A
+    failure it rejects, and the last attempt's, is raised as it is. ``operation`` must give the same result when run
+    again.
     """
     if attempts < 1:
         raise ValueError(f"{what} needs at least one attempt, not {attempts}")
@@ -88,7 +94,7 @@ def retrying(operation: Callable[..., Any], attempts: int, first_wait_seconds: f
             try:
                 return operation(*args, **kwargs)
             except Exception as error:
-                if attempt == attempts or not hub_read_failure_is_transient(error):
+                if attempt == attempts or not transient(error):
                     raise
                 wait = min(first_wait_seconds * 2 ** (attempt - 1), MAX_WAIT_SECONDS)
                 LOGGER.warning(
@@ -106,9 +112,15 @@ def retrying(operation: Callable[..., Any], attempts: int, first_wait_seconds: f
     return repeated
 
 
-def reads_repeated_in_place(file_obj: Any, attempts: int, first_wait_seconds: float, what: str) -> Any:
-    """``file_obj``, its ``read`` repeated on a transient Hub read failure when that ``read`` is one known to give the
-    same bytes when run again.
+def reads_repeated_in_place(
+    file_obj: Any,
+    attempts: int,
+    first_wait_seconds: float,
+    what: str,
+    transient: Callable[[BaseException], bool],
+) -> Any:
+    """``file_obj``, its ``read`` repeated on a transient Hub read failure (``transient``, as ``retrying`` takes it)
+    when that ``read`` is one known to give the same bytes when run again.
 
     Two are: fsspec's buffered ``read`` (``AbstractBufferedFile.read``), which leaves the file's position and cache
     where they were when a fetch fails, and the Hub's buffered file's (``HfFileSystemFile.read``), which is that
@@ -120,8 +132,21 @@ def reads_repeated_in_place(file_obj: Any, attempts: int, first_wait_seconds: fl
     from huggingface_hub.hf_file_system import HfFileSystemFile
 
     if getattr(type(file_obj), "read", None) in (AbstractBufferedFile.read, HfFileSystemFile.read):
-        file_obj.read = retrying(file_obj.read, attempts, first_wait_seconds, what)
+        file_obj.read = retrying(file_obj.read, attempts, first_wait_seconds, what, transient)
     return file_obj
+
+
+def datasets_repeats_hub_client_errors() -> bool:
+    """Whether the installed ``datasets`` repeats a streamed file's ``read`` on the Hub client's transport errors itself.
+
+    ``datasets`` 4 lists httpx's request errors in ``datasets.utils.file_utils.CONNECTION_ERRORS_TO_RETRY``.
+    ``datasets`` 3 has no such list.
+    """
+    import httpx
+    from datasets.utils import file_utils
+
+    errors = getattr(file_utils, "CONNECTION_ERRORS_TO_RETRY", ())
+    return any(isinstance(error, type) and issubclass(httpx.RemoteProtocolError, error) for error in errors)
 
 
 @contextmanager
@@ -129,19 +154,34 @@ def streamed_reads_retried(attempts: int, first_wait_seconds: float) -> Iterator
     """Inside the block, the files a ``datasets`` stream opens to read by range repeat their reads on a transient Hub
     read failure.
 
-    ``datasets`` gives each remote file it opens to one function that wraps the file's ``read``; inside the block that
-    function also applies ``reads_repeated_in_place``, around the wrapper ``datasets`` installs itself. A parquet or
-    JSON stream opens its files buffered, and those are repeated; a text stream's wrapped files and an archive's
-    unbuffered ones are not, and fail as they did. A file opened inside the block keeps the repeated ``read`` after
-    the block ends.
+    A read is tried at most ``attempts`` times on such a failure, whatever repeats the installed ``datasets`` makes
+    itself. A parquet or JSON stream opens its files buffered, so their reads repeat. A Hub read failure of a text
+    stream's wrapped file or an archive's unbuffered file ends the stream. A file opened inside the block keeps its
+    repeated ``read`` after the block ends.
     """
     from datasets.utils import file_utils
 
     wrap_for_known_clients = file_utils._add_retries_to_file_obj_read_method
+    what = "a read of a streamed file"
 
-    def wrap_for_the_hub_client_too(file_obj: Any) -> Any:
-        file_obj = wrap_for_known_clients(file_obj)
-        return reads_repeated_in_place(file_obj, attempts, first_wait_seconds, "a read of a streamed file")
+    if datasets_repeats_hub_client_errors():
+        # With two nested loops, the fixed waits of the datasets loop set the longest outage a stream outlasts. A file
+        # therefore gets at most this module's loop. That loop also repeats what the datasets loop repeats.
+        errors_datasets_repeats = file_utils.CONNECTION_ERRORS_TO_RETRY
+
+        def transient(error: BaseException) -> bool:
+            return hub_read_failure_is_transient(error) or isinstance(error, errors_datasets_repeats)
+
+        def wrap_for_the_hub_client_too(file_obj: Any) -> Any:
+            # reads_repeated_in_place leaves a file whose read does not repeat in place without a loop. A repeat of
+            # such a read ends the stream short without an error. Left without a loop, a failure ends it with one.
+            return reads_repeated_in_place(file_obj, attempts, first_wait_seconds, what, transient)
+
+    else:
+
+        def wrap_for_the_hub_client_too(file_obj: Any) -> Any:
+            file_obj = wrap_for_known_clients(file_obj)
+            return reads_repeated_in_place(file_obj, attempts, first_wait_seconds, what, hub_read_failure_is_transient)
 
     file_utils._add_retries_to_file_obj_read_method = wrap_for_the_hub_client_too
     try:
