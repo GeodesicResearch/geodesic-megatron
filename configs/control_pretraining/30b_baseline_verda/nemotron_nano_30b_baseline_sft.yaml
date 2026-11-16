@@ -10,6 +10,7 @@
 #   - Micro-batch 1 with nothing recomputed.
 #   - MXFP8 on the dense layers, with BF16 weights and BF16 gradient reduction. The routed experts run in BF16.
 #   - The HybridEP dispatcher, with its communication on a second stream.
+#   - The router unfused, which packed batches need on Verda's image (docs/verda/environment-pipeline.md).
 #
 # Verda holds the corpus as 16 packed shards. The glob below reads them all.
 
@@ -43,7 +44,7 @@ model:
   mtp_num_layers: null  # The pretrain config beside this file gives the reason.
   moe_token_dispatcher_type: flex
   moe_flex_dispatcher_backend: hybridep
-  moe_router_fusion: true
+  moe_router_fusion: false  # The header gives the reason.
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8

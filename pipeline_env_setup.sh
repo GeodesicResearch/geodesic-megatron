@@ -303,6 +303,7 @@ setup_overlay() {
     apptainer exec --bind "$CLUSTER_STORAGE_BINDS" "$CONTAINER_SIF" \
         python -m pip install --no-deps --no-build-isolation --target "$CONTAINER_PYTHON_OVERLAY" $CONTAINER_OVERLAY_PACKAGES
 
+    # pipeline_env_validate.py (overlay_packages) reads the packages line.
     {
         echo "packages: $CONTAINER_OVERLAY_PACKAGES"
         echo "sif: $CONTAINER_SIF_SOURCE"

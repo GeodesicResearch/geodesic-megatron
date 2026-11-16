@@ -24,6 +24,7 @@ import ctypes
 import importlib
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -95,10 +96,39 @@ STAGE2_IMPORT_CHECKS = [
 # NOT need grouped_gemm -- but the check stays, because `cublas_grouped` still does
 # and is kept installable so the paired A/B behind the -16.2% remains runnable. On
 # vanilla 26.04 the overlay builds it from sdist, so this catches a half-failed
-# overlay build at validate time instead of at 64-GPU launch time.
+# overlay build at validate time instead of at 64-GPU launch time. A cluster whose
+# image cannot build it leaves it out of the profile's CLUSTER_OVERLAY_PACKAGES.
+# main then skips the stage.
 STAGE2B_IMPORT_CHECKS = [
     ("grouped_gemm (cublas_grouped expert-backend dependency)", ("grouped_gemm",), "overlay sdist build"),
 ]
+# The distribution that provides grouped_gemm.
+GROUPED_GEMM_DISTRIBUTION = "nv-grouped-gemm"
+
+
+def overlay_packages(overlay_dir: str) -> list[str]:
+    """The pip specs the overlay in ``overlay_dir`` was installed with.
+
+    Reads the ``packages:`` line of its ``provenance.txt``, which pipeline_env_setup.sh's overlay step writes. Raises
+    ``FileNotFoundError`` when the overlay has no provenance file, and ``ValueError`` when the file has no packages
+    line.
+    """
+    provenance = pathlib.Path(overlay_dir, "provenance.txt")
+    for line in provenance.read_text().splitlines():
+        if line.startswith("packages:"):
+            return line.removeprefix("packages:").split()
+    raise ValueError(f"{provenance} has no packages line")
+
+
+def _distribution_name(name: str) -> str:
+    """A distribution name as PEP 503 normalizes it."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def installs_distribution(specs: list[str], name: str) -> bool:
+    """Whether one of the pip ``specs`` names the distribution ``name``."""
+    wanted = _distribution_name(name)
+    return any(_distribution_name(re.split(r"[\[<>=!~;@\s]", spec, maxsplit=1)[0]) == wanted for spec in specs)
 
 
 def check_imports(import_specs):
@@ -468,7 +498,13 @@ def main():
     # CONTAINER_IMAGE_TAG rather than by a lockfile, and they are reported
     # verbatim by the informational version report at the end.
     print("\nStage 2b: grouped_gemm (needed by the non-default cublas_grouped expert backend)")
-    check_imports(STAGE2B_IMPORT_CHECKS)
+    if installs_distribution(overlay_packages(os.environ["CONTAINER_PYTHON_OVERLAY"]), GROUPED_GEMM_DISTRIBUTION):
+        check_imports(STAGE2B_IMPORT_CHECKS)
+    else:
+        print(
+            f"  not run: the overlay leaves out {GROUPED_GEMM_DISTRIBUTION} (CLUSTER_OVERLAY_PACKAGES), so "
+            "moe_experts_impl cublas_grouped is unavailable on this cluster"
+        )
 
     print("\nStage 3: CUDA availability")
     check_cuda()

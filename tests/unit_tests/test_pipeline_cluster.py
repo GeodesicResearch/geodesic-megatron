@@ -169,6 +169,8 @@ def test_the_isambard_profile_holds_the_values_isambard_runs_with(monkeypatch):
         "CLUSTER_CUDA_ARCH_LIST": "9.0",
         "CLUSTER_FABRIC": "slingshot",
         "CLUSTER_IMAGE_TAG": "26.04",
+        "CLUSTER_OVERLAY_PACKAGES": "peft==0.18.1 imageio==2.37.0 nv-grouped-gemm==1.1.4.post8",
+        "CLUSTER_OVERLAY_KEYED_BY_PACKAGES": "",
         "CLUSTER_STORAGE_BINDS": "/projects,/lus",
         "CLUSTER_CONTAINER_ROOT": "/projects/a5k/public/containers",
         "CLUSTER_CONTAINER_STAGE_ROOT": "",

@@ -81,7 +81,8 @@ is optional there. A run needs 6 to 10 minutes before its second iteration.
 
 The header of each overlay gives the import command of its warm start. An import takes one node and writes 59 GiB.
 
-The SFT config finds its packs through a `shard*/` glob. A run reads the shards that exist when it starts.
+The SFT config finds its packs through a `shard*/` glob. A run reads the shards that exist when it starts. It runs
+the router unfused (`environment-pipeline.md`, "The newer image").
 
 `nemotron_nano_quickstart_pretrain_ep1.yaml` is the pretraining quickstart with expert parallelism 1. Its header
 gives the memory it needs. Launch it like the pretraining quickstart.

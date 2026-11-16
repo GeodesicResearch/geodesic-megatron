@@ -23,7 +23,7 @@
     "env": {
       "APPTAINER_CACHEDIR": "/tmp/apptainer_cache_tester",
       "APPTAINER_TMPDIR": "/tmp/apptainer_tmp_tester",
-      "CONTAINER_PYTHON_OVERLAY": "/shared/geodesic/containers/overlay/nemo_26.04",
+      "CONTAINER_PYTHON_OVERLAY": "/shared/geodesic/containers/overlay/nemo_26.10.00_8499eb66",
       "CUDA_DEVICE_MAX_CONNECTIONS": "1",
       "CUDA_HOME": "/usr/local/cuda",
       "GLOO_SOCKET_IFNAME": "eth0",
@@ -52,7 +52,7 @@
       "OMP_WAIT_POLICY": "PASSIVE",
       "PWD": "<REPO>",
       "PYTHONNOUSERSITE": "1",
-      "PYTHONPATH": "<REPO>/src:<REPO>/3rdparty/Megatron-LM:/shared/geodesic/containers/overlay/nemo_26.04",
+      "PYTHONPATH": "<REPO>/src:<REPO>/3rdparty/Megatron-LM:/shared/geodesic/containers/overlay/nemo_26.10.00_8499eb66",
       "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
       "SLURM_LOCALID": "0",
       "SLURM_PROCID": "0",

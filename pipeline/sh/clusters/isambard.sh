@@ -23,6 +23,11 @@ isambard_profile() {
     # docs/investigations/120b-gbs64-host-overhead-investigation.md (section 9.8) the record for this tag.
     # Change it here to move the cluster to a new image, then re-run `bash pipeline_env_setup.sh --force`.
     CLUSTER_IMAGE_TAG=26.04
+    # The packages the Python overlay adds to the image, as pip specs. docs/environment.md (D3b) gives the reason for
+    # each.
+    CLUSTER_OVERLAY_PACKAGES="peft==0.18.1 imageio==2.37.0 nv-grouped-gemm==1.1.4.post8"
+    # The overlay's directory is named after the tag alone (pipeline_env_config.env).
+    CLUSTER_OVERLAY_KEYED_BY_PACKAGES=""
 
     # Everything large is on shared project storage, because $HOME has a small quota. /projects/a5k/public is a
     # symlink into /lus, so a container needs both bound.

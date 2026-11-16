@@ -13,8 +13,8 @@ Hardware, SLURM behaviour and the measured rates that the Verda profile (`pipeli
 - **Software**: SLURM 25.11 on Kubernetes (Slinky), NVIDIA driver 580.178, Apptainer 1.5.5 on the compute nodes. The
   login pod has no Apptainer and no GPU. The compute hosts have no git, compiler or `module` command. The image has
   all three.
-- **Image**: `nvcr.io/nvidia/nemo:26.04`, the tag Isambard runs (torch 2.11.0a0+nv26.02, CUDA 13.1, Transformer
-  Engine 2.14.1, NCCL 2.29).
+- **Image**: `nvcr.io/nvidia/nemo:26.10.00` (torch 2.14.0a0+nv26.09, CUDA 13.4, Transformer Engine 2.20.2, NCCL
+  2.31.2, cuDNN 9.26). Isambard runs 26.04. `environment-pipeline.md` lists what the newer tag changes.
 
 ## Behind the rules
 

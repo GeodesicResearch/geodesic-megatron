@@ -3,9 +3,10 @@
 The quickstart configs of `configs/quickstart/`, on Verda (12 nodes of 8 B300, `docs/verda/cluster.md`).
 
 A file here with the name of an Isambard quickstart is that quickstart with its storage on Verda. Nothing else
-changes. Its `base_config` is the Isambard file, and its `base_config_relocate` is
-`configs/clusters/verda_from_isambard.yaml`. The model, data, schedule, batch and every performance lever are
-therefore the Isambard run's. `tests/unit_tests/test_cluster_configs.py` holds each file to that.
+changes, except that a quickstart that trains on packed batches runs the router unfused
+(`docs/verda/environment-pipeline.md`, "The newer image"). Its `base_config` is the Isambard file, and its
+`base_config_relocate` is `configs/clusters/verda_from_isambard.yaml`. The model, data, schedule, batch and every other
+performance lever are therefore the Isambard run's. `tests/unit_tests/test_cluster_configs.py` holds each file to that.
 
 Eight Verda nodes hold the 64 GPUs of a Nano quickstart. A run here compares with the Isambard run GPU for GPU.
 

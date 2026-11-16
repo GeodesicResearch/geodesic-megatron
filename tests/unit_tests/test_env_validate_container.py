@@ -290,3 +290,48 @@ def test_every_profiles_fabric_has_its_check(validate_mod, monkeypatch):
     assert set(fabrics.values()) <= set(validate_mod.FABRIC_CHECKS)
     assert validate_mod.FABRIC_CHECKS["slingshot"][1] is validate_mod.check_nccl_plugin
     assert validate_mod.FABRIC_CHECKS["infiniband"][1] is validate_mod.check_infiniband
+
+
+@pytest.mark.parametrize(
+    "specs, installs",
+    [
+        (["peft==0.18.1", "nv-grouped-gemm==1.1.4.post8"], True),
+        (["nv_grouped_gemm>=1.1"], True),
+        (["NV.Grouped-Gemm[extra]==1.1"], True),
+        (["nv-grouped-gemm-extra==1.0"], False),
+        (["peft==0.18.1", "imageio==2.37.0"], False),
+        ([], False),
+    ],
+)
+def test_installs_distribution_compares_normalized_names(validate_mod, specs, installs):
+    assert validate_mod.installs_distribution(specs, "nv-grouped-gemm") is installs
+
+
+def test_the_overlay_packages_are_read_from_the_overlays_provenance(validate_mod, tmp_path):
+    """pipeline_env_setup.sh writes the record. The packages line names what the overlay was installed with."""
+    (tmp_path / "provenance.txt").write_text(
+        "packages: peft==0.18.1 nv-grouped-gemm==1.1.4.post8\nsif: /images/nemo.sif\ninstalled_by: probe\n"
+    )
+    assert validate_mod.overlay_packages(str(tmp_path)) == ["peft==0.18.1", "nv-grouped-gemm==1.1.4.post8"]
+
+
+def test_an_overlay_without_a_packages_record_is_refused(validate_mod, tmp_path):
+    with pytest.raises(FileNotFoundError):
+        validate_mod.overlay_packages(str(tmp_path))
+    (tmp_path / "provenance.txt").write_text("sif: /images/nemo.sif\n")
+    with pytest.raises(ValueError, match="has no packages line"):
+        validate_mod.overlay_packages(str(tmp_path))
+
+
+def test_the_grouped_gemm_stage_runs_where_the_profiles_overlay_builds_the_package(validate_mod, monkeypatch):
+    """Isambard's overlay builds nv-grouped-gemm, so its validator checks the import. Verda's image cannot build it.
+    Verda's overlay therefore leaves the package out, and the validator skips the stage. Setup installs the profile's
+    list when nothing overrides it (test_pipeline_env_setup.py)."""
+    monkeypatch.setenv("USER", "probe")
+    runs = {
+        name: validate_mod.installs_distribution(
+            cluster_profile(name)["CLUSTER_OVERLAY_PACKAGES"].split(), validate_mod.GROUPED_GEMM_DISTRIBUTION
+        )
+        for name in cluster_names()
+    }
+    assert runs == {"isambard": True, "verda": False}

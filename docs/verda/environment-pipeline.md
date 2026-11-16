@@ -6,23 +6,48 @@ scripts. The cluster profile (`pipeline/sh/clusters/verda.sh`) holds every value
 
 ## What is the same
 
-- Every pipeline runs inside the Apptainer container built from `nvcr.io/nvidia/nemo:26.04`, entered through
+- Every pipeline runs inside an Apptainer container built from an NGC NeMo image, entered through
   `pipeline_env_exec.sh`.
 - The checkout you submit from is the code that runs. Its `src/` and `3rdparty/Megatron-LM` are first on
-  `PYTHONPATH`.
-- The Python overlay adds `peft`, `imageio` and `nv-grouped-gemm` on shared storage.
+  `PYTHONPATH`, so both clusters run the same Megatron-LM.
+- A Python overlay on shared storage adds the packages the profile names (`CLUSTER_OVERLAY_PACKAGES`).
 
 ## What differs
 
 | | Isambard | Verda |
 |---|---|---|
 | Submit command | `isambard_sbatch` | `./pipeline_cluster_submit.sh` |
+| Image | `nvcr.io/nvidia/nemo:26.04` | `nvcr.io/nvidia/nemo:26.10.00` |
+| Overlay directory | `overlay/nemo_<tag>` | `overlay/nemo_<tag>_<first 8 hex digits of the package list's SHA-256>` |
 | Where setup runs | A GPU node, or a login node for the CPU steps | A job. The login pod has no Apptainer |
 | Setup steps | `sif`, `slingshot`, `overlay`, `validate` | `sif`, `overlay`, `validate` |
 | Fabric | Slingshot through a built NCCL and `aws-ofi-nccl` | InfiniBand through the image's own NCCL. Nothing is built |
 | Image the launchers run | The SIF on project storage | An unpacked copy on each node's `/local` |
 | Storage bound into the container | `/projects`, `/lus` | `/shared`, `/home`, `/local` |
 | CUDA architecture for JIT builds | `9.0` | `10.3` |
+
+## The newer image
+
+Verda runs a newer image tag than Isambard. The repo's code is the same on both clusters.
+
+- `nv-grouped-gemm` does not build against the image's torch 2.14. The overlay leaves it out, so
+  `moe_experts_impl: cublas_grouped` is unavailable on Verda. The validator skips its `grouped_gemm` check there.
+  `torch_grouped` and `te_grouped` need no extra package.
+- The image's pytest has no `pytest-xdist` or `pytest-rerunfailures`. The overlay adds them for
+  `scripts/run_unit_tests.sh`. It also lists `execnet`, which `pytest-xdist` needs, because the overlay installs
+  without dependencies.
+- The image's Energon 7 drops the sample and batch fields the repo's Energon task encoders pass. The overlay holds
+  Energon 6.0.1, the version in Isambard's image.
+- Running jobs read the overlay live from `/shared`. The directory name carries a hash of the package list as well
+  as the tag. A changed list therefore installs into a new directory. A run that overrides the tag
+  (`GEODESIC_CONTAINER_IMAGE_TAG`) needs an overlay built for that tag with Verda's list.
+  `GEODESIC_CONTAINER_PYTHON_OVERLAY` can name one.
+- Transformer Engine 2.20 computes the fused router's aux loss in a kernel. The kernel takes the token count as an
+  int64 tensor. Under a packed batch's padding mask, the pinned Megatron-LM passes a float count. The first step then
+  fails. Every Verda config that trains on packed batches therefore sets `model.moe_router_fusion: false`.
+  `tests/unit_tests/test_cluster_configs.py` fails for a config that does not.
+- CUDA 13.4 runs on the hosts' 580 driver through the image's forward-compatibility libraries.
+  `pipeline_env_activate.sh` puts them first on the library path.
 
 ## Install
 
@@ -32,7 +57,7 @@ The install is shared. One account runs it once, into `/shared/geodesic/containe
 ./pipeline_cluster_submit.sh --time=01:00:00 pipeline_env_submit.sbatch setup
 ```
 
-It pulls the image straight from `nvcr.io` (about 13 minutes, 19 GB, no credentials), installs the overlay and runs
+It pulls the image straight from `nvcr.io` (about 12 minutes, 16 GB, no credentials), installs the overlay and runs
 the validator. Completed steps are skipped with a message, and `--force` redoes them. The pull's cache is on the
 job's own `/tmp`, so it leaves nothing behind.
 

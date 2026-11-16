@@ -20,8 +20,15 @@ verda_profile() {
     CLUSTER_CUDA_ARCH_LIST="10.3"
     CLUSTER_FABRIC=infiniband
 
-    # The tag Isambard is qualified against, so a run here compares with a run there image for image.
-    CLUSTER_IMAGE_TAG=26.04
+    # A newer tag than Isambard's. docs/verda/environment-pipeline.md ("The newer image") lists what the tag changes.
+    CLUSTER_IMAGE_TAG=26.10.00
+    # The packages the Python overlay adds to the image, as pip specs. docs/environment.md (D3b) gives the reasons
+    # for peft and imageio. docs/verda/environment-pipeline.md ("The newer image") gives the reasons for the rest.
+    CLUSTER_OVERLAY_PACKAGES="peft==0.18.1 imageio==2.37.0"
+    CLUSTER_OVERLAY_PACKAGES+=" pytest-xdist==3.8.0 execnet==2.1.1 pytest-rerunfailures==16.1"
+    CLUSTER_OVERLAY_PACKAGES+=" megatron-energon==6.0.1"
+    # The overlay's directory name carries a hash of the package list (pipeline_env_config.env).
+    CLUSTER_OVERLAY_KEYED_BY_PACKAGES=1
 
     # /shared and /home are one filesystem, visible on every node. /local is the node's own NVMe disk, which
     # outlives a job.

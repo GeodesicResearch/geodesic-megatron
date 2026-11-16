@@ -18,7 +18,9 @@ its container runtime are what the script probes, so a stand-in ``nvidia-smi`` t
 without a GPU, and no ``apptainer`` is on PATH.
 """
 
+import hashlib
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -53,12 +55,11 @@ def _setup(tmp_path, cluster: str, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def _config_value(tmp_path, cluster: str, name: str) -> str:
-    """``name`` as the real config derives it for this install."""
+def _config_value(tmp_path, cluster: str, name: str, extra_env: dict[str, str] | None = None) -> str:
+    """``name`` as the real config derives it for this install, with ``extra_env`` set on top of its shell."""
     script = f'source "{CONFIG}" && printf "%s" "${name}"'
-    return subprocess.run(
-        ["bash", "-c", script], env=_env(tmp_path, cluster), capture_output=True, text=True, check=True
-    ).stdout
+    env = {**_env(tmp_path, cluster), **(extra_env or {})}
+    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True).stdout
 
 
 def _install_cpu_side(tmp_path, cluster: str) -> None:
@@ -66,10 +67,56 @@ def _install_cpu_side(tmp_path, cluster: str) -> None:
     sif = tmp_path / "containers" / f"nemo_{_config_value(tmp_path, cluster, 'CONTAINER_IMAGE_TAG')}.sif"
     sif.parent.mkdir(parents=True, exist_ok=True)
     sif.write_bytes(b"image")
-    overlay = tmp_path / "containers" / "overlay" / sif.stem
+    overlay = Path(_config_value(tmp_path, cluster, "CONTAINER_PYTHON_OVERLAY"))
     overlay.mkdir(parents=True)
     packages = _config_value(tmp_path, cluster, "CONTAINER_OVERLAY_PACKAGES")
     (overlay / "provenance.txt").write_text(f"packages: {packages}\n")
+
+
+@pytest.mark.parametrize("cluster", sorted(STEPS))
+def test_the_overlay_installs_the_profiles_packages_unless_overridden(tmp_path, cluster):
+    """The overlay step installs the profile's CLUSTER_OVERLAY_PACKAGES. GEODESIC_CONTAINER_OVERLAY_PACKAGES replaces
+    them for one shell, and an empty override counts as unset."""
+    profile_packages = _config_value(tmp_path, cluster, "CLUSTER_OVERLAY_PACKAGES")
+    assert profile_packages
+    assert _config_value(tmp_path, cluster, "CONTAINER_OVERLAY_PACKAGES") == profile_packages
+    for override, packages in (("", profile_packages), ("peft==0.18.1", "peft==0.18.1")):
+        extra = {"GEODESIC_CONTAINER_OVERLAY_PACKAGES": override}
+        assert _config_value(tmp_path, cluster, "CONTAINER_OVERLAY_PACKAGES", extra) == packages
+
+
+@pytest.mark.parametrize("cluster, keyed", [("isambard", False), ("verda", True)])
+def test_the_overlay_directory_is_named_after_the_tag_and_where_the_profile_asks_the_package_list(
+    tmp_path, cluster, keyed
+):
+    """Running jobs read the overlay live from shared storage. A profile that keys its overlay by the package list
+    installs a changed list into a new directory."""
+    tag = _config_value(tmp_path, cluster, "CONTAINER_IMAGE_TAG")
+    packages = _config_value(tmp_path, cluster, "CONTAINER_OVERLAY_PACKAGES")
+    name = f"nemo_{tag}"
+    if keyed:
+        name += "_" + hashlib.sha256(packages.encode()).hexdigest()[:8]
+    overlay = _config_value(tmp_path, cluster, "CONTAINER_PYTHON_OVERLAY")
+    assert overlay == str(tmp_path / "containers" / "overlay" / name)
+
+    extra = {"GEODESIC_CONTAINER_OVERLAY_PACKAGES": packages + " six==1.17.0"}
+    changed = _config_value(tmp_path, cluster, "CONTAINER_PYTHON_OVERLAY", extra)
+    assert (changed != overlay) is keyed
+
+
+def test_verdas_overlay_carries_the_unit_test_plugins_and_no_grouped_gemm(tmp_path):
+    """Verda's image ships pytest without the plugins scripts/run_unit_tests.sh uses, and nv-grouped-gemm does not
+    build against its torch."""
+    names = {spec.split("==")[0] for spec in _config_value(tmp_path, "verda", "CONTAINER_OVERLAY_PACKAGES").split()}
+    assert {"pytest-xdist", "execnet", "pytest-rerunfailures"} <= names
+    assert "nv-grouped-gemm" not in names
+
+
+def test_verdas_overlay_pins_the_energon_the_task_encoders_are_written_for(tmp_path):
+    """Verda's image ships Energon 7, which drops the sample and batch fields the repo's Energon task encoders pass.
+    The overlay holds Isambard's image's Energon 6.0.1."""
+    specs = _config_value(tmp_path, "verda", "CONTAINER_OVERLAY_PACKAGES").split()
+    assert [spec for spec in specs if spec.startswith("megatron-energon")] == ["megatron-energon==6.0.1"]
 
 
 @pytest.mark.parametrize("cluster", sorted(STEPS))

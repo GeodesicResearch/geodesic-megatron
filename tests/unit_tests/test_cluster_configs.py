@@ -16,8 +16,8 @@
 the Verda arms of the control-pretraining campaigns (``configs/control_pretraining/<campaign>_verda/``).
 
 A Verda quickstart is its Isambard quickstart with the storage moved, so a run of one compares with a run of the
-other. The tests hold each overlay to that: nothing but storage and the W&B name is stated, and no path of the
-composed config is left on Isambard's storage.
+other. The tests hold each overlay to that. It states only storage, the W&B name and what Verda's image requires.
+No path of the composed config stays on Isambard's storage.
 
 A Verda arm trains what its campaign trains. Each of its stage configs overlays the campaign's stage config of
 the same name and can also state how the run uses Verda's hardware. The tests fail if one states anything else,
@@ -70,6 +70,9 @@ STORAGE_AND_NAME = {
     "logger.wandb_exp_name",
     "logger.tensorboard_dir",
 }
+# What Verda's image requires a config to state. Its Transformer Engine refuses the fused router's aux loss on a
+# packed batch (test_a_verda_config_that_trains_on_packed_batches_runs_the_router_unfused).
+IMAGE_REQUIRES = {"model.moe_router_fusion"}
 # What a stage config of an arm can state as well. A name with no dot, or the name of a section, covers all of it.
 ARM_STATES = STORAGE_AND_NAME | {
     # Where Verda keeps a packed corpus. Its shards are laid out differently from Isambard's.
@@ -109,8 +112,8 @@ ARM_STATES = STORAGE_AND_NAME | {
 ARM_STATES_ONLY_AS = {"model.mtp_num_layers": None}
 # The configs that set a topology for Verda's nodes.
 SET_A_TOPOLOGY = DEFINED_FOR_VERDA + ARM_OVERLAYS
-# The launcher mode of each stage of a campaign. Midtraining continues pretraining on a .bin/.idx blend.
-STAGE_MODES = {"pretrain": "pretrain", "midtrain": "pretrain", "sft": "sft"}
+# The launcher mode of each stage a config's name gives. Midtraining continues pretraining on a .bin/.idx blend.
+STAGE_MODES = {"pretrain": "pretrain", "midtrain": "pretrain", "sft": "sft", "cpt": "cpt"}
 # The sequence length from which a BF16 state between the chunks of the Mamba scan can produce NaNs.
 LONG_SEQUENCE = 32768
 # The token multiple that Transformer Engine's MXFP8 quantizer requires.
@@ -154,15 +157,14 @@ def _isambard_config(overlay):
 
 
 def _model_and_mode(overlay):
-    """The model and the launcher mode of a stage config of an arm, from its name
-    (``nemotron_<model>_<campaign>_<stage>.yaml``)."""
-    _, model, *_, stage = overlay.stem.split("_")
-    return model, STAGE_MODES[stage]
+    """The model and the launcher mode of a Verda config, from its name: ``nemotron_<model>_<campaign>_<stage>.yaml``
+    for a stage config of an arm, ``nemotron_<model>_quickstart_<stage>[_<variant>].yaml`` for a quickstart."""
+    _, model, *rest = overlay.stem.split("_")
+    return model, STAGE_MODES[next(part for part in rest if part in STAGE_MODES)]
 
 
 def _trained_config(overlay):
-    """The config the launcher trains for a stage config of an arm: the file merged onto the recipe of its model
-    and mode."""
+    """The config the launcher trains for a Verda config: the file merged onto the recipe of its model and mode."""
     model, mode = _model_and_mode(overlay)
     return merge_onto_recipe(overlay, partial(recipes.RECIPE_MAP[(model, mode)], None))
 
@@ -209,7 +211,7 @@ def test_a_verda_overlay_states_only_what_verda_changes(overlay, verda_user):
     assert (overlay.parent / own.pop(BASE_CONFIG_KEY)).resolve() == isambard_config
     assert (overlay.parent / own.pop(RELOCATE_KEY)).resolve() == STORAGE_MAP
     stated = dotted_leaves(own)
-    beyond = _beyond(stated, ARM_STATES if overlay in ARM_OVERLAYS else STORAGE_AND_NAME)
+    beyond = _beyond(stated, ARM_STATES if overlay in ARM_OVERLAYS else STORAGE_AND_NAME | IMAGE_REQUIRES)
     assert not beyond, f"{overlay.name} states more than Verda changes: {beyond}"
     assert all(stated.get(name, value) == value for name, value in ARM_STATES_ONLY_AS.items())
 
@@ -281,6 +283,17 @@ def test_a_packed_verda_arm_pads_its_batches_for_mxfp8(overlay, verda_user):
     multiple = cfg.dataset.dataset_kwargs.get("pad_seq_length_to_mult")
     assert multiple is not None, f"{overlay.name} leaves the pad multiple to the collate's default"
     assert multiple % (MXFP8_TOKEN_MULTIPLE * cfg.model.context_parallel_size) == 0
+
+
+@pytest.mark.parametrize("config", VERDA_CONFIGS + ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_a_verda_config_that_trains_on_packed_batches_runs_the_router_unfused(config, verda_user):
+    """Verda's Transformer Engine refuses the fused router's aux loss under a packed batch's padding mask
+    (docs/verda/environment-pipeline.md, "The newer image"). The first step then stops with "total_num_tokens must
+    be int64; got Float". The unfused router computes the loss in PyTorch."""
+    cfg = _trained_config(config)
+    if getattr(cfg.dataset, "packed_sequence_specs", None) is None:
+        pytest.skip("the config does not train on packed batches")
+    assert not cfg.model.moe_router_fusion, f"{config.name} fuses the router on packed batches"
 
 
 @pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
