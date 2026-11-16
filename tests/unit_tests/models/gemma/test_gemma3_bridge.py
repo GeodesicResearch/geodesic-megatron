@@ -209,7 +209,9 @@ class TestMegatronGemma3Bridge:
         assert issubclass(Gemma3ModelBridge, MegatronModelBridge)
 
     @patch("megatron.bridge.models.gemma.gemma3_bridge.AutoConfig.from_pretrained")
-    def test_provider_bridge_basic_1b(self, mock_autoconfig, mock_pretrained_gemma3_1b, gemma3_1b_config):
+    def test_provider_bridge_basic_1b(
+        self, mock_autoconfig, mock_pretrained_gemma3_1b, gemma3_1b_config, gemma3_1b_config_dict
+    ):
         """Test basic provider_bridge functionality for Gemma3 1B."""
         # Mock the VL config loading
         mock_autoconfig.return_value = gemma3_1b_config
@@ -227,10 +229,15 @@ class TestMegatronGemma3Bridge:
         assert result.hidden_size == gemma3_1b_config.hidden_size
         assert result.num_attention_heads == gemma3_1b_config.num_attention_heads
         assert result.seq_length == gemma3_1b_config.max_position_embeddings
-        assert result.rotary_base == (gemma3_1b_config.rope_local_base_freq, gemma3_1b_config.rope_theta)
+        assert result.rotary_base == (
+            gemma3_1b_config_dict["rope_local_base_freq"],
+            gemma3_1b_config_dict["rope_theta"],
+        )
 
     @patch("megatron.bridge.models.gemma.gemma3_bridge.AutoConfig.from_pretrained")
-    def test_provider_bridge_basic_4b(self, mock_autoconfig, mock_pretrained_gemma3_4b, gemma3_4b_config):
+    def test_provider_bridge_basic_4b(
+        self, mock_autoconfig, mock_pretrained_gemma3_4b, gemma3_4b_config, gemma3_4b_config_dict
+    ):
         """Test basic provider_bridge functionality for Gemma3 4B."""
         # Mock the VL config loading
         mock_autoconfig.return_value = gemma3_4b_config
@@ -248,10 +255,15 @@ class TestMegatronGemma3Bridge:
         assert result.hidden_size == gemma3_4b_config.hidden_size
         assert result.num_attention_heads == gemma3_4b_config.num_attention_heads
         assert result.seq_length == gemma3_4b_config.max_position_embeddings
-        assert result.rotary_base == (gemma3_4b_config.rope_local_base_freq, gemma3_4b_config.rope_theta)
+        assert result.rotary_base == (
+            gemma3_4b_config_dict["rope_local_base_freq"],
+            gemma3_4b_config_dict["rope_theta"],
+        )
 
     @patch("megatron.bridge.models.gemma.gemma3_bridge.AutoConfig.from_pretrained")
-    def test_provider_bridge_basic_27b(self, mock_autoconfig, mock_pretrained_gemma3_27b, gemma3_27b_config):
+    def test_provider_bridge_basic_27b(
+        self, mock_autoconfig, mock_pretrained_gemma3_27b, gemma3_27b_config, gemma3_27b_config_dict
+    ):
         """Test basic provider_bridge functionality for Gemma3 27B."""
         # Mock the VL config loading
         mock_autoconfig.return_value = gemma3_27b_config
@@ -269,7 +281,10 @@ class TestMegatronGemma3Bridge:
         assert result.hidden_size == gemma3_27b_config.hidden_size
         assert result.num_attention_heads == gemma3_27b_config.num_attention_heads
         assert result.seq_length == gemma3_27b_config.max_position_embeddings
-        assert result.rotary_base == (gemma3_27b_config.rope_local_base_freq, gemma3_27b_config.rope_theta)
+        assert result.rotary_base == (
+            gemma3_27b_config_dict["rope_local_base_freq"],
+            gemma3_27b_config_dict["rope_theta"],
+        )
 
     @patch("megatron.bridge.models.gemma.gemma3_bridge.AutoConfig.from_pretrained")
     def test_provider_bridge_vocabulary(self, mock_autoconfig, mock_pretrained_gemma3_1b, gemma3_1b_config):
@@ -321,7 +336,9 @@ class TestMegatronGemma3Bridge:
         assert result.layernorm_epsilon == gemma3_1b_config.rms_norm_eps
 
     @patch("megatron.bridge.models.gemma.gemma3_bridge.AutoConfig.from_pretrained")
-    def test_provider_bridge_position_embedding(self, mock_autoconfig, mock_pretrained_gemma3_1b, gemma3_1b_config):
+    def test_provider_bridge_position_embedding(
+        self, mock_autoconfig, mock_pretrained_gemma3_1b, gemma3_1b_config, gemma3_1b_config_dict
+    ):
         """Test position embedding configuration."""
         mock_autoconfig.return_value = gemma3_1b_config
         bridge = Gemma3ModelBridge()
@@ -329,7 +346,10 @@ class TestMegatronGemma3Bridge:
         result = bridge.provider_bridge(mock_pretrained_gemma3_1b)
 
         # Check position embedding - Gemma3 has dual rotary bases
-        assert result.rotary_base == (gemma3_1b_config.rope_local_base_freq, gemma3_1b_config.rope_theta)
+        assert result.rotary_base == (
+            gemma3_1b_config_dict["rope_local_base_freq"],
+            gemma3_1b_config_dict["rope_theta"],
+        )
 
     @patch("megatron.bridge.models.gemma.gemma3_bridge.AutoConfig.from_pretrained")
     def test_provider_bridge_gemma3_specific_features(
@@ -441,7 +461,7 @@ class TestMegatronGemma3Bridge:
 
     @patch("megatron.bridge.models.gemma.gemma3_bridge.AutoConfig.from_pretrained")
     def test_megatron_to_hf_config_reconstructs_gemma3_special_fields(
-        self, mock_autoconfig, mock_pretrained_gemma3_4b, gemma3_4b_config
+        self, mock_autoconfig, mock_pretrained_gemma3_4b, gemma3_4b_config, gemma3_4b_config_dict
     ):
         """Test Gemma3 reverse export reconstructs rope and scaling fields."""
         mock_autoconfig.return_value = gemma3_4b_config
@@ -450,15 +470,15 @@ class TestMegatronGemma3Bridge:
         provider = bridge.provider_bridge(mock_pretrained_gemma3_4b)
         hf_config = bridge.megatron_to_hf_config(provider)
 
-        assert hf_config["rope_theta"] == gemma3_4b_config.rope_theta
-        assert hf_config["rope_local_base_freq"] == gemma3_4b_config.rope_local_base_freq
+        assert hf_config["rope_theta"] == gemma3_4b_config_dict["rope_theta"]
+        assert hf_config["rope_local_base_freq"] == gemma3_4b_config_dict["rope_local_base_freq"]
         assert hf_config["sliding_window"] == gemma3_4b_config.sliding_window
         assert hf_config["query_pre_attn_scalar"] == gemma3_4b_config.query_pre_attn_scalar
         assert hf_config["rope_scaling"] == {"factor": 8.0, "type": "linear"}
 
     @patch("megatron.bridge.models.gemma.gemma3_bridge.AutoConfig.from_pretrained")
     def test_megatron_to_hf_config_omits_rope_scaling_when_disabled(
-        self, mock_autoconfig, mock_pretrained_gemma3_1b, gemma3_1b_config
+        self, mock_autoconfig, mock_pretrained_gemma3_1b, gemma3_1b_config, gemma3_1b_config_dict
     ):
         """Test Gemma3 reverse export leaves rope_scaling unset when no scaling is active."""
         mock_autoconfig.return_value = gemma3_1b_config
@@ -467,8 +487,8 @@ class TestMegatronGemma3Bridge:
         provider = bridge.provider_bridge(mock_pretrained_gemma3_1b)
         hf_config = bridge.megatron_to_hf_config(provider)
 
-        assert hf_config["rope_theta"] == gemma3_1b_config.rope_theta
-        assert hf_config["rope_local_base_freq"] == gemma3_1b_config.rope_local_base_freq
+        assert hf_config["rope_theta"] == gemma3_1b_config_dict["rope_theta"]
+        assert hf_config["rope_local_base_freq"] == gemma3_1b_config_dict["rope_local_base_freq"]
         assert hf_config["query_pre_attn_scalar"] == gemma3_1b_config.query_pre_attn_scalar
         assert hf_config["sliding_window"] == gemma3_1b_config.sliding_window
         assert "rope_scaling" not in hf_config

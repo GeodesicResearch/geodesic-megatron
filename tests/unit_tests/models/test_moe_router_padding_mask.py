@@ -35,6 +35,7 @@ import dataclasses
 
 import pytest
 import torch
+from megatron.core.utils import is_te_min_version
 
 from tests.unit_tests.one_rank_nccl_world import one_rank_model_parallel_state
 from tests.unit_tests.small_language_models import gpt_model, hybrid_model
@@ -49,6 +50,19 @@ VOCAB = 128
 HIDDEN = 64
 EXPERTS = 8
 TOPK = 2
+
+# Transformer Engine 2.18 and later take the fused auxiliary-loss kernel's token count as an int64 tensor.
+# Megatron-LM divides the padding mask's routed-token count by top-k, which gives a float. The fused router therefore
+# refuses a padding mask.
+FUSED_ROUTER = pytest.param(
+    True,
+    marks=pytest.mark.xfail(
+        is_te_min_version("2.18.0"),
+        reason="the fused router kernels take the token count as int64 and the padding mask's count is a float",
+        raises=RuntimeError,
+        strict=True,
+    ),
+)
 
 
 def _nemotron_h_routing() -> dict:
@@ -204,7 +218,7 @@ def one_rank_world():
         yield
 
 
-@pytest.mark.parametrize("router_fusion", [False, True], ids=["unfused-router", "fused-router"])
+@pytest.mark.parametrize("router_fusion", [False, FUSED_ROUTER], ids=["unfused-router", "fused-router"])
 @pytest.mark.parametrize("recompute", [False, True], ids=["no-recompute", "full-recompute"])
 def test_the_expert_bias_update_counts_only_the_real_tokens(one_rank_world, recompute, router_fusion):
     recompute_fields = (

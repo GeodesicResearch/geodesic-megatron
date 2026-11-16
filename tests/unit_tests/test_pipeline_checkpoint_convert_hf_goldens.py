@@ -36,7 +36,7 @@ from pipeline.export import hf
 from tests.unit_tests import recorded_bridge
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.child_process import REPO_ROOT, run_python
-from tests.unit_tests.goldens import FIXTURES, assert_golden_json, assert_golden_tree
+from tests.unit_tests.goldens import FIXTURES, assert_golden_json, assert_golden_tree, without_library_warnings
 from tests.unit_tests.hf_export_fixtures import INPUTS, INSTRUCT_TOK, NANO, SNAPSHOT_A, cache_repo, write_weights
 
 
@@ -75,7 +75,9 @@ def test_cli(case):
         timeout=120,
         env={**os.environ, "COLUMNS": "120"},
     )
-    record = {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+    # The installed libraries' import-time warnings are not the command line's output (goldens.py).
+    stderr = without_library_warnings(result.stderr)
+    record = {"returncode": result.returncode, "stdout": result.stdout, "stderr": stderr}
     assert_golden_json(GOLDENS / "cli" / f"{case}.json", record)
 
 
