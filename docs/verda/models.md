@@ -96,7 +96,7 @@ posture of the stage.
 
 | Stage | GBS | Microbatch | Recompute |
 |---|---|---|---|
-| 1, pretraining at 8,192 tokens | 2,048 | 4 | The expert activations, `[moe_act]` |
+| 1, pretraining at 8,192 tokens | 2,048 | 4 | None |
 | 2, midtraining at 32,768 tokens | 512 | 1 | None |
 | 3, SFT on 32,768-token packs | 512 | 1 | None |
 

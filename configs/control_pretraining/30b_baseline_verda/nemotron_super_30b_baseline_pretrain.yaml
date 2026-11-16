@@ -1,0 +1,69 @@
+# Stage 1 of the 30B baseline arm on Verda, trained on Nemotron 3 Super (120B-A12B) on B300 GPUs.
+#
+# The base is ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml. A launch gives the model argument super, and
+# the launcher merges the base onto the Super recipe. The data, the batch, the schedule, the optimizer and the
+# tokenizer are the base's. This file states how the run uses the hardware, where its checkpoints go, and its W&B
+# name. The test in tests/unit_tests/test_cluster_configs.py fails if it states anything else. The launcher settings
+# are in the .env beside this file. README.md gives the launch commands.
+#
+# The posture:
+#   - Expert parallelism 8 with no pipeline or context parallelism. A GPU holds an eighth of the routed experts.
+#   - Micro-batch 1. The run recomputes only the expert activations, which leaves room for the CUDA graphs' pools.
+#   - MXFP8 on the dense layers, with the dense weights stored in MXFP8 and BF16 gradient reduction. The routed
+#     experts run in BF16.
+#   - The HybridEP dispatcher, with its communication on the compute stream.
+#   - Transformer Engine CUDA graphs over the attention, Mamba, router and MoE preprocessing of each layer. The graphs
+#     use the Super recipe's scope and its three warmup steps. The routed experts and their dispatch run outside them.
+#   - Plain reads of the token files. A memory-mapped read of a large file on /shared takes seconds
+#     (docs/verda/storage.md).
+
+base_config: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+base_config_relocate: ../../clusters/verda_from_isambard.yaml
+
+# The preset stores the dense weights in MXFP8. With BF16 weights, Transformer Engine keeps a separate MXFP8 copy of
+# each dense weight between micro-batches. The preset saves that memory.
+mixed_precision: bf16_with_mxfp8_mixed_bf16_grad_reduce
+
+dataset:
+  bin_idx_read:
+    mmap_bin_files: false
+    create_attention_mask: false
+    num_workers: 8
+
+train:
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+# The Super recipe has no comm_overlap section. The merge then sets the base's as a plain mapping, which setup cannot
+# read. The ddp section below states the base's data-parallel settings.
+comm_overlap: null
+
+ddp:
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+  bucket_size: 500000000
+
+model:
+  expert_model_parallel_size: 8
+  # The hybrid model's expert-parallel overlap schedule refuses CUDA graphs, so the overlap is off.
+  overlap_moe_expert_parallel_comm: false
+  # The Super recipe builds two MTP layers. The campaign trains none.
+  mtp_num_layers: null
+  # The Super recipe's scope and warmup apply unchanged. The .env beside this file sets what the graphs need.
+  cuda_graph_impl: transformer_engine
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  moe_router_fusion: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+  recompute_modules: ["moe_act"]
+
+checkpoint:
+  # The relocation map gives each account its own root, but only to paths of the base. These paths are under Kyle's.
+  load: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_pretrain
+  save: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_pretrain
+
+logger:
+  wandb_exp_name: control_pretrain_30b_baseline_verda_super_pretrain

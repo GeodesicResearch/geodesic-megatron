@@ -6,7 +6,7 @@
 #
 # The posture:
 #   - Expert parallelism 8, so the expert all-to-all stays inside a node and a GPU holds an eighth of the experts.
-#   - Micro-batch 4. Only the expert activations are recomputed.
+#   - Micro-batch 4 with nothing recomputed.
 #   - MXFP8 on the dense layers, with BF16 weights and BF16 gradient reduction. The routed experts run in BF16.
 #   - The HybridEP dispatcher, with its communication on a second stream.
 #   - Plain reads of the token files. A memory-mapped read of a large file on /shared takes seconds
@@ -43,7 +43,9 @@ model:
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8
-  recompute_modules: ["moe_act"]
+  # The base config's recompute modules include moe, which the expert-parallel overlap refuses at any granularity.
+  recompute_granularity: null
+  recompute_modules: null
 
 logger:
   wandb_exp_name: control_pretrain_30b_baseline_verda_pretrain

@@ -19,14 +19,17 @@ A Verda quickstart is its Isambard quickstart with the storage moved, so a run o
 other. The tests hold each overlay to that. It states only storage, the W&B name and what Verda's image requires.
 No path of the composed config stays on Isambard's storage.
 
-A Verda arm trains what its campaign trains. Each of its stage configs overlays the campaign's stage config of
-the same name and can also state how the run uses Verda's hardware. The tests fail if one states anything else,
-such as a batch size or a learning rate.
+A Verda arm trains what its campaign trains. Each of its stage configs overlays the campaign's stage config of the
+same stage. It can also state how the run uses Verda's hardware. The model in its name can differ from the base's,
+since the launcher's model argument picks the recipe. The tests fail if a stage config states anything else, such as
+a batch size or a learning rate. They also fail if the other model's recipe changes a training setting (``TRAINING_SECTIONS``).
 
 The other files of the quickstart directory exist for Verda alone. The tests hold those, and the arms, to the
 cluster's rules.
 """
 
+import dataclasses
+import math
 from functools import partial
 
 import pytest
@@ -45,7 +48,7 @@ from megatron.bridge.training.mixed_precision import get_mixed_precision_config
 from pipeline.cluster import cluster_profile
 from pipeline.training import recipes
 from pipeline.training.datasets import BIN_IDX_READ_KEY, bin_idx_dataset_config
-from tests.unit_tests.campaign_config import assert_levers_are_set, merge_onto_recipe
+from tests.unit_tests.campaign_config import assert_levers_are_set, flatten_merged_config, merge_onto_recipe
 from tests.unit_tests.child_process import REPO_ROOT
 
 
@@ -57,7 +60,8 @@ OVERLAYS = [path for path in VERDA_CONFIGS if (QUICKSTARTS / path.name).is_file(
 # The configs defined for Verda: a topology for its nodes, or a quickstart Isambard does not have.
 DEFINED_FOR_VERDA = [path for path in VERDA_CONFIGS if path not in OVERLAYS]
 CAMPAIGNS = REPO_ROOT / "configs" / "control_pretraining"
-# The stage configs of the Verda arms. ``<campaign>_verda/<stage>.yaml`` overlays ``<campaign>/<stage>.yaml``.
+# The stage configs of the Verda arms. ``<campaign>_verda/nemotron_<model>_<name>.yaml`` overlays
+# ``<campaign>/nemotron_<any model>_<name>.yaml``.
 ARM_OVERLAYS = sorted(CAMPAIGNS.glob("*_verda/*.yaml"))
 # What an overlay can state besides its base and its map, by dotted name. The checkpoint names say where a warm
 # start and a run's own checkpoints are. The logger names give the W&B name of its runs and write no TensorBoard
@@ -81,7 +85,8 @@ ARM_STATES = STORAGE_AND_NAME | {
     # The multiple the collate pads a packed batch to. The precision preset sets what it must be.
     "dataset.dataset_kwargs.pad_seq_length_to_mult",
     # How the run uses the hardware. The names cover precision, parallelism, micro-batch and recomputation. They
-    # also cover the dispatcher, the fusions, the overlaps, host garbage collection and how the token files are read.
+    # also cover the dispatcher, the fusions, the overlaps and CUDA graphs. The rest cover host garbage collection
+    # and how the token files are read.
     "mixed_precision",
     "dataset.bin_idx_read",
     "train.micro_batch_size",
@@ -105,11 +110,15 @@ ARM_STATES = STORAGE_AND_NAME | {
     "model.cross_entropy_fusion_impl",
     "model.cross_entropy_fusion_saved_logit_chunks",
     "model.overlap_moe_expert_parallel_comm",
+    "model.cuda_graph_impl",
     "model.mtp_num_layers",
 }
-# The names of ``ARM_STATES`` that an arm can state with one value only. The stated value then cannot change the
-# model.
+# The names of ``ARM_STATES`` that an arm can state with one value only. A null builds no MTP layer, and
+# ``test_a_verda_arm_trains_the_mtp_layers_of_its_campaign`` holds that to the campaign.
 ARM_STATES_ONLY_AS = {"model.mtp_num_layers": None}
+# The sections of a trained config that hold how a stage trains, beside its data and its model. A stage config
+# leaves some of their fields to the recipe of its model.
+TRAINING_SECTIONS = ("optimizer", "scheduler", "train", "rng", "tokenizer")
 # The configs that set a topology for Verda's nodes.
 SET_A_TOPOLOGY = DEFINED_FOR_VERDA + ARM_OVERLAYS
 # The launcher mode of each stage a config's name gives. Midtraining continues pretraining on a .bin/.idx blend.
@@ -150,23 +159,31 @@ def _left_on_isambard(composed):
 
 
 def _isambard_config(overlay):
-    """The Isambard config a Verda overlay is named after: a campaign's stage config, or a quickstart."""
+    """The Isambard config a Verda overlay builds on. An arm's is the campaign's stage config that its ``base_config``
+    names. A quickstart's is the quickstart of the same name."""
     if overlay in ARM_OVERLAYS:
-        return CAMPAIGNS / overlay.parent.name.removesuffix("_verda") / overlay.name
+        own = parse_yaml_mapping(overlay.read_text(), str(overlay))
+        return (overlay.parent / own[BASE_CONFIG_KEY]).resolve()
     return QUICKSTARTS / overlay.name
 
 
-def _model_and_mode(overlay):
-    """The model and the launcher mode of a Verda config, from its name: ``nemotron_<model>_<campaign>_<stage>.yaml``
-    for a stage config of an arm, ``nemotron_<model>_quickstart_<stage>[_<variant>].yaml`` for a quickstart."""
-    _, model, *rest = overlay.stem.split("_")
+def _stage_name(config):
+    """The name of a stage config of a campaign or an arm without its model (``<campaign>_<stage>`` of
+    ``nemotron_<model>_<campaign>_<stage>.yaml``)."""
+    return "_".join(config.stem.split("_")[2:])
+
+
+def _model_and_mode(config):
+    """The model and the launcher mode of a config, from its name: ``nemotron_<model>_<campaign>_<stage>.yaml`` for a
+    stage config of a campaign or an arm, ``nemotron_<model>_quickstart_<stage>[_<variant>].yaml`` for a quickstart."""
+    _, model, *rest = config.stem.split("_")
     return model, STAGE_MODES[next(part for part in rest if part in STAGE_MODES)]
 
 
-def _trained_config(overlay):
-    """The config the launcher trains for a Verda config: the file merged onto the recipe of its model and mode."""
-    model, mode = _model_and_mode(overlay)
-    return merge_onto_recipe(overlay, partial(recipes.RECIPE_MAP[(model, mode)], None))
+def _trained_config(config):
+    """The config the launcher trains for a config: the file merged onto the recipe of its model and mode."""
+    model, mode = _model_and_mode(config)
+    return merge_onto_recipe(config, partial(recipes.RECIPE_MAP[(model, mode)], None))
 
 
 def _launcher_settings(overlay):
@@ -210,6 +227,10 @@ def test_a_verda_overlay_states_only_what_verda_changes(overlay, verda_user):
     own = parse_yaml_mapping(overlay.read_text(), str(overlay))
     assert (overlay.parent / own.pop(BASE_CONFIG_KEY)).resolve() == isambard_config
     assert (overlay.parent / own.pop(RELOCATE_KEY)).resolve() == STORAGE_MAP
+    if overlay in ARM_OVERLAYS:
+        # The campaign's stage config of the same stage. Its model can differ.
+        assert isambard_config.parent == CAMPAIGNS / overlay.parent.name.removesuffix("_verda")
+        assert _stage_name(isambard_config) == _stage_name(overlay)
     stated = dotted_leaves(own)
     beyond = _beyond(stated, ARM_STATES if overlay in ARM_OVERLAYS else STORAGE_AND_NAME | IMAGE_REQUIRES)
     assert not beyond, f"{overlay.name} states more than Verda changes: {beyond}"
@@ -259,12 +280,51 @@ def test_every_setting_of_a_verda_arm_reaches_the_config_it_trains(overlay, verd
         assert {key: getattr(dataset, key) for key in read_settings} == read_settings
 
 
+@pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_every_section_of_a_verda_arm_arrives_as_its_config_class(overlay, verda_user):
+    """The merge sets a section the recipe leaves None to the plain mapping the file states. Setup cannot read it.
+    The baseline's pretrain and midtrain configs state a comm_overlap section, and Super's pretrain recipe has none."""
+    cfg = _trained_config(overlay)
+    plain = [field.name for field in dataclasses.fields(cfg) if isinstance(getattr(cfg, field.name), dict)]
+    assert not plain, f"{overlay.name} merges these sections as plain mappings: {plain}"
+
+
+@pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_a_verda_arm_trains_the_training_sections_of_its_campaign(overlay, verda_user):
+    """An arm's stage config merges onto the recipe of its own model. Its base merges onto the recipe of the
+    campaign's model. A field the base leaves to its recipe can then take another value. In ``TRAINING_SECTIONS`` the
+    arm can differ only where it states how the run uses the hardware."""
+    arm = flatten_merged_config(_trained_config(overlay))
+    campaign = flatten_merged_config(_trained_config(_isambard_config(overlay)))
+    differing = [
+        name
+        for name in arm.keys() | campaign.keys()
+        if name.split(".")[0] in TRAINING_SECTIONS and arm.get(name) != campaign.get(name)
+    ]
+    assert not _beyond(differing, ARM_STATES), f"{overlay.name} trains differently from its campaign: {differing}"
+
+
+@pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_a_verda_arm_trains_the_mtp_layers_of_its_campaign(overlay, verda_user):
+    """MTP layers add a loss. Super's recipe builds two and Nano's builds none, so a Super stage of a Nano campaign
+    states ``mtp_num_layers: null``. A null and a 0 both build no MTP layer."""
+    arm = _trained_config(overlay).model.mtp_num_layers or 0
+    campaign = _trained_config(_isambard_config(overlay)).model.mtp_num_layers or 0
+    assert arm == campaign
+
+
 @pytest.mark.run_only_on("GPU")
 @pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
-def test_a_verda_arm_passes_the_trainers_config_update(overlay, verda_user, tmp_path):
+def test_a_verda_arm_passes_the_trainers_config_update(overlay, verda_user, tmp_path, monkeypatch):
     """The update resolves the precision preset and applies the overlaps, which assert what a posture can combine.
     It also checks the dispatcher backend against the GPU."""
     cfg = _trained_config(overlay)
+    # The update divides the world size by the model-parallel size. A launch has whole nodes of GPUs.
+    model_parallel_size = (
+        cfg.model.tensor_model_parallel_size * cfg.model.pipeline_model_parallel_size * cfg.model.context_parallel_size
+    )
+    gpus_per_node = int(cluster_profile("verda")["CLUSTER_GPUS_PER_NODE"])
+    monkeypatch.setenv("WORLD_SIZE", str(math.lcm(gpus_per_node, model_parallel_size)))
     if cfg.checkpoint.pretrained_checkpoint:
         # The update asserts that the warm start exists. A test host has no checkpoint of the stage before.
         cfg.checkpoint.pretrained_checkpoint = str(tmp_path)
@@ -316,6 +376,16 @@ def test_a_verda_arm_gives_the_expert_parallel_overlap_a_second_hardware_queue(o
     if not ((composed.get("comm_overlap") or {}).get(overlap) or composed["model"].get(overlap)):
         pytest.skip("the stage does not run the expert-parallel overlap")
     assert int(_launcher_settings(overlay)["ISAMBARD_CUDA_MAX_CONNECTIONS"]) > 1
+
+
+@pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_a_verda_arm_with_cuda_graphs_turns_off_nccls_graph_buffer_registration(overlay, verda_user):
+    """pipeline_env_activate.sh turns on expandable segments. With them, Megatron-LM refuses CUDA graphs unless
+    NCCL_GRAPH_REGISTER is 0. The refusal comes at the start of training, after the job waited for its nodes and
+    loaded its weights."""
+    if _trained_config(overlay).model.cuda_graph_impl == "none":
+        pytest.skip("the stage captures no CUDA graphs")
+    assert _launcher_settings(overlay).get("NCCL_GRAPH_REGISTER") == "0"
 
 
 @pytest.mark.parametrize("config", SET_A_TOPOLOGY, ids=lambda path: f"{path.parent.name}-{path.stem}")

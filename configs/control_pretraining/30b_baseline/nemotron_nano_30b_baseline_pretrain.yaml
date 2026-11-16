@@ -154,6 +154,10 @@ scheduler:
   # than redundant: omitting the line leaves the recipe's value and trips the assert.
   lr_warmup_iters: 0
   lr_warmup_fraction: 0.01     # 298.81 iters ~= 5.0B tokens of warmup
+  # The weight decay the scheduler applies in place of optimizer.weight_decay. The value is the Nano recipe's. A launch
+  # with another model's recipe then trains this value in place of that recipe's.
+  start_weight_decay: 0.033
+  end_weight_decay: 0.033
 
 optimizer:
   lr: 1.0e-3                   # overrides the recipe's 1.6e-3 peak; held for the whole stage
