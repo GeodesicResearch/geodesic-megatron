@@ -67,8 +67,10 @@ def write_config(tmp_path: Path, **overrides) -> Path:
     return path
 
 
-def sacct_line(job_id: int, state: str, log_dir: Path, started: bool = True, name: str = JOB_NAME) -> str:
-    start = START_TIME.strftime("%Y-%m-%dT%H:%M:%S") if started else "Unknown"
+def sacct_line(
+    job_id: int, state: str, log_dir: Path, started: bool = True, name: str = JOB_NAME, start: datetime = START_TIME
+) -> str:
+    start = start.strftime("%Y-%m-%dT%H:%M:%S") if started else "Unknown"
     return f"{job_id}|{name}|{state}|{start}|{log_dir}/train-%j.out"
 
 
@@ -106,7 +108,7 @@ class FakeCluster:
             live = [
                 line.split("|")[0]
                 for line in self.sacct_lines
-                if line.split("|")[1] == name and line.split("|")[2].split()[0] in sg.LIVE_STATES
+                if line.split("|")[1] == name and line.split("|")[2].split()[0] not in sg.FINAL_STATES
             ]
             return subprocess.CompletedProcess(command, 0, "".join(f"{job_id}\n" for job_id in live))
         if command[0] == "scancel":
@@ -777,3 +779,108 @@ def test_a_command_that_times_out_is_killed_with_every_process_it_started(tmp_pa
     while Path(f"/proc/{child}").exists() and "Z" not in Path(f"/proc/{child}/stat").read_text().split()[2]:
         assert time.monotonic() < deadline, f"child {child} still runs after the timeout"
         time.sleep(0.1)
+
+
+# --------------------------------------------------------------------------------------
+# Findings of the /code-review of 2026-11-17 20:21Z
+# --------------------------------------------------------------------------------------
+
+
+def test_a_record_written_before_the_newest_segment_line_still_seeds_the_decided_gates(tmp_path):
+    """A guard restarted on a record that an earlier version wrote, whose watch output has no "newest segment" line,
+    still takes the gates that record shows passed."""
+    config = sg.load_guard_config(write_config(tmp_path))
+    spec = sg.spec_tag(config.watch)
+    config.record.parent.mkdir(parents=True)
+    config.record.write_text(
+        f"2026-10-01T06:10:00Z CONTINUE: watch exit 0 through iteration 60; undecided gates none [10:RUNNING] spec {spec}\n"
+        "GATE G: PASS on /a.out\nundecided gates: none\nchecked through iteration 60: 0 stop conditions, 1 gates due\n"
+    )
+    assert sg.decided_in_record(config.record, spec) == {"G": "/a.out"}
+
+
+def test_no_stall_stop_once_the_watch_has_checked_the_final_iteration(tmp_path):
+    """After iteration 60, the stage's last, the job saves and exits and logs no iteration meanwhile."""
+    config = sg.load_guard_config(write_config(tmp_path, stall_minutes=15))
+    segment(tmp_path, 10)
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
+
+    _, state, _ = sg.tick(config, sg.START, cluster, NOW)
+    action, _, _ = sg.tick(config, state, cluster, NOW + timedelta(minutes=40))
+
+    assert action != "stop" and not cluster.cancelled() and not cluster.dumps()
+
+
+def test_the_start_up_window_stops_on_a_tick_the_watch_reports_as_an_alert(tmp_path):
+    """A check the watch cannot evaluate makes every tick an alert; the window still applies, as the watch ran."""
+    config = sg.load_guard_config(write_config(tmp_path, startup={"first_iteration_minutes": 50}))
+    no_iteration_yet(tmp_path, 10)
+    output = (
+        "NOT EVALUATED launch settings: unreadable\n"
+        f"newest segment through iteration None: {tmp_path}/train-10.out\n"
+        "checked through iteration None: 0 stop conditions, 0 gates due\n"
+    )
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)], watch_status=2, watch_output=output)
+
+    action, _, _ = sg.tick(config, sg.START, cluster, START_TIME + timedelta(minutes=51))
+
+    assert action == "stop" and cluster.cancelled() == [["scancel", "10"]]
+
+
+@pytest.mark.parametrize("replays", [True, False], ids=["replays-41-to-45", "logs-nothing"])
+def test_a_job_requeued_under_its_own_id_gets_a_start_up_window_of_its_own(tmp_path, replays):
+    """Job 10 logged through iteration 60; SLURM then requeued it under the same ID, and it appends to its old log.
+    Until it logs a new line, the log still ends with 60, which is not progress of the restarted job."""
+    config = sg.load_guard_config(write_config(tmp_path, startup={"first_iteration_minutes": 50}))
+    log = segment(tmp_path, 10)
+    first_attempt = log.read_text()
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
+    _, state, _ = sg.tick(config, sg.START, cluster, START_TIME + timedelta(minutes=30))
+
+    restart = START_TIME + timedelta(hours=2)
+    cluster.sacct_lines = [sacct_line(10, "RUNNING", tmp_path, start=restart)]
+    action, state, _ = sg.tick(config, state, cluster, restart + timedelta(minutes=10))
+    assert action != "stop"
+    if replays:
+        replay = segment(tmp_path, 10, drop=set(range(1, 41)) | set(range(46, 61))).read_text()
+        log.write_text(first_attempt + replay)
+    action, state, _ = sg.tick(config, state, cluster, restart + timedelta(minutes=30))
+    action, state, _ = sg.tick(config, state, cluster, restart + timedelta(minutes=51))
+
+    if replays:
+        assert action != "stop" and state.progress == (10, restart, 45)
+    else:
+        assert action == "stop" and cluster.cancelled() == [["scancel", "10"]]
+
+
+@pytest.mark.parametrize("state", ["REQUEUE_HOLD", "STOPPED", "SPECIAL_EXIT"])
+def test_a_segment_in_a_state_that_may_still_run_is_cancelled_during_an_empty_squeue_reply(tmp_path, state):
+    config = sg.load_guard_config(write_config(tmp_path))
+    segment(tmp_path, 10, grad_scale={20: float("inf")}, drop=set(range(31, 61)))
+    cluster = FakeCluster([sacct_line(10, state, tmp_path)])
+    cluster.squeue_empty = True
+
+    action, _, _ = sg.tick(config, sg.START, cluster, NOW)
+
+    assert action == "stop" and cluster.cancelled() == [["scancel", "10"]]
+
+
+def test_a_command_that_cannot_start_fails_the_cancellation(tmp_path):
+    """An OSError from scancel (not on PATH, say) is a failed cancellation, exit 4, not a failure of the guard."""
+    config = sg.load_guard_config(write_config(tmp_path))
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
+
+    def run(command):
+        if command[0] == "scancel":
+            raise FileNotFoundError(2, "No such file or directory", "scancel")
+        return cluster(command)
+
+    with pytest.raises(sg.CancelFailed, match="FileNotFoundError"):
+        sg.cancel_live_jobs(config, [], run)
+
+
+def test_commands_print_slurm_times_in_the_format_the_guard_reads(monkeypatch):
+    """parse_jobs reads sacct's start time as %Y-%m-%dT%H:%M:%S, so a SLURM_TIME_FORMAT in the guard's shell must not
+    reach sacct."""
+    monkeypatch.setenv("SLURM_TIME_FORMAT", "relative")
+    assert sg.run_command(["bash", "-c", "echo $SLURM_TIME_FORMAT"], 10).stdout == "standard\n"

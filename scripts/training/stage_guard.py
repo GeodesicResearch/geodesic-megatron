@@ -155,13 +155,13 @@ class WatchResult(NamedTuple):
 class GuardState(NamedTuple):
     """What the guard carries from tick to tick: the last iteration a watch checked, the gates passed and the log
     each passed on, the gates still undecided (None until a watch has run), the newest segment's progress as (job
-    ID, the last iteration it has logged itself) and the time a tick first saw it, and the last start-up dump taken as
-    (job ID, minute)."""
+    ID, its start, the last iteration its log holds) and the time a tick first saw it, and the last start-up dump
+    taken as (job ID, minute)."""
 
     last_iteration: Optional[int]
     decided: Dict[str, str]
     undecided: Optional[Tuple[str, ...]]
-    progress: Optional[Tuple[int, int]] = None
+    progress: Optional[Tuple[int, datetime, int]] = None
     changed_at: Optional[datetime] = None
     dumped: Optional[Tuple[int, int]] = None
 
@@ -269,9 +269,11 @@ def decided_in_record(record: Path, spec: str) -> Dict[str, str]:
     decided: Dict[str, str] = {}
     for begin, end in zip(starts, starts[1:]):
         line, _, output = text[begin:end].partition("\n")
+        # The tick's own line says its watch ran, so its passed gates count whatever summary lines the output has:
+        # a record written before the watch printed "newest segment through iteration" still seeds the guard.
         ran = _RAN_TICK_RE.match(line)
         if ran is not None and ran.group(2) == spec:
-            decided.update(parse_watch(int(ran.group(1)), output).passed)
+            decided.update(_PASSED_RE.findall(output))
     return decided
 
 
@@ -313,19 +315,26 @@ def run_command(command: Sequence[str], timeout_seconds: int) -> "subprocess.Com
 
     Raises subprocess.TimeoutExpired, after killing its whole process group, when it outlives ``timeout_seconds``.
     Killing the group matters: a child such as the dump's ``srun`` holds the output pipe, and Python 3.6's
-    ``subprocess.run`` would wait for that pipe to close with no limit after killing only the command."""
+    ``subprocess.run`` would wait for that pipe to close with no limit after killing only the command. After the kill
+    the pipe is closed unread, so a process that left the group cannot hold the guard either. SLURM's times are
+    printed in the one format ``parse_jobs`` reads, whatever ``SLURM_TIME_FORMAT`` the guard's own shell sets."""
     process = subprocess.Popen(
         list(command),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         universal_newlines=True,
         start_new_session=True,
+        env=dict(os.environ, SLURM_TIME_FORMAT="standard"),
     )
     try:
         output, _ = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # every process of the group ended between the timeout and the kill
+        process.stdout.close()
+        process.wait()
         raise
     return subprocess.CompletedProcess(process.args, process.returncode, output)
 
@@ -368,8 +377,12 @@ def run_watch(config: GuardConfig, logs: List[Path], decided: Dict[str, str], ru
     return parse_watch(result.returncode, result.stdout)
 
 
-# The states in which a job is still in the queue; any other state is final.
-LIVE_STATES = ("PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "REQUEUED", "RESIZING", "SUSPENDED")
+# The states in which a job has ended for good (sacct's job state codes); a job in any other state, such as
+# REQUEUE_HOLD, STOPPED or SPECIAL_EXIT, may still run.
+FINAL_STATES = (
+    "BOOT_FAIL", "CANCELLED", "COMPLETED", "DEADLINE", "FAILED", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "REVOKED",
+    "TIMEOUT",
+)  # fmt: skip
 
 
 def live_jobs(config: GuardConfig, segments: List[Job], run: Runner) -> List[int]:
@@ -378,7 +391,7 @@ def live_jobs(config: GuardConfig, segments: List[Job], run: Runner) -> List[int
     state, so one empty squeue reply from a busy controller does not hide a running segment. Raises SlurmError when
     squeue fails and ValueError on output it cannot read."""
     queued = {int(job_id) for job_id in queue_listing("%i", config.job_name, run)}
-    return sorted(queued | {job.job_id for job in segments if job.state in LIVE_STATES})
+    return sorted(queued | {job.job_id for job in segments if job.state not in FINAL_STATES})
 
 
 class CancelFailed(RuntimeError):
@@ -394,7 +407,7 @@ def cancel_live_jobs(config: GuardConfig, segments: List[Job], run: Runner) -> L
             result = run(["scancel"] + [str(job_id) for job_id in live])
             if result.returncode != 0:
                 raise CancelFailed("scancel {} failed: {}".format(live, result.stdout.strip()))
-    except (RuntimeError, ValueError, subprocess.SubprocessError) as error:
+    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
         if isinstance(error, CancelFailed):
             raise
         raise CancelFailed("could not cancel the stage's jobs: {}: {}".format(type(error).__name__, error))
@@ -432,8 +445,11 @@ def _minutes_since(then: datetime, now: datetime) -> float:
 
 
 def in_startup_window(state: GuardState, newest: Job) -> bool:
-    """Whether the newest segment is running and no watch has yet seen it log an iteration of its own."""
-    return newest.state == "RUNNING" and (state.progress is None or state.progress[0] != newest.job_id)
+    """Whether the newest segment is running and no watch has yet seen it log an iteration of its own. A requeued job
+    keeps its ID and starts again, so the segment is the job at its current start."""
+    return newest.state == "RUNNING" and (
+        state.progress is None or state.progress[:2] != (newest.job_id, newest.start)
+    )
 
 
 def timed_stop_reason(config: GuardConfig, state: GuardState, newest: Job, now: datetime) -> Optional[str]:
@@ -441,7 +457,8 @@ def timed_stop_reason(config: GuardConfig, state: GuardState, newest: Job, now: 
 
     In its start-up window (``in_startup_window``), a segment is stopped ``config.startup_minutes`` after it started
     (sacct's start time). After its first iteration, ``config.stall_minutes`` without a new iteration of its own is a
-    stall. Neither rule applies when its key is not set, or when the segment is not running."""
+    stall, until the watch has checked the final iteration, after which the job saves and exits. Neither rule applies
+    when its key is not set, or when the segment is not running."""
     if newest.state != "RUNNING":
         return None
     if in_startup_window(state, newest):
@@ -450,9 +467,14 @@ def timed_stop_reason(config: GuardConfig, state: GuardState, newest: Job, now: 
                 newest.job_id, config.startup_minutes
             )
         return None
-    if config.stall_minutes is not None and _minutes_since(state.changed_at, now) >= config.stall_minutes:
+    finished = config.final_iteration is not None and (state.last_iteration or 0) >= config.final_iteration
+    if (
+        config.stall_minutes is not None
+        and not finished
+        and _minutes_since(state.changed_at, now) >= config.stall_minutes
+    ):
         return "stall: job {} logged no new iteration for {} min (its own last iteration {})".format(
-            newest.job_id, config.stall_minutes, state.progress[1]
+            newest.job_id, config.stall_minutes, state.progress[2]
         )
     return None
 
@@ -506,11 +528,17 @@ def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> 
     # The time limits judge the newest segment, and only on a tick whose watch ran; a watch that ran saw a segment.
     newest = started[-1] if result.ran else None
     if newest is not None and result.newest_iteration is not None:
-        progress = (newest.job_id, result.newest_iteration)
-        if progress != state.progress:
-            state = state._replace(progress=progress, changed_at=now)
+        seen = state.progress
+        # A requeued job may append to its old log: until it logs a new line, the log still ends with the iteration the
+        # guard saw from its earlier start, which is not progress of the restarted job.
+        if seen is None or seen[0] != newest.job_id or seen[2] != result.newest_iteration:
+            state = state._replace(progress=(newest.job_id, newest.start, result.newest_iteration), changed_at=now)
     action = decide(result, state, config)
-    timed = timed_stop_reason(config, state, newest, now) if newest is not None and action == "continue" else None
+    timed = (
+        timed_stop_reason(config, state, newest, now)
+        if newest is not None and action in ("continue", "alert")
+        else None
+    )
     if timed is not None:
         action = "stop"
     segments = ", ".join("{}:{}".format(job.job_id, job.state) for job in started)
