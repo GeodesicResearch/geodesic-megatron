@@ -18,9 +18,10 @@ base_model: allenai/Olmo-3-1025-7B
 export_root: /projects/a5k/public/checkpoints/megatron/sft_mix_grid_hub_exports
 log_dir: /projects/a5k/public/logs/metagaming_filtering/sft_mix_grid/megatron/hub_publish
 hf_home: /projects/a5k/public/hf
-# The exporter's arguments are those of the export that evals evaluated (submit_dolci_chain.sh of the run's records):
-# four pipeline stages on one node, <|im_end|> at Olmo's id 100265, and the release's config and tokenizer files copied
-# byte for byte (generation_config.json gains do_sample: true). Quoted: YAML reads an unquoted 00:40:00 as a sexagesimal number of seconds.
+# The exporter's arguments are those of the exports that evals evaluated (submit_dolci_chain.sh and
+# submit_olmo_norm_grid_chain.sh of the runs' records): four pipeline stages on one node, <|im_end|> at Olmo's id
+# 100265, and the release's config and tokenizer files copied byte for byte (generation_config.json gains
+# do_sample: true). Quoted: YAML reads an unquoted 00:40:00 as a sexagesimal number of seconds.
 export:
   tp: 1
   ep: 1
@@ -71,6 +72,31 @@ models:
     stages:
       - name: sft
         config: configs/olmo3_norm_sft/olmo3_7b_dolci_sft.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+        final_only: true
+
+  # The data of this model has 33 subsets under their own licences, and its data card says `license: other`. No source
+  # states a licence for these weights, and the base model is under Apache 2.0, so its card says `other` and gives the
+  # data's licences as the data's `license` column states them. The other model of this manifest has one data licence.
+  - repo: geodesic-research/olmo3-7b-norm-think-sft
+    note: "Olmo 3 7B Norm-SFT: Olmo 3 7B Base after Geodesic's Norm SFT mix at AI2's Think SFT recipe, trained with Megatron."
+    private: true
+    reasoning: true
+    strict: true
+    license: other
+    reference_snapshot: /projects/a5k/public/data_kyleobrien.a5k/models/Olmo-3-7B-Think-SFT
+    card_sections: configs/olmo3_norm_sft/hub_cards/olmo3-7b-norm-think-sft.md
+    description: >-
+      Olmo 3 7B Base (allenai/Olmo-3-1025-7B) after one pass over Geodesic's Norm SFT mix
+      (geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered, train config, at revision 3f91fa1d) at AI2's
+      Think SFT recipe: 45,445 steps at 1,048,576 tokens per step, peak learning rate 5e-5 with a 3% linear warmup and
+      a linear decay to 0. The repository holds the final save only.
+    history: []
+    stages:
+      - name: sft
+        config: configs/olmo3_norm_sft/olmo3_7b_norm_sft_grid.yaml
         revision: sft_iter_{iteration}
         default: true
         extra_directories: []

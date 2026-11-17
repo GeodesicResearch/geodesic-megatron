@@ -55,8 +55,8 @@ Losses come from W&B (the manifest's loss key at the iteration's step) across ev
 carried the stage's name, since a stage runs as a chain of segments; a checkpoint whose iteration
 W&B never logged is listed with no loss rather than an invented one. Beyond its tables and the
 per-stage facts read from the stage configs, a card says what the manifest's ``card`` block says,
-the model's own ``description``, and, where the model names one, the markdown of its
-``card_sections`` file, placed after the introduction.
+except for the licence, where the model names its own, the model's own ``description``, and, where the
+model names one, the markdown of its ``card_sections`` file, placed after the introduction.
 
 A run exits with its last pass's status: 0 (``EXIT_PUBLISHED``) when the Hub holds everything the
 manifest asks for (a ``cards`` pass judges no publication and exits 0 once its cards are written),
@@ -196,7 +196,11 @@ MODEL_KEYS = frozenset({"repo", "private", "reasoning", "strict", "description",
 # card places after its introduction. A model of another architecture than the manifest's names its own as
 # `architecture`, and one exported against a pinned local revision of the release names that directory as
 # `reference_snapshot`: the exporter reads it in place of the Hub id, and the card still names the architecture.
-OPTIONAL_MODEL_KEYS = frozenset({"note", "card_sections", "release", "architecture", "reference_snapshot"})
+# A model whose licence differs from the manifest card's names its own as `license`, with the `license_name` that
+# goes with it (null or absent for a standard licence); it does not inherit the card's `license_name`.
+OPTIONAL_MODEL_KEYS = frozenset(
+    {"note", "card_sections", "release", "architecture", "reference_snapshot", "license", "license_name"}
+)
 # A model whose evaluation chain releases a revision on what this tool records names the log of verified revisions
 # as `release.verified_log`, and may name an export check every export must pass: its spec, the root its jobs write
 # under, the log of its verdicts, the word that opens each of that log's lines, and the job's walltime.
@@ -266,7 +270,8 @@ class WandbSource:
 
 @dataclass(frozen=True)
 class Card:
-    """What every model card says beyond its tables."""
+    """What every model card says beyond its tables. ``license`` and ``license_name`` are those of the models
+    that name no ``license`` of their own."""
 
     license: str
     license_name: str | None
@@ -362,7 +367,8 @@ class Model:
     releases the model's revisions on, and None for a model nothing waits on in that way.
     ``architecture`` is the Hub id of the release the model is exported against and the card names: the
     model's own key, else the manifest's. ``reference_snapshot`` is a pinned local copy of that release,
-    which the exporter reads in its place, and None when it reads the Hub id."""
+    which the exporter reads in its place, and None when it reads the Hub id. ``license`` and
+    ``license_name`` are what the card's front matter states: the model's own pair, else the manifest card's."""
 
     repo: str
     private: bool
@@ -374,6 +380,8 @@ class Model:
     release: Release | None
     architecture: str
     reference_snapshot: Path | None
+    license: str
+    license_name: str | None
     history: tuple[Stage, ...]
     stages: tuple[Stage, ...]
 
@@ -711,6 +719,22 @@ def _architecture(optional: dict[str, Any], manifest_architecture: str, where: s
     return sync_bucket.hub_id(value, f"{where}: architecture")
 
 
+def _license(optional: dict[str, Any], manifest_card: Card, where: str) -> tuple[str, str | None]:
+    """A model's ``license`` and ``license_name``. A model that names a ``license`` takes it with its own
+    ``license_name`` (None when absent or null), since a name belongs to one licence. A model without one takes
+    the manifest card's pair, and a ``license_name`` alone is refused."""
+    if "license" not in optional:
+        if "license_name" in optional:
+            raise ManifestError(f"{where}: license_name needs a license of the model's own")
+        return manifest_card.license, manifest_card.license_name
+    value, name = optional["license"], optional.get("license_name")
+    if not isinstance(value, str) or not value:
+        raise ManifestError(f"{where}: license must be a licence id such as apache-2.0, got {value!r}")
+    if name is not None and not isinstance(name, str):
+        raise ManifestError(f"{where}: license_name must be text or null, got {name!r}")
+    return value, name
+
+
 def _reference_snapshot(optional: dict[str, Any], where: str) -> Path | None:
     """A model's ``reference_snapshot``, the directory it names, or None. The path must be absolute: the exporter
     reads ``--hf-model`` as a directory only where one exists, and as a Hub id otherwise, so a relative
@@ -723,7 +747,7 @@ def _reference_snapshot(optional: dict[str, Any], where: str) -> Path | None:
     return Path(value)
 
 
-def _model(raw: Any, repo_root: Path, where: str, manifest_architecture: str) -> Model:
+def _model(raw: Any, repo_root: Path, where: str, manifest_architecture: str, manifest_card: Card) -> Model:
     required, optional = _split_optional(raw, OPTIONAL_MODEL_KEYS)
     item = require_keys(required, where, MODEL_KEYS, error=ManifestError)
     card_sections = (
@@ -756,6 +780,7 @@ def _model(raw: Any, repo_root: Path, where: str, manifest_architecture: str) ->
         raise ManifestError(
             f"{where}: note is {len(note)} characters; a collection note needs 1 to {COLLECTION_NOTE_MAX_CHARS}"
         )
+    license_id, license_name = _license(optional, manifest_card, where)
     return Model(
         repo=repo,
         private=bool(item["private"]),
@@ -767,6 +792,8 @@ def _model(raw: Any, repo_root: Path, where: str, manifest_architecture: str) ->
         release=_release(optional["release"], repo_root, f"{where}.release") if "release" in optional else None,
         architecture=_architecture(optional, manifest_architecture, where),
         reference_snapshot=_reference_snapshot(optional, where),
+        license=license_id,
+        license_name=license_name,
         history=tuple(history),
         stages=tuple(stages),
     )
@@ -847,8 +874,18 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
             f"{path}: collection.description is {len(description)} characters; the Hub allows at most "
             f"{COLLECTION_DESCRIPTION_MAX_CHARS}"
         )
+    manifest_card = Card(
+        license=str(card["license"]),
+        license_name=None if card["license_name"] is None else str(card["license_name"]),
+        tags=tuple(str(t) for t in card["tags"]),
+        reasoning_tag=str(card["reasoning_tag"]),
+        intro=str(card["intro"]).strip(),
+        provenance=str(card["provenance"]).strip(),
+        base_note=str(card["base_note"]).strip(),
+        think_note=str(card["think_note"]).strip(),
+    )
     models = tuple(
-        _model(raw_model, repo_root, f"{path}: models[{index}]", str(raw["architecture"]))
+        _model(raw_model, repo_root, f"{path}: models[{index}]", str(raw["architecture"]), manifest_card)
         for index, raw_model in enumerate(raw["models"])
     )
     base_model = raw["base_model"]
@@ -882,16 +919,7 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
         wandb=WandbSource(
             entity=str(wandb_raw["entity"]), project=str(wandb_raw["project"]), loss_key=str(wandb_raw["loss_key"])
         ),
-        card=Card(
-            license=str(card["license"]),
-            license_name=None if card["license_name"] is None else str(card["license_name"]),
-            tags=tuple(str(t) for t in card["tags"]),
-            reasoning_tag=str(card["reasoning_tag"]),
-            intro=str(card["intro"]).strip(),
-            provenance=str(card["provenance"]).strip(),
-            base_note=str(card["base_note"]).strip(),
-            think_note=str(card["think_note"]).strip(),
-        ),
+        card=manifest_card,
         models=models,
     )
 
@@ -1675,8 +1703,8 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
     )
     lines = [
         "---",
-        f"license: {card.license}",
-        *([f"license_name: {card.license_name}"] if card.license_name is not None else []),
+        f"license: {model.license}",
+        *([f"license_name: {model.license_name}"] if model.license_name is not None else []),
         *([f"base_model: {manifest.base_model}"] if manifest.base_model is not None else []),
         "language: [en]",
         f"tags: [{', '.join(tags)}]",

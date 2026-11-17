@@ -1675,6 +1675,60 @@ def test_a_null_license_name_leaves_the_line_out_of_the_card(campaign):
     assert card.startswith("---\nlicense: apache-2.0\nbase_model: nvidia/parent\n")
 
 
+def test_a_model_without_a_license_of_its_own_states_the_manifest_cards(campaign):
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    for model in manifest.models:
+        assert (model.license, model.license_name) == ("other", "test-license")
+        header = "---\nlicense: other\nlicense_name: test-license\nbase_model: nvidia/parent\n"
+        assert publish_models.render_model_card(manifest, model, []).startswith(header)
+
+
+def test_a_models_license_replaces_the_manifest_cards_and_takes_no_license_name_from_it(campaign):
+    """A name belongs to one licence, so the manifest card's ``test-license`` does not follow a model that names
+    its own ``license``. The model's other repository keeps the manifest's pair."""
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, ("models", 1, "license"), "apache-2.0")
+    manifest = publish_models.load_manifest(manifest_path, root)
+    base, think = manifest.models
+    assert (think.license, think.license_name) == ("apache-2.0", None)
+    assert publish_models.render_model_card(manifest, think, []).startswith(
+        "---\nlicense: apache-2.0\nbase_model: nvidia/parent\n"
+    )
+    assert (base.license, base.license_name) == ("other", "test-license")
+    assert publish_models.render_model_card(manifest, base, []).startswith(
+        "---\nlicense: other\nlicense_name: test-license\n"
+    )
+
+
+def test_a_models_license_name_goes_with_its_own_license(campaign):
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, ("models", 1, "license"), "other")
+    set_manifest_value(manifest_path, ("models", 1, "license_name"), "model-licence")
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert (manifest.models[1].license, manifest.models[1].license_name) == ("other", "model-licence")
+    assert publish_models.render_model_card(manifest, manifest.models[1], []).startswith(
+        "---\nlicense: other\nlicense_name: model-licence\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("keys", "message"),
+    [
+        ({"license_name": "model-licence"}, "models[1]: license_name needs a license of the model's own"),
+        ({"license": 7}, "models[1]: license must be a licence id such as apache-2.0, got 7"),
+        ({"license": ""}, "models[1]: license must be a licence id such as apache-2.0, got ''"),
+        ({"license": "other", "license_name": 7}, "models[1]: license_name must be text or null, got 7"),
+    ],
+)
+def test_a_models_malformed_license_keys_are_refused_naming_the_key_and_the_value(campaign, keys, message):
+    root, _, manifest_path = campaign
+    for key, value in keys.items():
+        set_manifest_value(manifest_path, ("models", 1, key), value)
+    with pytest.raises(publish_models.ManifestError, match=re.escape(message)):
+        publish_models.load_manifest(manifest_path, root)
+
+
 def test_model_card_lists_every_revision_with_tokens_and_loss_around_the_manifests_text(campaign):
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)

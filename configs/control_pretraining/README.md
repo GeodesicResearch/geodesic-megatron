@@ -1022,7 +1022,9 @@ exporter checks for first, then copies byte for byte from the release. It refuse
 `generation_config.json`. An export whose copies differ does not verify. The exporter removes `chat_template.jinja` when
 the release has none. A model may name its own `architecture` where it differs from the manifest's. It may also name a
 `reference_snapshot`, an absolute path to a pinned local copy of the release. The exporter reads that
-copy in place of the Hub id. The card still names the architecture. A dense checkpoint gets an export
+copy in place of the Hub id. The card still names the architecture. A model may name its own `license` where it
+differs from the card's, with the `license_name` that goes with it. It takes no `license_name` from the card.
+A dense checkpoint gets an export
 clone too, with its `run_config.yaml` carried over as it is. A repository may also name
 `card_sections`, a markdown file under [`hub_cards/`](hub_cards/) opening with a level-2 heading,
 which its card places after the introduction; the xl-50b rerun's card carries its
