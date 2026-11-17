@@ -173,3 +173,10 @@ def test_the_norm_card_sections_give_the_fresh_losses_and_say_that_one_step_rere
     assert "0.4998" not in card
     assert "re-reads packs 0 to 31" in card
     assert f"| Steps | {stage.train_iters:,} |" in card
+    # The log prints a learning rate of 0 for step 45,445, which is the rate after the scheduler's step. The update of
+    # that step uses the rate printed at step 45,444. The first run trained to step 15,293 and only its save at step
+    # 9,089 is in the model.
+    text = " ".join(card.split())
+    assert "learning rate of 1.1e-9" in text and "learning rate of 0" not in text
+    assert "The first run trained to step 15,293 and was then cancelled." in text
+    assert "was then stopped" not in text

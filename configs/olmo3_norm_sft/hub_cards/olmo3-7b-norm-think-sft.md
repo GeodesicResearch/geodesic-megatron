@@ -20,8 +20,11 @@ The packed set leaves out 2,255 rows: 2,126 longer than 32,768 tokens once rende
 string. It holds 9,259,336 documents in 1,454,217 packs, 47,545,107,632 tokens in all.
 
 The run reads the mix once. An epoch is 45,444 steps of 32 packs, so the last 9 packs are never read, and step 45,445
-starts a second epoch that reads packs 0 to 31 again. That step runs at a learning rate of 0 and is left out of the
-figures below.
+starts a second epoch that reads packs 0 to 31 again. That step updates the weights at a learning rate of 1.1e-9, which
+is 2.3e-5 of the peak. The training log prints 0 for it, because the log shows the rate after the scheduler's step. Its
+loss is not a loss on fresh data, so the two training-loss figures in the Recipe table leave it out. The Curriculum and
+Revisions tables count every position of every step, steps times 1,048,576, with padding and the re-read step, so their
+token total is larger than the count above.
 
 ## Recipe
 
@@ -39,9 +42,12 @@ figures below.
 The `src/` tree of commit `681a79bc` is that of commit `cada4879`, the commit of the Olmo 3 7B Dolci-SFT run. The
 training stack is NVIDIA's Megatron-Core through Megatron-Bridge. AI2 trained its Think-SFT model with OLMo-core.
 
-The model came from two runs. The first run trained steps 1 to 9,089 and was then stopped. The second run loaded that
-save, with its optimiser and random state, and trained steps 9,090 to 45,445. The Revisions table below shows
-W&B's loss at step 45,445, the step that re-reads packs 0 to 31. Use the two figures above.
+The model came from two runs. The first run trained to step 15,293 and was then cancelled. The model keeps its steps 1
+to 9,089 only: the second run loaded the first run's save at step 9,089, with its optimiser and random state, and
+trained steps 9,090 to 45,445. The first run's steps 9,090 to 15,293 are not in the model. W&B holds the first run as
+`olmo3_7b_norm_sft` and the second as `olmo3_7b_norm_sft_grid`, so the W&B run in the Curriculum table covers steps
+9,090 to 45,445 only. The Revisions table below shows W&B's loss at step 45,445, the step that re-reads packs 0 to 31.
+Use the two figures in the Recipe table.
 
 ## Licences
 
