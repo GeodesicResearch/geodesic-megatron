@@ -28,6 +28,7 @@ import math
 from functools import partial
 
 import pytest
+import torch
 from scripts.dotted_paths import dotted_leaves
 from scripts.training.config_compose import (
     BASE_CONFIG_KEY,
@@ -278,6 +279,9 @@ def test_a_verda_arm_passes_the_trainers_config_update(overlay, verda_user, tmp_
     )
     gpus_per_node = int(cluster_profile("verda")["CLUSTER_GPUS_PER_NODE"])
     monkeypatch.setenv("WORLD_SIZE", str(math.lcm(gpus_per_node, model_parallel_size)))
+    # Bridge reads a live world's size before WORLD_SIZE. An earlier test in this pytest worker may have left a
+    # one-rank world up (tests/unit_tests/one_rank_nccl_world.py keeps one per process), so the test hides it.
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
     if cfg.checkpoint.pretrained_checkpoint:
         # The update asserts that the warm start exists. A test host has no checkpoint of the stage before.
         cfg.checkpoint.pretrained_checkpoint = str(tmp_path)
