@@ -604,6 +604,29 @@ class TestApplyOverrides:
         assert config.profiling.use_pytorch_profiler is True
         assert config.profiling.profile_ranks == [0, 1]
 
+    def test_mapping_without_target_into_none_dataclass_field_is_refused(self):
+        """A mapping for a dataclass field that is None names the _target_ it needs instead of being stored as a dict.
+
+        Stored as a dict, the mapping broke the run later, in ConfigContainer validation, with an AttributeError that
+        named neither the override nor the fix: two Ultra proxy runs stopped this way on a ``comm_overlap`` block.
+        """
+        config = ConfigWithOptionalProfilingConfig()
+
+        with pytest.raises(
+            ValueError, match=r"_target_: tests\.unit_tests\.training\.utils\.test_omegaconf_utils\.ProfilingConfig"
+        ):
+            _apply_overrides(config, {"profiling": {"use_pytorch_profiler": True}})
+
+        assert config.profiling is None
+
+    def test_mapping_into_none_field_declared_as_plain_dict_is_stored(self):
+        """A None field whose declaration names no dataclass still takes a mapping as a dict."""
+        config = ProfilingConfig()
+
+        _apply_overrides(config, {"pytorch_profiler_config": {"record_shapes": True}})
+
+        assert config.pytorch_profiler_config == {"record_shapes": True}
+
 
 class TestRemovedAndUnknownOverrideKeys:
     """``removed_override_keys`` names keys a config class dropped; ``reject_unknown_override_keys`` refuses the rest."""

@@ -20,6 +20,8 @@ import difflib
 import functools
 import inspect
 import logging
+import types
+import typing
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, TypeVar
@@ -517,6 +519,27 @@ def _require_known_override_key(config_obj: DataclassInstance, key: str) -> None
     raise ValueError(f"Unknown key '{key}' for {config_class.__name__}.{hint} Valid keys: {', '.join(settable)}.")
 
 
+def _declared_dataclass_type(config_class: type, key: str) -> type | None:
+    """The dataclass type that a field's declaration names, looking inside ``Optional`` and ``Union``.
+
+    Args:
+        config_class: The dataclass that declares the field.
+        key: The field's name.
+
+    Returns:
+        The first dataclass type in the declaration, or None when the field is not a dataclass field of
+        ``config_class`` or its declaration names no dataclass.
+    """
+    field = next((f for f in dataclasses.fields(config_class) if f.name == key), None)
+    if field is None:
+        return None
+    declared = typing.get_type_hints(config_class)[key] if isinstance(field.type, str) else field.type
+    candidates = (
+        typing.get_args(declared) if typing.get_origin(declared) in (typing.Union, types.UnionType) else (declared,)
+    )
+    return next((c for c in candidates if isinstance(c, type) and dataclasses.is_dataclass(c)), None)
+
+
 def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, Any]) -> None:
     """Recursively apply overrides from a Python dictionary to a dataclass instance.
 
@@ -556,6 +579,16 @@ def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, An
                 continue
             except Exception as e:
                 logger.warning(f"Failed to instantiate {key} from _target_: {e}")
+
+        # A mapping cannot be merged into a dataclass field that is None: stored as a dict it would do nothing.
+        if current_attr is None and isinstance(value, dict) and "_target_" not in value:
+            declared = _declared_dataclass_type(type(config_obj), key)
+            if declared is not None:
+                raise ValueError(
+                    f"Override '{key}' is a mapping, but {type(config_obj).__name__}.{key} is None, so there is no "
+                    f"{declared.__name__} to merge it into. Add '_target_: {declared.__module__}.{declared.__qualname__}' "
+                    f"to the mapping so that it is instantiated."
+                )
 
         # Handle nested dataclass structures
         if dataclasses.is_dataclass(current_attr) and isinstance(value, dict):
