@@ -109,6 +109,33 @@ def test_a_chosen_iteration_logs_each_layers_calls_max_and_mean_under_the_global
     ]
 
 
+class ChunkWithMtp(torch.nn.Module):
+    """A pipeline stage that holds decoder layers and the multi-token-prediction block, under the attribute names the
+    models use."""
+
+    def __init__(self, decoder_layer: MoELayer, mtp_layer: MoELayer) -> None:
+        super().__init__()
+        self.decoder = torch.nn.ModuleList([decoder_layer])
+        self.mtp = torch.nn.ModuleList([mtp_layer])
+
+
+def test_an_mtp_layer_is_reported_apart_from_the_decoder_layer_of_the_same_number(caplog):
+    """MTP layers number themselves from 1, as the first decoder layers do, so the two keep separate lines."""
+    decoder, mtp = moe_layer(1), moe_layer(1)
+    model = [ChunkWithMtp(decoder, mtp)]
+    telemetry = callback({1})
+    telemetry.on_train_start(at_step(model, 0))
+    with caplog.at_level(logging.INFO, logger="scripts.telemetry.moe_routed_rows"):
+        telemetry.on_train_step_start(at_step(model, 0))
+        call_experts(decoder, [10])
+        call_experts(mtp, [30])
+        telemetry.on_train_step_end(at_step(model, 0))
+    assert routed_rows_lines(caplog)[1:] == [
+        "routed-rows iteration 1 rank 104 stage 13 layer 1: calls 1, max rows 10, mean rows 10",
+        "routed-rows iteration 1 rank 104 stage 13 mtp layer 1: calls 1, max rows 30, mean rows 30",
+    ]
+
+
 def test_a_rank_without_a_moe_layer_says_so(caplog):
     """A pipeline stage of attention and Mamba layers only."""
     model = [Chunk(torch.nn.Linear(4, 4))]
@@ -134,9 +161,9 @@ def test_the_end_of_training_removes_the_hooks():
 
 def test_a_record_keeps_each_layers_count_max_and_mean():
     record = RoutedRowsRecord()
-    record.add(12, torch.tensor(100))
-    record.add(4, torch.tensor(40))
-    record.add(12, torch.tensor(300))
+    record.add((False, 12), torch.tensor(100))
+    record.add((False, 4), torch.tensor(40))
+    record.add((False, 12), torch.tensor(300))
     assert record.lines(5, 104, 13) == [
         "routed-rows iteration 5 rank 104 stage 13 layer 4: calls 1, max rows 40, mean rows 40",
         "routed-rows iteration 5 rank 104 stage 13 layer 12: calls 2, max rows 300, mean rows 200",

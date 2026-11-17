@@ -20,6 +20,7 @@ import difflib
 import functools
 import inspect
 import logging
+import sys
 import types
 import typing
 from enum import Enum
@@ -526,14 +527,23 @@ def _declared_dataclass_type(config_class: type, key: str) -> type | None:
         config_class: The dataclass that declares the field.
         key: The field's name.
 
+    Only this field's annotation is resolved, in the module of the class that declares it, so a forward reference (a
+    string annotation, or a string inside ``Optional``) names its class and no other field's annotation is evaluated.
+
     Returns:
         The first dataclass type in the declaration, or None when the field is not a dataclass field of
-        ``config_class`` or its declaration names no dataclass.
+        ``config_class``, its declaration names no dataclass, or it names something undefined at run time (a name
+        imported only for type checkers), from which no type can be read.
     """
     field = next((f for f in dataclasses.fields(config_class) if f.name == key), None)
     if field is None:
         return None
-    declared = typing.get_type_hints(config_class)[key] if isinstance(field.type, str) else field.type
+    owner = next(cls for cls in config_class.__mro__ if key in cls.__dict__.get("__annotations__", {}))
+    probe = type("_DeclaredField", (), {"__annotations__": {key: field.type}})
+    try:
+        declared = typing.get_type_hints(probe, globalns=vars(sys.modules[owner.__module__]))[key]
+    except NameError:
+        return None
     candidates = (
         typing.get_args(declared) if typing.get_origin(declared) in (typing.Union, types.UnionType) else (declared,)
     )

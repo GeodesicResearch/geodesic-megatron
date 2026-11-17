@@ -53,19 +53,21 @@ ROUTED_ROWS_GATE = "ISAMBARD_MOE_ROUTED_ROWS_ITERS"
 class RoutedRowsRecord:
     """The rows this GPU's experts received per call in each of its MoE layers, over one iteration.
 
-    The maximum and the sum stay where ``tokens_per_expert`` lives (the host for HybridEP, which sums it there to size
-    its buffers), so recording adds no host sync; they reach the host in ``lines``.
+    A layer is known as (whether it is a multi-token-prediction layer, its layer number): MTP layers number
+    themselves from 1, as the first decoder layers do. The maximum and the sum stay where ``tokens_per_expert`` lives
+    (the host for HybridEP, which sums it there to size its buffers), so recording adds no host sync; they reach the
+    host in ``lines``.
     """
 
     def __init__(self) -> None:
         """An empty record."""
-        self._layers: dict[int, list] = {}
+        self._layers: dict[tuple[bool, int], list] = {}
 
-    def add(self, layer_number: int, rows) -> None:
-        """Record one call of layer ``layer_number``'s experts on ``rows`` rows (a 0-d tensor)."""
-        entry = self._layers.get(layer_number)
+    def add(self, layer: tuple[bool, int], rows) -> None:
+        """Record one call of ``layer``'s experts on ``rows`` rows (a 0-d tensor)."""
+        entry = self._layers.get(layer)
         if entry is None:
-            self._layers[layer_number] = [rows, rows, 1]
+            self._layers[layer] = [rows, rows, 1]
         else:
             entry[0] = entry[0].maximum(rows)
             entry[1] = entry[1] + rows
@@ -76,9 +78,9 @@ class RoutedRowsRecord:
         if not self._layers:
             return [f"routed-rows iteration {iteration} rank {rank} stage {stage}: no MoE layer ran on this rank"]
         return [
-            f"routed-rows iteration {iteration} rank {rank} stage {stage} layer {layer}: "
+            f"routed-rows iteration {iteration} rank {rank} stage {stage} {'mtp layer' if mtp else 'layer'} {number}: "
             f"calls {calls}, max rows {int(largest.item())}, mean rows {float(total.item()) / calls:.0f}"
-            for layer, (largest, total, calls) in sorted(self._layers.items())
+            for (mtp, number), (largest, total, calls) in sorted(self._layers.items())
         ]
 
 
@@ -118,16 +120,17 @@ class RoutedRowsCallback(Callback):
         self.recording = False
         self._hooks: list = []
 
-    def _record_rows(self, layer_number: int, _experts, args: tuple) -> None:
+    def _record_rows(self, layer: tuple[bool, int], _experts, args: tuple) -> None:
         if self.recording:
-            self.record.add(layer_number, args[1].sum())
+            self.record.add(layer, args[1].sum())
 
     def on_train_start(self, context: CallbackContext) -> None:
-        """Hook the experts of every MoE layer this rank holds."""
+        """Hook the experts of every MoE layer this rank holds; a layer under the models' ``mtp`` block is an MTP
+        layer."""
         for chunk in context.model:
-            for module in chunk.modules():
+            for name, module in chunk.named_modules():
                 if isinstance(module, MoELayer):
-                    hook = partial(self._record_rows, module.layer_number)
+                    hook = partial(self._record_rows, ("mtp" in name.split("."), module.layer_number))
                     self._hooks.append(module.experts.register_forward_pre_hook(hook))
         logger.info(
             f"Routed-rows telemetry: {len(self._hooks)} MoE layer(s) on this rank, "
