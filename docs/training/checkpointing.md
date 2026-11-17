@@ -32,6 +32,7 @@ Megatron Bridge uses Megatron Core's distributed checkpointing system, which is 
 |-----------|------|---------|-------------|
 | `save` | `Optional[str]` | `None` | Output directory to save checkpoints to **in Megatron format** |
 | `save_interval` | `Optional[int]` | `None` | Number of iterations between persistent checkpoint saves |
+| `save_steps` | `Optional[list[int]]` | `None` | Iterations at which to save as well, each positive |
 | `save_optim` | `bool` | `True` | Whether to save optimizer state |
 | `save_rng` | `bool` | `True` | Whether to save random number generator state |
 | `save_tokenizer_assets` | `bool` | `True` | Whether to save tokenizer files (vocab, config, special tokens) to checkpoint |

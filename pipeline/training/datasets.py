@@ -16,6 +16,9 @@
 Catalogue:
     configure_sft_dataset: set up an SFT launch's chat processing and its pre-packed parquet bypass.
     BIN_IDX_MODES: the modes whose training data is a .bin/.idx blend.
+    DATALOADER_TYPES: the samplers a .bin/.idx run may name.
+    DEFAULT_DATALOADER_TYPE: the sampler of a .bin/.idx run that names none.
+    DATALOADER_KEY: the dataset key that names the sampler.
     bin_idx_dataset_config: the .bin/.idx data of a cpt or pretrain launch.
 """
 
@@ -87,9 +90,23 @@ def configure_sft_dataset(cfg: ConfigContainer) -> None:
 # The modes whose training data is a .bin/.idx blend (``bin_idx_dataset_config``).
 BIN_IDX_MODES = ("cpt", "pretrain")
 
+# The samplers a .bin/.idx run may name in ``dataset.bin_idx_dataloader_type``; docs/isambard/training-pipeline.md
+# says what each does.
+#
+# The key is not ``dataset.dataloader_type`` on purpose. The merged section that this module reads holds the RECIPE's
+# own value for that name as well as the YAML's (``single`` in a pretrain recipe, ``batch`` in the SFT recipe that a cpt
+# run starts from), so reading it would let a recipe change the sampler of a run whose YAML names none.
+DATALOADER_TYPES = ("cyclic", "single")
+DEFAULT_DATALOADER_TYPE = "cyclic"
+DATALOADER_KEY = "bin_idx_dataloader_type"
+
 
 def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
     """The .bin/.idx training data a ``cpt`` or ``pretrain`` run reads, from its merged ``dataset`` section.
+
+    The section's ``data_path``, ``split``, ``seq_length``, ``seed`` and ``path_to_cache`` are read, and
+    ``bin_idx_dataloader_type`` (one of ``DATALOADER_TYPES``, ``DEFAULT_DATALOADER_TYPE`` when absent). Any other key
+    is dropped, ``dataloader_type`` included.
 
     Args:
         yaml_dataset: The merged config's ``dataset`` section.
@@ -97,6 +114,9 @@ def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
 
     Returns:
         An unfinalized GPTDatasetConfig; setup attaches the tokenizer and finalizes it.
+
+    Raises:
+        ValueError: The section names no data, or names a ``bin_idx_dataloader_type`` outside ``DATALOADER_TYPES``.
     """
     data_path = yaml_dataset.get("data_path")
     if not data_path:
@@ -122,6 +142,9 @@ def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
     # BlendedDataset index cache (it has no next-to-data fallback of its own and is
     # otherwise rebuilt at every launch).
     path_to_cache = yaml_dataset.get("path_to_cache")
+    dataloader_type = yaml_dataset.get(DATALOADER_KEY, DEFAULT_DATALOADER_TYPE)
+    if dataloader_type not in DATALOADER_TYPES:
+        raise ValueError(f"dataset.{DATALOADER_KEY} must be one of {DATALOADER_TYPES}, got {dataloader_type!r}")
 
     return GPTDatasetConfig(
         seq_length=seq_length,
@@ -132,6 +155,6 @@ def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
         reset_attention_mask=False,
         eod_mask_loss=False,
         mmap_bin_files=True,
-        dataloader_type="cyclic",
+        dataloader_type=dataloader_type,
         path_to_cache=path_to_cache,
     )

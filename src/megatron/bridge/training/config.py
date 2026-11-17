@@ -634,6 +634,11 @@ class CheckpointConfig(MTrainCheckpointConfig):
     a resumed step (a weights-only start from ``pretrained_checkpoint``) the flag changes nothing.
     """
 
+    save_steps: Optional[list[int]] = None
+    """Iterations at which to save, beside every ``save_interval`` iterations. A run that needs saves at chosen
+    shares of its length lists their steps here, because ``save_interval`` alone cannot place saves unevenly. Each
+    step must be positive."""
+
     storage_writers_per_rank: int = 1
     """Number of storage writers per rank for torch_dist checkpoint format.
     Affects the number of checkpoint files: saving_ranks * storage_writers_per_rank."""
@@ -656,8 +661,30 @@ class CheckpointConfig(MTrainCheckpointConfig):
     Example: ``'mypackage.checkpoint.MyCheckpointManager'``
     """
 
+    def is_save_step(self, step: int) -> bool:
+        """Whether a regular save is due after iteration ``step``: a save directory is set, and ``step`` is a multiple
+        of ``save_interval`` or one of ``save_steps``."""
+        if not self.save:
+            return False
+        on_interval = bool(self.save_interval) and step % self.save_interval == 0
+        return on_interval or (self.save_steps is not None and step in self.save_steps)
+
+    def is_final_save_due(self, step: int) -> bool:
+        """Whether the save at the end of training is due after iteration ``step``: a save directory is set, ``step``
+        is not 0, ``save_interval`` is not 0 (which turns the end-of-run save off), and no regular save
+        (``is_save_step``) wrote ``step`` already."""
+        return bool(self.save) and step != 0 and self.save_interval != 0 and not self.is_save_step(step)
+
+    def first_save_step(self, train_iters: int) -> int:
+        """The earliest save point that a run of ``train_iters`` iterations reaches: the smallest of ``train_iters``,
+        ``save_interval`` when set and the ``save_steps`` entries. ``train_iters`` stands for the end of the run and
+        counts even when no save is written there (``save`` unset, or ``save_interval`` 0)."""
+        return min([train_iters, *(self.save_steps or []), *([self.save_interval] if self.save_interval else [])])
+
     def finalize(self) -> None:
         """Post-initialization checks for checkpoint config."""
+        if self.save_steps is not None and any(step <= 0 for step in self.save_steps):
+            raise ValueError(f"checkpoint.save_steps must hold positive iterations, got {self.save_steps}")
         if self.pretrained_checkpoint is not None:
             from megatron.bridge.training.utils.checkpoint_utils import file_exists
 

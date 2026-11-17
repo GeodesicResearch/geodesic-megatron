@@ -683,6 +683,7 @@ checkpoint:
   replication_factor: 2
   verify_integrity: false
   reset_data_position: false
+  save_steps: null
   storage_writers_per_rank: 1
   custom_manager_class: null
 dist:

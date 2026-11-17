@@ -23,7 +23,7 @@ import pytest
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 
-from megatron.bridge.training.config import TrainingConfig
+from megatron.bridge.training.config import CheckpointConfig, TrainingConfig
 from megatron.bridge.training.train import (
     _dummy_train_step,
     _handle_mxfp8_param_buffer_copy,
@@ -631,6 +631,7 @@ class TestCheckpointAndDecideExit:
         start_time=None,
         checkpoint_save=False,
         checkpoint_save_interval=None,
+        checkpoint_save_steps=None,
         exit_signal_handler=False,
         exit_interval=None,
         step=0,
@@ -642,9 +643,13 @@ class TestCheckpointAndDecideExit:
         mock_state.cfg.train.exit_duration_in_mins = exit_duration_in_mins
         mock_state.cfg.train.exit_signal_handler = exit_signal_handler
         mock_state.cfg.train.exit_interval = exit_interval
-        mock_state.cfg.checkpoint.save = checkpoint_save
-        mock_state.cfg.checkpoint.save_interval = checkpoint_save_interval
-        mock_state.cfg.checkpoint.non_persistent_save_interval = None
+        # A real CheckpointConfig: checkpoint_and_decide_exit asks it whether a save is due (is_save_step).
+        mock_state.cfg.checkpoint = CheckpointConfig(
+            save=checkpoint_save,
+            save_interval=checkpoint_save_interval,
+            save_steps=checkpoint_save_steps,
+            non_persistent_save_interval=None,
+        )
 
         # Mock train state
         mock_state.train_state.step = step
@@ -1063,6 +1068,29 @@ class TestCheckpointAndDecideExit:
         save_call_args = mock_save_checkpoint.call_args
         assert "train_data_iterator" in save_call_args[1]
         assert "non_persistent_ckpt" not in save_call_args[1]  # Should not be non-persistent
+
+    @pytest.mark.parametrize(
+        ("step", "saves"),
+        [(7, True), (12, True), (10, False)],
+        ids=["a listed step", "another listed step", "an unlisted step"],
+    )
+    @patch("megatron.bridge.training.train.save_checkpoint_and_time")
+    @patch("megatron.bridge.training.train.barrier_and_log")
+    @patch("megatron.bridge.training.train.check_nvrx_straggler_detection")
+    def test_regular_checkpoint_save_at_a_listed_step(
+        self, mock_check_nvrx, mock_barrier_log, mock_save_checkpoint, step, saves
+    ):
+        """A step in checkpoint.save_steps saves with no save_interval, and a step outside it does not."""
+        mock_check_nvrx.return_value = False
+
+        state = self._create_mock_state(
+            checkpoint_save=True, checkpoint_save_interval=None, checkpoint_save_steps=[7, 12], step=step
+        )
+
+        result = checkpoint_and_decide_exit(state, **self._create_mock_args())
+
+        assert result is False
+        assert mock_save_checkpoint.called is saves
 
     @patch("megatron.bridge.training.train.save_checkpoint_and_time")
     @patch("megatron.bridge.training.train.barrier_and_log")

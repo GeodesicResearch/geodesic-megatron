@@ -55,14 +55,10 @@ def max_seconds_per_iteration_under_ft_heartbeat(
 def first_checkpoint_iteration(cfg: ConfigContainer) -> int:
     """The iteration at which this run first writes a checkpoint it could restart from.
 
-    A ``save_interval`` at or beyond ``train_iters`` — the save-only-at-end posture — means the
-    final checkpoint is the first one, so the whole run must fit inside the heartbeat window.
+    When neither a ``save_interval`` nor a ``save_steps`` entry falls inside the run — the save-only-at-end
+    posture — the final checkpoint is the first one, so the whole run must fit inside the heartbeat window.
     """
-    train_iters = cfg.train.train_iters
-    save_interval = cfg.checkpoint.save_interval
-    if not save_interval:
-        return train_iters
-    return min(save_interval, train_iters)
+    return cfg.checkpoint.first_save_step(cfg.train.train_iters)
 
 
 def apply_resilience_config(cfg: ConfigContainer, args: argparse.Namespace) -> None:

@@ -129,6 +129,22 @@ def test_save_only_at_end_measures_against_the_whole_run(run_module, cfg, monkey
     assert "18.00" in caplog.text  # 7200 / 400
 
 
+@pytest.mark.parametrize(
+    ("save_interval", "save_steps", "train_iters", "first"),
+    [
+        (1_000_000, [50, 200], 400, 50),  # a listed step before the interval and before the end
+        (100, [250], 400, 100),  # the interval comes first
+        (1_000_000, [500], 400, 400),  # a listed step beyond the run is never reached
+        (None, None, 400, 400),  # nothing but the final save
+    ],
+)
+def test_the_first_checkpoint_is_the_earliest_save_the_run_reaches(cfg, save_interval, save_steps, train_iters, first):
+    cfg.checkpoint.save_interval = save_interval
+    cfg.checkpoint.save_steps = save_steps
+    cfg.train.train_iters = train_iters
+    assert resilience.first_checkpoint_iteration(cfg) == first
+
+
 def test_disable_ft_emits_no_heartbeat_warning(run_module, cfg, monkeypatch, caplog):
     """With ft off there is no heartbeat monitor, so the warning would be noise."""
     cfg.checkpoint.save_interval = 2980

@@ -598,16 +598,10 @@ def train(
             break
 
     # Save final checkpoint when training completes normally and the last
-    # step wasn't already persisted by the interval-based save inside
+    # step wasn't already persisted by the regular save inside
     # checkpoint_and_decide_exit.
     if not should_exit:
-        ckpt_config = config.checkpoint
-        if (
-            ckpt_config.save
-            and global_state.train_state.step != 0
-            and ckpt_config.save_interval != 0
-            and (ckpt_config.save_interval is None or global_state.train_state.step % ckpt_config.save_interval != 0)
-        ):
+        if config.checkpoint.is_final_save_due(global_state.train_state.step):
             save_checkpoint_and_time(
                 global_state,
                 model,
@@ -1338,11 +1332,7 @@ def checkpoint_and_decide_exit(
             return True
 
     # Regular save (persistent and non-persistent).
-    if (
-        state.cfg.checkpoint.save
-        and state.cfg.checkpoint.save_interval
-        and state.train_state.step % state.cfg.checkpoint.save_interval == 0
-    ):
+    if state.cfg.checkpoint.is_save_step(state.train_state.step):
         save_checkpoint_and_time(
             state,
             model,

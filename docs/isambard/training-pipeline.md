@@ -43,6 +43,13 @@ to ~1e-6), `pretrain` uses `nemotron_3_*_pretrain_config` (from-scratch LR — 1
 4.5e-4 Super and Ultra) and dispatches `pretrain()` instead of `finetune()`, whose assert
 would demand a checkpoint.
 
+`dataset.bin_idx_dataloader_type` (`cyclic` or `single`, `cyclic` when absent) picks the sampler of a
+`cpt` or `pretrain` run. `cyclic` gives each data-parallel rank its own slab of the corpus, so the
+samples of a step depend on the GPU count. `single` hands out consecutive samples from the consumed
+count, so the samples of a step are the same at any GPU count and a resume at another width
+continues exactly, and the dataset has already shuffled its windows, so `single` still reads in
+random order. A `.bin/.idx` run does not read `dataset.dataloader_type`.
+
 **Config composition (`base_config:`).** A training YAML may name another under the top-level
 `base_config:` key and then state only the fields it changes. The base path resolves against the
 naming file's directory (never the working directory), a base may itself name a base, and a
@@ -434,5 +441,6 @@ Between retries: `pkill -9 -f "pipeline_training_launch"`, `rm` stale `*_train.o
 
 - **Standard SFT and EM fine-tuning**: Set `save_interval: 1000000` to skip intermediate checkpoints. Megatron-Core always saves a final checkpoint when `train_iters` is reached, so this effectively means "save only at end of training."
 - **Long CPT runs and reasoning/thinking training**: Use a reasonable `save_interval` (e.g., 100) for fault recovery — these runs take hours/days and losing progress is costly.
+- **Saves at chosen steps**: `checkpoint.save_steps` (a list of positive iterations, `null` when absent) saves at those iterations as well as at every `save_interval`. A run that needs saves at chosen shares of its length lists their steps, and sets `save_interval` above `train_iters` when it wants no others.
 - **Rationale**: SFT/EM runs are short (100-500 iters, minutes) and cheap to restart. Intermediate checkpoints waste disk and I/O time. Reasoning/thinking runs are long and need periodic saves for resumption.
 - **No intermediate checkpoints ⇒ skip optimizer + RNG state.** When a YAML has `save_interval: 1000000` (i.e., only the final checkpoint is written), set `checkpoint.save_optim: false` and `checkpoint.save_rng: false`. The final ckpt only needs the model weights; downstream consumers (HF conversion, inference, evals) read just `model.*` keys, never the Adam moments or RNG state. Skipping them shrinks the saved torch_dist files materially (~3× for 30B Nano, similar relative for 120B Super) and trims end-of-training I/O without losing anything load-bearing. Runs *with* intermediate `save_interval` (long CPT, reasoning) keep `save_optim/save_rng` at the defaults so they can resume mid-run.
