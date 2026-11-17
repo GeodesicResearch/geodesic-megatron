@@ -22,6 +22,7 @@ query and cancel jobs on the cluster and start the container, which a unit test 
 import hashlib
 import shlex
 import subprocess
+import time
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from io import StringIO
@@ -40,8 +41,9 @@ from tests.unit_tests.test_run_watch import gated, rejected_result_line  # noqa:
 JOB_NAME = "cp-stage"
 
 
-# The guard's clock in the tests: an hour after the segments' start in sacct_line.
-NOW = datetime(2026, 10, 1, 7, 0, 0)
+# A started segment's start in sacct_line, and the guard's clock in the tests that do not time it: an hour later.
+START_TIME = datetime(2026, 10, 1, 6, 0, 0)
+NOW = START_TIME + timedelta(hours=1)
 
 
 def write_config(tmp_path: Path, **overrides) -> Path:
@@ -66,11 +68,8 @@ def write_config(tmp_path: Path, **overrides) -> Path:
 
 
 def sacct_line(job_id: int, state: str, log_dir: Path, started: bool = True, name: str = JOB_NAME) -> str:
-    start = "2026-10-01T06:00:00" if started else "Unknown"
+    start = START_TIME.strftime("%Y-%m-%dT%H:%M:%S") if started else "Unknown"
     return f"{job_id}|{name}|{state}|{start}|{log_dir}/train-%j.out"
-
-
-LIVE = ("PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "REQUEUED", "RESIZING", "SUSPENDED")
 
 
 class FakeCluster:
@@ -107,14 +106,14 @@ class FakeCluster:
             live = [
                 line.split("|")[0]
                 for line in self.sacct_lines
-                if line.split("|")[1] == name and line.split("|")[2].split()[0] in LIVE
+                if line.split("|")[1] == name and line.split("|")[2].split()[0] in sg.LIVE_STATES
             ]
             return subprocess.CompletedProcess(command, 0, "".join(f"{job_id}\n" for job_id in live))
         if command[0] == "scancel":
             return subprocess.CompletedProcess(command, self.scancel_status, "")
-        if command[0] == "bash" and command[1].endswith("dump_hung_ranks.sh"):
+        if self._is_dump(command):
             return subprocess.CompletedProcess(
-                command, 0, f"nid000001: 4 rank stack(s) written\nevidence: /x/nccl_trace/{command[2]}"
+                command, 0, f"nid000001: 4 rank stack(s) written\nevidence: /x/nccl_trace/{command[2]}/{command[3]}"
             )
         if command[0].endswith("pipeline_env_exec.sh"):
             if self.watch_status is not None:
@@ -133,13 +132,13 @@ class FakeCluster:
     def cancelled(self) -> list[list[str]]:
         return [command for command in self.commands if command[0] == "scancel"]
 
+    @staticmethod
+    def _is_dump(command: list[str]) -> bool:
+        return command[0] == "bash" and command[1].endswith("dump_hung_ranks.sh")
+
     def dumps(self) -> list[str]:
-        """The job IDs dump_hung_ranks.sh was run on, in order."""
-        return [
-            command[2]
-            for command in self.commands
-            if command[0] == "bash" and command[1].endswith("dump_hung_ranks.sh")
-        ]
+        """Each dump_hung_ranks.sh run as ``<job ID>/<sweep>``, in order."""
+        return [f"{command[2]}/{command[3]}" for command in self.commands if self._is_dump(command)]
 
     def watch_arguments(self) -> list[list[str]]:
         return [
@@ -408,15 +407,25 @@ def test_a_stage_with_no_started_segment_fails_the_guard(tmp_path):
         sg.tick(config, sg.START, cluster, NOW)
 
 
-def test_a_stop_cancels_before_it_records(tmp_path):
-    """A record that cannot be written must not keep the stage's jobs alive."""
+@pytest.mark.parametrize("stopped_by", ["the watch", "the start-up window"])
+def test_a_stop_cancels_before_it_records(tmp_path, stopped_by):
+    """A record that cannot be written must not keep the stage's jobs alive. A start-up stop dumps the stacks first,
+    while the ranks still run."""
     (tmp_path / "not-a-directory").write_text("")
-    config = sg.load_guard_config(write_config(tmp_path, record=str(tmp_path / "not-a-directory" / "record.log")))
-    segment(tmp_path, 10, grad_scale={20: float("inf")}, drop=set(range(31, 61)))
+    record = str(tmp_path / "not-a-directory" / "record.log")
+    if stopped_by == "the watch":
+        config = sg.load_guard_config(write_config(tmp_path, record=record))
+        segment(tmp_path, 10, grad_scale={20: float("inf")}, drop=set(range(31, 61)))
+        now, dumps = NOW, []
+    else:
+        config = sg.load_guard_config(write_config(tmp_path, record=record, startup={"first_iteration_minutes": 50}))
+        segment(tmp_path, 10, drop=set(range(1, 61)))
+        now, dumps = START_TIME + timedelta(minutes=51), ["10/stop"]
     cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path), sacct_line(11, "PENDING", tmp_path, started=False)])
     with pytest.raises(OSError):
-        sg.tick(config, sg.START, cluster, NOW)
+        sg.tick(config, sg.START, cluster, now)
     assert cluster.cancelled() == [["scancel", "10", "11"]]
+    assert cluster.dumps() == dumps
 
 
 def test_a_failing_squeue_fails_the_cancellation_rather_than_reading_as_no_jobs(tmp_path):
@@ -555,14 +564,10 @@ def test_a_config_that_cannot_guard_as_written_is_refused(tmp_path, raw, message
 # The start-up window, the stall limit and the end on a final sacct state
 # --------------------------------------------------------------------------------------
 
-START_TIME = datetime(2026, 10, 1, 6, 0, 0)  # sacct_line's start of a started job
-
 
 def no_iteration_yet(tmp_path: Path, job_id: int) -> Path:
-    """A segment log whose training loop has started and logged no iteration."""
-    log = tmp_path / f"train-{job_id}.out"
-    log.write_text("Starting training loop at iteration 0\n")
-    return log
+    """A segment log that has logged no iteration."""
+    return segment(tmp_path, job_id, drop=set(range(1, 61)))
 
 
 def record_lines(config: sg.GuardConfig) -> list[str]:
@@ -593,19 +598,26 @@ def test_a_start_up_window_that_expires_dumps_at_its_minutes_then_dumps_and_canc
     cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path), sacct_line(11, "PENDING", tmp_path, started=False)])
     state = sg.START
 
-    for minute, dumps in ((10, []), (21, ["10"]), (30, ["10"]), (41, ["10", "10"])):
+    for minute, dumps in (
+        (10, []),
+        (21, ["10/startup_m20"]),
+        (30, ["10/startup_m20"]),
+        (41, ["10/startup_m20", "10/startup_m40"]),
+    ):
         action, state, _ = sg.tick(config, state, cluster, START_TIME + timedelta(minutes=minute))
         assert action != "stop" and cluster.dumps() == dumps and not cluster.cancelled()
     action, state, done = sg.tick(config, state, cluster, START_TIME + timedelta(minutes=51))
 
     assert (action, done) == ("stop", False)
-    assert cluster.dumps() == ["10", "10", "10"]
+    assert cluster.dumps() == ["10/startup_m20", "10/startup_m40", "10/stop"]
     assert cluster.cancelled() == [["scancel", "10", "11"]]
     lines = record_lines(config)
     assert any(
-        line.endswith("STOP: start-up window: job 10 logged no iteration within 50 min of starting") for line in lines
+        " STOP: watch exit 0 through iteration None; start-up window: job 10 logged no iteration within 50 min of "
+        "starting; " in line
+        for line in lines
     )
-    assert any("DUMP: stacks of job 10 (dump_hung_ranks.sh): exit 0: " in line for line in lines)
+    assert any("DUMP: stacks of job 10, sweep stop: exit 0: " in line for line in lines)
 
 
 def test_a_start_up_window_closes_at_the_first_iteration(tmp_path):
@@ -617,13 +629,13 @@ def test_a_start_up_window_closes_at_the_first_iteration(tmp_path):
     cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
 
     action, state, _ = sg.tick(config, sg.START, cluster, START_TIME + timedelta(minutes=25))
-    assert cluster.dumps() == ["10"]
+    assert cluster.dumps() == ["10/startup_m20"]
     segment(tmp_path, 10, drop=set(range(4, 61)))
     action, state, _ = sg.tick(config, state, cluster, START_TIME + timedelta(minutes=34))
     assert state.last_iteration == 3 and state.changed_at == START_TIME + timedelta(minutes=34)
     action, state, _ = sg.tick(config, state, cluster, START_TIME + timedelta(minutes=90))
 
-    assert action != "stop" and cluster.dumps() == ["10"] and not cluster.cancelled()
+    assert action != "stop" and cluster.dumps() == ["10/startup_m20"] and not cluster.cancelled()
 
 
 def test_a_stall_after_the_first_iteration_dumps_and_cancels(tmp_path):
@@ -638,9 +650,9 @@ def test_a_stall_after_the_first_iteration_dumps_and_cancels(tmp_path):
     assert action != "stop" and not cluster.cancelled()
     action, state, _ = sg.tick(config, state, cluster, NOW + timedelta(minutes=16))
 
-    assert action == "stop" and cluster.dumps() == ["10"] and cluster.cancelled() == [["scancel", "10"]]
+    assert action == "stop" and cluster.dumps() == ["10/stop"] and cluster.cancelled() == [["scancel", "10"]]
     assert any(
-        line.endswith("STOP: stall: job 10 logged no new iteration for 15 min (its own last iteration 20)")
+        "; stall: job 10 logged no new iteration for 15 min (its own last iteration 20); " in line
         for line in record_lines(config)
     )
 
@@ -738,3 +750,30 @@ def test_the_time_limits_act_only_on_a_tick_whose_watch_ran(tmp_path):
     action, _, _ = sg.tick(config, state, cluster, START_TIME + timedelta(minutes=52))
 
     assert action == "stop" and cluster.cancelled() == [["scancel", "10"]]
+
+
+def test_a_guard_started_late_in_the_window_takes_one_dump_for_the_minutes_it_passed(tmp_path):
+    """Started at minute 45 with dumps listed at 20 and 40: one sweep, named for minute 40, and none again at 47."""
+    config = sg.load_guard_config(
+        write_config(tmp_path, startup={"first_iteration_minutes": 50, "dump_at_minutes": [20, 40]})
+    )
+    no_iteration_yet(tmp_path, 10)
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
+
+    _, state, _ = sg.tick(config, sg.START, cluster, START_TIME + timedelta(minutes=45))
+    sg.tick(config, state, cluster, START_TIME + timedelta(minutes=47))
+
+    assert cluster.dumps() == ["10/startup_m40"]
+
+
+def test_a_command_that_times_out_is_killed_with_every_process_it_started(tmp_path):
+    """A child that holds the output pipe (the dump's srun) is killed too, so the guard neither waits on the pipe nor
+    leaves the child running."""
+    pid_file = tmp_path / "child.pid"
+    with pytest.raises(subprocess.TimeoutExpired):
+        sg.run_command(["bash", "-c", f"sleep 60 & echo $! > {pid_file}; wait"], 2)
+    child = int(pid_file.read_text())
+    deadline = time.monotonic() + 10
+    while Path(f"/proc/{child}").exists() and "Z" not in Path(f"/proc/{child}/stat").read_text().split()[2]:
+        assert time.monotonic() < deadline, f"child {child} still runs after the timeout"
+        time.sleep(0.1)

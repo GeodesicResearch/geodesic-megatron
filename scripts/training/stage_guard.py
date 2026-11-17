@@ -69,8 +69,10 @@ USAGE
 import argparse
 import getpass
 import hashlib
+import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -122,13 +124,17 @@ class GuardConfig(NamedTuple):
 
 
 class Job(NamedTuple):
-    """One job of the stage: its state, whether it has started, its log, and its start time (None before it starts)."""
+    """One job of the stage: its state, its log, and its start time (None before it starts)."""
 
     job_id: int
     state: str
-    started: bool
     log: Path
-    start: Optional[datetime] = None
+    start: Optional[datetime]
+
+    @property
+    def started(self) -> bool:
+        """Whether the job has started."""
+        return self.start is not None
 
 
 class WatchResult(NamedTuple):
@@ -149,7 +155,7 @@ class WatchResult(NamedTuple):
 class GuardState(NamedTuple):
     """What the guard carries from tick to tick: the last iteration a watch checked, the gates passed and the log
     each passed on, the gates still undecided (None until a watch has run), the newest segment's progress as (job
-    ID, the last iteration it has logged itself) and the time a tick first saw it, and the dumps already taken as
+    ID, the last iteration it has logged itself) and the time a tick first saw it, and the last start-up dump taken as
     (job ID, minute)."""
 
     last_iteration: Optional[int]
@@ -157,7 +163,7 @@ class GuardState(NamedTuple):
     undecided: Optional[Tuple[str, ...]]
     progress: Optional[Tuple[int, int]] = None
     changed_at: Optional[datetime] = None
-    dumped: Tuple[Tuple[int, int], ...] = ()
+    dumped: Optional[Tuple[int, int]] = None
 
 
 START = GuardState(last_iteration=None, decided={}, undecided=None)
@@ -166,7 +172,9 @@ START = GuardState(last_iteration=None, decided={}, undecided=None)
 def load_guard_config(path: Path) -> GuardConfig:
     """Read a guard config; the watch spec and record paths resolve against the repository root.
 
-    Raises ValueError on an unknown key or a hold other than ``from_iteration``; KeyError on a missing required key.
+    Raises ValueError on an unknown key, a hold other than ``from_iteration``, a ``startup`` without
+    ``first_iteration_minutes`` or with another key, a limit below 1 minute or a dump minute outside the start-up
+    window; KeyError on a missing required key.
     """
     raw = yaml.safe_load(Path(path).read_text())
     keys = {
@@ -180,18 +188,16 @@ def load_guard_config(path: Path) -> GuardConfig:
     if hold and set(hold) != {"from_iteration"}:
         raise ValueError("{}: hold needs exactly from_iteration".format(path))
     startup = raw.get("startup") or {}
-    if startup and (
-        not set(startup) <= {"first_iteration_minutes", "dump_at_minutes"} or "first_iteration_minutes" not in startup
-    ):
-        raise ValueError("{}: startup needs first_iteration_minutes and may give dump_at_minutes".format(path))
-    startup_minutes = int(startup["first_iteration_minutes"]) if startup else None
-    dump_minutes = tuple(sorted(int(minute) for minute in startup.get("dump_at_minutes", ()))) if startup else ()
-    if startup_minutes is not None and (
-        startup_minutes < 1 or any(not 1 <= m < startup_minutes for m in dump_minutes)
-    ):
-        raise ValueError(
-            "{}: startup.first_iteration_minutes must be 1 or more and each dump_at_minutes below it".format(path)
-        )
+    startup_minutes, dump_minutes = None, ()
+    if startup:
+        if not {"first_iteration_minutes"} <= set(startup) <= {"first_iteration_minutes", "dump_at_minutes"}:
+            raise ValueError("{}: startup needs first_iteration_minutes and may give dump_at_minutes".format(path))
+        startup_minutes = int(startup["first_iteration_minutes"])
+        dump_minutes = tuple(sorted(int(minute) for minute in startup.get("dump_at_minutes", ())))
+        if startup_minutes < 1 or any(not 1 <= minute < startup_minutes for minute in dump_minutes):
+            raise ValueError(
+                "{}: startup.first_iteration_minutes must be 1 or more and each dump_at_minutes below it".format(path)
+            )
     stall_minutes = int(raw["stall_minutes"]) if "stall_minutes" in raw else None
     if stall_minutes is not None and stall_minutes < 1:
         raise ValueError("{}: stall_minutes must be 1 or more".format(path))
@@ -225,9 +231,8 @@ def parse_jobs(sacct_output: str, job_name: str) -> List[Job]:
             continue
         state = state.split()[0]
         log = stdout.replace("%j", job_id).replace("%x", name)
-        started = start not in ("Unknown", "None", "")
-        started_at = datetime.strptime(start, "%Y-%m-%dT%H:%M:%S") if started else None
-        jobs.append(Job(int(job_id), state, started, Path(log), started_at))
+        started_at = None if start in ("Unknown", "None", "") else datetime.strptime(start, "%Y-%m-%dT%H:%M:%S")
+        jobs.append(Job(int(job_id), state, Path(log), started_at))
     return sorted(jobs, key=lambda job: job.job_id)
 
 
@@ -304,16 +309,25 @@ Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess"]
 
 
 def run_command(command: Sequence[str], timeout_seconds: int) -> "subprocess.CompletedProcess":
-    """Run a command, its stderr merged into its stdout (Python 3.6 has no ``capture_output``). Raises
-    subprocess.TimeoutExpired, after killing it, when it outlives ``timeout_seconds``."""
-    return subprocess.run(
+    """Run a command in its own session, its stderr merged into its stdout (Python 3.6 has no ``capture_output``).
+
+    Raises subprocess.TimeoutExpired, after killing its whole process group, when it outlives ``timeout_seconds``.
+    Killing the group matters: a child such as the dump's ``srun`` holds the output pipe, and Python 3.6's
+    ``subprocess.run`` would wait for that pipe to close with no limit after killing only the command."""
+    process = subprocess.Popen(
         list(command),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         universal_newlines=True,
-        check=False,
-        timeout=timeout_seconds,
+        start_new_session=True,
     )
+    try:
+        output, _ = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(process.args, process.returncode, output)
 
 
 def stage_jobs(config: GuardConfig, run: Runner) -> List[Job]:
@@ -413,58 +427,56 @@ def _record(config: GuardConfig, line: str, detail: str = "") -> None:
 DUMP_SCRIPT = REPO_ROOT / "scripts" / "training" / "dump_hung_ranks.sh"
 
 
-def timed_check(
-    config: GuardConfig, state: GuardState, newest: Job, now: datetime
-) -> Tuple[Optional[str], Tuple[int, ...], str]:
-    """The start-up window and the stall limit for the stage's newest segment: (``"stop"``, (), reason), (``"dump"``,
-    the dump minutes now due, reason) or (None, (), "").
+def _minutes_since(then: datetime, now: datetime) -> float:
+    return (now - then).total_seconds() / 60
 
-    The segment is in its start-up window until a watch has seen it log an iteration of its own (``state.progress``
-    names it); the window counts from the segment's start (sacct) and is ``config.startup_minutes`` long, with a stack
-    dump at each of ``config.startup_dump_minutes``. After that, ``config.stall_minutes`` without a new iteration of its
-    own is a stall. Neither rule applies when its key is not set, or when the segment is not running."""
-    if newest.state != "RUNNING" or newest.start is None:
-        return None, (), ""
-    if state.progress is None or state.progress[0] != newest.job_id:
-        if config.startup_minutes is None:
-            return None, (), ""
-        minutes = (now - newest.start).total_seconds() / 60
-        if minutes >= config.startup_minutes:
-            return (
-                "stop",
-                (),
-                "start-up window: job {} logged no iteration within {} min of starting".format(
-                    newest.job_id, config.startup_minutes
-                ),
+
+def in_startup_window(state: GuardState, newest: Job) -> bool:
+    """Whether the newest segment is running and no watch has yet seen it log an iteration of its own."""
+    return newest.state == "RUNNING" and (state.progress is None or state.progress[0] != newest.job_id)
+
+
+def timed_stop_reason(config: GuardConfig, state: GuardState, newest: Job, now: datetime) -> Optional[str]:
+    """Why the time limits stop the newest segment now, or None.
+
+    In its start-up window (``in_startup_window``), a segment is stopped ``config.startup_minutes`` after it started
+    (sacct's start time). After its first iteration, ``config.stall_minutes`` without a new iteration of its own is a
+    stall. Neither rule applies when its key is not set, or when the segment is not running."""
+    if newest.state != "RUNNING":
+        return None
+    if in_startup_window(state, newest):
+        if config.startup_minutes is not None and _minutes_since(newest.start, now) >= config.startup_minutes:
+            return "start-up window: job {} logged no iteration within {} min of starting".format(
+                newest.job_id, config.startup_minutes
             )
-        due = tuple(m for m in config.startup_dump_minutes if minutes >= m and (newest.job_id, m) not in state.dumped)
-        if due:
-            return (
-                "dump",
-                due,
-                "job {} has logged no iteration {:.0f} min after starting".format(newest.job_id, minutes),
-            )
-        return None, (), ""
-    if config.stall_minutes is not None and (now - state.changed_at).total_seconds() / 60 >= config.stall_minutes:
-        return (
-            "stop",
-            (),
-            "stall: job {} logged no new iteration for {} min (its own last iteration {})".format(
-                newest.job_id, config.stall_minutes, state.progress[1]
-            ),
+        return None
+    if config.stall_minutes is not None and _minutes_since(state.changed_at, now) >= config.stall_minutes:
+        return "stall: job {} logged no new iteration for {} min (its own last iteration {})".format(
+            newest.job_id, config.stall_minutes, state.progress[1]
         )
-    return None, (), ""
+    return None
 
 
-def dump_stacks(config: GuardConfig, job_id: int, run: Runner) -> None:
-    """Run dump_hung_ranks.sh on the job and record how it went; a dump that fails or times out is recorded and does
-    not stop the guard, so a stop that follows still cancels."""
+def dump_due(config: GuardConfig, state: GuardState, newest: Job, now: datetime) -> Optional[int]:
+    """The listed dump minute the newest segment's start-up window has now passed with no dump taken at it, or None.
+    One dump covers every listed minute up to it."""
+    if not in_startup_window(state, newest):
+        return None
+    passed = [minute for minute in config.startup_dump_minutes if minute <= _minutes_since(newest.start, now)]
+    if not passed or state.dumped == (newest.job_id, passed[-1]):
+        return None
+    return passed[-1]
+
+
+def dump_stacks(job_id: int, sweep: str, run: Runner) -> str:
+    """Run dump_hung_ranks.sh on the job into its sweep's own folder and return the record's line for it. A dump that
+    fails or times out is reported in that line and raises nothing, so a stop that follows still cancels."""
     try:
-        result = run(["bash", str(DUMP_SCRIPT), str(job_id)])
+        result = run(["bash", str(DUMP_SCRIPT), str(job_id), sweep])
         outcome = "exit {}: {}".format(result.returncode, " | ".join(result.stdout.strip().splitlines()[-3:]))
     except (OSError, subprocess.SubprocessError) as error:
         outcome = "{}: {}".format(type(error).__name__, error)
-    _record(config, "DUMP: stacks of job {} ({}): {}".format(job_id, DUMP_SCRIPT.name, outcome))
+    return "DUMP: stacks of job {}, sweep {}: {}".format(job_id, sweep, outcome)
 
 
 class NoStartedSegment(RuntimeError):
@@ -491,11 +503,16 @@ def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> 
         except Exception as error:  # noqa: BLE001 - judged by the hold window like a watch that could not run
             result = could_not_evaluate("{}: {}".format(type(error).__name__, error))
     state = advance(state, result)
-    if result.ran and started and result.newest_iteration is not None:
-        progress = (started[-1].job_id, result.newest_iteration)
+    # The time limits judge the newest segment, and only on a tick whose watch ran; a watch that ran saw a segment.
+    newest = started[-1] if result.ran else None
+    if newest is not None and result.newest_iteration is not None:
+        progress = (newest.job_id, result.newest_iteration)
         if progress != state.progress:
             state = state._replace(progress=progress, changed_at=now)
     action = decide(result, state, config)
+    timed = timed_stop_reason(config, state, newest, now) if newest is not None and action == "continue" else None
+    if timed is not None:
+        action = "stop"
     segments = ", ".join("{}:{}".format(job.job_id, job.state) for job in started)
     if result.ran:
         summary = "watch exit {} through iteration {}".format(result.status, result.checked_iteration)
@@ -503,30 +520,27 @@ def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> 
         summary = "could not evaluate: {}".format(result.output)
     else:
         summary = "watch could not run (exit {})".format(result.status)
+    if timed is not None:
+        summary += "; " + timed
     undecided = "unknown" if state.undecided is None else ", ".join(state.undecided) or "none"
     line = "{}: {}; undecided gates {} [{}] spec {}".format(action.upper(), summary, undecided, segments, spec)
     detail = result.output if result.status is not None else ""
     if action in ("stop", "hold"):
+        # A timed stop dumps first, while the ranks still run; every stop and hold cancels before it records.
+        dumped = dump_stacks(newest.job_id, "stop", run) if timed is not None else None
         try:
             cancelled = cancel_live_jobs(config, started, run)
-        except CancelFailed:
+        finally:
             _record(config, line, detail)
-            raise
-        _record(config, line, detail)
+            if dumped is not None:
+                _record(config, dumped)
         _record(config, "{}: cancelled {}".format(action.upper(), cancelled or "nothing (no live job)"))
         return action, state, False
     _record(config, line, detail)
-    timed, due, reason = timed_check(config, state, started[-1], now) if result.ran else (None, (), "")
-    if timed == "stop":
-        _record(config, "STOP: {}".format(reason))
-        dump_stacks(config, started[-1].job_id, run)
-        cancelled = cancel_live_jobs(config, started, run)
-        _record(config, "STOP: cancelled {}".format(cancelled or "nothing (no live job)"))
-        return "stop", state, False
-    if timed == "dump":
-        _record(config, "STARTUP: {}; stack dump at minute {}".format(reason, max(due)))
-        dump_stacks(config, started[-1].job_id, run)
-        state = state._replace(dumped=state.dumped + tuple((started[-1].job_id, minute) for minute in due))
+    minute = dump_due(config, state, newest, now) if newest is not None else None
+    if minute is not None:
+        _record(config, dump_stacks(newest.job_id, "startup_m{}".format(minute), run))
+        state = state._replace(dumped=(newest.job_id, minute))
     # live_jobs includes the segments sacct shows live, so one empty squeue reply does not end the guard.
     done = (
         config.final_iteration is not None

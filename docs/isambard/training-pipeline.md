@@ -225,9 +225,12 @@ placement measurements).
   at each listed minute and one before the cancel. With it, the guard may be started as soon as the segment starts,
   before its first iteration. `stall_minutes` stops a segment that has logged no new iteration of its own for that
   many minutes. The dumps are
-  `scripts/training/dump_hung_ranks.sh` runs. They land beside the raw log in `<log-dir>/nccl_trace/<jobid>/`, one
-  stack file per rank and one process table per node: about 1.5 MB in 354 files for a 64-node job, and tens of KB
-  for a 2-node job. Each later dump of the same job overwrites the files of the earlier one.
+  `scripts/training/dump_hung_ranks.sh` runs. Each dump lands beside the raw log in its own folder,
+  `<log-dir>/nccl_trace/<jobid>/<sweep>/`, where the sweep is `startup_m<minute>` or `stop`. A dump holds one stack
+  file per rank and one process table per node: about 1.5 MB in 354 files for a 64-node job, and tens of KB for a
+  2-node job. A guard that first ticks after several listed minutes takes one dump, at the latest of them. A stop
+  dumps before it cancels, because the stacks need the ranks alive. The cancel then waits for the dump, for at most
+  the guard's `command_timeout_seconds`.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
   CLI overrides and, for a `base_config:` overlay, every field it inherits (the
   profiler's `config_snapshot.yaml` is that overlay verbatim), but the bridge sends the
