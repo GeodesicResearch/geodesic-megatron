@@ -152,3 +152,38 @@ def test_env_gates_install_their_patches(run_module, monkeypatch, tmp_path, case
         "row_telemetry": getattr(GPTSFTPackedParquetDataset.__getitem__, "_isambard_row_telemetry", False),
     }
     assert_golden_json(GOLDENS / "env_gates" / f"{case}.json", record)
+
+
+@pytest.mark.parametrize("value, installed", [(None, False), ("5,10,15,20", True)])
+def test_the_routed_rows_gate_installs_its_telemetry(run_module, monkeypatch, tmp_path, value, installed):
+    """ISAMBARD_MOE_ROUTED_ROWS_ITERS installs the routed-row and memory telemetry on HybridEP's dispatch and Bridge's
+    train step; without it neither is touched."""
+    from megatron.core.transformer.moe import token_dispatcher
+
+    from megatron.bridge.training import train as bridge_train
+
+    # Re-set each patched attribute to itself so that monkeypatch restores it when the test ends.
+    monkeypatch.setattr(token_dispatcher._HybridEPManager, "dispatch", token_dispatcher._HybridEPManager.dispatch)
+    monkeypatch.setattr(bridge_train, "train_step", bridge_train.train_step)
+    monkeypatch.delenv("ISAMBARD_MOE_ROUTED_ROWS_ITERS", raising=False)
+    if value is not None:
+        monkeypatch.setenv("ISAMBARD_MOE_ROUTED_ROWS_ITERS", value)
+
+    run_main(run_module, monkeypatch, tmp_path, "nano", "sft", ["--disable-ft"])
+
+    assert getattr(token_dispatcher._HybridEPManager.dispatch, "_isambard_routed_rows", False) is installed
+    assert getattr(bridge_train.train_step, "_isambard_routed_rows", False) is installed
+
+
+def test_the_routed_rows_gate_refuses_a_malformed_iteration_list(run_module, monkeypatch, tmp_path):
+    """A value that is not comma-separated iterations of 1 or more stops the launch, naming the variable."""
+    from megatron.core.transformer.moe import token_dispatcher
+
+    from megatron.bridge.training import train as bridge_train
+
+    monkeypatch.setattr(token_dispatcher._HybridEPManager, "dispatch", token_dispatcher._HybridEPManager.dispatch)
+    monkeypatch.setattr(bridge_train, "train_step", bridge_train.train_step)
+    monkeypatch.setenv("ISAMBARD_MOE_ROUTED_ROWS_ITERS", "5,ten")
+
+    with pytest.raises(ValueError, match="ISAMBARD_MOE_ROUTED_ROWS_ITERS='5,ten'"):
+        run_main(run_module, monkeypatch, tmp_path, "nano", "sft", ["--disable-ft"])

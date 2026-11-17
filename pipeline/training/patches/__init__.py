@@ -21,4 +21,5 @@ Catalogue:
     mamba_scan: fp32 SSM state and saved-tensor host offload for the Mamba2 training scan.
     comm_warmup: NCCL communicators of every model-parallel group initialised in one parallel wave.
     row_telemetry: a log line per packed-parquet row fetch, mapping dataset index to parquet row.
+    routed_rows: the rows each GPU received per HybridEP dispatch and its memory, after chosen iterations.
 """

@@ -155,6 +155,19 @@ def main() -> None:
 
         patch_packed_parquet_row_telemetry()
 
+    # Routed rows and memory per rank after the listed iterations (comma-separated): the memory margin that the busiest
+    # GPU of a HybridEP MoE run leaves, which Megatron reports only after the first iteration.
+    if os.environ.get("ISAMBARD_MOE_ROUTED_ROWS_ITERS"):
+        from megatron.core import parallel_state
+
+        from pipeline.training.patches.routed_rows import parse_report_iterations, patch_hybridep_routed_rows_telemetry
+
+        patch_hybridep_routed_rows_telemetry(
+            parse_report_iterations(os.environ["ISAMBARD_MOE_ROUTED_ROWS_ITERS"], "ISAMBARD_MOE_ROUTED_ROWS_ITERS"),
+            read_memory=lambda: (torch.cuda.max_memory_allocated(), torch.cuda.memory_allocated()),
+            where=lambda: (torch.distributed.get_rank(), parallel_state.get_pipeline_model_parallel_rank()),
+        )
+
     args, cli_overrides = parse_cli_args()
 
     peft = args.peft if args.peft and args.peft.lower() != "none" else None
