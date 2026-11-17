@@ -185,6 +185,9 @@ scheduler:
   # warmup length: the WSD branch ignores lr_warmup_steps, so the boundary is already
   # continuous to 0.254% and shortening this would introduce the gap it looks like it avoids.
   lr_wsd_decay_iters: 3126
+  # The stage-1 config gives the reason for these two.
+  start_weight_decay: 0.033
+  end_weight_decay: 0.033
 
 optimizer:
   lr: 7.5e-4                   # 75% of stage 1's stable rate; see the schedule note in the header

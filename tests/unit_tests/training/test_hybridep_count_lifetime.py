@@ -33,6 +33,9 @@ sequence runs in a child process, whose CUDA context a fault would poison for go
 
 The device copy is the pinned submodule's carried commit 0004 (``3rdparty/patches/megatron-lm/README.md``).
 All the tests need a GPU and deep_ep's HybridEP, which are environment boundaries.
+
+The test of the hazard on deep_ep's own API skips on a deep_ep that keeps the count on the device
+(``_permute_reads_the_pinned_count``).
 """
 
 import json
@@ -92,6 +95,17 @@ def _addresses(blocks):
     return {block.data_ptr() for block in blocks}
 
 
+def _permute_reads_the_pinned_count() -> bool:
+    """Whether deep_ep's standalone permute and unpermute kernels read the dispatched-token count from pinned memory.
+
+    They do in a deep_ep whose handle carries a ``row_id_map``. A deep_ep without it (DeepEP #625) reads the count
+    from the handle's device ``dense_chunk_layout``. A freed pinned block then feeds no kernel.
+    """
+    from deep_ep import hybrid_ep_buffer
+
+    return hasattr(hybrid_ep_buffer.hybrid_ep_cpp.HandleImpl, "row_id_map")
+
+
 def _dispatch(hidden, routing_map, probs, group):
     """Megatron's blocking HybridEP dispatch: (dispatched tokens, permuted row count, handle)."""
     dispatched, _, _, tokens_per_expert, handle = fused_a2a.hybrid_ep_dispatch(
@@ -134,6 +148,8 @@ def test_a_blocking_dispatch_hands_out_its_count_on_the_device(group):
 @requires_hybridep
 def test_a_raw_deep_ep_handle_count_is_handed_out_again_once_freed(group):
     """The hazard itself, on deep_ep's own API: why HybridEPDispatch copies the count."""
+    if not _permute_reads_the_pinned_count():
+        pytest.skip("this deep_ep keeps the dispatched-token count on the device, so no freed pinned block is read")
     hidden, routing_map, probs = _inputs()
     with torch.no_grad():
         _dispatch(hidden, routing_map, probs, group)

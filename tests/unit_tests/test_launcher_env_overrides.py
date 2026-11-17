@@ -193,6 +193,11 @@ def test_a_repeated_key_is_fatal(tmp_path):
         # Derived by pipeline_env_config.env from GEODESIC_CONTAINER_* on every node.
         ("CONTAINER_SIF", "override its GEODESIC_CONTAINER_* input"),
         ("CONTAINER_PYTHON_OVERLAY", "override its GEODESIC_CONTAINER_* input"),
+        # The cluster profile's values, and the name that selects the profile: a launch runs on one cluster.
+        ("CLUSTER_GPUS_PER_NODE", "is the cluster profile's"),
+        ("CLUSTER_FABRIC", "is the cluster profile's"),
+        ("_CLUSTER_PROFILE_DIR", "is the cluster profile's"),
+        ("GEODESIC_CLUSTER", "is set by the launcher itself"),
         # Bash's own shell variables.
         ("IFS", "is a shell variable of the launcher"),
         ("OPTIND", "is a shell variable of the launcher"),

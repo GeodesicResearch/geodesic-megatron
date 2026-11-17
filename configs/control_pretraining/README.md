@@ -500,8 +500,8 @@ probe that exits at its second save, passes while the campaign dies.
    capacity (~4096 entries); the save's host-buffer churn fills the cache with dead entries
    and every later registration takes the slow path. Fix: `FI_MR_CACHE_MAX_COUNT=65536` /
    `FI_MR_CACHE_MAX_SIZE=-1`, exported by `fabric_training` in `pipeline/sh/fabric.sh` (the
-   monitor setting is in `fabric_shared` there). Verified by A/B at 512 ranks: without the override the collapse reproduced 5/5;
-   with it, save crossings hold 5.9–6.0 s/iter.
+   monitor setting is in `slingshot_shared` there). Verified by A/B at 512 ranks: without the override the collapse reproduced 5/5.
+   With it, save crossings hold 5.9–6.0 s/iter.
 
 2. **A one-time ~4 GB memory step on the coordinator rank at the first save**, invisible to
    the torch allocator (identical live/reserved bytes in post-save snapshots) and immune to

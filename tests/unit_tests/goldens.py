@@ -23,16 +23,32 @@ Catalogue:
     assert_golden_bytes: compare bytes with a golden file.
     assert_golden_json: compare a JSON-serialisable value with a golden JSON file.
     assert_golden_tree: compare every file under a directory with a golden directory.
+    without_library_warnings: a process's stderr without the Python warnings its installed libraries printed.
 """
 
 import difflib
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+_REPO_ROOT = FIXTURES.parent.parent.parent
+# A warning as the warnings module prints it: "<file>:<line>: <Category>: <message>", then the source line it points
+# at, indented by two spaces.
+_WARNING = re.compile(r"^(?P<file>/\S+):\d+: [A-Z]\w*(?:Warning|Error): .*\n(?:  .*\n)?", re.MULTILINE)
+
+
+def without_library_warnings(stderr: str) -> str:
+    """``stderr`` without the Python warnings raised from files outside this repo.
+
+    The libraries in the image raise these warnings. Their file, line and text change with each library release, so a
+    golden that records one fails after an image change. The function keeps a warning raised from this repo's own
+    files.
+    """
+    return _WARNING.sub(lambda match: match[0] if match["file"].startswith(f"{_REPO_ROOT}/") else "", stderr)
 
 
 def updating() -> bool:

@@ -341,11 +341,21 @@ def run_tool(*args: str, env: dict[str, str] | None = None) -> subprocess.Comple
     )
 
 
-def test_the_clone_root_defaults_to_the_environment_then_a_per_user_project_directory():
-    per_user = Path("/projects/a5k/public/tmp/export_clones_someone")
-    assert export_clone.default_clone_root({export_clone.CLONE_ROOT_ENV: "/x/clones"}, "someone") == Path("/x/clones")
-    assert export_clone.default_clone_root({}, "someone") == per_user
-    assert export_clone.default_clone_root({export_clone.CLONE_ROOT_ENV: ""}, "someone") == per_user
+@pytest.mark.parametrize(
+    "cluster, per_user",
+    [
+        ("isambard", "/projects/a5k/public/tmp/export_clones_someone"),
+        ("verda", "/shared/geodesic/scratch_someone/export_clones"),
+    ],
+)
+def test_the_clone_root_defaults_to_the_environment_then_the_clusters_per_user_directory(
+    monkeypatch, cluster, per_user
+):
+    monkeypatch.setenv("GEODESIC_CLUSTER", cluster)
+    monkeypatch.setenv("USER", "someone")
+    assert export_clone.default_clone_root({export_clone.CLONE_ROOT_ENV: "/x/clones"}) == Path("/x/clones")
+    assert export_clone.default_clone_root({}) == Path(per_user)
+    assert export_clone.default_clone_root({export_clone.CLONE_ROOT_ENV: ""}) == Path(per_user)
 
 
 def test_cli_builds_and_removes_a_clone_under_the_environment_root(torch_grouped, tmp_path):

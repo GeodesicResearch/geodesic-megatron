@@ -18,7 +18,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from scripts.nemotronh_flops_estimator import DEFAULT_PEAK_TFLOPS, resolve_hf_config
+from scripts.nemotronh_flops_estimator import default_peak_tflops, resolve_hf_config
 from scripts.nemotronh_flops_estimator import main as estimator_main
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml, parse_yaml_mapping
 
@@ -38,6 +38,9 @@ BASELINE_CONFIG = (
 )
 QUICKSTART_CONFIG = REPO_ROOT / "configs" / "quickstart" / "nemotron_nano_quickstart_pretrain.yaml"
 NANO_HF_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+# The fixture log is an Isambard run, and the suite's cluster is Isambard (conftest.py), so the CLI's default peak
+# is this one.
+DEFAULT_PEAK_TFLOPS = default_peak_tflops("isambard")
 
 # 16,777,216 tokens per iteration over 256 GPUs; the window's 25 logged steps sum to 250581.7 ms.
 FIXTURE_TOKENS_PER_S_PER_GPU = 65536 / 10.023268
@@ -439,6 +442,17 @@ def test_cli_peak_override_scales_mfu(sr, cli_args, capsys):
     assert at_500["peak_tflops_per_gpu"] == 500.0
     assert at_500["model_tflops_per_gpu"] == at_default["model_tflops_per_gpu"]
     assert at_500["mfu"] == pytest.approx(at_default["mfu"] * DEFAULT_PEAK_TFLOPS / 500)
+
+
+def test_cli_cluster_names_the_gpus_whose_peak_mfu_is_a_fraction_of(sr, cli_args, capsys):
+    """The same throughput is a smaller fraction of a B300's peak than of a GH200's."""
+    assert sr.main([str(FIXTURE), *cli_args, "--json"]) == 0
+    at_default = json.loads(capsys.readouterr().out)
+    assert sr.main([str(FIXTURE), *cli_args, "--cluster", "verda", "--json"]) == 0
+    on_verda = json.loads(capsys.readouterr().out)
+    assert on_verda["peak_tflops_per_gpu"] == default_peak_tflops("verda") == 2250.0
+    assert on_verda["model_tflops_per_gpu"] == at_default["model_tflops_per_gpu"]
+    assert on_verda["mfu"] == pytest.approx(at_default["mfu"] * DEFAULT_PEAK_TFLOPS / 2250.0)
 
 
 def test_cli_wandb_peak_memory_adds_the_summary_peaks(sr, cli_args, monkeypatch, capsys):

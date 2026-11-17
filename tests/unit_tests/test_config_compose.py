@@ -30,11 +30,13 @@ import yaml
 from omegaconf import OmegaConf
 from scripts.training.config_compose import (
     BASE_CONFIG_KEY,
+    RELOCATE_KEY,
     composition_chain,
     deep_merge,
     load_composed,
     load_composed_yaml,
     parse_yaml_mapping,
+    relocate_paths,
 )
 
 
@@ -174,6 +176,113 @@ class TestChains:
             "b": [1],
         }
         assert load_composed_yaml(top)["a"]["y"] == 1e-3
+
+
+class TestRelocation:
+    """``base_config_relocate``: the composed base's paths move under another storage layout's roots."""
+
+    @staticmethod
+    def _files(tmp_path, map_text: str, overlay_body: str = "") -> Path:
+        (tmp_path / "base.yaml").write_text(
+            "dataset:\n"
+            "  root: /old/data/corpus\n"
+            "  data_path: ['0.5', /old/data/a/tokens, '0.5', /old/data_other/b]\n"
+            "  globbed: /old/data/c/shard*/packed.parquet\n"
+            "checkpoint:\n"
+            "  save: /old/checkpoints/run\n"
+            "  load: null\n"
+            "logger:\n"
+            "  name: /old/data is only a name here\n"
+            "  dir: /old\n"
+        )
+        (tmp_path / "map.yaml").write_text(map_text)
+        overlay = tmp_path / "overlay.yaml"
+        overlay.write_text(f"{BASE_CONFIG_KEY}: base.yaml\n{RELOCATE_KEY}: map.yaml\n{overlay_body}")
+        return overlay
+
+    def test_every_path_at_or_under_a_prefix_moves_and_nothing_else_does(self, tmp_path):
+        overlay = self._files(tmp_path, "/old/data: /new/shared/data\n/old/checkpoints: /new/mine/checkpoints\n")
+        assert load_composed_yaml(overlay) == {
+            "dataset": {
+                "root": "/new/shared/data/corpus",
+                # A weight, a path under the prefix, and a path that only begins like it.
+                "data_path": ["0.5", "/new/shared/data/a/tokens", "0.5", "/old/data_other/b"],
+                "globbed": "/new/shared/data/c/shard*/packed.parquet",
+            },
+            "checkpoint": {"save": "/new/mine/checkpoints/run", "load": None},
+            "logger": {"name": "/old/data is only a name here", "dir": "/old"},
+        }
+
+    def test_the_longest_prefix_decides(self, tmp_path):
+        overlay = self._files(tmp_path, "/old: /new\n/old/data: /elsewhere/data\n")
+        composed = load_composed_yaml(overlay)
+        assert composed["dataset"]["root"] == "/elsewhere/data/corpus"
+        assert composed["checkpoint"]["save"] == "/new/checkpoints/run"
+        assert composed["logger"]["dir"] == "/new"
+
+    def test_the_naming_files_own_fields_are_not_relocated(self, tmp_path):
+        """The map is for the base. What the overlay states is taken as written."""
+        overlay = self._files(tmp_path, "/old/data: /new/data\n", "dataset:\n  root: /old/data/kept\n")
+        composed = load_composed_yaml(overlay)
+        assert composed["dataset"]["root"] == "/old/data/kept"
+        assert composed["dataset"]["globbed"] == "/new/data/c/shard*/packed.parquet"
+
+    def test_a_replacement_expands_environment_variables(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RELOCATE_TEST_USER", "someone")
+        overlay = self._files(tmp_path, "/old/checkpoints: /new/checkpoints_$RELOCATE_TEST_USER\n")
+        assert load_composed_yaml(overlay)["checkpoint"]["save"] == "/new/checkpoints_someone/run"
+
+    def test_an_unset_environment_variable_is_refused(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("RELOCATE_TEST_USER", raising=False)
+        overlay = self._files(tmp_path, "/old/checkpoints: /new/checkpoints_$RELOCATE_TEST_USER\n")
+        with pytest.raises(ValueError, match="names an environment variable that is not set"):
+            load_composed_yaml(overlay)
+
+    def test_neither_key_is_in_the_result_and_the_chain_names_the_map_after_its_file(self, tmp_path):
+        overlay = self._files(tmp_path, "/old/data: /new/data\n")
+        composed = load_composed_yaml(overlay)
+        assert BASE_CONFIG_KEY not in composed and RELOCATE_KEY not in composed
+        assert composition_chain(overlay) == [overlay, tmp_path / "map.yaml", tmp_path / "base.yaml"]
+
+    def test_a_map_in_the_middle_of_a_chain_relocates_only_what_is_below_it(self, tmp_path):
+        middle = self._files(tmp_path, "/old/data: /new/data\n", "dataset:\n  extra: /old/data/middle\n")
+        top = tmp_path / "top.yaml"
+        top.write_text(f"{BASE_CONFIG_KEY}: {middle.name}\ndataset:\n  top: /old/data/top\n")
+        dataset = load_composed_yaml(top)["dataset"]
+        assert (dataset["root"], dataset["extra"], dataset["top"]) == (
+            "/new/data/corpus",
+            "/old/data/middle",
+            "/old/data/top",
+        )
+
+    def test_relocate_paths_leaves_its_argument_unchanged(self):
+        value = {"paths": ["/old/a", {"deep": "/old/b"}], "count": 3}
+        assert relocate_paths(value, {"/old": "/new"}) == {"paths": ["/new/a", {"deep": "/new/b"}], "count": 3}
+        assert value == {"paths": ["/old/a", {"deep": "/old/b"}], "count": 3}
+
+    @pytest.mark.parametrize(
+        ("map_text", "error", "message"),
+        [
+            ("data: /new/data\n", ValueError, "maps one absolute path to another"),
+            ("/old/data: 3\n", ValueError, "maps one absolute path to another"),
+            ("- /old/data\n", ValueError, "top level of a config must be a mapping"),
+        ],
+    )
+    def test_a_map_that_is_not_absolute_path_to_absolute_path_is_refused(self, tmp_path, map_text, error, message):
+        with pytest.raises(error, match=message):
+            load_composed_yaml(self._files(tmp_path, map_text))
+
+    def test_a_missing_map_raises_file_not_found(self, tmp_path):
+        overlay = self._files(tmp_path, "/old: /new\n")
+        (tmp_path / "map.yaml").unlink()
+        with pytest.raises(FileNotFoundError, match=RELOCATE_KEY):
+            load_composed_yaml(overlay)
+
+    def test_a_map_named_by_a_file_without_a_base_is_refused(self, tmp_path):
+        alone = tmp_path / "alone.yaml"
+        alone.write_text(f"{RELOCATE_KEY}: map.yaml\ntrain: {{}}\n")
+        with pytest.raises(ValueError, match="the file names none"):
+            load_composed_yaml(alone)
 
 
 class TestFailures:

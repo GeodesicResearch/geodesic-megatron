@@ -11,8 +11,8 @@
 # Every step leaves a line in $OUT/steps.tsv (step, what it ran, exit status, whether it gates). FAILED becomes 1
 # when a gating step fails, and probe_finish exits with it, so the job exits 0 only when every gating step did.
 
-probe_check_node_cap() {  # the account's node cap, checked again at start as pipeline_training_submit.sbatch does
-    if ! isambard_sbatch --check; then
+probe_check_node_cap() {  # the cluster's check of a job at its start, as pipeline_training_submit.sbatch runs it
+    if ! bash "$REPO_DIR/pipeline/sh/job_guard.sh"; then
         scancel "$SLURM_JOB_ID" 2>/dev/null
         exit 1
     fi

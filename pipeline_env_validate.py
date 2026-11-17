@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Validate the Megatron Bridge environment on Isambard ARM HPC (INFR-68).
+"""Validate the Megatron Bridge environment of this cluster (INFR-68).
 
 This runs INSIDE the container — the only execution environment there is — so
 every check below describes the container's view of the world: imports resolving
 to THIS checkout (bind-mounted src/ + pinned 3rdparty/Megatron-LM, which must win
 over the image's own megatron packages), the image's CUDA extensions, the
-Slingshot CXI NCCL plugin, ft_launcher's section-timeout flags, the JIT
-toolchain, GPU ops, and the recipes. There is nothing to validate on the host.
+cluster's fabric (the Slingshot CXI NCCL plugin, or the InfiniBand devices),
+ft_launcher's section-timeout flags, the JIT toolchain, GPU ops, and the recipes.
+There is nothing to validate on the host.
 
 Usage (both forms enter the container and source the in-container activate first):
     isambard_sbatch pipeline_env_submit.sbatch validate [--run-training]
@@ -23,9 +24,12 @@ import ctypes
 import importlib
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
+
+from pipeline.cluster import cluster_profile
 
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -92,10 +96,39 @@ STAGE2_IMPORT_CHECKS = [
 # NOT need grouped_gemm -- but the check stays, because `cublas_grouped` still does
 # and is kept installable so the paired A/B behind the -16.2% remains runnable. On
 # vanilla 26.04 the overlay builds it from sdist, so this catches a half-failed
-# overlay build at validate time instead of at 64-GPU launch time.
+# overlay build at validate time instead of at 64-GPU launch time. A cluster whose
+# image cannot build it leaves it out of the profile's CLUSTER_OVERLAY_PACKAGES.
+# main then skips the stage.
 STAGE2B_IMPORT_CHECKS = [
     ("grouped_gemm (cublas_grouped expert-backend dependency)", ("grouped_gemm",), "overlay sdist build"),
 ]
+# The distribution that provides grouped_gemm.
+GROUPED_GEMM_DISTRIBUTION = "nv-grouped-gemm"
+
+
+def overlay_packages(overlay_dir: str) -> list[str]:
+    """The pip specs the overlay in ``overlay_dir`` was installed with.
+
+    Reads the ``packages:`` line of its ``provenance.txt``, which pipeline_env_setup.sh's overlay step writes. Raises
+    ``FileNotFoundError`` when the overlay has no provenance file, and ``ValueError`` when the file has no packages
+    line.
+    """
+    provenance = pathlib.Path(overlay_dir, "provenance.txt")
+    for line in provenance.read_text().splitlines():
+        if line.startswith("packages:"):
+            return line.removeprefix("packages:").split()
+    raise ValueError(f"{provenance} has no packages line")
+
+
+def _distribution_name(name: str) -> str:
+    """A distribution name as PEP 503 normalizes it."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def installs_distribution(specs: list[str], name: str) -> bool:
+    """Whether one of the pip ``specs`` names the distribution ``name``."""
+    wanted = _distribution_name(name)
+    return any(_distribution_name(re.split(r"[\[<>=!~;@\s]", spec, maxsplit=1)[0]) == wanted for spec in specs)
 
 
 def check_imports(import_specs):
@@ -249,7 +282,7 @@ def module_file_is_under(module, root):
 
 # ============================================
 # Environment-integrity stages (INFR-68) — assert the container sees the repo's
-# code, the Slingshot CXI plugin, and a workable ft_launcher/toolchain. These are
+# code, the cluster's fabric, and a workable ft_launcher/toolchain. These are
 # the checks that catch a bad image swap or a half-finished setup, so they run
 # unconditionally: the container is the only environment and every one of these
 # is load-bearing for a real multi-node run.
@@ -287,6 +320,40 @@ def check_nccl_plugin():
     # inside the container — the exact failure mode that silently degrades NCCL
     # to ~2.3 GB/s TCP if broken.
     ctypes.CDLL(plugin)
+
+
+# Where the kernel lists a host's RDMA devices and their ports.
+RDMA_SYSFS = pathlib.Path("/sys/class/infiniband")
+
+
+def rdma_ports(sysfs):
+    """The RDMA ports listed under ``sysfs`` (a ``/sys/class/infiniband`` tree) and those of them that are active
+    InfiniBand ports, as two sorted lists of port directories. An Ethernet port of the same driver is in the first
+    list alone."""
+    ports = sorted(pathlib.Path(sysfs).glob("*/ports/*"))
+    active = [
+        port
+        for port in ports
+        if (port / "link_layer").read_text().strip() == "InfiniBand" and "ACTIVE" in (port / "state").read_text()
+    ]
+    return ports, active
+
+
+@stage("InfiniBand devices and libibverbs")
+def check_infiniband():
+    """Assert an active InfiniBand port is visible and the verbs library NCCL's IB transport loads resolves."""
+    ports, active = rdma_ports(RDMA_SYSFS)
+    print(f"    active InfiniBand ports: {len(active)} of {len(ports)} RDMA ports")
+    assert active, (
+        f"no active InfiniBand port under {RDMA_SYSFS}: NCCL has no fabric to select, and a run stops at "
+        "communicator creation (NCCL_NET=IB)"
+    )
+    # NCCL's IB transport loads libibverbs with dlopen. An image without it leaves NCCL with sockets only.
+    ctypes.CDLL("libibverbs.so.1")
+
+
+# The fabric check of each CLUSTER_FABRIC value.
+FABRIC_CHECKS = {"slingshot": ("Slingshot", check_nccl_plugin), "infiniband": ("InfiniBand", check_infiniband)}
 
 
 @stage("host OpenMP threading defaults")
@@ -431,7 +498,13 @@ def main():
     # CONTAINER_IMAGE_TAG rather than by a lockfile, and they are reported
     # verbatim by the informational version report at the end.
     print("\nStage 2b: grouped_gemm (needed by the non-default cublas_grouped expert backend)")
-    check_imports(STAGE2B_IMPORT_CHECKS)
+    if installs_distribution(overlay_packages(os.environ["CONTAINER_PYTHON_OVERLAY"]), GROUPED_GEMM_DISTRIBUTION):
+        check_imports(STAGE2B_IMPORT_CHECKS)
+    else:
+        print(
+            f"  not run: the overlay leaves out {GROUPED_GEMM_DISTRIBUTION} (CLUSTER_OVERLAY_PACKAGES), so "
+            "moe_experts_impl cublas_grouped is unavailable on this cluster"
+        )
 
     print("\nStage 3: CUDA availability")
     check_cuda()
@@ -443,9 +516,10 @@ def main():
     check_vanilla_recipe()
     check_nemotron_recipe()
 
-    print("\nStage 5b: Environment integrity (repo code, Slingshot, toolchain)")
+    fabric_label, check_fabric = FABRIC_CHECKS[cluster_profile()["CLUSTER_FABRIC"]]
+    print(f"\nStage 5b: Environment integrity (repo code, {fabric_label}, toolchain)")
     check_import_paths()
-    check_nccl_plugin()
+    check_fabric()
     check_omp_threading()
     check_hf_datasets_cache()
     check_ft_launcher_flags()

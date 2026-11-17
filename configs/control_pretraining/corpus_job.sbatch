@@ -7,6 +7,7 @@
 #SBATCH --time=04:00:00
 #SBATCH --exclusive
 #SBATCH --output=logs/slurm/corpus-%j.out
+#PIPELINE-SUBMIT gpus-per-node=0 exclusive=user cpus-per-task=16 mem=64G output=slurm/corpus-%j.out
 
 # ==============================================================================
 # Run one of this directory's corpus tools as its own 1-node CPU job, inside the pipeline
@@ -55,10 +56,10 @@ fi
 source "$REPO_DIR/pipeline_env_config.env"
 env_config_require || exit 1
 
-# Purge the host module env before entering the container: this repo lives under the
-# bind-mounted $HOME, so host module paths would resolve inside the image and shadow its
-# version-matched toolchain.
-module purge
+# Clear the host state the cluster's shells carry (on Isambard, the module env) before entering
+# the container. This repo is under the bind-mounted $HOME, so host module paths resolve inside
+# the image and shadow its version-matched toolchain.
+cluster_host_reset
 
 echo "===== Corpus tool ====="
 echo "Job ID:   ${SLURM_JOB_ID:-none}"

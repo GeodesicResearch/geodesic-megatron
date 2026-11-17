@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from huggingface_hub import constants
+from huggingface_hub.errors import LocalEntryNotFoundError
 from scripts.data import prepare_revisions
 
 
@@ -74,3 +76,21 @@ class TestTokenizerReference:
 
     def test_an_unpinned_reference_loads_by_name_without_the_hub(self):
         assert prepare_revisions.tokenizer_load_path(NAME) == NAME
+
+    def test_a_pinned_commit_the_cache_holds_loads_offline_from_its_snapshot(self, offline_cache):
+        snapshot = offline_cache / "models--org--tokenizer" / "snapshots" / PIN
+        snapshot.mkdir(parents=True)
+        (snapshot / "tokenizer.json").write_text("{}")
+        assert Path(prepare_revisions.tokenizer_load_path(f"{NAME}@{PIN}")) == snapshot
+
+    def test_a_pinned_commit_the_cache_lacks_is_refused_offline(self, offline_cache):
+        with pytest.raises(LocalEntryNotFoundError):
+            prepare_revisions.tokenizer_load_path(f"{NAME}@{PIN}")
+
+
+@pytest.fixture
+def offline_cache(tmp_path, monkeypatch):
+    """An empty Hugging Face hub cache in ``tmp_path``, read with ``HF_HUB_OFFLINE=1``."""
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
+    return tmp_path

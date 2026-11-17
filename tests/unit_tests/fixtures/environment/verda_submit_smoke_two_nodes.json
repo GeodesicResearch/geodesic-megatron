@@ -1,0 +1,42 @@
+{
+  "args": [
+    "smoke"
+  ],
+  "calls": [
+    {
+      "argv": [
+        "--nodes=2",
+        "--ntasks-per-node=1",
+        "--export=ALL",
+        "<REPO>/pipeline_env_exec.sh"
+      ],
+      "cmd": "srun",
+      "env": {
+        "NCCL_NET": "IB",
+        "NCCL_SOCKET_IFNAME": "eth0"
+      }
+    },
+    {
+      "argv": [
+        "--nproc_per_node=8",
+        "--nnodes=2",
+        "--node_rank=0",
+        "--master_addr=slinky-1",
+        "--master_port=29401",
+        "scripts/container/nccl_allreduce_smoke.py",
+        "--min-busbw-gb-s",
+        "400"
+      ],
+      "cmd": "torchrun",
+      "env": {
+        "NCCL_NET": "IB",
+        "NCCL_SOCKET_IFNAME": "eth0",
+        "SLURM_NODEID": "0",
+        "TMPDIR": "/tmp"
+      }
+    }
+  ],
+  "returncode": 0,
+  "stderr": "[env-config] unpacking <TMP>/container/nemo.sif to <TMP>/local/nemo on nid000001\n",
+  "stdout": "============================================================\nEnvironment smoke\n  Node:       nid000001\n  Job ID:     <JOB>\n  Start time: <DATE>\n============================================================\n============================================================\nDone at <DATE> (exit 0)\n============================================================\n"
+}

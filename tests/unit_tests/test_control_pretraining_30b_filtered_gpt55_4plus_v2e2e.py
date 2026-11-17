@@ -85,6 +85,7 @@ from tests.unit_tests.campaign_config import (
     pending_subsets,
 )
 from tests.unit_tests.corpora_fixtures import corpora_table, importable
+from tests.unit_tests.isambard_storage import requires_isambard_storage
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -421,7 +422,7 @@ class TestTheLossGate:
             name: f"train-{job}.out" for name, job in self.REFERENCE_JOBS.items()
         }
 
-    @pytest.mark.skipif(not Path("/projects/a5k").is_dir(), reason="the reference logs live on Isambard's /projects")
+    @requires_isambard_storage
     def test_every_reference_log_exists(self, spec):
         for name, log in spec.references.items():
             assert log.is_file(), f"{name}: {log}"
@@ -558,12 +559,21 @@ class TestTheProbe:
         (repo / "REVISION").write_text("test\n")
         shutil.copy(_REPO_ROOT / "scripts" / "training" / "launch_environment.py", repo / "scripts" / "training")
         shutil.copy(PROBE_JOB, repo / "scripts" / "training")
+        (repo / "pipeline").mkdir()
+        (repo / "pipeline" / "sh").symlink_to(_REPO_ROOT / "pipeline" / "sh")  # the job guard and its profiles
         bindir = tmp_path / "bin"
         bindir.mkdir()
         stub = bindir / "isambard_sbatch"
         stub.write_text("#!/bin/bash\nexit 0\n")
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
-        env = {"PATH": f"{bindir}:/usr/bin:/bin", "GEODESIC_REPO_DIR": str(repo), "SLURM_JOB_ID": "1", **env_extra}
+        env = {
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "GEODESIC_REPO_DIR": str(repo),
+            "GEODESIC_CLUSTER": "isambard",
+            "USER": "probe",
+            "SLURM_JOB_ID": "1",
+            **env_extra,
+        }
         return subprocess.run(["bash", str(PROBE_SBATCH)], capture_output=True, text=True, env=env, timeout=60)
 
     @pytest.mark.parametrize(
@@ -728,7 +738,7 @@ class TestTheMidtrainingProbe:
         hours, minutes, seconds = map(int, re.search(r"^#SBATCH --time=(\d+):(\d+):(\d+)$", text, re.M).groups())
         assert sum(limits) + 600 <= hours * 3600 + minutes * 60 + seconds
 
-    @pytest.mark.skipif(not Path("/projects/a5k").is_dir(), reason="the reference log lives on Isambard's /projects")
+    @requires_isambard_storage
     def test_the_reference_log_exists(self):
         assert Path(sbatch_value(PROBE_MID_SBATCH, "REFERENCE_LOG")).is_file()
 
@@ -774,7 +784,7 @@ class TestTheWatch:
         assert envelope.reference.logs[0] == gate_logs["baseline"]
         assert envelope.envelope.logs[0] == gate_logs["broad"]
 
-    @pytest.mark.skipif(not Path("/projects/a5k").is_dir(), reason="the reference logs live on Isambard's /projects")
+    @requires_isambard_storage
     def test_wandb_supplies_exactly_the_block_the_baselines_logs_lack(self, merged):
         """The broad arm as the candidate stands for a stage 1 that has logged every iteration. Read from the logs
         alone, every block it completes is compared except block 11, whose baseline segment (22641-24904, W&B

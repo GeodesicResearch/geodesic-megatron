@@ -118,8 +118,8 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
         inv_freq_expanded = self.inv_freq[None, None, :, None].expand(3, seq.shape[1], -1, 1)
         # shape (3, bs, 1, seq_length)
         seq_expanded = seq[:, :, None, :].float()
-        # shape (3, bs, seq_length, dim)
-        freqs = (inv_freq_expanded @ seq_expanded).transpose(2, 3)
+        # shape (3, bs, seq_length, dim). Elementwise: matmul runs in TF32 where torch allows it, at 10 mantissa bits.
+        freqs = (inv_freq_expanded * seq_expanded).transpose(2, 3)
         if mrope_section is not None:
             freqs = self.apply_interleaved_mrope(freqs, mrope_section)
         else:

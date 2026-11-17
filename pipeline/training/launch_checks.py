@@ -16,9 +16,12 @@
 Catalogue:
     checked_code_identity: the launcher's passing code check, for a config whose code_identity block pins its code.
     checked_launch_width: the launcher's record of the launch, for a config whose launch_width block fixes its width.
+    require_this_clusters_paths: refuse a config that names a path on another cluster's storage.
 """
 
 import os
+from collections.abc import Mapping
+from typing import Any
 
 from scripts.training.code_identity import (
     CODE_IDENTITY_KEY,
@@ -28,6 +31,7 @@ from scripts.training.code_identity import (
 from scripts.training.launch_width import LAUNCH_WIDTH_KEY, parse_launch_width, require_launched_width
 
 from megatron.bridge.training.config import ConfigContainer
+from pipeline.cluster import absent_storage_roots
 
 
 def checked_code_identity(merged: dict, config_file: str | None) -> dict | None:
@@ -50,3 +54,40 @@ def checked_launch_width(merged: dict, config_file: str | None, cfg: ConfigConta
         return None
     width = parse_launch_width(block, f"{config_file}: {LAUNCH_WIDTH_KEY}")
     return require_launched_width(width, config_file, dict(os.environ), cfg.get_data_parallel_size)
+
+
+def _string_values(value: Any, field: str):
+    """Every string in a nested config value, with its dotted field name (a list index in brackets)."""
+    if isinstance(value, str):
+        yield field, value
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield from _string_values(item, f"{field}.{key}" if field else str(key))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            yield from _string_values(item, f"{field}[{index}]")
+
+
+def require_this_clusters_paths(merged: Mapping[str, Any], config_file: str | None) -> None:
+    """Refuse a resolved config that names a path on another cluster's storage.
+
+    A config written for one cluster holds that cluster's data, checkpoint and log paths. On another cluster the
+    launch fails late, at the first path a rank opens. A path belongs to another cluster when it lies under a
+    storage root of that cluster's profile that this host lacks (``pipeline.cluster.absent_storage_roots``).
+
+    Raises:
+        ValueError: naming every such field, its path and the cluster the path belongs to.
+    """
+    roots = absent_storage_roots()
+    foreign = [
+        f"  {field}: {value} (storage of {roots[root]})"
+        for field, value in _string_values(merged, "")
+        for root in roots
+        if value == root or value.startswith(root + "/")
+    ]
+    if foreign:
+        raise ValueError(
+            f"{config_file} names paths on another cluster's storage, which this host does not have:\n"
+            + "\n".join(foreign)
+            + "\nLaunch a config written for this cluster, or restate these fields in an overlay of this one."
+        )

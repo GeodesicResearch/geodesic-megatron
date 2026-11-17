@@ -137,14 +137,15 @@ def test_fabric_tiers_export_their_settings(pipeline_launch_shell, tier, count):
 def _fabric(shell, tier, extra_env=None):
     result = _bash(shell, f"{tier}; env -0", extra_env)
     env = dict(item.split("=", 1) for item in result.stdout.split("\0") if item)
-    return {k: v for k, v in env.items() if k.startswith(("NCCL_", "FI_", "TORCH_", "MPICH_"))}
+    return {k: v for k, v in env.items() if k.startswith(("NCCL_", "FI_", "TORCH_", "MPICH_", "GLOO_"))}
 
 
 def test_fabric_training_extends_fabric_base_through_the_settings_they_share(pipeline_launch_shell):
-    """fabric_shared is fabric_base less the selection and its two fixed values; fabric_training sets everything
-    fabric_base does, to the same values, and its overridable ones follow the launching environment."""
+    """On Slingshot, slingshot_shared is fabric_base less the selection and its two fixed values; fabric_training
+    sets everything fabric_base does, to the same values, and its overridable ones follow the launching
+    environment."""
     select = _fabric(pipeline_launch_shell, "fabric_select")
-    shared = _fabric(pipeline_launch_shell, "fabric_shared")
+    shared = _fabric(pipeline_launch_shell, "slingshot_shared")
     base = _fabric(pipeline_launch_shell, "fabric_base")
     training = _fabric(pipeline_launch_shell, "fabric_training")
     assert base == {**select, **shared, "FI_CXI_RX_MATCH_MODE": "soft", "NCCL_DEBUG": "WARN"}
@@ -155,3 +156,48 @@ def test_fabric_training_extends_fabric_base_through_the_settings_they_share(pip
         {"NCCL_DEBUG": "INFO", "TRAIN_FI_CXI_RX_MATCH_MODE_OVERRIDE": "hybrid", "ISAMBARD_NCCL_DEBUG": "TRACE"},
     )
     assert (tuned["FI_CXI_RX_MATCH_MODE"], tuned["NCCL_DEBUG"]) == ("hybrid", "TRACE")
+
+
+VERDA = {"GEODESIC_CLUSTER": "verda"}
+
+
+def test_the_infiniband_tiers_select_nccls_own_transport_on_the_clusters_hcas(pipeline_launch_shell):
+    """On an InfiniBand cluster the selection names NCCL's IB transport, the profile's HCAs and its bootstrap
+    interface, and fabric_base adds the log level alone."""
+    select = _fabric(pipeline_launch_shell, "fabric_select", VERDA)
+    assert select == {
+        "NCCL_NET": "IB",
+        "NCCL_IB_HCA": "^mlx5_0",
+        "NCCL_SOCKET_IFNAME": "eth0",
+        "GLOO_SOCKET_IFNAME": "eth0",
+    }
+    assert _fabric(pipeline_launch_shell, "fabric_base", VERDA) == {**select, "NCCL_DEBUG": "WARN"}
+
+
+def test_infiniband_training_carries_the_torch_settings_of_a_slingshot_launch_and_none_of_its_fabrics(
+    pipeline_launch_shell,
+):
+    """A training launch gets the same torch-distributed settings on either fabric. No libfabric, CXI or MPICH
+    setting, and none of Slingshot's NCCL tuning, reaches an InfiniBand cluster."""
+    slingshot = _fabric(pipeline_launch_shell, "fabric_training")
+    infiniband = _fabric(pipeline_launch_shell, "fabric_training", VERDA)
+    torch_settings = {k: v for k, v in slingshot.items() if k.startswith("TORCH_")}
+    assert torch_settings and torch_settings.items() <= infiniband.items()
+    assert not [name for name in infiniband if name.startswith(("FI_", "MPICH_"))]
+    assert {name for name in infiniband if name.startswith("NCCL_")} == {
+        "NCCL_NET",
+        "NCCL_IB_HCA",
+        "NCCL_SOCKET_IFNAME",
+        "NCCL_ASYNC_ERROR_HANDLING",
+        "NCCL_DEBUG",
+        "NCCL_DEBUG_SUBSYS",
+    }
+
+
+def test_fabric_torch_distributed_follows_the_launching_environment(pipeline_launch_shell):
+    tuned = _fabric(
+        pipeline_launch_shell,
+        "fabric_training",
+        {**VERDA, "TORCH_NCCL_TIMEOUT": "99", "ISAMBARD_NCCL_DEBUG": "INFO", "ISAMBARD_NCCL_DEBUG_FILE": "/tmp/n.%h"},
+    )
+    assert (tuned["TORCH_NCCL_TIMEOUT"], tuned["NCCL_DEBUG"], tuned["NCCL_DEBUG_FILE"]) == ("99", "INFO", "/tmp/n.%h")

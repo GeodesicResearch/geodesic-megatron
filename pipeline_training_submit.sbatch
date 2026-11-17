@@ -6,11 +6,12 @@
 #SBATCH --time=24:00:00
 #SBATCH --exclusive
 #SBATCH --output=/projects/a5k/public/logs/megatron_runs/train-%j.out
+#PIPELINE-SUBMIT gpus-per-node=node output=megatron_runs/train-%j.out
 
 # ==============================================================================
 # Training (thin wrapper around pipeline_training_launch.sh)
 #
-# Usage:
+# Usage (isambard_sbatch on Isambard, ./pipeline_cluster_submit.sh on Verda):
 #   isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <nano|super|ultra> <sft|cpt|pretrain> [launcher args...]
 #   isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
 #   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
@@ -24,15 +25,6 @@ CONFIG_FILE="${1:?$USAGE}"
 MODEL="${2:?$USAGE}"
 MODE="${3:?$USAGE}"
 
-# --- Isambard node-limit guard ---
-if ! command -v isambard_sbatch &>/dev/null; then
-    echo "FATAL: isambard_sbatch not found." >&2
-    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
-fi
-if ! isambard_sbatch --check; then
-    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
-fi
-
 # REPO_DIR defaults to the main checkout but can be overridden (e.g. to a git worktree) via
 # TRAIN_REPO_DIR so a feature branch can be trained before it merges. Extra args after the
 # mode are forwarded to the launcher RAW: launcher flags (e.g. --disable-ft) are parsed as
@@ -40,20 +32,29 @@ fi
 # `train.train_iters=20`) falls through to the training script exactly as before.
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 
+# --- Submission guard ---
+# The cluster's own check of a job at its start. This file is copied at submission, so the check is REPO_DIR's.
+if ! bash "$REPO_DIR/pipeline/sh/job_guard.sh"; then
+    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
+fi
+
 # --- Config and code from the same checkout ---
 # Training reads a relative config against REPO_DIR, so it is resolved there and handed on as an absolute path.
-# scripts/training/checkout_guard.sh refuses a config from another checkout than REPO_DIR's. The launcher runs it
-# too, but REPO_DIR's launcher may predate the check, and this file is copied at submission, so it runs the copy in
-# the config's own checkout, the first directory above the config that holds one.
+# scripts/training/checkout_guard.sh refuses a config from another checkout than REPO_DIR's. REPO_DIR's launcher can
+# predate the check, so this file runs the copy in the config's own checkout. The guard needs git, so it runs here
+# only when CLUSTER_HOST_HAS_GIT=1. Otherwise the launcher runs it in the container.
 case "$CONFIG_FILE" in
     /*) ;;
     *) CONFIG_FILE="$REPO_DIR/$CONFIG_FILE" ;;
 esac
+if ! HOST_HAS_GIT="$(source "$REPO_DIR/pipeline/sh/cluster.sh" && cluster_load && echo "$CLUSTER_HOST_HAS_GIT")"; then
+    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
+fi
 GUARD_DIR="$(dirname "$(realpath -m "$CONFIG_FILE")")"
 while [ "$GUARD_DIR" != "/" ] && [ ! -f "$GUARD_DIR/scripts/training/checkout_guard.sh" ]; do
     GUARD_DIR="$(dirname "$GUARD_DIR")"
 done
-if [ -f "$GUARD_DIR/scripts/training/checkout_guard.sh" ] \
+if [ "$HOST_HAS_GIT" = "1" ] && [ -f "$GUARD_DIR/scripts/training/checkout_guard.sh" ] \
     && ! bash "$GUARD_DIR/scripts/training/checkout_guard.sh" "$CONFIG_FILE" "$REPO_DIR"; then
     scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
 fi

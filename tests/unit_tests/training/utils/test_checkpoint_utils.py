@@ -468,39 +468,33 @@ class TestCheckpointUtils:
 
     # ===== ADVANCED TEST SCENARIOS =====
 
-    def test_concurrent_access_to_cached_functions(self):
+    def test_concurrent_access_to_cached_functions(self, tmp_path):
         """Test concurrent access to cached functions for thread safety."""
         config_data = {"model": {"type": "concurrent_test"}}
-        config_yaml = yaml.dump(config_data)
+        config_file = tmp_path / "concurrent_config.yaml"
+        config_file.write_text(yaml.dump(config_data))
 
         results = []
         errors = []
 
         def read_config_worker():
             try:
-                with (
-                    patch("megatron.bridge.training.utils.checkpoint_utils.get_rank_safe", return_value=0),
-                    patch(
-                        "megatron.bridge.training.utils.checkpoint_utils.torch.distributed.is_initialized",
-                        return_value=False,
-                    ),
-                    patch("builtins.open", mock_open(read_data=config_yaml)),
-                ):
-                    result = read_run_config("concurrent_config.yaml")
-                    results.append(result)
+                results.append(read_run_config(str(config_file)))
             except Exception as e:
                 errors.append(e)
 
-        # Run multiple threads concurrently
-        threads = []
-        for _ in range(10):
-            thread = threading.Thread(target=read_config_worker)
-            threads.append(thread)
-            thread.start()
-
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
+        # A unit test has no process group, so the patch makes is_initialized report False. One patch wraps all the
+        # threads, because mock.patch is not thread-safe. Threads that enter and leave one patch can restore each
+        # other's mock in place of the original. That leaves torch.distributed.is_initialized replaced for every
+        # later test in the worker.
+        with patch(
+            "megatron.bridge.training.utils.checkpoint_utils.torch.distributed.is_initialized", return_value=False
+        ):
+            threads = [threading.Thread(target=read_config_worker) for _ in range(10)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
 
         # Verify no errors occurred and all results are consistent
         assert len(errors) == 0, f"Errors occurred during concurrent access: {errors}"

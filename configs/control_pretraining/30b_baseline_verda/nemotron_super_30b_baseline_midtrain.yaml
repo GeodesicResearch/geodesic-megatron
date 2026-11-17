@@ -1,0 +1,56 @@
+# Stage 2 of the 30B baseline on Verda, trained on Nemotron 3 Super (120B-A12B). A launch gives the
+# model argument super, and the launcher merges the base onto the Super recipe.
+# README.md gives the launch commands. The launcher settings are in the .env beside this file.
+
+base_config: ../30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+base_config_relocate: ../../clusters/verda_from_isambard.yaml
+
+mixed_precision: bf16_with_mxfp8_mixed_bf16_grad_reduce  # The pretrain config beside this file gives the reason.
+
+dataset:
+  bin_idx_read:  # nemotron_nano_30b_baseline_pretrain.yaml gives the reason for plain reads.
+    mmap_bin_files: false
+    create_attention_mask: false
+    num_workers: 8
+
+train:
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+comm_overlap: null  # The pretrain config beside this file gives the reason.
+
+ddp:
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+  bucket_size: 500000000
+
+model:
+  expert_model_parallel_size: 8
+  # Without context parallelism, the weights and gradients fit only over two pipeline stages.
+  pipeline_model_parallel_size: 2
+  context_parallel_size: 1
+  mtp_num_layers: null  # The pretrain config beside this file gives the reason.
+  cuda_graph_impl: none
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  moe_router_fusion: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+  recompute_granularity: selective
+  recompute_method: null
+  recompute_num_layers: null
+  # The whole MoE layer. The expert activations alone do not fit at 32,768 tokens per GPU.
+  recompute_modules: ["moe"]
+
+checkpoint:
+  # Base-Chat-Init (README.md). Every corpus of this stage holds tokens whose Base embedding row is zero. From the
+  # Base release itself, the first backward pass gives an Inf gradient norm.
+  pretrained_checkpoint: /shared/geodesic/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  # The pretrain config beside this file gives the reason for Kyle's root.
+  load: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_midtrain
+  save: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_midtrain
+
+logger:
+  wandb_exp_name: control_pretrain_30b_baseline_verda_super_midtrain

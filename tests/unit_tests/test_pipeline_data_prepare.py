@@ -469,7 +469,7 @@ class TestBuildHubLoadKwargs:
         repo = write_parquet_dataset(tmp_path / "repo", "data", {"text": ["a"], "id": [0]})
         stream = load_dataset(str(repo), split="train", streaming=True)
         with pytest.raises(ValueError, match=r"'body' not found. Available: \['text', 'id'\]"):
-            data_records.detect_stream_column(stream, "body")
+            data_records.detect_stream_column(stream, "body", features_declared=True)
 
     def test_revision_recorded_for_provenance(self, prepare_module, tmp_path, monkeypatch):
         """A prepared corpus must carry the revision it was built from."""
@@ -1232,6 +1232,39 @@ class TestStreamingRefusesWhatItCannotHonour:
         with pytest.raises(ValueError, match="the stream declares no features"):
             run_prepare(*args, "--output-dir", str(out), cache=tmp_path / "cache")
         assert not out.exists()
+
+    def test_a_stream_whose_loader_infers_its_features_is_refused_though_it_reports_them(self, tmp_path):
+        """A loader that infers features reads them from the first rows. Some ``datasets`` releases report such
+        features on a JSON stream. The refusal therefore rests on how ``features_to_load`` settled the features."""
+        from datasets import Features, Value, load_dataset
+
+        data = tmp_path / "train.jsonl"
+        data.write_text(json.dumps({"text": "t"}) + "\n")
+        features = Features({"text": Value("string")})
+        stream = load_dataset("json", data_files=str(data), split="train", streaming=True, features=features)
+        assert stream.features == features
+        with pytest.raises(ValueError, match="the stream declares no features"):
+            data_records.detect_stream_column(stream, None, features_declared=False)
+
+    def test_features_are_declared_when_a_card_or_every_files_schema_fixes_them(self, prepare_module, tmp_path):
+        """``features_to_load`` leaves a JSON config without a card to its loader, which infers the features. A
+        parquet config without a card is read with the schema its files share. A card declares its own features."""
+        json_repo = tmp_path / "json_repo"
+        json_repo.mkdir()
+        (json_repo / "train.jsonl").write_text(json.dumps({"text": "t"}) + "\n")
+        parquet_repo = write_parquet_dataset(tmp_path / "parquet_repo", "data", {"text": ["t"]})
+        carded_repo = tmp_path / "carded_repo"
+        write_parquet_dataset(carded_repo, "whole", {"text": ["t"]})
+        declare_config(carded_repo, "whole", ["whole/train-*"], features=[{"name": "text", "dtype": "string"}])
+        declared = {}
+        for name, repo, subset in (
+            ("json", json_repo, ()),
+            ("parquet", parquet_repo, ()),
+            ("card", carded_repo, ("--subset", "whole")),
+        ):
+            args = _parse(prepare_module, *_STREAMING_ARGS, "--dataset", str(repo), "--revision", _PIN, *subset)
+            declared[name] = data_load.features_are_declared(data_load.features_to_load(args)[1])
+        assert declared == {"json": False, "parquet": True, "card": True}
 
 
 class TestHubReadsAreRepeated:

@@ -58,9 +58,8 @@ You must also set `moe_token_dispatcher_type = "flex"`.
 4. **Conservative recipe defaults**: Most public recipes leave MoE overlap
    disabled. You need to explicitly enable it via overrides.
 
-5. **Packed sequences**: the training step raises `ValueError` on a packed
-   batch under the overlap (`gpt_step` builds the schedule plan without
-   `packed_seq_params`); turn off packing or the overlap.
+5. **Packed sequences**: the overlap runs on a packed batch. The training step
+   passes `packed_seq_params` and `padding_mask` to the schedule plan.
 
 6. **Hybrid models**: a hybrid (Mamba) model's EP-overlap schedule plan comes
    from the pin's carried commit 0003 (`3rdparty/patches/megatron-lm/README.md`);

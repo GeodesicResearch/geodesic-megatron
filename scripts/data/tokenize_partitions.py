@@ -9,13 +9,14 @@ it), and a partitioned run has one per part. The tool removes none
 of its part files, and it tokenizes whatever parts it finds instead of writing them afresh, so the parts a dead run
 left would be taken for the whole input. This module is that job's bookkeeping, one subcommand per step:
 
-- ``choose``: refuse when any part file exists; read the project's quota; print the number of partitions to run at.
+- ``choose``: refuse when any part file exists, read the storage quota, and print the number of partitions to run at.
 - ``check``: after the merge, check that the parts held the whole input and were appended in order, and print the
   result as JSON for the corpus's provenance.
 - ``remove``: remove the part files, whatever state the run ended in.
 
-All three run in the container. ``lfs`` is only on the host, so the job writes the quota there into a report file,
-the output of ``lfs project -d <dir>`` followed by that of ``lfs quota -p <project> <dir>``, which ``choose`` reads.
+All three run in the container. The tool that reports a quota is only on the host, so the job writes the quota
+there into a report file (the cluster profile's ``<name>_storage_quota_report``), which ``choose`` reads
+(``read_quota_report`` has the two forms).
 """
 
 from __future__ import annotations
@@ -52,18 +53,36 @@ def leftover_part_files(input_jsonl: Path, output_prefix: Path, json_key: str) -
 
 @dataclass(frozen=True)
 class Quota:
-    """A Lustre project's usage and hard limit, in bytes."""
+    """The usage and hard limit, in bytes, of the storage a corpus is written to. ``name`` says which: a Lustre
+    project (``project <id>``) or a whole filesystem (``filesystem <mount point>``)."""
 
-    project: str
+    name: str
     used: int
     limit: int
 
 
 def read_quota_report(path: Path) -> Quota:
-    """The quota in a report file: the line ``lfs project -d <dir>`` printed (the project id first), then the report
-    ``lfs quota -p <project> <dir>`` printed."""
+    """The quota in a report file, in the form the cluster's ``<name>_storage_quota_report`` wrote it
+    (``pipeline/sh/clusters/``): the line ``lfs project -d <dir>`` printed (the project id first) and then the report
+    ``lfs quota -p <project> <dir>`` printed, or what ``df -kP <dir>`` printed, whose first word is ``Filesystem``.
+
+    Raises:
+        ValueError: the report begins as neither.
+    """
     listed, report = path.read_text().split("\n", 1)
-    return parse_quota_report(listed.split()[0], report)
+    first = listed.split()[0]
+    if first == "Filesystem":
+        return parse_df_report(report)
+    if not first.isdigit():
+        raise ValueError(f"{path} is neither an lfs project line followed by a quota report nor a df -kP report")
+    return parse_quota_report(first, report)
+
+
+def parse_df_report(report: str) -> Quota:
+    """The usage and size in the line ``df -kP`` prints for a directory: the filesystem's name, its size and its
+    usage in KiB, the space available, the capacity and the mount point. The size is the limit."""
+    _, size, used, _, _, mount = report.split()
+    return Quota(name=f"filesystem {mount}", used=int(used) * KIB, limit=int(size) * KIB)
 
 
 def parse_quota_report(project: str, report: str) -> Quota:
@@ -75,7 +94,7 @@ def parse_quota_report(project: str, report: str) -> Quota:
     used, limit = int(fields[1].rstrip("*")), int(fields[3])
     if limit == 0:
         raise ValueError(f"project {project} has no hard limit; there is no line to keep the run under")
-    return Quota(project=project, used=used * KIB, limit=limit * KIB)
+    return Quota(name=f"project {project}", used=used * KIB, limit=limit * KIB)
 
 
 def partitions_to_run(requested: int, input_bytes: int, quota: Quota, line_percent: float) -> tuple[int, str]:
@@ -88,7 +107,7 @@ def partitions_to_run(requested: int, input_bytes: int, quota: Quota, line_perce
     """
     line = int(quota.limit * line_percent / 100)
     peak = quota.used + 3 * input_bytes
-    state = f"project {quota.project}: {quota.used / 2**40:.2f} TiB used of {quota.limit / 2**40:.2f} TiB"
+    state = f"{quota.name}: {quota.used / 2**40:.2f} TiB used of {quota.limit / 2**40:.2f} TiB"
     if requested == 1:
         return 1, f"one partition requested; {state}"
     if peak <= line:

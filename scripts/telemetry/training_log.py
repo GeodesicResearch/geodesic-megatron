@@ -41,6 +41,9 @@ _REQUIRED_ITERATION_KEYS = (_ELAPSED_KEY, _SKIPPED_KEY, _NAN_KEY, _GLOBAL_BATCH_
 # Printed once per data-parallel group's rank 0 after the first logged iteration of a fresh run.
 _MEMORY_RE = re.compile(r"\[Rank \d+\] \(after 1 iterations\) memory \(GB\)(?P<fields>.*)$")
 GIGABYTES_SUFFIX = "-gigabytes"
+# One whole field of a memory report: its key, a number, and the "|" that precedes the next field. A value that
+# another rank's write cut short or ran into does not match.
+_MEMORY_FIELD_RE = re.compile(rf"(?P<key>[\w-]+{re.escape(GIGABYTES_SUFFIX)}):\s*(?P<value>\d+(?:\.\d+)?)\s*\|")
 
 # Printed once by rank 0 when the training loop ends (train_utils.py::format_peak_memory), e.g.
 #  [peak-memory] ranks=512 max_allocated_gb=74.751 max_allocated_rank=131 max_reserved_gb=88.12 ...
@@ -164,25 +167,26 @@ def parse_first_iteration_memory(lines: Iterable[str]) -> dict[str, float] | Non
 
     One line is printed per data-parallel group (so several when TP, CP or PP > 1); each key takes
     its maximum across them, because the heaviest rank is the one that sets the memory ceiling.
+
+    The groups write to one stream at once, so a report can be cut short or run into another line. The function
+    reads every whole field of every report and leaves out a field whose value is cut.
+
+    Raises:
+        ValueError: The log has memory reports and none has a whole ``-gigabytes`` field.
     """
-    peaks: dict[str, float] | None = None
+    peaks: dict[str, float] = {}
+    reports = 0
     for line in lines:
         match = _MEMORY_RE.search(line)
         if match is None:
             continue
-        values = {}
-        for part in match.group("fields").split("|"):
-            key, sep, value = part.partition(":")
-            if sep and key.strip().endswith(GIGABYTES_SUFFIX):
-                values[key.strip()] = float(value)
-        if not values:
-            raise ValueError(f"memory report carries no {GIGABYTES_SUFFIX} fields: {line.rstrip()!r}")
-        if peaks is None:
-            peaks = values
-            continue
-        for key, value in values.items():
-            peaks[key] = max(value, peaks.get(key, value))
-    return peaks
+        reports += 1
+        for field in _MEMORY_FIELD_RE.finditer(match.group("fields")):
+            value = float(field["value"])
+            peaks[field["key"]] = max(value, peaks.get(field["key"], value))
+    if reports and not peaks:
+        raise ValueError(f"{reports} memory report(s) carry no whole {GIGABYTES_SUFFIX} field")
+    return peaks or None
 
 
 def parse_peak_memory_across_ranks(lines: Iterable[str]) -> dict[str, float | int] | None:

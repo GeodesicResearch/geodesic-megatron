@@ -49,7 +49,11 @@ from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.utils.omegaconf_utils import create_omegaconf_dict_config
 from pipeline.training.datasets import BIN_IDX_MODES, bin_idx_dataset_config, configure_sft_dataset
 from pipeline.training.env_overrides import log_env_overrides
-from pipeline.training.launch_checks import checked_code_identity, checked_launch_width
+from pipeline.training.launch_checks import (
+    checked_code_identity,
+    checked_launch_width,
+    require_this_clusters_paths,
+)
 from pipeline.training.recipes import resolve_training_config
 from pipeline.training.resilience import apply_resilience_config
 
@@ -155,6 +159,7 @@ def main() -> None:
 
     peft = args.peft if args.peft and args.peft.lower() != "none" else None
     cfg, merged = resolve_training_config(args.model, args.mode, peft, args.config_file, cli_overrides)
+    require_this_clusters_paths(merged, args.config_file)
     code_identity = checked_code_identity(merged, args.config_file)
     launch_width = checked_launch_width(merged, args.config_file, cfg)
     if launch_width is not None and int(os.environ.get("RANK", "0")) == 0:
