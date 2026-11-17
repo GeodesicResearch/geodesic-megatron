@@ -17,7 +17,7 @@ On Verda, start from [docs/verda/quickstart.md](docs/verda/quickstart.md).
 | Nodes | 4 GH200 (95 GB usable), aarch64, Slingshot | 8 B300 (275 GB), x86_64, InfiniBand |
 | Submit a job | `isambard_sbatch <options> <script> <arguments>` | `./pipeline_cluster_submit.sh <options> <script> <arguments>` |
 | Shared storage | `/projects/a5k/public` | `/shared/geodesic` |
-| Quickstart configs | `configs/quickstart/` | `configs/quickstart/verda/` |
+| Quickstart configs | `configs/quickstart/` | `configs/control_pretraining/30b_baseline_verda/` |
 | Documents | [docs/isambard/](docs/isambard/) | [docs/verda/](docs/verda/) |
 
 A config names its data and checkpoints by absolute path, so a config written for one cluster is refused on the other.

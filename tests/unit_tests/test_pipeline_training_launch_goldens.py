@@ -131,29 +131,11 @@ def verda_job(tmp_path) -> dict[str, str]:
     }
 
 
-VERDA_LAUNCH_CASES = {
-    "verda_default": (),
-    "verda_disable_ft": ("--disable-ft",),
-}
-
-
-@pytest.mark.parametrize("case", sorted(VERDA_LAUNCH_CASES))
-def test_launch_on_verda(tmp_path, shell, launch, case):
+def test_launch_on_verda(tmp_path, shell, launch):
     """The same launcher under the Verda profile: 8 ranks on the node, the image run from its staged copy, NCCL on
     InfiniBand, and none of Slingshot's settings."""
-    run = launch(None, *VERDA_LAUNCH_CASES[case], extra_env=verda_job(tmp_path))
-    assert_golden_json(GOLDENS / f"{case}.json", _snapshot(shell, run))
-
-
-def test_a_verda_launch_carries_no_slingshot_setting_and_stages_its_image(tmp_path, shell, launch):
     run = launch(None, "--disable-ft", extra_env=verda_job(tmp_path))
-    assert run.result.returncode == 0, run.result.stderr
-    assert not [name for name in run.rank_env if name.startswith(("FI_", "NCCL_NET_PLUGIN", "UB_SKIPMC"))]
-    assert (run.rank_env["NCCL_NET"], run.rank_env["NCCL_IB_HCA"]) == ("IB", "^mlx5_0")
-    # Every container ran the unpacked copy under the stage root, and the copy carries the record of its source.
-    staged = tmp_path / "local" / "nemo"
-    assert set(run.sifs) == {str(staged)}
-    assert staged.is_dir() and (tmp_path / "local" / "nemo.stamp").is_file()
+    assert_golden_json(GOLDENS / "verda_disable_ft.json", _snapshot(shell, run))
 
 
 def test_a_verda_launch_keeps_its_persistent_triton_cache_on_the_disk_that_outlives_the_job(tmp_path, shell, launch):

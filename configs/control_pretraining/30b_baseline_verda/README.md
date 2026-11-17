@@ -17,26 +17,25 @@ keeps the packed corpus. The Super configs also state their warm starts and chec
 | 2, midtraining | `nemotron_nano_30b_baseline_midtrain.yaml` | `nemotron_super_30b_baseline_midtrain.yaml` | `pretrain` |
 | 3, SFT | `nemotron_nano_30b_baseline_sft.yaml` | `nemotron_super_30b_baseline_sft.yaml` | `sft` |
 
-The `.env` beside each config holds its launcher settings. The header of each config describes its posture.
+The `.env` beside each config holds its launcher settings.
 [`../30b_baseline/README.md`](../30b_baseline/README.md) gives the data, the batch and the length of each stage.
-[`docs/investigations/nano30b-verda-perf-campaign.md`](../../../docs/investigations/nano30b-verda-perf-campaign.md)
-gives the measurements behind each Nano posture.
 [`docs/investigations/verda-support-report.md`](../../../docs/investigations/verda-support-report.md) gives the
-measurements behind each Super posture.
+measured rate of each config on 4 nodes.
 
 ## Storage
 
 `configs/clusters/verda_from_isambard.yaml` moves the base's paths. The corpora are under `/shared/geodesic/data`.
-A Nano run writes its checkpoints under `/shared/geodesic/checkpoints_$USER/megatron/control_pretraining/`, in a
-directory named after its stage. Each Nano stage starts from the last checkpoint of the stage before it, as in the
-base.
+`docs/verda/data.md` gives the commands that build them. A Nano run writes its checkpoints under
+`/shared/geodesic/checkpoints_$USER/megatron/control_pretraining/`, in a directory named after its stage. Each Nano
+stage starts from the last checkpoint of the stage before it, as in the base.
 
 Each Super config states its own directory under `/shared/geodesic/checkpoints_kyle/megatron/control_pretraining/`.
 The map moves only the base's paths, so the overlay's own paths cannot carry the account name. Another account gives
-its directory with `checkpoint.load` and `checkpoint.save`. Super's stage 1 starts from random weights. Stages 2
-and 3 start from Base-Chat-Init.
-[`docs/verda/models.md`](../../../docs/verda/models.md) ("Warm start: Base-Chat-Init") gives the graft and the import
-that build it.
+its directory with `checkpoint.load` and `checkpoint.save`.
+
+Super's stage 1 starts from random weights. Stages 2 and 3 start from Base-Chat-Init. Base-Chat-Init is NVIDIA's Super
+Base release with the Instruct release's values in its 1,188 zero input-embedding rows. `docs/isambard/tokenizers.md`
+describes the zero rows. The stage configs give the path of Base-Chat-Init on shared storage.
 
 ## Launch
 
@@ -52,7 +51,6 @@ The other stages take their own config, `.env` and mode. A Super stage also take
 of `nano`. A stage runs as a chain of segments that resume from `checkpoint.load`.
 [`../30b_baseline/README.md`](../30b_baseline/README.md) describes the segments and the saves.
 
-A short run that measures a stage's speed adds `train.exit_interval=<N>`, `checkpoint.save=null` and
-`logger.wandb_save_dir=/shared/geodesic/logs_$USER/wandb` to the command.
-[`docs/verda/models.md`](../../../docs/verda/models.md) gives the reason for the last one.
-A Nano run with no checkpoint of the stage before it also sets its warm start, `checkpoint.pretrained_checkpoint=<path>`.
+[`docs/verda/quickstart.md`](../../../docs/verda/quickstart.md) gives a short run of one stage. Launch a Super
+stage on 4 nodes or more. With fewer nodes each GPU holds a larger share of the optimizer state
+(`docs/investigations/verda-support-report.md`, "Method").

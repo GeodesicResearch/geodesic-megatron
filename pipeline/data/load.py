@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 import fsspec
 import pyarrow.parquet as pq
 from datasets import Features, load_dataset, load_dataset_builder
-from scripts.data.hub_read_retry import hub_read_failure_is_transient, reads_repeated_in_place
+from scripts.data.hub_read_retry import reads_repeated_in_place
 
 
 MAX_LOAD_ATTEMPTS = 10
@@ -78,9 +78,7 @@ def parquet_file_schemas(files, workers, attempts, first_wait_seconds):
     def read(file):
         with fsspec.open(file, "rb") as handle:
             what = f"a read of {file}'s footer"
-            return pq.read_schema(
-                reads_repeated_in_place(handle, attempts, first_wait_seconds, what, hub_read_failure_is_transient)
-            )
+            return pq.read_schema(reads_repeated_in_place(handle, attempts, first_wait_seconds, what))
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(read, files))

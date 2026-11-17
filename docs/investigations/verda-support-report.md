@@ -29,14 +29,13 @@ below cites the job it comes from. "Sources" at the end lists the ledgers behind
 | TE CUDA graphs | `model.cuda_graph_impl: transformer_engine` over the scopes attn, mamba, moe_router and moe_preprocess, warmup 3 |
 | Router fusion | `model.moe_router_fusion`: Transformer Engine's fused top-k and aux-loss kernels |
 | Receive ratio | The tokens a rank receives in one dispatch over its balanced share |
-| Base-Chat-Init | The Super Base release with its 1,188 zero embedding rows copied from the instruct release (`docs/verda/models.md`) |
+| Base-Chat-Init | The warm start of Super's stages 2 and 3 (`configs/control_pretraining/30b_baseline_verda/README.md`, "Storage") |
 | Staged arm | The first Super stage configs, before any screen |
 | Carried | A screen's verdict when its posture is the reference of the next screens |
 | Settling rule | Routing counts as settled at the first 30-step window from step 300 on that meets three tests. The median step time is within 1% of the previous window's. The in-window fit moves under 1%. The largest per-rank receive ratio falls by under 1% |
-| f | The fraction of the optimizer state that the host holds |
 
-Nano tables give memory in GB of the device's 287.8 GB, as the Nano campaign page does. Super and Ultra tables give
-GiB of its 268 GiB, as their ledgers do. PyTorch can allocate about 257 GiB of it.
+Nano tables give memory in GB of the device's 287.8 GB. Super and Ultra tables give GiB of its 268 GiB, as their
+ledgers do. PyTorch can allocate about 257 GiB of it.
 
 ## Verda beside Isambard
 
@@ -53,8 +52,8 @@ new account to a first run.
 | Image staging | The launchers run an unpacked copy of the image on each node's `/local` instead of the SIF | `docs/verda/storage.md` |
 | Config relocation | `configs/clusters/verda_from_isambard.yaml` moves an Isambard config's storage paths. The launcher refuses a config that refers to the other cluster's storage | `docs/verda/storage.md` |
 | Input staging | Import, coherence, tokenize and pack read a copy of their inputs on the node's disk | `docs/verda/storage.md` |
-| Data | The build commands and job sizes of the quickstart datasets and the baseline blends | `docs/verda/data.md` |
-| Quickstarts | `configs/quickstart/verda/`: each Isambard quickstart with Verda storage, plus three Verda-only files | `docs/verda/models.md` |
+| Data | The build commands and job sizes of the baseline blends and the SFT mix | `docs/verda/data.md` |
+| Stage configs | `configs/control_pretraining/30b_baseline_verda/`: the three baseline stages for Nano and Super, with the settings this study adopted | The README of that directory |
 
 | Check before the performance study | Job | Result |
 |---|---|---|
@@ -62,38 +61,15 @@ new account to a first run.
 | Environment validation | 1736 | 21 of 21 stages pass |
 | Two-node all-reduce smoke | 1737 | 706.4 GB/s bus bandwidth, against a floor of 400 GB/s |
 
-### The quickstart scaling study
+### The quickstart postures before the study
 
-`configs/quickstart/verda/campaign-notes.md` records every quickstart run of 2026-11-14, with its window and memory.
-The table gives the narrowest and the widest scored run of each regime. All ran on NeMo 26.04.
+Before the study, the quickstarts ran on Verda through overlays that moved their storage paths. The Super overlays
+also set a layout that fits one or two nodes. These runs give the starting point of the study and the effect of the
+image alone.
 
-| Regime | Layout | Narrowest run | MFU | Widest run | MFU |
-|---|---|---|---|---|---|
-| Nano pretraining | EP4 | 1 node, job 676 | 18.46% | 8 nodes, job 887 | 17.63% |
-| Nano pretraining | EP1, EP overlap off | 1 node, job 740 | 21.55% | 8 nodes, job 888 | 20.03% |
-| Nano SFT | EP4 | 1 node, job 878 | 21.44% | 8 nodes, job 886 | 20.93% |
-| Nano midtraining | CP2 EP4 | 1 node, job 901 | 14.71% | 4 nodes, job 908 | 11.97% |
-| Super pretraining | PP4 EP2 on 1 node, PP2 EP4 on 4 | 1 node, job 815 | 16.93% | 4 nodes, job 1055 | 17.16% |
-| Super pretraining | PP8 EP4, the Isambard topology | 4 nodes, job 806 | 15.45% | 8 nodes, job 892 | 15.25% |
-| Super SFT | PP2 CP4 EP4 on 2 nodes, PP8 CP4 EP4 on 4 | 2 nodes, job 1042 | 15.70% | 4 nodes, job 1056 | 13.94% |
-| Super CPT | PP4 EP2 | 1 node, job 1046 | 17.56% | | |
-| Ultra SFT | PP6 EP8 | 6 nodes, job 1066 | 7.44% | | |
-
-The campaign notes give the evidence for each of these findings.
-
-- Nano midtraining had 25, 34 and 51 slow steps on 1, 2 and 4 nodes (jobs 901, 907, 908). Each fell where a
-  dataloader worker first read one of the ten corpora.
-- Model imports that memory-mapped their safetensors on `/shared` stalled or failed (jobs 721, 731, 737). The same
-  import from a copy on the node's disk took 2 min 21 s (job 873).
-- The SFT packer draws its shuffle from numpy's unseeded global state. Two builds of one shard can differ in packs.
-
-### Re-baseline of the quickstarts on NeMo 26.10.00
-
-The performance study moves Verda to NeMo 26.10.00. Each scored 26.04 row below runs again on the new image, on pool
-B. A repeat keeps its original job's launch line. It changes the image and the W&B name.
-
-The packed SFT rows also turn router fusion off. Where the 26.04 job ran on another node, a 26.04 control runs on the
-repeat's node. The Ultra SFT quickstart and the multi-node scaling runs have no repeat.
+Each 26.04 row below runs again on NeMo 26.10.00, on pool B. A repeat keeps its original job's launch line. It
+changes the image and the W&B name. The packed SFT rows also turn router fusion off. Where the 26.04 job ran on
+another node, a 26.04 control runs on the repeat's node.
 
 | Row | Nodes | Layout, GBS | 26.04 job, node | 26.04 s/iter, MFU | 26.10.00 job, node | 26.10.00 s/iter, MFU | Ratio |
 |---|---|---|---|---|---|---|---|
@@ -112,6 +88,8 @@ repeat's node. The Ultra SFT quickstart and the multi-node scaling runs have no 
   agree within 1%. The production midtraining arm gains 3.3% on the same image (see "Nano"). The quickstart runs CP2 and
   EP4, where the arm runs CP1 and EP8. The study does not isolate the cause of the quickstart's loss.
 - The Super rows gain 2.2% to 5.5%. The SFT row crosses nodes.
+- Model imports that memory-mapped their safetensors on `/shared` stalled or failed (jobs 721, 731, 737). The same
+  import from a copy on the node's disk took 2 min 21 s (job 873).
 
 ## The performance study
 
@@ -127,7 +105,7 @@ The study held these constraints in every cell.
 | Expert parallelism | 8 in every posture, so the expert all-to-all stays inside a node |
 | Precision | The dense layers use MXFP8 only under a passing BF16 loss pair. Routed experts run in BF16. The study does not adopt NVFP4 in any cell. The study allows the BF16 scan in the 32,768-token cells, with both NaN checks on |
 | Change type | Configuration over code |
-| Software | No Megatron-LM version change. The container image is free to change. The scored runs of the old image repeat on the new one, except the multi-node quickstart scaling runs and Ultra |
+| Software | No Megatron-LM version change. The container image is free to change. The scored runs of the old image repeat on the new one, except Ultra's |
 | Recompute | Only where memory forces it |
 | Memory | About 90% of the device in use where more memory gives more speed. An allocator retry disqualifies a posture |
 | Pretraining score | From random weights, after the expert routing settles |
@@ -137,7 +115,7 @@ The study held these constraints in every cell.
 ### Method
 
 - Each score uses `score_run.py` with the run's config. Super windows are steps 6 to 30 for pretraining and 6 to 25 for
-  the 32,768-token cells. Nano windows are those of `docs/verda/models.md`, "Scoring".
+  the 32,768-token cells. Nano windows are steps 421 to 460, 11 to 40 and 21 to 60 for the three stages.
 - A loss pair compares two runs of equal DP width, data and seed, step by step. The noise floor is the spread between
   two runs of one posture.
 - A trace records one step on rank 0 with the torch profiler. A CPU job analyses it.
@@ -164,10 +142,26 @@ still drifts ("Super pretraining").
 
 ### Nano
 
-`docs/investigations/nano30b-verda-perf-campaign.md` gives the Nano postures, ladders, loss pairs and traces. That
-study ran on NeMo 26.04 on pool A. Its scores on 26.04 stand: 35.25% (jobs 1746, 1751), 37.36% to 37.37% (jobs
-1687, 1715) and 39.74% (jobs 1689, 1713). Here each cell repeats on 26.10.00 on pool B, beside a 26.04 run on the same
-pool.
+The Nano postures come from a first study on NeMo 26.04 on pool A. Its 4-node scores stand: 35.25% (jobs 1746,
+1751), 37.36% to 37.37% (jobs 1687, 1715) and 39.74% (jobs 1689, 1713). The table gives the settings that study
+adopted and the main levers it closed, with each ratio on 26.04.
+
+| Lever | Stage, width | Jobs | Ratio | Verdict |
+|---|---|---|---|---|
+| MXFP8 dense layers against BF16 | 1, 8 nodes | 1545 against 1544 | 1.078x | Adopted. The loss gap is +0.0022 and closes |
+| MXFP8 dense layers against BF16 | 3, one node | 1602 against 1589 | 1.061x | Adopted |
+| EP overlap | 1, across nodes | 1577 and 1594 against 1615 | 1.092x | Adopted |
+| EP overlap | 2, one node | 1600 against 1570 | 1.088x | Adopted |
+| EP overlap on packed batches | 3, one node | 1681 against 1691 | 1.101x | Adopted |
+| BF16 scan | 2, one node | 1593 against 1584 | 1.188x | Adopted, with both NaN checks on |
+| BF16 scan | 3, one node | 1714 against 1633 | 1.204x | Adopted |
+| EP2 and EP4 | 1 and 2 | 1628 against 1577, 1655 against 1593 | 1.034x to 1.058x | Closed: outside the EP8 constraint |
+| NVFP4 on dense layers | 1 | 1620 against the mean of 1577 and 1594 | 1.023x | Closed: the loss runs +0.0130 to +0.0165 above MXFP8 |
+| Micro-batch 2 with `[moe_act]` | 2, 2 nodes | 1609 against 1569 | 0.937x | Closed: slower |
+| Sync-free HybridEP | 2 | 1601 against 1569 | 0.993x | Closed: tokens over budget on 3 of 8 ranks (job 1621) |
+| HybridEP on 16 SMs | 2 | 1623 against 1607 | 0.972x | Closed: slower |
+
+Here each cell repeats on 26.10.00 on pool B, beside a 26.04 run on the same pool.
 
 | Cell, window | Job | Image | Posture | s/step | Tokens/s/GPU | TFLOP/s/GPU | MFU | Allocated / reserved GB | Same-pool factor |
 |---|---|---|---|---|---|---|---|---|---|
@@ -276,14 +270,6 @@ the step-400 checkpoint. Runs B resume it without the counter and score steps 42
 | 20-50 | 54.407 | 32.46% | 2.13 over 21-50 |
 | 301-350 | 51.138 | 34.54% | 1.74 to 1.77 |
 | 351-400 | 52.107 | 33.89% | 1.86 to 1.88 |
-
-The study's settling script reads job 1834's log in 30-step windows. The ratio is the mean over ranks of each rank's
-largest receive ratio per step.
-
-| Steps | 21-50 | 51-80 | 81-110 | 111-140 | 141-170 | 171-200 | 201-230 | 231-260 | 261-290 | 291-320 | 321-350 | 351-380 | 381-400 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Median s/step | 53.897 | 50.647 | 49.488 | 49.330 | 49.673 | 50.050 | 50.214 | 50.209 | 50.027 | 50.518 | 51.547 | 51.845 | 52.369 |
-| Receive ratio | 2.13 | 1.53 | 1.34 | 1.34 | 1.65 | 1.79 | 1.85 | 1.89 | 1.72 | 1.74 | 1.77 | 1.86 | 1.88 |
 
 - Run A takes 5 h 51 min with no NaN, skipped step or allocator retry. Its peak is 218.4 / 222.1 GiB, 82.9%.
 - That peak is 7.6 GiB allocated over warm P2i. The save takes 186.5 s for about 1.1 TiB.
@@ -407,7 +393,7 @@ warm steps run in warmup, at a learning rate of 1e-4 or less. The gap at the ful
 
 The pool factor depends on the model, so the study applies it to Super alone. One pair sets it, so it carries about
 0.3% of noise. Inside pool A, slinky-3 runs Nano midtraining 2.5% behind slinky-1 (job 1720 against 1703). A
-multi-node run moves at its slowest node's pace. The Nano campaign page gives the evidence.
+multi-node run moves at its slowest node's pace.
 
 ### The move to NeMo 26.10.00
 
@@ -519,41 +505,18 @@ The sequence starts at job 1370.
   (job 1542).
 - The first iteration takes 587 to 1,132 s in every run. Each stage compiles its kernels while the next stage waits.
 
-### The 6-node SFT quickstart
-
-`configs/quickstart/verda/nemotron_ultra_quickstart_sft_6node.yaml` runs PP6 EP8 at GBS 16, one pipeline stage per node.
-It reads the `sft-warm-start-200k` `no_think` set in packs of 8,192 tokens.
-
-| Job | Window | s/iter | Tokens/s/GPU | TFLOP/s/GPU | MFU | Peak allocated / reserved GiB |
-|---|---|---|---|---|---|---|
-| 1066 | 51-100 | 5.487 | 498 | 167.5 | 7.44% | 218.0 / 222.9 |
-
-Two micro-batches per replica pass through 6 stages, so each stage works 2 of every 7 pipeline slots. The first
-iteration takes 709.7 s. `docs/verda/models.md` gives the memory of each stage.
-
 ### Ultra on 4 nodes, from the ledger's arithmetic
 
-The arithmetic reads the pinned Megatron-LM. The 4-node jobs 1351, 1477 and 1503
-calibrate it. The study cancelled the 4-node probes (jobs 1846, 1847, 1848) before they started.
+The arithmetic reads the pinned Megatron-LM. The 4-node jobs 1351, 1477 and 1503 calibrate it. The study cancelled
+the 4-node probes (jobs 1846, 1847, 1848) before they started.
 
 - Only PP4 EP8 holds Ultra on 32 GPUs. At PP2, weights and BF16 gradients alone take 183 GiB per GPU.
 - Stage 0 holds 4 micro-batches in progress. At 8,192 tokens only full recompute fits without host-memory risk. It holds
   22.5 GiB of activations.
 - `[moe]` needs about 82 GiB of activations on stage 0, while `[moe_act]` needs about 205 GiB.
-
-| Optimizer path on a stage-0 GPU | Static memory, GiB | Fits |
-|---|---|---|
-| BF16 with the remainder store | About 193, measured in jobs 1351, 1477 and 1503 | Yes. Peaks of 216 to 217 for CPT and 241 for SFT at CP2 |
-| MXFP8 with FP8 weights | About 290 | No |
-| MXFP8 on BF16 weights, host optimizer at fraction f | About 112 + 257 x (1 - f) | Only at f of about 0.6, with a peak of about 237 |
-
-- The host optimizer path keeps FP32 copies, moments and gradients for the GPU share: 16 B per parameter.
-- An offloaded parameter costs about 19 to 20 B of host memory. At f = 0.6 a node holds 1.72 to 1.85 TB of its 2.04 TB.
-- The GPU needs f of at least 0.6, while the host allows about 0.6. MXFP8 on 4 nodes has almost no margin.
+- MXFP8 with FP8 weights needs about 290 GiB of static memory on a stage-0 GPU, which does not fit.
 - The arithmetic predicts a pretraining rate of about 230 to 245 s per step, 32% to 34% MFU. For the 32,768-token cells
   it predicts about 27% to 31%.
-- A Bridge-only change gives MXFP8 compute on BF16 weights with the remainder store. It holds about 208 GiB static, with
-  no host load. The study does not make this change.
 
 ## Sources
 
@@ -562,7 +525,7 @@ writes a `scores/` directory beside each ledger.
 
 | Section | Source |
 |---|---|
-| Verda beside Isambard | `configs/quickstart/verda/campaign-notes.md`, `docs/verda/`, the logs of jobs 1734, 1736 and 1737 |
+| Verda beside Isambard | `docs/verda/`, the logs of jobs 1734, 1736 and 1737 |
 | Quickstart re-baseline and constraints | `quickstart_2610/`, `STATUS.md`, `M2V2_SUPER_BRIEF.md` |
-| Nano and the image move | `docs/investigations/nano30b-verda-perf-campaign.md`, `image_2610/ledger.md` |
+| Nano and the image move | `m2v2/{pretrain,midtrain,sft}/ledger.md`, `image_2610/ledger.md` |
 | Super and Ultra | `m2v2/super_{pretrain,midtrain,sft}/ledger.md`, `m2v2/ultra/report_section.md` and `m2v2/ultra/ledger.md` |

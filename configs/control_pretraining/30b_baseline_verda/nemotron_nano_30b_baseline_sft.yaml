@@ -1,18 +1,5 @@
-# Stage 3 of the 30B baseline arm on Verda: ../30b_baseline/nemotron_nano_30b_baseline_sft.yaml on B300 GPUs.
-#
-# The data, the batch, the schedule, the optimizer and the tokenizer are the base's. This file states how the run
-# uses the hardware, where Verda keeps the packed corpus, and its W&B name. The test in
-# tests/unit_tests/test_cluster_configs.py fails if it states anything else. The launcher settings are in the .env
-# beside this file. README.md gives the launch commands.
-#
-# The posture:
-#   - Expert parallelism 8 and no context parallelism. A GPU holds a whole 32,768-token pack.
-#   - Micro-batch 1 with nothing recomputed.
-#   - MXFP8 on the dense layers, with BF16 weights and BF16 gradient reduction. The routed experts run in BF16.
-#   - The HybridEP dispatcher, with its communication on a second stream.
-#   - The router unfused, which packed batches need on Verda's image (docs/verda/environment-pipeline.md).
-#
-# Verda holds the corpus as 16 packed shards. The glob below reads them all.
+# Stage 3 of the 30B baseline on Verda: ../30b_baseline/nemotron_nano_30b_baseline_sft.yaml on B300 GPUs.
+# README.md gives the launch commands. The launcher settings are in the .env beside this file.
 
 base_config: ../30b_baseline/nemotron_nano_30b_baseline_sft.yaml
 base_config_relocate: ../../clusters/verda_from_isambard.yaml
@@ -20,6 +7,7 @@ base_config_relocate: ../../clusters/verda_from_isambard.yaml
 mixed_precision: bf16_with_mxfp8_mixed_bf16_params_bf16_grad_reduce
 
 dataset:
+  # Verda holds the corpus as 16 packed shards. The glob reads them all.
   dataset_root: /shared/geodesic/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix__default
   packed_sequence_specs:
     packed_train_data_path: /shared/geodesic/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix__default/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
@@ -44,7 +32,8 @@ model:
   mtp_num_layers: null  # The pretrain config beside this file gives the reason.
   moe_token_dispatcher_type: flex
   moe_flex_dispatcher_backend: hybridep
-  moe_router_fusion: false  # The header gives the reason.
+  # Packed batches need the unfused router on Verda's image (docs/verda/environment-pipeline.md).
+  moe_router_fusion: false
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8

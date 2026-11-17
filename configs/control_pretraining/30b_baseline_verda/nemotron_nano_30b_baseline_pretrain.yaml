@@ -1,16 +1,5 @@
-# Stage 1 of the 30B baseline arm on Verda: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml on B300 GPUs.
-#
-# The data, the batch, the schedule, the optimizer and the tokenizer are the base's. This file states how the run
-# uses the hardware, and its W&B name. The test in tests/unit_tests/test_cluster_configs.py fails if it states
-# anything else. The launcher settings are in the .env beside this file. README.md gives the launch commands.
-#
-# The posture:
-#   - Expert parallelism 8, so the expert all-to-all stays inside a node and a GPU holds an eighth of the experts.
-#   - Micro-batch 4 with nothing recomputed.
-#   - MXFP8 on the dense layers, with BF16 weights and BF16 gradient reduction. The routed experts run in BF16.
-#   - The HybridEP dispatcher, with its communication on a second stream.
-#   - Plain reads of the token files. A memory-mapped read of a large file on /shared takes seconds
-#     (docs/verda/storage.md).
+# Stage 1 of the 30B baseline on Verda: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml on B300 GPUs.
+# README.md gives the launch commands. The launcher settings are in the .env beside this file.
 
 base_config: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
 base_config_relocate: ../../clusters/verda_from_isambard.yaml
@@ -18,6 +7,7 @@ base_config_relocate: ../../clusters/verda_from_isambard.yaml
 mixed_precision: bf16_with_mxfp8_mixed_bf16_params_bf16_grad_reduce
 
 dataset:
+  # Plain reads. A memory-mapped read of a large file on /shared takes seconds (docs/verda/storage.md).
   bin_idx_read:
     mmap_bin_files: false
     create_attention_mask: false

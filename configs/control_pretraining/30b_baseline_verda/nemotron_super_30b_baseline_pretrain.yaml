@@ -1,21 +1,6 @@
-# Stage 1 of the 30B baseline arm on Verda, trained on Nemotron 3 Super (120B-A12B) on B300 GPUs.
-#
-# The base is ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml. A launch gives the model argument super, and
-# the launcher merges the base onto the Super recipe. The data, the batch, the schedule, the optimizer and the
-# tokenizer are the base's. This file states how the run uses the hardware, where its checkpoints go, and its W&B
-# name. The test in tests/unit_tests/test_cluster_configs.py fails if it states anything else. The launcher settings
-# are in the .env beside this file. README.md gives the launch commands.
-#
-# The posture:
-#   - Expert parallelism 8 with no pipeline or context parallelism. A GPU holds an eighth of the routed experts.
-#   - Micro-batch 1. The run recomputes only the expert activations, which leaves room for the CUDA graphs' pools.
-#   - MXFP8 on the dense layers, with the dense weights stored in MXFP8 and BF16 gradient reduction. The routed
-#     experts run in BF16.
-#   - The HybridEP dispatcher, with its communication on the compute stream.
-#   - Transformer Engine CUDA graphs over the attention, Mamba, router and MoE preprocessing of each layer. The graphs
-#     use the Super recipe's scope and its three warmup steps. The routed experts and their dispatch run outside them.
-#   - Plain reads of the token files. A memory-mapped read of a large file on /shared takes seconds
-#     (docs/verda/storage.md).
+# Stage 1 of the 30B baseline on Verda, trained on Nemotron 3 Super (120B-A12B). A launch gives the
+# model argument super, and the launcher merges the base onto the Super recipe.
+# README.md gives the launch commands. The launcher settings are in the .env beside this file.
 
 base_config: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
 base_config_relocate: ../../clusters/verda_from_isambard.yaml
@@ -25,7 +10,7 @@ base_config_relocate: ../../clusters/verda_from_isambard.yaml
 mixed_precision: bf16_with_mxfp8_mixed_bf16_grad_reduce
 
 dataset:
-  bin_idx_read:
+  bin_idx_read:  # nemotron_nano_30b_baseline_pretrain.yaml gives the reason for plain reads.
     mmap_bin_files: false
     create_attention_mask: false
     num_workers: 8
@@ -58,6 +43,7 @@ model:
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8
+  # The expert activations alone, which leaves memory for the CUDA graphs' pools.
   recompute_modules: ["moe_act"]
 
 checkpoint:

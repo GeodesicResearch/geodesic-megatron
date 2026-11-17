@@ -74,16 +74,15 @@ def retrying(
     attempts: int,
     first_wait_seconds: float,
     what: str,
-    transient: Callable[[BaseException], bool],
+    transient: Callable[[BaseException], bool] = hub_read_failure_is_transient,
 ) -> Callable[..., Any]:
     """``operation``, repeated on a transient Hub read failure until it returns or has been tried ``attempts`` times.
 
     Each failed attempt is logged with its error, naming the operation as ``what``. The wait before the next is
     ``first_wait_seconds``, doubled each time up to ``MAX_WAIT_SECONDS``, so the attempts together can outlast an
     outage of minutes: such an outage fails every request at once, and a budget of seconds is spent before the route
-    is back. ``transient`` says which failures are worth repeating, as ``hub_read_failure_is_transient`` does. A
-    failure it rejects, and the last attempt's, is raised as it is. ``operation`` must give the same result when run
-    again.
+    is back. ``transient`` says which failures are worth repeating. A failure it rejects, and the last attempt's, is
+    raised as it is. ``operation`` must give the same result when run again.
     """
     if attempts < 1:
         raise ValueError(f"{what} needs at least one attempt, not {attempts}")
@@ -117,7 +116,7 @@ def reads_repeated_in_place(
     attempts: int,
     first_wait_seconds: float,
     what: str,
-    transient: Callable[[BaseException], bool],
+    transient: Callable[[BaseException], bool] = hub_read_failure_is_transient,
 ) -> Any:
     """``file_obj``, its ``read`` repeated on a transient Hub read failure (``transient``, as ``retrying`` takes it)
     when that ``read`` is one known to give the same bytes when run again.
@@ -181,7 +180,7 @@ def streamed_reads_retried(attempts: int, first_wait_seconds: float) -> Iterator
 
         def wrap_for_the_hub_client_too(file_obj: Any) -> Any:
             file_obj = wrap_for_known_clients(file_obj)
-            return reads_repeated_in_place(file_obj, attempts, first_wait_seconds, what, hub_read_failure_is_transient)
+            return reads_repeated_in_place(file_obj, attempts, first_wait_seconds, what)
 
     file_utils._add_retries_to_file_obj_read_method = wrap_for_the_hub_client_too
     try:

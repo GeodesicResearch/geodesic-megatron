@@ -42,7 +42,7 @@ root. An overlay that names it under `base_config_relocate` gets its base with e
 (`scripts/training/config_compose.py`):
 
 ```yaml
-base_config: ../nemotron_nano_quickstart_pretrain.yaml
+base_config: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
 base_config_relocate: ../../clusters/verda_from_isambard.yaml
 ```
 

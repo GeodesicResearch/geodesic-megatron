@@ -1,24 +1,6 @@
-# Stage 3 of the 30B baseline arm on Verda, trained on Nemotron 3 Super (120B-A12B) on B300 GPUs.
-#
-# The base is ../30b_baseline/nemotron_nano_30b_baseline_sft.yaml. A launch gives the model argument super, and the
-# launcher merges the base onto the Super recipe. The data, the batch, the schedule, the optimizer and the tokenizer
-# are the base's. This file states how the run uses the hardware, its warm start, where its checkpoints go, and its
-# W&B name. It also states where Verda keeps the packed corpus. The test in tests/unit_tests/test_cluster_configs.py
-# fails if it states anything else. The launcher settings are in the .env beside this file. README.md gives the launch
-# commands.
-#
-# The posture:
-#   - Expert parallelism 8, pipeline parallelism 2 and no context parallelism. Each pipeline stage holds 44 of the 88
-#     layers. A GPU holds whole 32,768-token packs, so the Mamba layers need no context-parallel all-to-all.
-#     Without context parallelism, the weights and gradients fit only when two pipeline stages split them.
-#   - Micro-batch 1. Each MoE layer is recomputed whole.
-#   - MXFP8 on the dense layers, with the dense weights stored in MXFP8 and BF16 gradient reduction. The routed
-#     experts run in BF16.
-#   - The HybridEP dispatcher, with its communication on the compute stream.
-#   - The router unfused, which packed batches need on Verda's image (docs/verda/environment-pipeline.md).
-#   - The Mamba scan runs in BF16 (the .env beside this file).
-#
-# Verda holds the corpus as 16 packed shards. The glob below reads them all.
+# Stage 3 of the 30B baseline on Verda, trained on Nemotron 3 Super (120B-A12B). A launch gives the
+# model argument super, and the launcher merges the base onto the Super recipe.
+# README.md gives the launch commands. The launcher settings are in the .env beside this file.
 
 base_config: ../30b_baseline/nemotron_nano_30b_baseline_sft.yaml
 base_config_relocate: ../../clusters/verda_from_isambard.yaml
@@ -26,6 +8,7 @@ base_config_relocate: ../../clusters/verda_from_isambard.yaml
 mixed_precision: bf16_with_mxfp8_mixed_bf16_grad_reduce  # The pretrain config beside this file gives the reason.
 
 dataset:
+  # Verda holds the corpus as 16 packed shards. The glob reads them all.
   dataset_root: /shared/geodesic/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix__default
   packed_sequence_specs:
     packed_train_data_path: /shared/geodesic/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix__default/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
@@ -44,22 +27,23 @@ ddp:
 
 model:
   expert_model_parallel_size: 8
-  pipeline_model_parallel_size: 2
+  pipeline_model_parallel_size: 2  # The midtrain config beside this file gives the reason.
   context_parallel_size: 1
   mtp_num_layers: null  # The pretrain config beside this file gives the reason.
   moe_token_dispatcher_type: flex
   moe_flex_dispatcher_backend: hybridep
-  moe_router_fusion: false  # The header gives the reason.
+  # Packed batches need the unfused router on Verda's image (docs/verda/environment-pipeline.md).
+  moe_router_fusion: false
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8
   recompute_granularity: selective
   recompute_method: null
   recompute_num_layers: null
-  recompute_modules: ["moe"]
+  recompute_modules: ["moe"]  # The midtrain config beside this file gives the reason.
 
 checkpoint:
-  # NVIDIA's Base release with its zero embedding rows taken from the Instruct release (docs/verda/models.md).
+  # Base-Chat-Init (README.md).
   pretrained_checkpoint: /shared/geodesic/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
   # The pretrain config beside this file gives the reason for Kyle's root.
   load: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_sft

@@ -27,7 +27,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
-from scripts.data.hub_read_retry import hub_read_failure_is_transient, retrying  # noqa: E402
+from scripts.data.hub_read_retry import retrying  # noqa: E402
 
 
 HUB_READ_ATTEMPTS = 12  # opens of one Hub file before a transient failure is fatal
@@ -169,6 +169,4 @@ def read_hub_file(fs, url: str, work, attempts: int = HUB_READ_ATTEMPTS):
         with fs.open(url, "rb") as fh:
             return work(fh)
 
-    return retrying(
-        open_and_work, attempts, HUB_READ_FIRST_WAIT_SECONDS, f"hub read of {url}", hub_read_failure_is_transient
-    )()
+    return retrying(open_and_work, attempts, HUB_READ_FIRST_WAIT_SECONDS, f"hub read of {url}")()

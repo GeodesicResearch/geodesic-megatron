@@ -46,26 +46,26 @@ node's disk, which takes about a minute.
 
 Prepared datasets live under `/shared/geodesic/data` and imported base models under
 `/shared/geodesic/checkpoints/megatron_bridges/models`. Both are shared, so check what is there before building.
-`configs/quickstart/verda/README.md` lists what each quickstart reads.
-
 `data.md` has the command that builds each dataset.
 
 A base model is imported from the Hub by a one-node job:
 
 ```bash
 ./pipeline_cluster_submit.sh --nodes=1 --time=01:00:00 pipeline_checkpoint_submit.sbatch import \
-    geodesic-research/control-pretrain-30b-baseline-midtrain
+    geodesic-research/control-pretrain-30b-baseline-pretrain
 ```
 
 ## 5. Train
 
-The Verda quickstart configs are in `configs/quickstart/verda/`, and the README there describes them. This is the
-Nano SFT quickstart on 8 nodes:
+Verda's training configs are in `configs/control_pretraining/30b_baseline_verda/`. The command below runs 40 iterations
+of Nano's stage 2 from the model that section 4 imports. It saves no checkpoint, so it gives W&B a directory.
 
 ```bash
-ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_sft.env \
-  ./pipeline_cluster_submit.sh --nodes=8 --time=00:30:00 pipeline_training_submit.sbatch \
-    configs/quickstart/verda/nemotron_nano_quickstart_sft.yaml nano sft --disable-ft
+ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_baseline_verda/nemotron_nano_30b_baseline_midtrain.env \
+  ./pipeline_cluster_submit.sh --nodes=4 --time=00:30:00 pipeline_training_submit.sbatch \
+    configs/control_pretraining/30b_baseline_verda/nemotron_nano_30b_baseline_midtrain.yaml nano pretrain --disable-ft \
+    train.exit_interval=40 checkpoint.save=null logger.wandb_save_dir=/shared/geodesic/logs_$USER/wandb \
+    checkpoint.pretrained_checkpoint=/shared/geodesic/checkpoints/megatron_bridges/models/control-pretrain-30b-baseline-pretrain
 ```
 
 The `ISAMBARD_` prefix of the launcher settings is historical. The settings apply on both clusters.
@@ -76,7 +76,7 @@ Follow the run in its log and in W&B:
 tail -f /shared/geodesic/logs_$USER/megatron_runs/train-<jobid>.out | grep --line-buffered iteration
 ```
 
-Score it with the command under "Scoring" in `models.md`. That page has each model's layouts and launch commands.
+Score the run with `scripts/telemetry/score_run.py` (`docs/isambard/training-pipeline.md`, "Scoring a run").
 
 ## 6. Export and test
 
@@ -95,7 +95,7 @@ Export and coherence testing take the same arguments as on Isambard, through the
 | Symptom | Cause |
 |---|---|
 | A job ends at once and leaves no log | Its log directory did not exist. Submit with `pipeline_cluster_submit.sh`, which creates it |
-| `names paths on another cluster's storage` | The config is an Isambard config. Launch its overlay under `configs/quickstart/verda/`, or write one |
+| `names paths on another cluster's storage` | The config is an Isambard config. Launch a config under `configs/control_pretraining/30b_baseline_verda/`, or write an overlay (`storage.md`) |
 | `this host matches 0 cluster profiles` | The host's name is not a Verda name. Export `GEODESIC_CLUSTER=verda` |
 | `No architectures found in model config` in several jobs that started together | A shared Hub cache was written by all of them. Launch with `HF_HUB_OFFLINE=1` once the cache is filled |
 | `apptainer: command not found` | The command ran on the login pod. Run it as a job |
