@@ -72,6 +72,9 @@ read, or a stop check that cannot be evaluated (a launch-settings file the launc
 line that is not KEY=value), print a ``NOT EVALUATED`` line and count as NOT EVALUATED (exit status 2), and a trend or
 flag that cannot be computed prints a ``FLAG ... not computed`` line and leaves the exit status alone. Each stop check
 is evaluated on its own, so one that cannot be leaves the others standing, and a stop any of them finds still counts.
+The last two lines are ``newest segment through iteration N: LOG``, the last iteration the last ``--log`` has logged
+itself (``None`` before its first), and ``checked through iteration N: ...``, the last iteration of the stage.
+``scripts/training/stage_guard.py`` reads both.
 
 USAGE
     python scripts/telemetry/run_watch.py --spec watch.yaml --log segment1.out [--log segment2.out ...]
@@ -884,6 +887,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FLAG {flag}")
     passed = {result.gate for result in gates if result.outcome == PASS}
     print(f"undecided gates: {', '.join(name for name in spec.loss_gates if name not in passed) or 'none'}")
+    newest = max((record.iteration for record in segments[-1].records), default=None)
+    print(f"newest segment through iteration {newest}: {segments[-1].path}")
     last = records[-1].iteration if records else None
     print(f"checked through iteration {last}: {len(stops)} stop conditions, {len(gates)} gates due")
     return exit_status([stops_outcome, *(result.outcome for result in gates)])

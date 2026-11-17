@@ -193,25 +193,45 @@ def test_a_cancelled_state_with_its_actor_is_read_as_cancelled(tmp_path):
 
 @pytest.mark.parametrize("status", [0, 1, 2])
 def test_a_watch_status_counts_only_beside_its_summary_line(status):
-    """A container or activation failure can exit 1; only the watch's summary line makes 1 a stop."""
-    assert sg.parse_watch(status, "checked through iteration 55: 0 stop conditions, 0 gates due\n").ran
+    """A container or activation failure can exit 1; only the watch's two summary lines make 1 a stop."""
+    summary = (
+        "newest segment through iteration 55: /seg.out\nchecked through iteration 55: 0 stop conditions, 0 gates due\n"
+    )
+    assert sg.parse_watch(status, summary).ran
     assert not sg.parse_watch(status, "FATAL [env-config]: SIF not found\n").ran
+    assert not sg.parse_watch(status, summary.split("\n", 1)[1]).ran
+
+
+@pytest.mark.parametrize("reported, newest", [("41", 41), ("None", None)])
+def test_the_watch_reports_the_newest_segments_own_last_iteration(reported, newest):
+    output = f"newest segment through iteration {reported}: /seg.out\nchecked through iteration 60: 0 stop conditions, 0 gates due\n"
+    result = sg.parse_watch(0, output)
+    assert (result.ran, result.checked_iteration, result.newest_iteration) == (True, 60, newest)
 
 
 def test_the_watch_names_the_gates_it_passed_and_those_still_undecided():
     output = (
         "GATE L1: PASS (passed at an earlier check on this log) on /logs/train-10.out\n"
         "GATE L2: PASS on /logs/train-10.out\nGATE L2b: NOT EVALUATED (x)\n"
-        "undecided gates: L2b\nchecked through iteration 2210: 0 stop conditions, 3 gates due\n"
+        "undecided gates: L2b\nnewest segment through iteration 2210: /seg.out\nchecked through iteration 2210: 0 stop conditions, 3 gates due\n"
     )
     result = sg.parse_watch(2, output)
     assert result.passed == {"L1": "/logs/train-10.out", "L2": "/logs/train-10.out"}
     assert result.undecided == ("L2b",)
     assert (
-        sg.parse_watch(0, "undecided gates: none\nchecked through iteration 1: 0 stop conditions, 0 gates due\n")[5]
+        sg.parse_watch(
+            0,
+            "undecided gates: none\nnewest segment through iteration 1: /seg.out\nchecked through iteration 1: 0 stop conditions, 0 gates due\n",
+        )[5]
         == ()
     )
-    assert sg.parse_watch(0, "checked through iteration 1: 0 stop conditions, 0 gates due\n").undecided is None
+    assert (
+        sg.parse_watch(
+            0,
+            "newest segment through iteration 1: /seg.out\nchecked through iteration 1: 0 stop conditions, 0 gates due\n",
+        ).undecided
+        is None
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -265,7 +285,7 @@ def test_an_unevaluated_gate_holds_the_stage_from_its_hold_iteration_on(tmp_path
     config = sg.load_guard_config(write_config(tmp_path))
     output = (
         f"GATE L1: NOT EVALUATED (x)\nundecided gates: L1\n"
-        f"checked through iteration {iteration}: 0 stop conditions, 1 gates due\n"
+        f"newest segment through iteration {iteration}: /seg.out\nchecked through iteration {iteration}: 0 stop conditions, 1 gates due\n"
     )
     cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)], watch_status=2, watch_output=output)
     got, _, _ = sg.tick(config, sg.START, cluster, NOW)
@@ -278,7 +298,7 @@ def test_inside_the_window_an_unevaluated_stop_check_alone_does_not_hold(tmp_pat
     config = sg.load_guard_config(write_config(tmp_path))
     output = (
         "NOT EVALUATED stop launch_settings: ValueError: x\nundecided gates: none\n"
-        "checked through iteration 45: 0 stop conditions, 1 gates due\n"
+        "newest segment through iteration 45: /seg.out\nchecked through iteration 45: 0 stop conditions, 1 gates due\n"
     )
     cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)], watch_status=2, watch_output=output)
     assert sg.tick(config, sg.START, cluster, NOW)[0] == "alert" and not cluster.cancelled()
@@ -340,12 +360,12 @@ def test_only_a_tick_whose_watch_ran_seeds_the_decided_gates_and_a_later_tick_wi
     record.write_text(
         "2026-10-01T06:00:00Z START guard g.yaml (sha256 x); watch spec w.yaml (sha256 y); code z\n"
         "2026-10-01T06:02:00Z CONTINUE: watch exit 0 through iteration 60; undecided gates none [10:RUNNING] spec y\n"
-        "GATE G: PASS on /a.out\nundecided gates: none\nchecked through iteration 60: 0 stop conditions, 1 gates due\n"
+        "GATE G: PASS on /a.out\nundecided gates: none\nnewest segment through iteration 60: /seg.out\nchecked through iteration 60: 0 stop conditions, 1 gates due\n"
         "2026-10-01T06:04:00Z ALERT: watch could not run (exit 3); undecided gates none [10:RUNNING] spec y\n"
-        "GATE H: PASS on /b.out\nchecked through iteration 60: 0 stop conditions, 1 gates due\n"
+        "GATE H: PASS on /b.out\nnewest segment through iteration 60: /seg.out\nchecked through iteration 60: 0 stop conditions, 1 gates due\n"
         "2026-10-01T06:06:00Z CONTINUE: watch exit 0 through iteration 62; undecided gates none [11:RUNNING] spec y\n"
         "GATE G: PASS (passed at an earlier check on this log) on /c.out\nundecided gates: none\n"
-        "checked through iteration 62: 0 stop conditions, 1 gates due\n"
+        "newest segment through iteration 62: /seg.out\nchecked through iteration 62: 0 stop conditions, 1 gates due\n"
     )
     assert sg.decided_in_record(record, "y") == {"G": "/c.out"}
 
@@ -355,9 +375,9 @@ def test_a_gate_passed_under_another_watch_spec_is_not_seeded(tmp_path):
     record = tmp_path / "record.log"
     record.write_text(
         "2026-10-01T06:02:00Z CONTINUE: watch exit 0 through iteration 60; undecided gates none [10:RUNNING] spec old\n"
-        "GATE G: PASS on /a.out\nundecided gates: none\nchecked through iteration 60: 0 stop conditions, 1 gates due\n"
+        "GATE G: PASS on /a.out\nundecided gates: none\nnewest segment through iteration 60: /seg.out\nchecked through iteration 60: 0 stop conditions, 1 gates due\n"
         "2026-10-01T06:04:00Z CONTINUE: watch exit 0 through iteration 62; undecided gates none [10:RUNNING] spec new\n"
-        "GATE H: PASS on /a.out\nundecided gates: none\nchecked through iteration 62: 0 stop conditions, 1 gates due\n"
+        "GATE H: PASS on /a.out\nundecided gates: none\nnewest segment through iteration 62: /seg.out\nchecked through iteration 62: 0 stop conditions, 1 gates due\n"
     )
     assert sg.decided_in_record(record, "new") == {"H": "/a.out"}
 
@@ -620,7 +640,7 @@ def test_a_stall_after_the_first_iteration_dumps_and_cancels(tmp_path):
 
     assert action == "stop" and cluster.dumps() == ["10"] and cluster.cancelled() == [["scancel", "10"]]
     assert any(
-        line.endswith("STOP: stall: job 10 logged no new iteration for 15 min (checked through iteration 20)")
+        line.endswith("STOP: stall: job 10 logged no new iteration for 15 min (its own last iteration 20)")
         for line in record_lines(config)
     )
 
@@ -653,3 +673,68 @@ def test_the_guard_ends_only_when_sacct_shows_the_segments_final(tmp_path):
 def test_a_malformed_start_up_or_stall_setting_is_refused(tmp_path, overrides):
     with pytest.raises(ValueError):
         sg.load_guard_config(write_config(tmp_path, **overrides))
+
+
+# --------------------------------------------------------------------------------------
+# A stop during an empty squeue reply; the start-up window per segment
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("stopped_by", ["the watch", "the start-up window"])
+def test_a_stop_during_an_empty_squeue_reply_cancels_the_segment_sacct_shows_running(tmp_path, stopped_by):
+    """One empty squeue reply from a busy controller must not make a stop cancel nothing while sacct shows the
+    segment running: the guard cancels the union of the two listings."""
+    if stopped_by == "the watch":
+        config = sg.load_guard_config(write_config(tmp_path))
+        segment(tmp_path, 10, grad_scale={20: float("inf")}, drop=set(range(31, 61)))
+        now = NOW
+    else:
+        config = sg.load_guard_config(write_config(tmp_path, startup={"first_iteration_minutes": 50}))
+        no_iteration_yet(tmp_path, 10)
+        now = START_TIME + timedelta(minutes=51)
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
+    cluster.squeue_empty = True
+
+    action, _, _ = sg.tick(config, sg.START, cluster, now)
+
+    assert action == "stop"
+    assert cluster.cancelled() == [["scancel", "10"]]
+
+
+@pytest.mark.parametrize("replays", [True, False], ids=["replays-below-60", "logs-nothing"])
+def test_a_successors_start_up_window_counts_its_own_iterations_only(tmp_path, replays):
+    """Job 10 logged through iteration 60 and failed; job 11 resumed from the save at iteration 40, and the guard is
+    started while job 11 runs. Job 11's window counts its own iterations: replaying 41 to 45, below job 10's 60,
+    closes it; no iteration of its own by minute 50 stops it, however far job 10 got."""
+    config = sg.load_guard_config(write_config(tmp_path, startup={"first_iteration_minutes": 50}))
+    segment(tmp_path, 10)
+    no_iteration_yet(tmp_path, 11)
+    cluster = FakeCluster([sacct_line(10, "FAILED", tmp_path), sacct_line(11, "RUNNING", tmp_path)])
+
+    action, state, _ = sg.tick(config, sg.START, cluster, START_TIME + timedelta(minutes=10))
+    assert action != "stop"
+    if replays:
+        segment(tmp_path, 11, drop=set(range(1, 41)) | set(range(46, 61)))
+    action, state, _ = sg.tick(config, state, cluster, START_TIME + timedelta(minutes=30))
+    assert action != "stop"
+    action, state, _ = sg.tick(config, state, cluster, START_TIME + timedelta(minutes=51))
+
+    if replays:
+        assert action != "stop" and not cluster.cancelled()
+    else:
+        assert action == "stop" and cluster.cancelled() == [["scancel", "11"]]
+
+
+def test_the_time_limits_act_only_on_a_tick_whose_watch_ran(tmp_path):
+    """A watch that could not run says nothing about the segment's progress: an expired window stops the segment on
+    the next tick whose watch runs, not on this one."""
+    config = sg.load_guard_config(write_config(tmp_path, startup={"first_iteration_minutes": 50}))
+    no_iteration_yet(tmp_path, 10)
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)], watch_status=3, watch_output="FATAL: no SIF\n")
+
+    action, state, _ = sg.tick(config, sg.START, cluster, START_TIME + timedelta(minutes=51))
+    assert action != "stop" and not cluster.cancelled() and not cluster.dumps()
+    cluster.watch_status = None
+    action, _, _ = sg.tick(config, state, cluster, START_TIME + timedelta(minutes=52))
+
+    assert action == "stop" and cluster.cancelled() == [["scancel", "10"]]
