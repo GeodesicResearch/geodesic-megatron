@@ -100,6 +100,11 @@ placement measurements).
 
 ### Profiling and run identity
 
+- **Routed rows and memory per rank** (any MoE launch): set `ISAMBARD_MOE_ROUTED_ROWS_ITERS=5,20` in the run's
+  `.env`. After each listed iteration, every rank logs its peak and current allocated memory, and the largest and
+  mean rows its experts received per call in each of its MoE layers. The busiest GPU's margin shows how far the
+  routing is from an out-of-memory error. The iterations are the run's global ones, so a resumed segment's lines
+  match the run's other logs. The callback is `scripts/telemetry/moe_routed_rows.py`.
 - **Torch-profiler capture** (any launch): prefix with
   `ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20` (also
   `_RANKS=0,9`; legacy `_WAIT=3` = single capture at iteration 5). Profiling runs

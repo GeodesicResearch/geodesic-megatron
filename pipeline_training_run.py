@@ -155,19 +155,6 @@ def main() -> None:
 
         patch_packed_parquet_row_telemetry()
 
-    # Routed rows and memory per rank after the listed iterations (comma-separated): the memory margin that the busiest
-    # GPU of a HybridEP MoE run leaves, which Megatron reports only after the first iteration.
-    if os.environ.get("ISAMBARD_MOE_ROUTED_ROWS_ITERS"):
-        from megatron.core import parallel_state
-
-        from pipeline.training.patches.routed_rows import parse_report_iterations, patch_hybridep_routed_rows_telemetry
-
-        patch_hybridep_routed_rows_telemetry(
-            parse_report_iterations(os.environ["ISAMBARD_MOE_ROUTED_ROWS_ITERS"], "ISAMBARD_MOE_ROUTED_ROWS_ITERS"),
-            read_memory=lambda: (torch.cuda.max_memory_allocated(), torch.cuda.memory_allocated()),
-            where=lambda: (torch.distributed.get_rank(), parallel_state.get_pipeline_model_parallel_rank()),
-        )
-
     args, cli_overrides = parse_cli_args()
 
     peft = args.peft if args.peft and args.peft.lower() != "none" else None
@@ -274,7 +261,13 @@ def main() -> None:
         raw_log_path=raw_log_path,
     )
 
-    callbacks = [cb for cb in (identity_cb, profiler_cb) if cb is not None]
+    # Routed rows and memory per rank after chosen iterations (ISAMBARD_MOE_ROUTED_ROWS_ITERS, default off): the memory
+    # margin that the busiest GPU of a MoE run leaves, which Megatron reports only after the first iteration.
+    from scripts.telemetry.moe_routed_rows import ROUTED_ROWS_GATE, build_routed_rows_callback
+
+    routed_rows_cb = build_routed_rows_callback(os.environ.get(ROUTED_ROWS_GATE))
+
+    callbacks = [cb for cb in (identity_cb, profiler_cb, routed_rows_cb) if cb is not None]
     # pretrain() is the raw entry point; finetune() is the same call behind an assert that a
     # checkpoint.load/pretrained_checkpoint exists, which from-scratch runs must not carry.
     train_entry = pretrain if args.mode == "pretrain" else finetune
