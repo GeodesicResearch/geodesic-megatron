@@ -23,10 +23,12 @@ variable missing at the ranks, and nothing for a variable that arrives unchanged
 
 import json
 import shutil
+import subprocess
 
 import pytest
 from scripts.training.launcher_source import LAUNCHER
 
+from tests.unit_tests.child_process import REPO_ROOT
 from tests.unit_tests.goldens import FIXTURES, assert_golden_json
 from tests.unit_tests.launcher_harness import LITERAL_VALUES, Launcher, launcher_shell
 from tests.unit_tests.stubbed_shell import PipelineShell
@@ -119,23 +121,56 @@ def test_launch(shell, launch, case):
     assert_golden_json(GOLDENS / f"{case}.json", _snapshot(shell, run))
 
 
+VERDA_OVERLAY = "verda_python_overlay"
+
+
 def verda_job(tmp_path) -> dict[str, str]:
     """The variables that make the fake job a Verda job: the profile, a node of 8 GPUs, and directories of the test's
-    own where the profile names Verda's storage (the node-local image copy and W&B's files)."""
+    own where the profile names Verda's storage (the node-local image copy, W&B's files and the Python overlay).
+
+    The overlay directory exists, so the job finds the overlay present on any host, as a Verda job does; a record names
+    it by the path the profile derives (``_as_verda_records_it``).
+    """
+    overlay = tmp_path / VERDA_OVERLAY
+    overlay.mkdir(exist_ok=True)
     return {
         "GEODESIC_CLUSTER": "verda",
         "SLURM_GPUS_PER_NODE": "8",
         "SLURM_NODELIST": "slinky-1",
         "GEODESIC_CONTAINER_STAGE_ROOT": str(tmp_path / "local"),
         "WANDB_DIR": str(tmp_path / "wandb"),
+        "GEODESIC_CONTAINER_PYTHON_OVERLAY": str(overlay),
     }
+
+
+def _as_verda_records_it(shell: PipelineShell, record: object) -> object:
+    """``record`` (normalised) with ``verda_job``'s overlay directory named by the path the Verda profile derives, as
+    pipeline_env_config.env computes it without the override."""
+    script = f'source "{REPO_ROOT / "pipeline_env_config.env"}" && printf "%s" "$CONTAINER_PYTHON_OVERLAY"'
+    env = shell.env({"GEODESIC_CLUSTER": "verda"})
+    derived = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True).stdout
+    return json.loads(json.dumps(record).replace(f"<TMP>/{VERDA_OVERLAY}", derived))
 
 
 def test_launch_on_verda(tmp_path, shell, launch):
     """The same launcher under the Verda profile: 8 ranks on the node, the image run from its staged copy, NCCL on
-    InfiniBand, and none of Slingshot's settings."""
+    InfiniBand, the Python overlay after the repository on PYTHONPATH, and none of Slingshot's settings."""
     run = launch(None, "--disable-ft", extra_env=verda_job(tmp_path))
-    assert_golden_json(GOLDENS / "verda_disable_ft.json", _snapshot(shell, run))
+    assert_golden_json(GOLDENS / "verda_disable_ft.json", _as_verda_records_it(shell, _snapshot(shell, run)))
+
+
+def test_a_verda_launch_whose_python_overlay_is_missing_runs_without_it_and_says_so(tmp_path, shell, launch):
+    """A configured overlay that does not exist (Verda's path on another cluster) leaves the ranks' PYTHONPATH to the
+    repository's two paths, and the launch warns on stderr, naming the missing directory."""
+    missing = tmp_path / "missing_python_overlay"
+    run = launch(
+        None, "--disable-ft", extra_env=verda_job(tmp_path) | {"GEODESIC_CONTAINER_PYTHON_OVERLAY": str(missing)}
+    )
+    assert run.result.returncode == 0
+    assert run.rank_env["PYTHONPATH"] == f"{REPO_ROOT}/src:{REPO_ROOT}/3rdparty/Megatron-LM"
+    assert f"WARNING [env-activate]: CONTAINER_PYTHON_OVERLAY={missing} is configured but does not exist." in (
+        run.result.stderr
+    )
 
 
 def test_a_verda_launch_keeps_its_persistent_triton_cache_on_the_disk_that_outlives_the_job(tmp_path, shell, launch):
@@ -306,7 +341,8 @@ def test_env_submit_smoke_on_verda(tmp_path, pipeline_launch_shell):
     env = {**verda_job(tmp_path), "SLURM_JOB_NUM_NODES": "2", "SLURM_JOB_NODELIST": "slinky-[1-2]"}
     run = pipeline_launch_shell.run("pipeline_env_submit.sbatch", "smoke", env=env)
     assert_golden_json(
-        FIXTURES / "environment" / "verda_submit_smoke_two_nodes.json", pipeline_launch_shell.normalise(run)
+        FIXTURES / "environment" / "verda_submit_smoke_two_nodes.json",
+        _as_verda_records_it(pipeline_launch_shell, pipeline_launch_shell.normalise(run)),
     )
 
 
