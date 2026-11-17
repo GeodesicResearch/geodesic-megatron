@@ -30,7 +30,15 @@ the job's own ``StdOut``), runs ``scripts/telemetry/run_watch.py`` on them insid
   passed, so before any watch has run every gate is;
 - **alert** (any other exit 2 or failure to evaluate): the record and the printed line say so, and the guard keeps
   going; a tick that could not be evaluated is never read as a stop;
-- the guard exits 0 once the watch has checked the final iteration and no job of the stage is live.
+- the guard exits 0 once the watch has checked the final iteration, sacct shows every started segment in a final
+  state and squeue lists no live job of the stage (an empty squeue reply alone does not end it).
+
+Two time limits are optional and off unless the guard config sets them. ``startup: {first_iteration_minutes: N,
+dump_at_minutes: [...]}``: a running segment whose watch has not checked a new iteration since the segment started
+(sacct's start time) is stopped N minutes after it started, with a stack dump of every rank
+(``scripts/training/dump_hung_ranks.sh``) at each listed minute and one before the cancel; the guard may then be
+started as soon as the segment starts. ``stall_minutes: M``: after that first change, M minutes without another
+change in the checked iteration is a stall, stopped the same way. Both stop with exit 1, as a watch's stop does.
 
 Each tick appends its line and the watch's output to the record, after cancelling on a stop or hold so a record that
 cannot be written cannot keep the jobs alive. A stop or hold whose cancellation fails exits 4. The guard is started
@@ -103,15 +111,19 @@ class GuardConfig(NamedTuple):
     command_timeout_seconds: int
     hold_from: Optional[int]
     final_iteration: Optional[int]
+    startup_minutes: Optional[int] = None
+    startup_dump_minutes: Tuple[int, ...] = ()
+    stall_minutes: Optional[int] = None
 
 
 class Job(NamedTuple):
-    """One job of the stage: its state, whether it has started, and its log."""
+    """One job of the stage: its state, whether it has started, its log, and its start time (None before it starts)."""
 
     job_id: int
     state: str
     started: bool
     log: Path
+    start: Optional[datetime] = None
 
 
 class WatchResult(NamedTuple):
@@ -134,6 +146,8 @@ class GuardState(NamedTuple):
     last_iteration: Optional[int]
     decided: Dict[str, str]
     undecided: Optional[Tuple[str, ...]]
+    changed_at: Optional[datetime] = None
+    dumped: Tuple[Tuple[int, int], ...] = ()
 
 
 START = GuardState(last_iteration=None, decided={}, undecided=None)
@@ -147,6 +161,7 @@ def load_guard_config(path: Path) -> GuardConfig:
     raw = yaml.safe_load(Path(path).read_text())
     keys = {
         "watch", "job_name", "since", "interval_seconds", "command_timeout_seconds", "record", "hold", "final_iteration",
+        "startup", "stall_minutes",
     }  # fmt: skip
     unknown = sorted(set(raw) - keys)
     if unknown:
@@ -154,6 +169,22 @@ def load_guard_config(path: Path) -> GuardConfig:
     hold = raw.get("hold") or {}
     if hold and set(hold) != {"from_iteration"}:
         raise ValueError("{}: hold needs exactly from_iteration".format(path))
+    startup = raw.get("startup") or {}
+    if startup and (
+        not set(startup) <= {"first_iteration_minutes", "dump_at_minutes"} or "first_iteration_minutes" not in startup
+    ):
+        raise ValueError("{}: startup needs first_iteration_minutes and may give dump_at_minutes".format(path))
+    startup_minutes = int(startup["first_iteration_minutes"]) if startup else None
+    dump_minutes = tuple(sorted(int(minute) for minute in startup.get("dump_at_minutes", ()))) if startup else ()
+    if startup_minutes is not None and (
+        startup_minutes < 1 or any(not 1 <= m < startup_minutes for m in dump_minutes)
+    ):
+        raise ValueError(
+            "{}: startup.first_iteration_minutes must be 1 or more and each dump_at_minutes below it".format(path)
+        )
+    stall_minutes = int(raw["stall_minutes"]) if "stall_minutes" in raw else None
+    if stall_minutes is not None and stall_minutes < 1:
+        raise ValueError("{}: stall_minutes must be 1 or more".format(path))
     return GuardConfig(
         watch=REPO_ROOT / raw["watch"],
         job_name=str(raw["job_name"]),
@@ -163,6 +194,9 @@ def load_guard_config(path: Path) -> GuardConfig:
         record=REPO_ROOT / raw["record"],
         hold_from=int(hold["from_iteration"]) if hold else None,
         final_iteration=int(raw["final_iteration"]) if "final_iteration" in raw else None,
+        startup_minutes=startup_minutes,
+        startup_dump_minutes=dump_minutes,
+        stall_minutes=stall_minutes,
     )
 
 
@@ -181,7 +215,9 @@ def parse_jobs(sacct_output: str, job_name: str) -> List[Job]:
             continue
         state = state.split()[0]
         log = stdout.replace("%j", job_id).replace("%x", name)
-        jobs.append(Job(int(job_id), state, start not in ("Unknown", "None", ""), Path(log)))
+        started = start not in ("Unknown", "None", "")
+        started_at = datetime.strptime(start, "%Y-%m-%dT%H:%M:%S") if started else None
+        jobs.append(Job(int(job_id), state, started, Path(log), started_at))
     return sorted(jobs, key=lambda job: job.job_id)
 
 
@@ -233,7 +269,7 @@ def advance(state: GuardState, result: WatchResult) -> GuardState:
     iteration = result.checked_iteration if result.checked_iteration is not None else state.last_iteration
     decided = dict(state.decided)
     decided.update(result.passed)
-    return GuardState(iteration, decided, result.undecided)
+    return state._replace(last_iteration=iteration, decided=decided, undecided=result.undecided)
 
 
 def decide(result: WatchResult, state: GuardState, config: GuardConfig) -> str:
@@ -352,12 +388,72 @@ def _record(config: GuardConfig, line: str, detail: str = "") -> None:
     print("{} {}".format(_stamp(), line), flush=True)
 
 
+# The states in which a job is still in the queue; any other state is final.
+LIVE_STATES = ("PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "REQUEUED", "RESIZING", "SUSPENDED")
+DUMP_SCRIPT = REPO_ROOT / "scripts" / "training" / "dump_hung_ranks.sh"
+
+
+def timed_check(
+    config: GuardConfig, state: GuardState, newest: Job, now: datetime
+) -> Tuple[Optional[str], Tuple[int, ...], str]:
+    """The start-up window and the stall limit for the stage's newest segment: (``"stop"``, (), reason), (``"dump"``,
+    the dump minutes now due, reason) or (None, (), "").
+
+    The segment is in its start-up window until the watch's checked iteration changes after the segment started; the
+    window counts from the segment's start (sacct) and is ``config.startup_minutes`` long, with a stack dump at each of
+    ``config.startup_dump_minutes``. After that change, ``config.stall_minutes`` without another change is a stall.
+    Neither rule applies when its key is not set, or when the segment is not running."""
+    if newest.state != "RUNNING" or newest.start is None:
+        return None, (), ""
+    if state.changed_at is None or state.changed_at < newest.start:
+        if config.startup_minutes is None:
+            return None, (), ""
+        minutes = (now - newest.start).total_seconds() / 60
+        if minutes >= config.startup_minutes:
+            return (
+                "stop",
+                (),
+                "start-up window: job {} logged no iteration within {} min of starting".format(
+                    newest.job_id, config.startup_minutes
+                ),
+            )
+        due = tuple(m for m in config.startup_dump_minutes if minutes >= m and (newest.job_id, m) not in state.dumped)
+        if due:
+            return (
+                "dump",
+                due,
+                "job {} has logged no iteration {:.0f} min after starting".format(newest.job_id, minutes),
+            )
+        return None, (), ""
+    if config.stall_minutes is not None and (now - state.changed_at).total_seconds() / 60 >= config.stall_minutes:
+        return (
+            "stop",
+            (),
+            "stall: job {} logged no new iteration for {} min (checked through iteration {})".format(
+                newest.job_id, config.stall_minutes, state.last_iteration
+            ),
+        )
+    return None, (), ""
+
+
+def dump_stacks(config: GuardConfig, job_id: int, run: Runner) -> None:
+    """Run dump_hung_ranks.sh on the job and record how it went; a dump that fails or times out is recorded and does
+    not stop the guard, so a stop that follows still cancels."""
+    try:
+        result = run(["bash", str(DUMP_SCRIPT), str(job_id)])
+        outcome = "exit {}: {}".format(result.returncode, " | ".join(result.stdout.strip().splitlines()[-3:]))
+    except (OSError, subprocess.SubprocessError) as error:
+        outcome = "{}: {}".format(type(error).__name__, error)
+    _record(config, "DUMP: stacks of job {} ({}): {}".format(job_id, DUMP_SCRIPT.name, outcome))
+
+
 class NoStartedSegment(RuntimeError):
     """No job of the stage's name has started: the guard was started too early, or under the wrong name or user."""
 
 
-def tick(config: GuardConfig, state: GuardState, run: Runner) -> Tuple[str, GuardState, bool]:
-    """One evaluation: (action, the guard's state after it, whether the stage is done).
+def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> Tuple[str, GuardState, bool]:
+    """One evaluation at ``now`` (the cluster's local time, as sacct prints it): (action, the guard's state after it,
+    whether the stage is done).
 
     Raises NoStartedSegment when the stage has no started segment, and CancelFailed when a stop or hold could not
     cancel its jobs."""
@@ -374,7 +470,10 @@ def tick(config: GuardConfig, state: GuardState, run: Runner) -> Tuple[str, Guar
             result = run_watch(config, [job.log for job in started], state.decided, run)
         except Exception as error:  # noqa: BLE001 - judged by the hold window like a watch that could not run
             result = could_not_evaluate("{}: {}".format(type(error).__name__, error))
+    previous = state.last_iteration
     state = advance(state, result)
+    if result.ran and state.last_iteration is not None and state.last_iteration != previous:
+        state = state._replace(changed_at=now)
     action = decide(result, state, config)
     segments = ", ".join("{}:{}".format(job.job_id, job.state) for job in started)
     if result.ran:
@@ -396,12 +495,26 @@ def tick(config: GuardConfig, state: GuardState, run: Runner) -> Tuple[str, Guar
         _record(config, "{}: cancelled {}".format(action.upper(), cancelled or "nothing (no live job)"))
         return action, state, False
     _record(config, line, detail)
+    timed, due, reason = timed_check(config, state, started[-1], now) if started else (None, (), "")
+    if timed == "stop":
+        _record(config, "STOP: {}".format(reason))
+        dump_stacks(config, started[-1].job_id, run)
+        cancelled = cancel_live_jobs(config, run)
+        _record(config, "STOP: cancelled {}".format(cancelled or "nothing (no live job)"))
+        return "stop", state, False
+    if timed == "dump":
+        _record(config, "STARTUP: {}; stack dump at minute {}".format(reason, max(due)))
+        dump_stacks(config, started[-1].job_id, run)
+        state = state._replace(dumped=state.dumped + tuple((started[-1].job_id, minute) for minute in due))
+    # The stage ends when sacct shows every started segment in a final state as well as squeue showing no live job:
+    # one empty squeue reply from a busy controller must not end the guard while a segment runs.
     done = (
         config.final_iteration is not None
         and result.ran
         and result.status == 0
         and state.last_iteration is not None
         and state.last_iteration >= config.final_iteration
+        and all(job.state not in LIVE_STATES for job in started)
         and not live_jobs(config, run)
     )
     return action, state, done
@@ -434,7 +547,7 @@ def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
     while True:
         try:
             action, state, done = tick(
-                config, state, lambda command: run_command(command, config.command_timeout_seconds)
+                config, state, lambda command: run_command(command, config.command_timeout_seconds), datetime.now()
             )
         except CancelFailed as error:
             _record(config, "CANCEL FAILED: {}; the stage may still be running".format(error))

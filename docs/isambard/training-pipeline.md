@@ -217,6 +217,15 @@ placement measurements).
   opens with the config, the spec's sha256 and the code revision, and its own failures (no started segment of the
   stage among them) are written there too.
   The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
+  The guard ends only when `sacct` shows every started segment in a final state, so one empty `squeue` reply does
+  not end it. Two time limits are optional, and a guard config that sets neither behaves as before. A `startup:`
+  block (`first_iteration_minutes`, and optionally `dump_at_minutes`) stops a running segment that has logged no
+  iteration that many minutes after it started, with a stack dump at each listed minute and one before the cancel.
+  With it, the guard may be started as soon as the segment starts, before its first iteration. `stall_minutes`
+  stops a segment whose checked iteration has not changed for that many minutes. The dumps are
+  `scripts/training/dump_hung_ranks.sh` runs. They land beside the raw log in `<log-dir>/nccl_trace/<jobid>/`, one
+  stack file per rank and one process table per node: about 1.5 MB in 354 files for a 64-node job, and tens of KB
+  for a 2-node job. Each later dump of the same job overwrites the files of the earlier one.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
   CLI overrides and, for a `base_config:` overlay, every field it inherits (the
   profiler's `config_snapshot.yaml` is that overlay verbatim), but the bridge sends the
