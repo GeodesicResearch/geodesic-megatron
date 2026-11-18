@@ -135,7 +135,7 @@ def train(
     timers = global_state.timers
     straggler_timer = global_state.straggler_timer
     energy_monitor = global_state.energy_monitor
-    masked_validation = global_state.masked_validation
+    held_out_evaluations = global_state.held_out_evaluations
 
     # Prepare forward_step_func (check signature and inject state if needed).
     # This is done once to prevent creating new partial objects every iteration.
@@ -284,12 +284,15 @@ def train(
         model_config.param_sync_func = None
         pre_hook_enabled = False
 
-    # A fresh run evaluates its held-out masked-validation set before the first step, the point its later
-    # evaluations are compared with. It runs as the first step does: without the forward pre-hooks when those are
-    # toggled (they are off until that step has run).
-    if masked_validation is not None and global_state.train_state.step == 0:
+    # A fresh run evaluates its held-out sets before the first step, the point their later evaluations are compared
+    # with. They run as the first step does: without the forward pre-hooks when those are toggled (they are off
+    # until that step has run).
+    if held_out_evaluations and global_state.train_state.step == 0:
         evaluate_between_steps(
-            [partial(masked_validation.evaluate, global_state, forward_step_func, model, model_config)],
+            [
+                partial(held_out.evaluate, global_state, forward_step_func, model, model_config)
+                for held_out in held_out_evaluations
+            ],
             global_state,
             model,
             energy_monitor,
@@ -540,10 +543,11 @@ def train(
                     callback_manager=callback_manager,
                 )
             )
-        if masked_validation is not None and masked_validation.due(global_state.train_state.step):
-            evaluations.append(
-                partial(masked_validation.evaluate, global_state, forward_step_func, model, model_config)
-            )
+        evaluations.extend(
+            partial(held_out.evaluate, global_state, forward_step_func, model, model_config)
+            for held_out in held_out_evaluations
+            if held_out.due(global_state.train_state.step)
+        )
         if evaluations:
             evaluate_between_steps(
                 evaluations,

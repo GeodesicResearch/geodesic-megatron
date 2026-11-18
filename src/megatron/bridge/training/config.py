@@ -52,6 +52,7 @@ from megatron.bridge.models.mimo.mimo_provider import MimoModelProvider
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.flex_dispatcher_backend import validate_flex_dispatcher_backend
+from megatron.bridge.training.held_out.config import HeldOutConfig
 from megatron.bridge.training.mixed_precision import MixedPrecisionConfig, get_mixed_precision_config
 from megatron.bridge.training.token_masking.config import (
     TokenMaskingConfig,
@@ -1097,6 +1098,7 @@ class ConfigContainer(Container):
     logger: LoggerConfig
     tokenizer: TokenizerConfig
     token_masking: TokenMaskingConfig = field(default_factory=TokenMaskingConfig)
+    held_out: HeldOutConfig = field(default_factory=HeldOutConfig)
     checkpoint: CheckpointConfig
     dist: DistributedInitConfig = field(default_factory=DistributedInitConfig)
     ft: Optional[FaultToleranceConfig] = None
@@ -1185,6 +1187,7 @@ class ConfigContainer(Container):
 
         self.logger.finalize()
         validate_token_masking(self.token_masking)
+        self.held_out.finalize()
         refuse_masking_that_trains_the_masked_output_row(self.token_masking, self.model)
         self.train.finalize()
         self.scheduler.finalize()
@@ -1508,6 +1511,7 @@ class ConfigContainer(Container):
             ("logger", self.logger),
             ("tokenizer", self.tokenizer),
             ("token_masking", self.token_masking),
+            ("held_out", self.held_out),
             ("rng", self.rng),
         ]
 

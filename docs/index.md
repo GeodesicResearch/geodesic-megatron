@@ -54,6 +54,7 @@ training/cpu-offloading.md
 training/peft.md
 training/packed-sequences.md
 training/token-masking.md
+training/held-out-validation.md
 training/multi-token-prediction.md
 training/distillation.md
 training/pruning.md

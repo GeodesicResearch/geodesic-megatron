@@ -214,6 +214,7 @@ def build_data_loader(
     data_parallel_rank: int,
     data_parallel_size: int,
     persistent_workers: bool,
+    drop_last: bool = True,
 ) -> DataLoader | None:
     """Build a data loader over ``dataset`` the way every loader of a run is built.
 
@@ -229,6 +230,8 @@ def build_data_loader(
         data_parallel_rank: This rank's index in the data-parallel group, whose share of every batch it reads.
         data_parallel_size: The size of the data-parallel group.
         persistent_workers: Keep the workers alive from one pass over the loader to the next.
+        drop_last: Drop the last incomplete global batch, as the training and validation loaders do. False, for the
+            ``batch`` type, pads it with samples that carry no loss, so every sample of the dataset is read.
     """
     worker_init_fn = (
         partial(_install_exit_signal_handler, cfg.train.exit_signal)
@@ -248,6 +251,7 @@ def build_data_loader(
         persistent_workers=persistent_workers,
         data_parallel_rank=data_parallel_rank,
         data_parallel_size=data_parallel_size,
+        drop_last=drop_last,
         global_batch_size=cfg.train.global_batch_size,
     )
 

@@ -47,6 +47,7 @@ config = ConfigContainer(
 | `rng` | Random number generation settings | | `RNGConfig()` |
 | `rerun_state_machine` | Result validation and error injection | | `RerunStateMachineConfig()` |
 | `token_masking` | Removing listed token ids from the training loss, measuring the loss at their targets (in-loop and on an optional held-out set), and its checks (see [Token Masking](token-masking.md)) | | `TokenMaskingConfig()` (no masking, nothing measured) |
+| `held_out` | Named packed sets that a run evaluates in full between training steps (see [Held-Out Validation](held-out-validation.md)) | | `HeldOutConfig()` (no set) |
 | `mixed_precision` | Mixed precision training settings | | `None` |
 | `comm_overlap` | Communication overlap optimizations | | `None` |
 | `peft` | Parameter-efficient fine-tuning (LoRA, DoRA, etc.) | | `None` |

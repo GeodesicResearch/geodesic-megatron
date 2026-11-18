@@ -36,9 +36,9 @@ from megatron.bridge.utils.common_utils import get_rank_safe, get_world_size_saf
 
 
 if TYPE_CHECKING:
+    from megatron.bridge.training.held_out.evaluation import HeldOutEvaluation
     from megatron.bridge.training.token_masking.monitor import TokenMaskingMonitor
     from megatron.bridge.training.token_masking.resolution import ResolvedTokenMasking
-    from megatron.bridge.training.token_masking.validation import MaskedValidation
 
 
 @dataclass
@@ -147,8 +147,9 @@ class GlobalState:
         self._energy_monitor_created: bool = False
         self._token_masking: "ResolvedTokenMasking | None" = None
         self._token_masking_monitor: "TokenMaskingMonitor | None" = None
-        # The held-out masked-validation set setup builds; None when the run evaluates none.
-        self.masked_validation: "MaskedValidation | None" = None
+        # The held-out sets setup builds (the masked-validation set, then the sets of ``held_out``); empty when the
+        # run evaluates none.
+        self.held_out_evaluations: "list[HeldOutEvaluation]" = []
 
     @property
     def cfg(self) -> Optional[ConfigContainer]:
@@ -499,7 +500,7 @@ class GlobalState:
         self._nvrx_straggler_created = False
         self._token_masking = None
         self._token_masking_monitor = None
-        self.masked_validation = None
+        self.held_out_evaluations = []
 
 
 def _timers_write_to_wandb(

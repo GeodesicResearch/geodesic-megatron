@@ -47,6 +47,7 @@ from megatron.bridge.training.checkpointing import (
 from megatron.bridge.training.config import CheckpointConfig, ConfigContainer
 from megatron.bridge.training.data_inspection import inspect_training_data
 from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
+from megatron.bridge.training.held_out.evaluation import build_held_out_evaluations
 from megatron.bridge.training.initialize import initialize_megatron, set_jit_fusion_options
 from megatron.bridge.training.optim import setup_optimizer
 from megatron.bridge.training.state import GlobalState
@@ -239,9 +240,13 @@ def setup(
     )
 
     cfg.dataset.tokenizer = tokenizer
-    # A held-out masked-validation set does not depend on the training state, so it is built, and the samples its
-    # evaluations read are checked, before the model too.
-    state.masked_validation = build_masked_validation(cfg, tokenizer, state.token_masking, pg_collection.dp)
+    # Held-out sets do not depend on the training state, so they are built, and the samples a masked-validation
+    # evaluation reads are checked, before the model too.
+    masked_validation = build_masked_validation(cfg, tokenizer, state.token_masking, pg_collection.dp)
+    state.held_out_evaluations = [
+        *([masked_validation] if masked_validation is not None else []),
+        *build_held_out_evaluations(cfg, tokenizer, pg_collection.dp),
+    ]
     timers("tokenizer-setup").stop()
     barrier_and_log("after tokenizer is built")
 

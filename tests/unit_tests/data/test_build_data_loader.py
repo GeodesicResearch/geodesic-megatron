@@ -102,3 +102,40 @@ def test_batches_are_the_runs_micro_batches_collated_by_the_dataset_in_this_rank
         [{"collated": [0, 1]}, {"collated": [4, 5]}],
         [{"collated": [2, 3]}, {"collated": [6, 7]}],
     ]
+
+
+class _Indices(Dataset):
+    """``count`` samples that collate themselves into their indices, so a pad (-1) shows as a sample."""
+
+    def __init__(self, count: int):
+        self.count = count
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, index: int) -> int:
+        return index
+
+    @staticmethod
+    def collate_fn(samples: list[int]) -> dict[str, list[int]]:
+        return {"collated": samples}
+
+
+def _batch_shares(drop_last: bool) -> list[list[dict]]:
+    """Seven samples through the ``batch`` loader of a global batch of four, as two data-parallel ranks read them."""
+    cfg = _config(exit_signal_handler=False, num_workers=0)
+    return [
+        list(build_data_loader(_Indices(7), 0, "batch", cfg, rank, 2, persistent_workers=False, drop_last=drop_last))
+        for rank in (0, 1)
+    ]
+
+
+def test_a_batch_loader_drops_the_last_incomplete_global_batch_unless_told_to_keep_it():
+    assert _batch_shares(drop_last=True) == [[{"collated": [0, 2]}], [{"collated": [1, 3]}]]
+
+
+def test_a_batch_loader_that_keeps_the_last_batch_pads_it_with_minus_one_samples():
+    assert _batch_shares(drop_last=False) == [
+        [{"collated": [0, 2]}, {"collated": [4, 6]}],
+        [{"collated": [1, 3]}, {"collated": [5, -1]}],
+    ]

@@ -626,6 +626,9 @@ token_masking:
     packed_data_path: null
     interval: null
     iters: null
+held_out:
+  sets: {}
+  interval: null
 checkpoint:
   save: <TMP>/ckpt
   save_interval: 5

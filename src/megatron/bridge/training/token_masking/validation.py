@@ -15,31 +15,27 @@ dataset config pointed at it, so it is read exactly as the training data is (seq
   sample, with the run's forward step, so token masking applies exactly as in training, and logs the results under
   ``masked-validation/``. ``token_masking/listed_target_loss`` is computed before the mask, so it is the number to
   watch in both arms: it rises when masking and falls in an unmasked control.
+
+The evaluation itself is ``training.held_out.evaluation.HeldOutEvaluation``, which the ``held_out:`` block's sets use
+too; this module adds what is token masking's alone: the config of the set and the check of its samples.
 """
 
 from __future__ import annotations
 
 import copy
-import dataclasses
 import logging
-from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable, Iterable
 
 import torch
-from megatron.core.rerun_state_machine import RerunDataIterator
-from megatron.core.transformer import MegatronModule
 
-from megatron.bridge.data.builders.hf_dataset import HFDatasetConfig, hf_dataset_root
-from megatron.bridge.data.loaders import build_data_loader
 from megatron.bridge.data.utils import (
     finetuning_train_valid_test_datasets_provider,
     pretrain_train_valid_test_datasets_provider,
 )
 from megatron.bridge.training.config import ConfigContainer, FinetuningDatasetConfig, GPTDatasetConfig
-from megatron.bridge.training.eval import evaluate_and_print_results
-from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
-from megatron.bridge.training.state import GlobalState
+from megatron.bridge.training.held_out.config import HeldOutError
+from megatron.bridge.training.held_out.evaluation import HeldOutEvaluation, loader_builder, packed_set_config
 from megatron.bridge.training.token_masking.config import TokenMaskingError
 from megatron.bridge.training.token_masking.data_check import HELD_OUT_SET, no_trainable_target
 from megatron.bridge.training.token_masking.hook import apply_token_masking
@@ -50,53 +46,6 @@ from megatron.bridge.utils.common_utils import print_rank_0
 logger = logging.getLogger(__name__)
 
 MASKED_VALIDATION_KEY_PREFIX = "masked-validation/"
-
-
-@dataclass(frozen=True)
-class MaskedValidation:
-    """A run's held-out masked-validation set, built at setup, and when and how the training loop evaluates it."""
-
-    interval: int
-    """Evaluate at step 0 of a fresh run and at every step that is a multiple of ``interval``."""
-    iters: int
-    """Batches, each of the training global batch size, per evaluation."""
-    new_loader: Callable[[], Iterable[Any]]
-    """A data loader over the set that starts at its first sample. Its sampler advances as it is read (the batch
-    sampler counts what it yields), so every evaluation takes a new one."""
-
-    def due(self, step: int) -> bool:
-        """Whether the set is evaluated after the iteration that brings the run to ``step``."""
-        return step % self.interval == 0
-
-    def data_iterator(self) -> RerunDataIterator:
-        """An iterator over the set from its first sample, so every evaluation reads the same samples."""
-        return RerunDataIterator(iter(self.new_loader()))
-
-    def evaluate(
-        self,
-        state: GlobalState,
-        forward_step_func: ForwardStepCallable,
-        model: list[MegatronModule],
-        model_config: Any,
-    ) -> None:
-        """Evaluate the set and log the results under ``masked-validation/``.
-
-        The evaluation leaves ``train_state.consumed_valid_samples`` alone (that counter positions the validation
-        set's sampler on resume) and fires no evaluation callbacks, which belong to the validation set.
-        """
-        evaluate_and_print_results(
-            state,
-            f"iteration {state.train_state.step}",
-            forward_step_func,
-            self.data_iterator(),
-            model,
-            model_config,
-            verbose=False,
-            write_to_tensorboard=True,
-            eval_iters=self.iters,
-            advance_consumed_valid_samples=False,
-            key_prefix=MASKED_VALIDATION_KEY_PREFIX,
-        )
 
 
 def masked_validation_dataset_config(cfg: ConfigContainer) -> GPTDatasetConfig | FinetuningDatasetConfig | None:
@@ -143,24 +92,10 @@ def _indexed_config(dataset: Any, data_path: str) -> GPTDatasetConfig:
 
 
 def _packed_config(dataset: Any, packed_data_path: str, samples: int) -> FinetuningDatasetConfig:
-    specs = dataset.packed_sequence_specs if isinstance(dataset, FinetuningDatasetConfig) else None
-    if specs is None or specs.packed_sequence_size <= 0:
-        raise TokenMaskingError(
-            "token_masking.masked_validation.packed_data_path names packed held-out data, but the run does not train "
-            f"on packed sequences ({type(dataset).__name__} without dataset.packed_sequence_specs); a .bin/.idx run "
-            "names its held-out set in data_path"
-        )
     try:
-        specs = dataclasses.replace(specs, packed_train_data_path=packed_data_path)
-    except (FileNotFoundError, ValueError) as error:
-        raise TokenMaskingError(
-            f"token_masking.masked_validation.packed_data_path={packed_data_path!r}: {error}"
-        ) from error
-    fields = {field.name: getattr(dataset, field.name) for field in dataclasses.fields(FinetuningDatasetConfig)}
-    fields.update(packed_sequence_specs=specs, max_train_samples=samples, do_validation=False, do_test=False)
-    if isinstance(dataset, HFDatasetConfig):
-        fields.update(dataset_root=hf_dataset_root(dataset.dataset_root, dataset.dataset_name))
-    return FinetuningDatasetConfig(**fields)
+        return packed_set_config(dataset, packed_data_path, samples)
+    except HeldOutError as error:
+        raise TokenMaskingError(f"token_masking.masked_validation: {error}") from error
 
 
 def _named_set(cfg: ConfigContainer) -> str:
@@ -235,7 +170,7 @@ def _require_trainable_measured_targets(
 
 def build_masked_validation(
     cfg: ConfigContainer, tokenizer: Any, resolved: ResolvedTokenMasking, dp_group: torch.distributed.ProcessGroup
-) -> MaskedValidation | None:
+) -> HeldOutEvaluation | None:
     """Build the held-out masked-validation set on every rank as the training data is built, and check it; None
     when the run evaluates none.
 
@@ -258,21 +193,14 @@ def build_masked_validation(
         dataset, _, _ = finetuning_train_valid_test_datasets_provider([samples, 0, 0], dataset_config, tokenizer)
     else:
         dataset, _, _ = pretrain_train_valid_test_datasets_provider([samples, 0, 0], dataset_config)
-    new_loader = partial(
-        build_data_loader,
-        dataset,
-        0,
-        "batch" if cfg.dataset.dataloader_type == "batch" else "single",
-        cfg,
-        # Every evaluation reads through a new loader, whose workers end with it.
-        persistent_workers=False,
-    )
+    new_loader = loader_builder(cfg, dataset, drop_last=True)
     _require_trainable_measured_targets(cfg, new_loader, samples, resolved)
     print_rank_0(
         f"> masked validation: {block.iters} batches of {cfg.train.global_batch_size} samples at step 0 of a fresh "
         f"run and every {block.interval} iterations, logged under {MASKED_VALIDATION_KEY_PREFIX}"
     )
-    return MaskedValidation(
+    return HeldOutEvaluation(
+        key_prefix=MASKED_VALIDATION_KEY_PREFIX,
         interval=block.interval,
         iters=block.iters,
         new_loader=partial(

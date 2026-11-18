@@ -26,26 +26,18 @@ from megatron.core.datasets.gpt_dataset import GPTDataset
 
 from megatron.bridge.data.builders.hf_dataset import HFDatasetConfig, hf_dataset_root
 from megatron.bridge.data.datasets import sft
-from megatron.bridge.data.datasets.packed_parquet import write_packed_parquet
-from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 from megatron.bridge.data.hf_processors import process_squad_example
-from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.training.config import (
-    CheckpointConfig,
     ConfigContainer,
     FinetuningDatasetConfig,
     GPTDatasetConfig,
-    LoggerConfig,
     MockGPTDatasetConfig,
-    OptimizerConfig,
-    SchedulerConfig,
-    TokenizerConfig,
-    TrainingConfig,
 )
 from megatron.bridge.training.eval import evaluation_results
+from megatron.bridge.training.held_out import evaluation as evaluation_module
+from megatron.bridge.training.held_out.evaluation import HeldOutEvaluation
 from megatron.bridge.training.losses import reports_a_loss
 from megatron.bridge.training.state import GlobalState
-from megatron.bridge.training.token_masking import validation as validation_module
 from megatron.bridge.training.token_masking.config import (
     MaskedValidationConfig,
     TokenMaskingConfig,
@@ -59,13 +51,21 @@ from megatron.bridge.training.token_masking.hook import (
 )
 from megatron.bridge.training.token_masking.validation import (
     MASKED_VALIDATION_KEY_PREFIX,
-    MaskedValidation,
     build_masked_validation,
     masked_validation_dataset_config,
 )
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.train import evaluate_between_steps
 from tests.unit_tests.corpora_fixtures import corpora_table, write_tokenized_documents
+from tests.unit_tests.packed_run_fixtures import (
+    GLOBAL_BATCH,
+    MICRO_BATCH,
+    PACK_SIZE,
+    SEQ,
+    packed_dataset_config,
+    run_config,
+    write_packs,
+)
 from tests.unit_tests.token_masking_fixtures import (
     MARKER_ID,
     build_tiny_hf_tokenizer,
@@ -78,8 +78,7 @@ from tests.unit_tests.token_masking_fixtures import (
 VOCAB_SIZE = 1024  # NullTokenizer(1024): ids 0..1023, its end-of-document id is 1023
 EOD = VOCAB_SIZE - 1
 LISTED = 1000
-SEQ = 16
-GLOBAL_BATCH, MICRO_BATCH, ITERS, INTERVAL = 4, 2, 3, 5
+ITERS, INTERVAL = 3, 5
 SAMPLES = ITERS * GLOBAL_BATCH
 CPU = torch.device("cpu")
 
@@ -135,26 +134,11 @@ def _held_out_of(token_ids: list[int], enabled: bool, **paths: str) -> TokenMask
     return block
 
 
-def _run(dataset, token_masking: TokenMaskingConfig, tokenizer: TokenizerConfig) -> ConfigContainer:
-    """A run's config, as ``ConfigContainer`` holds it; the masked validation reads its dataset, train and logger."""
-    return ConfigContainer(
-        train=TrainingConfig(global_batch_size=GLOBAL_BATCH, micro_batch_size=MICRO_BATCH, train_iters=10),
-        model=GPTModelProvider(num_layers=1, hidden_size=64, num_attention_heads=4, seq_length=SEQ),
-        optimizer=OptimizerConfig(lr=1e-4, use_distributed_optimizer=False),
-        scheduler=SchedulerConfig(lr_decay_style="linear", lr_warmup_iters=0),
-        dataset=dataset,
-        logger=LoggerConfig(),
-        tokenizer=tokenizer,
-        checkpoint=CheckpointConfig(),
-        token_masking=token_masking,
-    )
-
-
 def _bin_idx_run(tmp_path: Path, held_out: list[list[int]], *, enabled: bool = True) -> ConfigContainer:
     training = _corpus(tmp_path / "training", _documents(30, listed=True))
     held = _corpus(tmp_path / "held_out", held_out)
     dataset = _gpt_dataset(tmp_path, [training], split="99,1,0")
-    return _run(dataset, _held_out(enabled, data_path=held), null_tokenizer_config(VOCAB_SIZE))
+    return run_config(dataset, null_tokenizer_config(VOCAB_SIZE), token_masking=_held_out(enabled, data_path=held))
 
 
 # A conversation that opens its answer with the marker. The packer's stored mask is shifted by one: entry i gates the
@@ -162,7 +146,6 @@ def _bin_idx_run(tmp_path: Path, held_out: list[list[int]], *, enabled: bool = T
 CONVERSATION = [3, 4, 5, MARKER_ID, 6, 3, 4]
 MARKER_TRAINED = [0, 0, 1, 1, 1, 1, 0]
 MARKER_UNTRAINED = [0, 0, 0, 1, 1, 1, 0]
-PACK_SIZE = 64
 
 
 def _packs(path: Path, stored_mask: list[int], count: int) -> str:
@@ -171,27 +154,15 @@ def _packs(path: Path, stored_mask: list[int], count: int) -> str:
         {"input_ids": [3 + (d % 3)] + CONVERSATION[1:], "loss_mask": stored_mask, "seq_start_id": [0]}
         for d in range(count)
     ]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_packed_parquet(rows, path, row_group_size=1)
-    return str(path)
+    return write_packs(path, rows)
 
 
 def _packed_run(tmp_path: Path, held_out_mask: list[int], *, enabled: bool = True) -> ConfigContainer:
     tokenizer = hf_tokenizer_config(build_tiny_hf_tokenizer(tmp_path / "tokenizer"))
     training = _packs(tmp_path / "training" / "training_64.idx.parquet", MARKER_TRAINED, 8)
     held = _packs(tmp_path / "held_out" / "held_out_64.idx.parquet", held_out_mask, 5)
-    dataset = FinetuningDatasetConfig(
-        dataset_root=tmp_path,
-        seq_length=PACK_SIZE,
-        dataset_kwargs={"answer_only_loss": True},
-        packed_sequence_specs=PackedSequenceSpecs(
-            packed_sequence_size=PACK_SIZE, packed_train_data_path=training, tokenizer_model_name="org--tiny"
-        ),
-        num_workers=0,
-        pin_memory=False,
-        persistent_workers=False,
-    )
-    return _run(dataset, _held_out_of([MARKER_ID], enabled, packed_data_path=held), tokenizer)
+    dataset = packed_dataset_config(tmp_path, training)
+    return run_config(dataset, tokenizer, token_masking=_held_out_of([MARKER_ID], enabled, packed_data_path=held))
 
 
 def _decision(cfg: ConfigContainer):
@@ -238,10 +209,10 @@ class TestDatasetConfig:
         held = _packs(tmp_path / "held_out" / "held_out_64.idx.parquet", MARKER_TRAINED, 2)
         bin_idx = _bin_idx_run(tmp_path, _documents(10, listed=True))
         bin_idx.token_masking = _held_out(True, packed_data_path=held)
-        unpacked = _run(
+        unpacked = run_config(
             FinetuningDatasetConfig(dataset_root=tmp_path, seq_length=PACK_SIZE),
-            _held_out(True, packed_data_path=held),
             null_tokenizer_config(VOCAB_SIZE),
+            token_masking=_held_out(True, packed_data_path=held),
         )
         for cfg, dataset in ((bin_idx, "GPTDatasetConfig"), (unpacked, "FinetuningDatasetConfig")):
             with pytest.raises(TokenMaskingError, match=f"does not train on packed sequences \\({dataset} without"):
@@ -250,7 +221,7 @@ class TestDatasetConfig:
     def test_a_bin_idx_set_needs_a_run_on_a_corpus(self, tmp_path):
         held = _corpus(tmp_path / "held_out", _documents(10, listed=True))
         dataset = _gpt_dataset(tmp_path, None, split="1,0,0", config_class=MockGPTDatasetConfig)
-        cfg = _run(dataset, _held_out(True, data_path=held), null_tokenizer_config(VOCAB_SIZE))
+        cfg = run_config(dataset, null_tokenizer_config(VOCAB_SIZE), token_masking=_held_out(True, data_path=held))
         with pytest.raises(TokenMaskingError, match="but the run trains on mock data"):
             masked_validation_dataset_config(cfg)
 
@@ -270,7 +241,7 @@ class TestDatasetConfig:
             pin_memory=False,
             persistent_workers=False,
         )
-        cfg = _run(dataset, packed.token_masking, packed.tokenizer)
+        cfg = run_config(dataset, packed.tokenizer, token_masking=packed.token_masking)
         assert cfg.dataset.dataset_root is None
         root = masked_validation_dataset_config(cfg).dataset_root
         assert root == hf_dataset_root(None, "rajpurkar/squad") == tmp_path / "nemo_datasets" / "rajpurkar" / "squad"
@@ -284,7 +255,7 @@ class TestDatasetConfig:
             masked_validation_dataset_config(cfg)
 
 
-def _build(cfg: ConfigContainer, dp_group) -> MaskedValidation | None:
+def _build(cfg: ConfigContainer, dp_group) -> HeldOutEvaluation | None:
     """``build_masked_validation`` as setup calls it, with the run's real tokenizer and token-masking decision."""
     return build_masked_validation(cfg, build_tokenizer(cfg.tokenizer), _decision(cfg), dp_group)
 
@@ -384,7 +355,7 @@ class TestCheck:
     def test_the_check_stops_reading_at_its_first_trainable_target(self, tmp_path, gloo_group_of_one, monkeypatch):
         """One target that carries loss is the whole proof, and the other ranks wait while the last rank reads; every
         sample here holds the marker, so the first batch settles it."""
-        loader_of = validation_module.build_data_loader
+        loader_of = evaluation_module.build_data_loader
         read: list[int] = []
 
         def counting_loader(*args, **kwargs):
@@ -392,7 +363,7 @@ class TestCheck:
                 read.append(len(batch["labels"]))
                 yield batch
 
-        monkeypatch.setattr(validation_module, "build_data_loader", counting_loader)
+        monkeypatch.setattr(evaluation_module, "build_data_loader", counting_loader)
         assert _build(_bin_idx_run(tmp_path, _documents(10, listed=True)), gloo_group_of_one) is not None
         assert read == [MICRO_BATCH] and MICRO_BATCH < SAMPLES
 
@@ -472,14 +443,18 @@ class TestBuild:
                 signal.signal(cfg.train.exit_signal, original)
 
     def test_due_at_every_multiple_of_the_interval(self):
-        validation = MaskedValidation(interval=INTERVAL, iters=ITERS, new_loader=list)
+        validation = HeldOutEvaluation(
+            key_prefix=MASKED_VALIDATION_KEY_PREFIX, interval=INTERVAL, iters=ITERS, new_loader=list
+        )
         assert [step for step in range(16) if validation.due(step)] == [0, 5, 10, 15]
 
     def test_a_restart_drops_the_set(self):
         state = GlobalState()
-        state.masked_validation = MaskedValidation(interval=INTERVAL, iters=ITERS, new_loader=list)
+        state.held_out_evaluations = [
+            HeldOutEvaluation(key_prefix=MASKED_VALIDATION_KEY_PREFIX, interval=INTERVAL, iters=ITERS, new_loader=list)
+        ]
         state.reset_for_restart()
-        assert state.masked_validation is None
+        assert state.held_out_evaluations == []
 
 
 class TestResults:
