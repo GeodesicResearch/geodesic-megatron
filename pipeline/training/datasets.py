@@ -16,10 +16,14 @@
 Catalogue:
     configure_sft_dataset: set up an SFT launch's chat processing and its pre-packed parquet bypass.
     BIN_IDX_MODES: the modes whose training data is a .bin/.idx blend.
+    BIN_IDX_READ_KEY: the key of a dataset section that states how a .bin/.idx blend is read.
+    BIN_IDX_READ_SETTINGS: the settings the bin_idx_read mapping of a dataset section can state.
     bin_idx_dataset_config: the .bin/.idx data of a cpt or pretrain launch.
 """
 
 import logging
+
+from scripts.mapping_keys import require_keys
 
 from megatron.bridge.data.datasets.packed_parquet import resolve_packed_parquet_paths
 from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
@@ -87,16 +91,27 @@ def configure_sft_dataset(cfg: ConfigContainer) -> None:
 # The modes whose training data is a .bin/.idx blend (``bin_idx_dataset_config``).
 BIN_IDX_MODES = ("cpt", "pretrain")
 
+# The key of a ``dataset`` section that states how a .bin/.idx blend is read, and the settings it can hold. A setting
+# the section leaves out keeps its default: ``mmap_bin_files`` is true and the others take the ``GPTDatasetConfig``
+# defaults. A separate key holds the settings because the section also holds recipe defaults, such as the SFT
+# recipe's ``num_workers``.
+BIN_IDX_READ_KEY = "bin_idx_read"
+BIN_IDX_READ_SETTINGS = ("mmap_bin_files", "create_attention_mask", "num_workers")
+
 
 def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
     """The .bin/.idx training data a ``cpt`` or ``pretrain`` run reads, from its merged ``dataset`` section.
 
     Args:
-        yaml_dataset: The merged config's ``dataset`` section.
+        yaml_dataset: The merged config's ``dataset`` section. Its ``bin_idx_read`` mapping sets the read settings
+            of the returned config.
         mode: The training mode, named in the error when the section names no data.
 
     Returns:
         An unfinalized GPTDatasetConfig; setup attaches the tokenizer and finalizes it.
+
+    Raises:
+        ValueError: If the section names no data, or if ``bin_idx_read`` has a key outside ``BIN_IDX_READ_SETTINGS``.
     """
     data_path = yaml_dataset.get("data_path")
     if not data_path:
@@ -108,7 +123,7 @@ def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
             "tools/preprocess_data.py (see pipeline_data_submit.sbatch 'tokenize' mode)."
         )
 
-    # Native .bin/.idx data pipeline — fast mmap loading, no packing needed.
+    # The native .bin/.idx data needs no packing.
     # data_path is a list of interleaved weights and path prefixes, e.g.:
     #   ["0.5", "/path/to/ds1_input_document", "0.5", "/path/to/ds2_input_document"]
     seq_length = yaml_dataset.get("seq_length", 8192)
@@ -122,6 +137,12 @@ def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
     # BlendedDataset index cache (it has no next-to-data fallback of its own and is
     # otherwise rebuilt at every launch).
     path_to_cache = yaml_dataset.get("path_to_cache")
+    stated = yaml_dataset.get(BIN_IDX_READ_KEY)
+    read_settings = (
+        {}
+        if stated is None
+        else require_keys(stated, f"dataset.{BIN_IDX_READ_KEY}", frozenset(), frozenset(BIN_IDX_READ_SETTINGS))
+    )
 
     return GPTDatasetConfig(
         seq_length=seq_length,
@@ -131,7 +152,7 @@ def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
         reset_position_ids=False,
         reset_attention_mask=False,
         eod_mask_loss=False,
-        mmap_bin_files=True,
         dataloader_type="cyclic",
         path_to_cache=path_to_cache,
+        **{"mmap_bin_files": True, **read_settings},
     )

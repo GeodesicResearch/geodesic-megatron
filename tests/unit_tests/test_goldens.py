@@ -15,7 +15,13 @@
 
 import pytest
 
-from tests.unit_tests.goldens import assert_golden_bytes, assert_golden_json, assert_golden_tree
+from tests.unit_tests.goldens import (
+    FIXTURES,
+    assert_golden_bytes,
+    assert_golden_json,
+    assert_golden_tree,
+    without_library_warnings,
+)
 
 
 def test_a_golden_is_recorded_under_update_goldens_and_compared_otherwise(tmp_path, monkeypatch):
@@ -74,3 +80,24 @@ def test_a_missing_golden_tree_fails(tmp_path, monkeypatch):
     (tmp_path / "actual").mkdir()
     with pytest.raises(AssertionError, match="no golden"):
         assert_golden_tree(tmp_path / "absent", tmp_path / "actual")
+
+
+def test_a_librarys_warning_is_dropped_from_stderr_and_the_repos_own_and_other_lines_are_kept():
+    repo_file = FIXTURES.parent / "some_module.py"
+    stderr = (
+        "/usr/local/lib/python3.12/dist-packages/torch/cuda/__init__.py:68: FutureWarning: The pynvml package is "
+        "deprecated.\n"
+        "  import pynvml  # type: ignore[import]\n"
+        f"{repo_file}:12: UserWarning: the repo's own\n"
+        "  warnings.warn(...)\n"
+        "/opt/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:55: UserWarning: transformers 5.17.0 is not "
+        "tested\n"
+        "usage: tool.py [-h]\n"
+        "tool.py: error: argument --x: not allowed\n"
+    )
+    assert without_library_warnings(stderr) == (
+        f"{repo_file}:12: UserWarning: the repo's own\n"
+        "  warnings.warn(...)\n"
+        "usage: tool.py [-h]\n"
+        "tool.py: error: argument --x: not allowed\n"
+    )

@@ -49,9 +49,10 @@ from scripts.data.hub_read_retry import streamed_reads_retried
 from scripts.data.prepare_revisions import FULL_SHA, require_full_sha, subset_revision
 from transformers import AutoTokenizer
 
+from pipeline.cluster import cluster_profile
 from pipeline.data.count import count_tokens_batched
 from pipeline.data.layout import slugify_dataset_name
-from pipeline.data.load import load_source_dataset
+from pipeline.data.load import features_are_declared, load_source_dataset
 from pipeline.data.packing import run_pack
 from pipeline.data.records import (
     LIFTED,
@@ -75,7 +76,6 @@ except ImportError:
     HAS_WANDB = False
 
 DEFAULT_TOKENIZER = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-DEFAULT_OUTPUT_BASE = "/projects/a5k/public/data"
 WANDB_PROJECT = "megatron-datasets-processing"
 WANDB_ENTITY = "geodesic"
 
@@ -140,7 +140,12 @@ def parse_args():  # noqa: D103
 
     # Output arguments
     parser.add_argument("--output-dir", type=str, default=None, help="Override full output path")
-    parser.add_argument("--output-base", type=str, default=DEFAULT_OUTPUT_BASE, help="Base output directory")
+    parser.add_argument(
+        "--output-base",
+        type=str,
+        default=None,
+        help="Base output directory (default: the cluster profile's CLUSTER_DATA_ROOT)",
+    )
 
     # Column/format arguments
     parser.add_argument("--text-column", type=str, default=None, help="Override text column (auto-detects otherwise)")
@@ -290,6 +295,9 @@ def parse_args():  # noqa: D103
 
     if not args.dataset:
         parser.error("--dataset is required, on the command line or in --config")
+
+    if args.output_base is None:
+        args.output_base = cluster_profile()["CLUSTER_DATA_ROOT"]
 
     if pins:
         try:
@@ -575,7 +583,9 @@ def run_pipeline(args):
 
     stream_files = None
     if args.streaming:
-        text_column, format_type = detect_stream_column(ds, args.text_column)
+        text_column, format_type = detect_stream_column(
+            ds, args.text_column, features_declared=features_are_declared(results["features"])
+        )
         stream_files = parquet_stream_files(ds, args)
         if stream_files is None and args.stream_workers > 1:
             raise ValueError(

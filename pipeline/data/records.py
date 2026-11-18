@@ -58,7 +58,7 @@ def detect_column_and_format(ds, text_column=None, join_columns=None):
     raise ValueError(f"Could not auto-detect text column. Available columns: {columns}. Use --text-column.")
 
 
-def detect_stream_column(ds, text_column=None):
+def detect_stream_column(ds, text_column=None, *, features_declared: bool):
     """The document column of a streamed dataset, chosen by ``detect_column_and_format`` from its declared features.
 
     A stream is not loaded before it is exported, so a wrong column would surface only after
@@ -66,9 +66,13 @@ def detect_stream_column(ds, text_column=None):
     instead: a stream that declares no features (its columns cannot be checked before reading
     it), more than one candidate column without ``--text-column``, a chat-format column, and a
     column that does not hold strings.
+
+    ``features_declared`` says whether the stream's features were fixed before any row is read
+    (``pipeline.data.load.features_are_declared``). The function refuses a stream whose features
+    its loader infers, even when the stream reports them.
     """
     features = ds.features
-    if features is None:
+    if not features_declared or features is None:
         raise ValueError(
             "--streaming: the stream declares no features, so its columns cannot be checked before the export "
             "starts (a JSON dataset without a dataset card declares none); stream a parquet dataset, or prepare "

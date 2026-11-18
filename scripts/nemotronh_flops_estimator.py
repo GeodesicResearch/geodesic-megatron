@@ -183,13 +183,13 @@ if _REPO_ROOT not in sys.path:
 
 from scripts.flops_common import (
     ATTENTION,
-    DEFAULT_PEAK_TFLOPS,
     MAMBA,
     MLP,
     MOE,
     FlopReport,
     RunSpec,
     achieved_throughput,
+    default_peak_tflops,
     padded_vocab_size,
     recompute_components,
     resolve_hf_config,
@@ -856,8 +856,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--peak-tflops",
         type=float,
-        default=DEFAULT_PEAK_TFLOPS,
-        help=f"Per-GPU BF16 dense peak for MFU/HFU (default {DEFAULT_PEAK_TFLOPS} = GH200/H100)",
+        default=None,
+        help="Per-GPU BF16 dense peak for MFU/HFU (default: the peak of --cluster's GPUs)",
+    )
+    parser.add_argument(
+        "--cluster",
+        default=None,
+        help="Cluster profile whose GPU peak is the default --peak-tflops (default: the cluster of this host)",
     )
     parser.add_argument(
         "--target-tflops",
@@ -904,8 +909,9 @@ def main(argv: list[str] | None = None) -> int:
         backward_multiplier=args.backward_multiplier,
     )
 
+    peak_tflops = args.peak_tflops if args.peak_tflops is not None else default_peak_tflops(args.cluster)
     if args.json:
-        payload = report_to_dict(report, args.seconds_per_iter, args.gpus, args.peak_tflops, args.compare_megatron)
+        payload = report_to_dict(report, args.seconds_per_iter, args.gpus, peak_tflops, args.compare_megatron)
         payload["hf_config_path"] = hf_cfg_path
         print(json.dumps(payload, indent=2))
     else:
@@ -914,7 +920,7 @@ def main(argv: list[str] | None = None) -> int:
                 report,
                 seconds_per_iter=args.seconds_per_iter,
                 gpus=args.gpus,
-                peak_tflops=args.peak_tflops,
+                peak_tflops=peak_tflops,
                 target_tflops=args.target_tflops,
                 compare_megatron=args.compare_megatron,
             )

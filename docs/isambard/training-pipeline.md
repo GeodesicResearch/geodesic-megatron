@@ -139,7 +139,8 @@ placement measurements).
   The sequence length and model FLOPs/token are read from the config (through its
   `base_config:` chain, `scripts/flops_common.py`) and the HF `config.json` by the estimator that the config's
   `model_type` selects (`scripts/nemotronh_flops_estimator.py` for `nemotron_h`, `scripts/dense_flops_estimator.py`
-  for `olmo3`), and the peak defaults to `DEFAULT_PEAK_TFLOPS` of `flops_common.py` (989.4, GH200 dense
+  for `olmo3`), and the peak defaults to the cluster profile's `CLUSTER_GPU_PEAK_TFLOPS` through
+  `default_peak_tflops` of `flops_common.py` (989.4 on Isambard, GH200 dense
   BF16). The primary statistic is the **mean** step time over the window (node-hours scale
   with the mean); median, p10/p90, min/max and the iterations above 2× the median are reported
   beside it, then tokens/s/GPU, model TFLOP/s/GPU and MFU, mean loss, NaN/skipped counts,

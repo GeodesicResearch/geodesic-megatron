@@ -18,6 +18,8 @@ from safetensors.torch import save_file
 from scripts.checkpoint import compare_safetensors as compare
 from scripts.telemetry.gate_outcome import FAIL, PASS
 
+from tests.unit_tests.isambard_storage import requires_isambard_storage
+
 
 def tensors() -> dict[str, torch.Tensor]:
     generator = torch.Generator().manual_seed(7)
@@ -327,6 +329,7 @@ SHIPPED_CONFIG = (
 PINNED_REVISION = "e0ac9ee3dfd02be21b5479edfc2f671ed269d0a2"
 
 
+@requires_isambard_storage
 def test_the_shipped_nvidia_base_config_compares_the_pinned_revision_with_a_round_trip_export():
     config = compare.load_config(SHIPPED_CONFIG)
     assert config.reference.name == PINNED_REVISION

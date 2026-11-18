@@ -18,8 +18,9 @@ through its ``base_config`` chain) and its model's HF ``config.json``, through t
 for an ``olmo3`` model (any other ``model_type`` raises): the MODEL (not hardware) FLOPs per token at that
 sequence length, so MFU is invariant to the recompute posture. Both count causal attention over one document
 that fills the sequence, so a packed run's attention is an upper bound. The throughput arithmetic is
-``achieved_throughput`` of ``scripts/flops_common.py``, and the peak is its ``DEFAULT_PEAK_TFLOPS`` (GH200 dense
-BF16) unless ``--peak-tflops`` overrides it. The global batch size is the one the scored
+``achieved_throughput`` of ``scripts/flops_common.py``. The peak is ``--peak-tflops`` when given. Otherwise it is
+the dense BF16 peak of the GPUs of ``--cluster``, or of this host's cluster without that flag
+(``default_peak_tflops`` of ``scripts/flops_common.py``). The global batch size is the one the scored
 iterations' own log lines report, so a batch set by a Hydra override is scored correctly.
 
 Every score records its inputs beside its results: the log, the config and HF config it read,
@@ -67,7 +68,13 @@ if _REPO_ROOT not in sys.path:
 
 from scripts.dense_flops_estimator import CAUSAL, DenseArchSpec
 from scripts.dense_flops_estimator import compute_flops as compute_dense_flops
-from scripts.flops_common import DEFAULT_PEAK_TFLOPS, FlopReport, RunSpec, achieved_throughput, resolve_hf_config
+from scripts.flops_common import (
+    FlopReport,
+    RunSpec,
+    achieved_throughput,
+    default_peak_tflops,
+    resolve_hf_config,
+)
 from scripts.nemotronh_flops_estimator import ArchSpec, compute_flops
 from scripts.telemetry.training_log import (
     GIGABYTES_SUFFIX,
@@ -389,8 +396,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--peak-tflops",
         type=float,
-        default=DEFAULT_PEAK_TFLOPS,
-        help=f"Per-GPU dense BF16 peak TFLOP/s for MFU (default: the FLOPs estimators' {DEFAULT_PEAK_TFLOPS}, GH200)",
+        default=None,
+        help="Per-GPU dense BF16 peak TFLOP/s for MFU (default: the peak of --cluster's GPUs)",
+    )
+    parser.add_argument(
+        "--cluster",
+        default=None,
+        help="Cluster profile whose GPU peak is the default --peak-tflops (default: the cluster of this host)",
     )
     parser.add_argument(
         "--wandb-peak-memory",
@@ -411,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
         window=(args.window[0], args.window[1]),
         loss_window=(args.loss_window[0], args.loss_window[1]),
         num_gpus=args.gpus,
-        peak_tflops_per_gpu=args.peak_tflops,
+        peak_tflops_per_gpu=args.peak_tflops if args.peak_tflops is not None else default_peak_tflops(args.cluster),
     )
     if args.wandb_peak_memory:
         if score.wandb_run_path is None:

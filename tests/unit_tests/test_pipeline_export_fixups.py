@@ -20,6 +20,7 @@ output on the same real release files (tests/unit_tests/hf_export_fixtures.py).
 import json
 
 import pytest
+from transformers import NemotronHConfig
 
 from pipeline.export.decoding_defaults import GENERATION_CONFIG, generation_config_text
 from pipeline.export.fixups import fixup_hf_output
@@ -166,6 +167,14 @@ def test_layers_block_type_is_replaced_by_the_pattern_it_spells():
     assert not fix_layers_block_type(config)
     with pytest.raises(ValueError, match="unknown block type"):
         fix_layers_block_type({"layers_block_type": ["mamba", "conv"]})
+
+
+def test_the_block_list_the_installed_transformers_writes_is_replaced_by_its_pattern():
+    """The export's config.json is the installed transformers' NemotronHConfig, which names the blocks in its own
+    words (``pipeline.nemotron.BLOCK_TYPE_CHARS``)."""
+    pattern = _release_config()["hybrid_override_pattern"]
+    config = {"layers_block_type": NemotronHConfig(hybrid_override_pattern=pattern).to_dict()["layers_block_type"]}
+    assert fix_layers_block_type(config) and config == {"hybrid_override_pattern": pattern}
 
 
 def test_num_hidden_layers_comes_from_the_pattern_length():

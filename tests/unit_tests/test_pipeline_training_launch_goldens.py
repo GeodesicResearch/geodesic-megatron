@@ -119,6 +119,38 @@ def test_launch(shell, launch, case):
     assert_golden_json(GOLDENS / f"{case}.json", _snapshot(shell, run))
 
 
+def verda_job(tmp_path) -> dict[str, str]:
+    """The variables that make the fake job a Verda job: the profile, a node of 8 GPUs, and directories of the test's
+    own where the profile names Verda's storage (the node-local image copy, the Python overlay and W&B's files). The
+    overlay folder exists in the test, so that the launcher finds one on any host and not only on a Verda node."""
+    overlay = tmp_path / "overlay"
+    overlay.mkdir(exist_ok=True)
+    return {
+        "GEODESIC_CLUSTER": "verda",
+        "SLURM_GPUS_PER_NODE": "8",
+        "SLURM_NODELIST": "slinky-1",
+        "GEODESIC_CONTAINER_STAGE_ROOT": str(tmp_path / "local"),
+        "GEODESIC_CONTAINER_PYTHON_OVERLAY": str(overlay),
+        "WANDB_DIR": str(tmp_path / "wandb"),
+    }
+
+
+def test_launch_on_verda(tmp_path, shell, launch):
+    """The same launcher under the Verda profile: 8 ranks on the node, the image run from its staged copy, NCCL on
+    InfiniBand, and none of Slingshot's settings."""
+    run = launch(None, "--disable-ft", extra_env=verda_job(tmp_path))
+    assert_golden_json(GOLDENS / "verda_disable_ft.json", _snapshot(shell, run))
+
+
+def test_a_verda_launch_keeps_its_persistent_triton_cache_on_the_disk_that_outlives_the_job(tmp_path, shell, launch):
+    """A Verda job's /tmp is its own and goes with it, so a cache kept there warms no later job."""
+    job = verda_job(tmp_path)
+    plain = launch(None, "--disable-ft", extra_env=job)
+    kept = launch(None, "--disable-ft", extra_env=job | {"TRAIN_PERSISTENT_TRITON_CACHE": "1"})
+    assert plain.rank_env["TRITON_CACHE_DIR"] == f"/tmp/triton_cache_{shell.job_id}_container"
+    assert kept.rank_env["TRITON_CACHE_DIR"] == "/local/geodesic_tester/cache/triton_cache_persistent_container"
+
+
 def test_an_ft_launcher_lacking_the_out_of_section_timeout_flag_stops_the_launch(shell, launch):
     """The launcher passes both section-timeout flags, so an ft_launcher that has only the first one fails the gate
     and names the missing flag, before any rank starts."""
@@ -216,6 +248,28 @@ def test_exec_shim_scrub(tmp_path):
     assert_golden_json(FIXTURES / "environment" / "exec_shim_scrub.json", shell.normalise(snapshot))
 
 
+@pytest.mark.parametrize(
+    "cluster, started_at, expected",
+    [
+        ("isambard", "1024", "1024"),  # Isambard's profile names no limit, so the shell's stands
+        ("verda", "1024", "65536"),
+        ("verda", "100000", "100000"),  # a limit already above the profile's is left alone
+    ],
+)
+def test_exec_shim_raises_the_open_file_limit_to_the_profiles(tmp_path, cluster, started_at, expected):
+    """The limit a payload starts with, from a shell whose soft limit is ``started_at``."""
+    shell = PipelineShell(tmp_path, record=())
+    seen = tmp_path / "limit"
+    wrapper = tmp_path / "with_limit.sh"
+    wrapper.write_text(
+        f'ulimit -Sn {started_at}\nexec bash "{LAUNCHER.parent}/pipeline_env_exec.sh" "ulimit -n > {seen}"\n'
+    )
+    env = verda_job(tmp_path) if cluster == "verda" else {}
+    run = shell.run(str(wrapper), env=env)
+    assert run["returncode"] == 0, run["stderr"]
+    assert seen.read_text().strip() == expected
+
+
 # --- pipeline_env_submit.sbatch ------------------------------------------------------------------------------------------
 
 
@@ -249,6 +303,15 @@ def test_exec_shim_scrub(tmp_path):
 def test_env_submit(pipeline_launch_shell, case, args, env):
     run = pipeline_launch_shell.run("pipeline_env_submit.sbatch", *args, env=env)
     assert_golden_json(FIXTURES / "environment" / f"{case}.json", pipeline_launch_shell.normalise(run))
+
+
+def test_env_submit_smoke_on_verda(tmp_path, pipeline_launch_shell):
+    """The smoke on Verda: 8 ranks a node, InfiniBand selected, and the profile's bandwidth floor passed on."""
+    env = {**verda_job(tmp_path), "SLURM_JOB_NUM_NODES": "2", "SLURM_JOB_NODELIST": "slinky-[1-2]"}
+    run = pipeline_launch_shell.run("pipeline_env_submit.sbatch", "smoke", env=env)
+    assert_golden_json(
+        FIXTURES / "environment" / "verda_submit_smoke_two_nodes.json", pipeline_launch_shell.normalise(run)
+    )
 
 
 def test_smoke_rendezvous_honours_the_address_override_as_every_launcher_does(pipeline_launch_shell):

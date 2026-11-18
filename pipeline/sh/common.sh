@@ -7,6 +7,10 @@
 # each, beginning "[ -f "$REPO_DIR/pipeline/sh/common.sh" ]"), because a REPO_DIR
 # that misses it cannot be diagnosed from here.
 #
+# Sourcing it resolves the cluster (cluster_load, pipeline/sh/cluster.sh), so the
+# libraries sourced after it read the CLUSTER_* values, and a launcher stops at
+# this line on a host that no profile matches.
+#
 # Catalogue:
 #   source_env_config  source pipeline_env_config.env and require a complete
 #                      container environment, or exit 1
@@ -16,6 +20,9 @@
 #   slurm_flag_arity   the words a SLURM flag that isambard_sbatch may append
 #                      to a script's argv takes, or 0 for any other word
 # ==============================================================================
+
+source "$(dirname "${BASH_SOURCE[0]}")/cluster.sh" || { return 1 2>/dev/null || exit 1; }
+cluster_load || { return 1 2>/dev/null || exit 1; }
 
 # Exits 1 with the fix when REPO_DIR holds no pipeline_env_config.env (REPO_DIR
 # mis-resolved) or the container environment is incomplete (env_config_require

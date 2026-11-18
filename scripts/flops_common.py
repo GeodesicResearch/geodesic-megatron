@@ -24,7 +24,8 @@ parts that do not depend on the architecture:
 * ``FlopReport``, a model's FLOPs over one iteration, and ``achieved_throughput``, the one place a FLOP count is
   divided by time;
 * the mcore layer kinds and the table of what each ``recompute_modules`` entry re-executes;
-* ``resolve_hf_config``, which finds a model's ``config.json`` offline, and the default GPU peak.
+* ``resolve_hf_config``, which finds a model's ``config.json`` offline, and ``default_peak_tflops``, the GPU peak
+  of a cluster profile.
 
 The shared code reads an architecture only through ``Architecture`` (its vocabulary size) and a model's parameter
 counts only through ``ActiveParams`` (the counts the 6ND comparison uses). Each family passes its own types, and
@@ -40,12 +41,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar
 
+from pipeline.cluster import cluster_profile
 
-# GH200 / H100 SXM dense BF16 tensor-core peak, TFLOP/s per GPU (no sparsity).
-DEFAULT_PEAK_TFLOPS = 989.4
-
-# Where to look for a repo-id's config.json when it is not a local path.
-_DEFAULT_HF_CACHE = "/projects/a5k/public/hf"
 
 # Layer kinds, in the alphabet of mcore's ssm/mamba_hybrid_layer_allocation.py: M mamba, * attention, E MoE,
 # - dense MLP. The hybrid estimator reads its layer schedule in it, and a dense decoder is attention and dense-MLP
@@ -239,6 +236,17 @@ class FlopReport(Generic[ArchT, ParamsT]):
         return 6.0 * n * self.run.tokens_per_iter
 
 
+def default_peak_tflops(cluster: str | None) -> float:
+    """The dense BF16 tensor-core peak of one GPU of ``cluster`` in TFLOP/s, without sparsity: the profile's
+    ``CLUSTER_GPU_PEAK_TFLOPS``. None names the cluster of this host (``pipeline.cluster.cluster_profile``)."""
+    return float(cluster_profile(cluster)["CLUSTER_GPU_PEAK_TFLOPS"])
+
+
+def _hf_home() -> str:
+    """Where a repo id's config.json is looked for: ``HF_HOME``, else the resolved cluster's shared Hub cache."""
+    return os.environ.get("HF_HOME") or cluster_profile()["CLUSTER_HF_HOME"]
+
+
 def achieved_throughput(
     flops_per_iter: float, seconds_per_iter: float, gpus: int, peak_tflops: float
 ) -> tuple[float, float]:
@@ -264,7 +272,7 @@ def resolve_hf_config(hf_model: str) -> tuple[dict[str, Any], str]:
     elif os.path.isdir(hf_model):
         candidates.append(os.path.join(hf_model, "config.json"))
     else:
-        cache = os.environ.get("HF_HUB_CACHE") or os.path.join(os.environ.get("HF_HOME", _DEFAULT_HF_CACHE), "hub")
+        cache = os.environ.get("HF_HUB_CACHE") or os.path.join(_hf_home(), "hub")
         repo_dir = "models--" + hf_model.replace("/", "--")
         # Prefer the snapshot that also carries weights: it is the fully-materialised one.
         snapshots = sorted(glob.glob(os.path.join(cache, repo_dir, "snapshots", "*", "config.json")))
@@ -277,6 +285,6 @@ def resolve_hf_config(hf_model: str) -> tuple[dict[str, Any], str]:
                 return json.load(fh), path
     raise FileNotFoundError(
         f"no config.json for --hf-model {hf_model!r}. Looked at: {candidates or '<nothing>'}. "
-        f"Pass a local directory/config.json, or set HF_HOME (currently "
-        f"{os.environ.get('HF_HOME', _DEFAULT_HF_CACHE)}) so the repo id resolves from cache."
+        f"Pass a local directory/config.json, or set HF_HOME (currently {_hf_home()}) so the repo id resolves "
+        "from cache."
     )

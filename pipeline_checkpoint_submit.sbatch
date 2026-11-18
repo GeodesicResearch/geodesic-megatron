@@ -6,6 +6,7 @@
 #SBATCH --time=6:00:00
 #SBATCH --exclusive
 #SBATCH --output=logs/slurm/convert-checkpoint-%j.out
+#PIPELINE-SUBMIT gpus-per-node=node output=slurm/convert-checkpoint-%j.out
 
 # ==============================================================================
 # Checkpoint Conversion (thin wrapper around pipeline_checkpoint_convert.sh)
@@ -24,14 +25,12 @@
 #       --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --poll
 # ==============================================================================
 
-# --- Isambard node-limit guard ---
-if ! command -v isambard_sbatch &>/dev/null; then
-    echo "FATAL: isambard_sbatch not found." >&2
-    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
-fi
-if ! isambard_sbatch --check; then
+REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+
+# --- Submission guard ---
+# The cluster's own check of a job at its start. This file is copied at submission, so the check is REPO_DIR's.
+if ! bash "$REPO_DIR/pipeline/sh/job_guard.sh"; then
     scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
 fi
 
-REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 exec bash "$REPO_DIR/pipeline_checkpoint_convert.sh" "$@"

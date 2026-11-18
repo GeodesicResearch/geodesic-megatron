@@ -165,8 +165,6 @@ nothing to apply. 0005 builds on it.
 - `ISAMBARD_CUDA_MAX_CONNECTIONS=32` (sets `CUDA_DEVICE_MAX_CONNECTIONS`). With a single hardware
   queue the two streams serialise, and the overlap was slower than no overlap at all (6933732:
   5.622 s).
-- No packed sequences. Megatron-Bridge builds the schedule plan without `packed_seq_params`, so it
-  raises when the overlap meets a packed batch (`gpt_step._forward_step_common`).
 - None of the refused settings above.
 - Settings the E-044 posture already has:
   - `moe` not in `recompute_modules` (`[moe_act]` is fine);

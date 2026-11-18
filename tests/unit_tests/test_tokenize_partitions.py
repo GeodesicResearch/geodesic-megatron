@@ -110,7 +110,22 @@ class TestQuota:
     def test_the_report_file_the_job_writes_names_the_project_first(self, tmp_path):
         report = tmp_path / "quota"
         report.write_text("1483801186 P /projects/a5k/public/data\n" + self.REPORT)
-        assert tp.read_quota_report(report) == tp.Quota("1483801186", 193110182304 * 1024, 214748364800 * 1024)
+        assert tp.read_quota_report(report) == tp.Quota("project 1483801186", 193110182304 * 1024, 214748364800 * 1024)
+
+    def test_a_df_report_is_read_as_the_filesystems_usage_and_size(self, tmp_path):
+        """What Verda's profile writes: `df -kP <dir>` on 2026-11-14, read as text for the reason above."""
+        report = tmp_path / "quota"
+        report.write_text(
+            "Filesystem      1024-blocks       Used    Available Capacity Mounted on\n"
+            "home           536870912000 4228071424 532642840576       1% /shared\n"
+        )
+        assert tp.read_quota_report(report) == tp.Quota("filesystem /shared", 4228071424 * 1024, 536870912000 * 1024)
+
+    def test_a_report_in_neither_form_is_refused(self, tmp_path):
+        report = tmp_path / "quota"
+        report.write_text("lfs: command not found\n")
+        with pytest.raises(ValueError, match="neither"):
+            tp.read_quota_report(report)
 
     def test_a_usage_over_its_soft_quota_is_read_without_its_star(self):
         report = self.REPORT.replace("193110182304 ", "193110182304* ")
@@ -128,10 +143,10 @@ class TestQuota:
         self, requested, input_tib, expected
     ):
         # 180 TiB used of 200; the 94% line is 188 TiB, so 8 TiB of room: three copies of 1 TiB fit, of 3 TiB not.
-        quota = tp.Quota(project="p", used=180 * 2**40, limit=200 * 2**40)
+        quota = tp.Quota(name="project p", used=180 * 2**40, limit=200 * 2**40)
         chosen, reason = tp.partitions_to_run(requested, int(input_tib * 2**40), quota, 94)
         assert chosen == expected
-        assert "180.00 TiB used of 200.00 TiB" in reason
+        assert "project p: 180.00 TiB used of 200.00 TiB" in reason
 
 
 class TestMergeOrderCheck:

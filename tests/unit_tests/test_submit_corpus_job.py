@@ -26,7 +26,15 @@ import slurm_jobs  # noqa: E402
 
 
 SCRIPT = Path("configs/control_pretraining/submit_corpus_job.py")
-FROZEN_FILES = (SCRIPT, Path("scripts/slurm_jobs.py"), Path("scripts/training/launch_environment.py"))
+# The script, what it imports, and the cluster profiles it reads the submit command from.
+FROZEN_FILES = (
+    SCRIPT,
+    Path("scripts/slurm_jobs.py"),
+    Path("scripts/training/launch_environment.py"),
+    Path("pipeline/cluster.py"),
+    Path("pipeline/sh/cluster.sh"),
+    *(path.relative_to(REPO_ROOT) for path in sorted((REPO_ROOT / "pipeline" / "sh" / "clusters").glob("*.sh"))),
+)
 TOOL_ARGS = (
     "configs/control_pretraining/corpus_documents.py",
     "check-hashes",
@@ -63,7 +71,8 @@ def frozen_root(tmp_path) -> Path:
 
 def submit(root: Path, *args: str, **environment: str) -> tuple[subprocess.CompletedProcess, dict | None]:
     """The script from ``root`` with the stub isambard_sbatch first on PATH, in an environment holding nothing but
-    PATH, HOME and ``environment``; its result, and what the stub recorded (None when it was never called)."""
+    PATH, HOME, the account and cluster the profile is read for, and ``environment``; its result, and what the stub
+    recorded (None when it was never called)."""
     bindir, record = root.parent / "bin", root.parent / "stub.json"
     bindir.mkdir(exist_ok=True)
     stub = bindir / "isambard_sbatch"
@@ -72,6 +81,8 @@ def submit(root: Path, *args: str, **environment: str) -> tuple[subprocess.Compl
     env = {
         "PATH": f"{bindir}:{os.environ['PATH']}",
         "HOME": os.environ.get("HOME", str(root)),
+        "USER": "probe",
+        "GEODESIC_CLUSTER": "isambard",
         "STUB_RECORD": str(record),
         **environment,
     }

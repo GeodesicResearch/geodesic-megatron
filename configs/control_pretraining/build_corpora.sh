@@ -4,8 +4,9 @@
 # This script SUBMITS; it decides nothing. What an arm's corpora are, how each is cut, which
 # directories to stripe, what each job's payload and walltime are, and which job must wait on
 # which, are all derived by `corpora_table.py` from the arm's `corpora.tsv`. Everything here
-# is the part that only a shell can do: create the directories, run `isambard_sbatch`,
-# capture job ids, and substitute them into the next job's `--dependency`.
+# is the part that only a shell can do: create the directories, run the cluster's submit command
+# (`isambard_sbatch` on Isambard), capture job ids, and substitute them into the next job's
+# `--dependency`.
 #
 # That split is deliberate. The same module is what `verify_corpora.py` checks the built
 # corpora against, so a build and its verification cannot disagree about what was supposed to
@@ -57,6 +58,9 @@ BUILD_SHARDS="${BUILD_SHARDS:-}"
 [ "$DRY_RUN" != "1" ] || echo "  every job would be submitted with ISAMBARD_SBATCH_FORCE=$ISAMBARD_SBATCH_FORCE" >&2
 
 CAMPAIGN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$CAMPAIGN_DIR/../../pipeline/sh/cluster.sh"
+cluster_load
+SUBMIT="$(cluster_submit_command)"
 STRIPE_COUNT="${SHARD_STRIPE_COUNT:-8}"
 
 [ -f "$TABLE" ] || { echo "FATAL: corpora table not found: $TABLE" >&2; exit 1; }
@@ -82,18 +86,18 @@ stripe_dir() {
     fi
 }
 
-# Submit and return the job id. isambard_sbatch execs the real sbatch, so --parsable reaches
-# it; the wrapper's own bad-node and storage banners print first, hence the tail. A
+# Submit and return the job id. The submit command execs the real sbatch, so --parsable reaches
+# it. isambard_sbatch prints its own bad-node and storage banners first, hence the tail. A
 # non-numeric result means the submission failed and must not become a dependency.
 submit() {
     local desc="$1"; shift
     if [ "$DRY_RUN" = "1" ]; then
-        echo "  [dry-run] $desc: isambard_sbatch $*" >&2
+        echo "  [dry-run] $desc: $SUBMIT $*" >&2
         echo "DRYRUN"
         return
     fi
     local out jobid
-    out=$(isambard_sbatch --parsable "$@")
+    out=$("$SUBMIT" --parsable "$@")
     jobid=$(printf '%s\n' "$out" | tail -n1 | tr -d '[:space:]')
     if ! [[ "$jobid" =~ ^[0-9]+$ ]]; then
         echo "FATAL: submission failed for $desc; sbatch said:" >&2

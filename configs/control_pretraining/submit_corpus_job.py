@@ -15,8 +15,9 @@ Run this file from a frozen copy of the commit (a directory with a ``REVISION`` 
 scripts/training/README.md, "Making a frozen copy", makes one), never from a working checkout: the job reads its code
 from the copy this file sits in after the submission has returned, and ``corpus_job.sbatch`` logs the copy's commit. It
 refuses a copy without ``REVISION`` and a shell carrying launch settings (``scripts/training/launch_environment.py``),
-submits through ``isambard_sbatch`` from the copy's root with ``slurm_jobs.forced_submission_env`` (the job is one
-node, which the node-limit rule in configs/control_pretraining/README.md submits forced), and prints the job id;
+submits through the cluster's submit command (``isambard_sbatch`` on Isambard) from the copy's root with
+``slurm_jobs.forced_submission_env`` (the job is one node, which the node-limit rule in
+configs/control_pretraining/README.md submits forced), and prints the job id.
 ``--dry-run`` prints the submission as a shell line instead and submits nothing.
 """
 
@@ -36,6 +37,8 @@ import slurm_jobs  # noqa: E402
 sys.path.insert(0, str(REPO_ROOT))
 from scripts.training.launch_environment import inherited_launch_settings  # noqa: E402
 
+from pipeline.cluster import cluster_profile  # noqa: E402
+
 
 CORPUS_JOB = "configs/control_pretraining/corpus_job.sbatch"
 
@@ -45,8 +48,10 @@ class NotAFrozenCopy(RuntimeError):
 
 
 def submission_command(job_name: str, time_limit: str, tool: str, tool_args: list[str]) -> list[str]:
-    """The isambard_sbatch command that runs ``tool`` with ``tool_args`` as one ``corpus_job.sbatch`` job."""
-    return ["isambard_sbatch", f"--job-name={job_name}", f"--time={time_limit}", CORPUS_JOB, tool, *tool_args]
+    """The command that runs ``tool`` with ``tool_args`` as one ``corpus_job.sbatch`` job, through the cluster's
+    submit command (``isambard_sbatch`` on Isambard)."""
+    submit = cluster_profile()["CLUSTER_SUBMIT_COMMAND"]
+    return [submit, f"--job-name={job_name}", f"--time={time_limit}", CORPUS_JOB, tool, *tool_args]
 
 
 def require_frozen_copy(root: Path, environ: dict[str, str]) -> None:

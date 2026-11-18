@@ -107,9 +107,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 from scripts.data.prepare_revisions import subset_revision, tokenizer_reference, tokenizer_revision  # noqa: E402
 
+from pipeline.cluster import cluster_profile  # noqa: E402
 
-# Where every corpus root lives.
-DATA_BASE = Path("/projects/a5k/public/data")
+
+# Where every corpus root lives: the resolved cluster's data root, where pipeline_data_prepare.py writes by default.
+DATA_BASE = Path(cluster_profile()["CLUSTER_DATA_ROOT"])
 # The batch scripts a job can be submitted through. Every prepare, tokenize and pack goes
 # through the data pipeline's sbatch wrapper; a split is its own script, submitted directly.
 SUBMIT_SCRIPT = "pipeline_data_submit.sbatch"

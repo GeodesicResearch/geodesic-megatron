@@ -53,8 +53,8 @@ joins the profile to its log and W&B run:
                                     point-in-time snapshot — the live log keeps
                                     growing after training ends)
 
-Open traces in chrome://tracing or Perfetto. Default root lives on project
-storage (never $HOME): the launcher's W&B exp name (or SLURM job id) names the
+Open traces in chrome://tracing or Perfetto. The default root is the cluster
+profile's CLUSTER_PROFILE_ROOT (never $HOME): the launcher's W&B exp name (or SLURM job id) names the
 run directory, the run ID names the per-launch subdirectory.
 """
 
@@ -67,9 +67,9 @@ import torch
 from scripts.telemetry.code_revision import code_revision
 
 from megatron.bridge.training.callbacks import Callback
+from pipeline.cluster import cluster_profile
 
 
-DEFAULT_PROFILE_ROOT = "/projects/a5k/public/profiles"
 WITH_STACK_ENV = "ISAMBARD_TORCH_PROFILE_WITH_STACK"
 
 
@@ -319,7 +319,7 @@ def maybe_build_profiler_callback(
     with_stack_setting = os.environ.get(WITH_STACK_ENV, "1")
     if with_stack_setting not in ("0", "1"):
         raise ValueError(f"{WITH_STACK_ENV} must be 0 or 1, got {with_stack_setting!r}")
-    out_root = DEFAULT_PROFILE_ROOT if setting == "1" else setting
+    out_root = cluster_profile()["CLUSTER_PROFILE_ROOT"] if setting == "1" else setting
     ranks = [int(r) for r in os.environ.get("ISAMBARD_TORCH_PROFILE_RANKS", "0").split(",") if r != ""]
     iters_env = os.environ.get("ISAMBARD_TORCH_PROFILE_ITERS", "")
     if iters_env:

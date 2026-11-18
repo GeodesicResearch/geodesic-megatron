@@ -8,9 +8,8 @@
 #   1. Import resolution: this repo's megatron.bridge fork (src/) and the pinned
 #      Megatron-Core submodule (3rdparty/Megatron-LM) must win over any megatron
 #      packages installed in the image.
-#   2. Slingshot networking: point NCCL at the aws-ofi-nccl CXI plugin built by
-#      pipeline_env_setup.sh (official Isambard "Option B" recipe) and order the
-#      host libfabric ahead of everything.
+#   2. The cluster's own environment: its profile's activation hook
+#      (pipeline/sh/clusters/), for example the library paths of its fabric.
 #   3. Universal GPU/cache settings.
 #
 # The image provides torch/CUDA/cuDNN/NCCL/TE/Mamba-kernels/compilers as a
@@ -18,7 +17,7 @@
 # ==============================================================================
 
 # Refuse to run outside a container — sourcing this on the host would poison the
-# host env with /opt/slingshot paths that don't exist there.
+# host env with in-container paths that don't exist there.
 if [ ! -d /.singularity.d ]; then
     echo "ERROR [env-activate]: not inside an Apptainer container." >&2
     echo "  This file is sourced by pipeline_env_exec.sh, which enters the container:" >&2
@@ -29,6 +28,11 @@ fi
 # Repo root from this script's own location (worktree-safe).
 _ENV_ACTIVATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${REPO_DIR:-$_ENV_ACTIVATE_DIR}"
+
+# The cluster's profile (CLUSTER_* values and its activation hook). The shim exports GEODESIC_CLUSTER, so this
+# resolves the cluster the launcher resolved.
+source "$_ENV_ACTIVATE_DIR/pipeline/sh/cluster.sh" || return 1
+cluster_load || return 1
 
 # ==============================================================================
 # 1. Import resolution
@@ -110,62 +114,17 @@ if [ "$_CUDA_COMPAT_MODE" != "0" ]; then
 fi
 
 # ==============================================================================
-# 2. Slingshot / CXI networking (official Option B layout)
+# 2. The cluster's own environment
 #
-# pipeline_env_setup.sh builds, inside this image:
-#   /opt/slingshot/nccl          — NCCL (built vs image CUDA)
-#   /opt/slingshot/aws-ofi-nccl  — the CXI-capable network plugin
-# and the shim binds host libfabric at /host/opt/cray/libfabric/<ver> and
-# /usr/lib64 (libcxi, libnl) at /host/usr/lib64.
-#
-# Ordering (mirrors the BriCS pytorch_multinode.def %environment):
-#   libfabric first  — the plugin must resolve the CXI-capable Cray libfabric;
-#   built NCCL next  — a newer NCCL shadowing torch's bundled one;
-#   image aarch64 libdir — see the linker note below;
-#   /opt/slingshot/hostlibs LAST — only fills sonames the image lacks.
-#
-# NCCL_NET_PLUGIN names the CXI plugin explicitly — NGC images ship an
-# EFA-targeted aws-ofi-nccl (AWS fabric) that must never be selected; without the
-# CXI plugin NCCL silently falls back to TCP at ~2.3 GB/s vs ~163 GB/s.
-#
-# LINKER TRAP — /host/usr/lib64 must NEVER be on LD_LIBRARY_PATH. torch
-# inductor's C++ codegen converts LD_LIBRARY_PATH entries into -L link dirs, and
-# the host dir's libc.so is a SUSE GNU-ld script whose GROUP() names absolute
-# /lib64/libc.so.6 + /usr/lib64/libc_nonshared.a — paths that do not exist in the
-# image, so any fresh torch.compile link dies with "ld: cannot find
-# /lib64/libc.so.6". Ordering image libdirs first does NOT save you: the image
-# keeps no plain libc.so dev script in /usr/lib/aarch64-linux-gnu, so -lc falls
-# through to the host dir anyway (warm inductor caches masked this for a while — a
-# cache hit skips the link entirely, which is why single-shot probes "passed").
-# Instead, the ONLY things the plugin needs from the host /usr/lib64 (libcxi,
-# libnl — sonames the image lacks) are exposed via a symlink-only directory the
-# setup step creates at /opt/slingshot/hostlibs: runtime dlopen finds them, and
-# the linker finds NO libc there to be poisoned by.
+# The profile's activation hook exports what only that cluster needs inside the
+# container. A hook that cannot build a working environment returns 1, and the
+# payload stops.
 # ==============================================================================
-# Resolve the bound host libfabric. An unmatched glob would stay LITERAL and a
-# multi-version match would inject a space into LD_LIBRARY_PATH — both give the
-# CXI plugin no libfabric to resolve, which degrades NCCL to TCP sockets (~2.3 vs
-# ~163 GB/s) with no error anywhere. Fail loudly instead: this is the one silent
-# ~70x performance cliff in the whole stack.
-_HOST_LIBFABRIC_CANDIDATES=(/host/opt/cray/libfabric/*/lib64)
-if [ ! -d "${_HOST_LIBFABRIC_CANDIDATES[0]}" ]; then
-    echo "ERROR [env-activate]: no host libfabric under /host/opt/cray/libfabric/*/lib64." >&2
-    echo "  The CXI plugin cannot load and NCCL would silently fall back to TCP (~70x slower)." >&2
-    echo "  Check the libfabric bind in pipeline_env_config.env (CONTAINER_HOST_LIBFABRIC=${CONTAINER_HOST_LIBFABRIC:-unset})." >&2
-    return 1
-fi
-if [ "${#_HOST_LIBFABRIC_CANDIDATES[@]}" -gt 1 ]; then
-    echo "WARNING [env-activate]: multiple host libfabric versions bound (${_HOST_LIBFABRIC_CANDIDATES[*]});" >&2
-    echo "  using ${_HOST_LIBFABRIC_CANDIDATES[0]}. Pin CONTAINER_HOST_LIBFABRIC to one version." >&2
-fi
-_HOST_LIBFABRIC_LIB="${_HOST_LIBFABRIC_CANDIDATES[0]}"
-export LD_LIBRARY_PATH="${_HOST_LIBFABRIC_LIB}:/opt/slingshot/nccl/lib:/opt/slingshot/aws-ofi-nccl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/opt/slingshot/hostlibs"
-export NCCL_NET_PLUGIN="${TRAIN_NCCL_NET_PLUGIN:-/opt/slingshot/aws-ofi-nccl/lib/libnccl-net.so}"
+cluster_activate || return 1
 
 # ==============================================================================
 # 3. Universal GPU settings
 # ==============================================================================
-export UB_SKIPMC=1                                        # Isambard driver lacks CUDA Multicast; UB init hangs without this
 # Overridable via ISAMBARD_CUDA_MAX_CONNECTIONS: the =1 requirement is for TP/SP
 # comm-compute overlap; TP=1 topologies (e.g. the 120B quickstart) may probe >1
 # to unserialize the hardware launch queues (see the quickstart header ladder).
@@ -200,7 +159,7 @@ export NVTE_CPU_OFFLOAD_V1="${NVTE_CPU_OFFLOAD_V1:-1}"
 # `sysnc_memops returned -22` warnings under FI_LOG_LEVEL=warn appear in BOTH modes —
 # they concern NCCL's own cuMem-allocated buffers, not this allocator.
 export PYTORCH_CUDA_ALLOC_CONF="${ISAMBARD_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export TORCH_CUDA_ARCH_LIST="9.0"                         # Hopper/GH200; also guards sm_90a arch-string parsing in JIT builds
+export TORCH_CUDA_ARCH_LIST="$CLUSTER_CUDA_ARCH_LIST"         # the GPU architecture JIT builds compile for
 
 # The image's CUDA toolkit (nvcc, headers) — for JIT builds (Triton, TE, Megatron
 # dataset helpers). Deliberately NOT the host HPC-SDK path (which the shim
@@ -211,21 +170,18 @@ export CUDA_HOME=/usr/local/cuda
 # Shared cache paths (inherited from the host anyway; set explicitly so an
 # interactive `apptainer shell` works alone).
 # ==============================================================================
-export NEMO_HOME=/projects/a5k/public/data/nemo_cache
-export HF_HOME=/projects/a5k/public/hf
+export NEMO_HOME="$CLUSTER_NEMO_HOME"
+export HF_HOME="$CLUSTER_HF_HOME"
 # Processed-dataset cache is scoped to this image's datasets library version: a
 # dir shared with a different major version fails with 'DatasetInfo.from_directory
 # ... must be called with a dataclass' (found by the C7 parity smoke). Hub
 # downloads (models/tokenizers under HF_HOME) stay shared.
 #
-# Per-user by default (same pattern as APPTAINER_CACHEDIR in
-# pipeline_env_config.env): `datasets` creates this tree mode 0755 under whichever
-# account populates it first, so a single shared directory leaves every other
-# account unable to take the dataset lock. Point GEODESIC_HF_DATASETS_CACHE at an
+# The profile's default is per user. Point GEODESIC_HF_DATASETS_CACHE at an
 # explicit path to share one deliberately.
-export HF_DATASETS_CACHE="${GEODESIC_HF_DATASETS_CACHE:-/projects/a5k/public/hf/datasets_container_${USER}}"
-export WANDB_DIR=/projects/a5k/public/logs/wandb
-export TMPDIR="${TMPDIR:-/projects/a5k/public/tmp}"
+export HF_DATASETS_CACHE="${GEODESIC_HF_DATASETS_CACHE:-$CLUSTER_HF_DATASETS_CACHE}"
+export WANDB_DIR="$CLUSTER_WANDB_DIR"
+export TMPDIR="${TMPDIR:-$CLUSTER_ACTIVATE_TMPDIR}"
 # deep_ep's HybridEP dispatcher compiles its kernels at first use into a new directory per process
 # (under 1 MB, never reused or removed): HYBRID_EP_CACHE_DIR/.deepep/hybrid_ep/jit/proc-<pid>, with the
 # bind-mounted host $HOME in place of the variable when it is unset. Under TMPDIR it is node-local and

@@ -137,7 +137,8 @@ submission wrapper's own). The scripts refuse one, so each job's posture comes f
   tools can import it. `deep_merge(base, overlay)` is that merge on its own,
   `parse_yaml_mapping(text, source)` reads one document with the same scalar rules,
   `load_composed(path, read)` composes with the caller's reader, and `composition_chain(path)` lists
-  the files a composition reads.
+  the files a composition reads. `relocate_paths(value, prefixes)` applies a `base_config_relocate:`
+  map, which the module docstring describes.
 
 ## Quick Start
 

@@ -107,10 +107,13 @@ def write_small_nemotron_h_release(path: Path, layers_block_type: tuple[str, ...
     torch.manual_seed(0)
     # save_original_format writes the release checkpoint layout (one key per expert), which the bridge maps.
     NemotronHForCausalLM(config).to(torch.bfloat16).save_pretrained(path, save_original_format=True)
-    # The releases name the embedding backbone.embeddings.weight; transformers writes backbone.embedding.weight.
+    # The releases name the embedding backbone.embeddings.weight. transformers 5.3 writes backbone.embedding.weight.
+    # transformers 5.17 writes the release name.
     shard = path / "model.safetensors"
     tensors = load_file(shard)
-    tensors["backbone.embeddings.weight"] = tensors.pop("backbone.embedding.weight")
-    save_file(tensors, shard, metadata={"format": "pt"})
+    if "backbone.embedding.weight" in tensors:
+        tensors["backbone.embeddings.weight"] = tensors.pop("backbone.embedding.weight")
+        save_file(tensors, shard, metadata={"format": "pt"})
+    assert "backbone.embeddings.weight" in tensors, sorted(tensors)
     build_word_level_tokenizer(path, {f"t{i}": i for i in range(VOCAB)}, "t0")
     return path

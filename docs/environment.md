@@ -9,6 +9,10 @@ bind-mounted, so **the checkout you submit from is the code that runs**. There i
 second environment and no mode flag: a missing image or Slingshot build stops the job
 with the command that fixes it rather than degrading silently.
 
+This page describes the environment as it is installed on Isambard. The same scripts run on
+Verda (x86_64, InfiniBand): the cluster profile under `pipeline/sh/clusters/` holds every
+value that differs, and `docs/verda/environment-pipeline.md` lists the differences.
+
 Submit commands are the ordinary ones:
 
 ```bash
@@ -81,9 +85,11 @@ run.
 
 | File | Responsibility |
 |------|----------------|
-| `pipeline_env_config.env` | THE config (image tag/URI, SIF path, Slingshot dir, overlay dir + package list, bind list, cache dirs + `$HOME` guards) and `env_config_require`, the run-time gate every launcher calls. |
-| `pipeline_env_exec.sh` | The shim: `pipeline_env_exec.sh "<one command string>"`. Gates on `env_config_require`, scrubs host toolchain/venv-shaped env, `exec apptainer exec --nv --bind "$CONTAINER_BINDS"`. |
-| `pipeline_env_activate.sh` | Sourced **inside** the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH` ordering + `NCCL_NET_PLUGIN`, universal GPU settings, cache paths. Refuses to run outside a container. |
+| `pipeline/sh/cluster.sh`, `pipeline/sh/clusters/<name>.sh` | The cluster profiles. `cluster_load` resolves the cluster from `GEODESIC_CLUSTER` or the host's name and sets its `CLUSTER_*` values (GPUs per node, fabric, storage roots, image tag, overlay packages) and hooks. Every file below reads them. `pipeline/cluster.py` gives Python the same values. |
+| `pipeline_env_config.env` | THE config (image tag/URI, SIF path, Slingshot dir, overlay dir + package list, bind list, cache dirs + `$HOME` guards), `env_config_require`, the run-time gate every launcher calls, and `env_config_stage`, which keeps a node-local unpacked copy of the image where the profile names a stage root. |
+| `pipeline_env_exec.sh` | The shim: `pipeline_env_exec.sh "<one command string>"`. Gates on `env_config_require`, stages the image, scrubs host toolchain/venv-shaped env, `exec apptainer exec --nv --bind "$CONTAINER_BINDS"`. |
+| `pipeline_env_activate.sh` | Sourced **inside** the container: import resolution, CUDA forward-compat, the profile's activation hook (on Isambard, the Slingshot `LD_LIBRARY_PATH` ordering + `NCCL_NET_PLUGIN`), universal GPU settings, cache paths. Refuses to run outside a container. |
+| `pipeline_cluster_submit.sh` | Submits a job with the cluster's submit command: `isambard_sbatch` on Isambard, `sbatch` with the options of the script's `#PIPELINE-SUBMIT` line elsewhere. |
 | `pipeline_env_setup.sh` | The whole install in one command (the four steps above). |
 | `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke`. |
 | `pipeline_env_validate.py` | The validator (runs in-container). |
@@ -321,7 +327,9 @@ site-packages), configured as `CONTAINER_PYTHON_OVERLAY` and populated by setup 
 lives under `/projects` (already bound) so it needs no extra bind, and it is `export`ed so
 the in-container activate script inherits it through Apptainer's env passthrough.
 
-`CONTAINER_OVERLAY_PACKAGES` currently carries three packages, each for a stated reason:
+The list is the cluster profile's `CLUSTER_OVERLAY_PACKAGES` (`GEODESIC_CONTAINER_OVERLAY_PACKAGES` replaces it for
+one shell). Isambard's carries three packages, each for a stated reason (`docs/verda/environment-pipeline.md` gives
+Verda's):
 
 - **`peft==0.18.1`** — the image ships 0.13.2; the bridge recipes import `modelopt`, which
   hard-requires `peft>=0.17.0` (recipe-load stages failed on exactly this).
@@ -343,7 +351,7 @@ a dependency closure risks shadowing the image's CUDA-matched torch with a PyPI 
 runtime deps are all present and newer in the image. If a future package genuinely needs a
 dep the image lacks, add that one wheel explicitly — still `--no-deps`, never the closure.
 The overlay records `provenance.txt` (package list, SIF, who/when), which is also the
-idempotency key: change `CONTAINER_OVERLAY_PACKAGES` and the next setup run rebuilds it. A
+idempotency key: change the profile's list and the next setup run rebuilds it. A
 configured-but-missing overlay is a **loud warning** from the activate script, never a
 silent skip, so a stale overlay cannot quietly fall back to the too-old image package.
 

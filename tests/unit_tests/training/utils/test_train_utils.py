@@ -2069,6 +2069,13 @@ class TestParamIsNotShared:
         assert param_is_not_shared(param) is False
 
 
+# What multi_tensor_l2norm raises when a None is in its tensor list. Transformer Engine 2.14 hands the None to its
+# C++ binding, which refuses the argument list. Transformer Engine 2.20's multi_tensor_applier first drops the empty
+# tensors of each list and fails on the None's numel.
+NONE_IN_L2NORM = (TypeError, AttributeError)
+NONE_IN_L2NORM_MESSAGE = "incompatible function arguments|'NoneType' object has no attribute 'numel'"
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for this test")
 class TestCalcParamsL2Norm:
     """Test suite for the calc_params_l2_norm function."""
@@ -2730,8 +2737,7 @@ class TestCalcParamsL2Norm:
             param.main_param = None
             param.main_param_sharded = False
 
-        # This currently raises a TypeError because None is passed to multi_tensor_l2norm
-        with pytest.raises(TypeError, match="incompatible function arguments"):
+        with pytest.raises(NONE_IN_L2NORM, match=NONE_IN_L2NORM_MESSAGE):
             calc_params_l2_norm(model, mock_model_config_bf16, force_create_fp32_copy=False)
 
     # ==================== MoE BF16 main_param tests ====================
@@ -3001,8 +3007,7 @@ class TestCalcParamsL2Norm:
             param.main_param = None
             param.main_param_sharded = False
 
-        # This currently raises a TypeError because None is passed to multi_tensor_l2norm
-        with pytest.raises(TypeError, match="incompatible function arguments"):
+        with pytest.raises(NONE_IN_L2NORM, match=NONE_IN_L2NORM_MESSAGE):
             calc_params_l2_norm(model, mock_model_config_bf16, force_create_fp32_copy=False)
 
     @mock.patch("megatron.bridge.training.utils.train_utils.get_data_parallel_group_if_dtensor")

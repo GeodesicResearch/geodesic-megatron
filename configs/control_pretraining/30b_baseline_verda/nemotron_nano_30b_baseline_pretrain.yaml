@@ -1,0 +1,41 @@
+# Stage 1 of the 30B baseline on Verda: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml on B300 GPUs.
+# README.md gives the launch commands. The launcher settings are in the .env beside this file.
+
+base_config: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+base_config_relocate: ../../clusters/verda_from_isambard.yaml
+
+mixed_precision: bf16_with_mxfp8_mixed_bf16_params_bf16_grad_reduce
+
+dataset:
+  # Plain reads. A memory-mapped read of a large file on /shared takes seconds (docs/verda/storage.md).
+  bin_idx_read:
+    mmap_bin_files: false
+    create_attention_mask: false
+    num_workers: 8
+
+train:
+  micro_batch_size: 4
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+comm_overlap:
+  overlap_param_gather: true
+  overlap_moe_expert_parallel_comm: true
+
+model:
+  expert_model_parallel_size: 8
+  # The expert-parallel overlap refuses the provider's default of 0 MTP layers. Null builds the same model.
+  mtp_num_layers: null
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  moe_router_fusion: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+  # The base config's recompute modules include moe, which the expert-parallel overlap refuses at any granularity.
+  recompute_granularity: null
+  recompute_modules: null
+
+logger:
+  wandb_exp_name: control_pretrain_30b_baseline_verda_pretrain
