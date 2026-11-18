@@ -226,7 +226,9 @@ placement measurements).
   takes a stack dump at each listed minute and one before the cancel. With it, the guard may be started as soon as
   the segment starts, before its first iteration. `stall_minutes` stops an attempt whose last iteration line is that
   many minutes old. Set it above the longest checkpoint save or evaluation of the stage, which log no iteration. It
-  does not apply once the watch has checked the final iteration, while the job saves and exits. The dumps are
+  does not apply once the watch has checked the final iteration, while the job saves and exits, so it needs
+  `final_iteration`. The job, `sacct` and the guard must read one time zone: a tick on which the newest log's
+  iteration lines carry no stamp, or a stamp lies after the guard's clock, leaves both limits unevaluated and says so. The dumps are
   `scripts/training/dump_hung_ranks.sh` runs. Each dump lands beside the raw log in its own folder,
   `<log-dir>/nccl_trace/<jobid>/<attempt start>_<sweep>/`, where the sweep is `startup_m<minute>` or `stop`. A dump holds one stack
   file per rank and one process table per node: about 1.5 MB in 354 files for a 64-node job, and tens of KB for a

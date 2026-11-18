@@ -43,8 +43,12 @@ dump_at_minutes: [...]}``: a running attempt that has logged no iteration is sto
 a stack dump of every rank (``scripts/training/dump_hung_ranks.sh``) at each listed minute and one before the cancel;
 the guard may then be started as soon as the segment starts. ``stall_minutes: M``: M minutes after the attempt's last
 iteration line, with no newer one, is a stall, stopped the same way, until the watch has checked the final iteration
-and the job saves and exits. Both stop with exit 1, as a watch's stop does. The log's stamps are the compute nodes'
-local time and sacct's start the cluster's, in the one time zone that the guard's clock reads too.
+and the job saves and exits, so a stall limit needs ``final_iteration``. Both stop with exit 1, as a watch's stop
+does. The log's stamps are the compute nodes' local time and sacct's start the cluster's, in the one time zone that the
+guard's clock reads too; minutes are counted in absolute time, so a daylight-saving change does not shift them. A tick
+on which the newest log's iteration lines carry no stamp, or its last stamp or the attempt's start lies after the
+guard's clock (another time zone), leaves both limits unevaluated and says so in its line. A guard started again takes
+the start-up dumps its record shows taken as taken.
 
 Each tick appends its line and the watch's output to the record, after cancelling on a stop or hold so a record that
 cannot be written cannot keep the jobs alive. A stop or hold whose cancellation fails exits 4. The guard is started
@@ -81,7 +85,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Sequence, Tuple
 
 import yaml
 
@@ -158,13 +162,13 @@ class WatchResult(NamedTuple):
 
 class GuardState(NamedTuple):
     """What the guard carries from tick to tick: the last iteration a watch checked, the gates passed and the log
-    each passed on, the gates still undecided (None until a watch has run), and the last start-up dump taken as (job
-    ID, the attempt's start, minute)."""
+    each passed on, the gates still undecided (None until a watch has run), and the dump sweeps already taken (their
+    folder names, ``attempt_sweep``'s)."""
 
     last_iteration: Optional[int]
     decided: Dict[str, str]
     undecided: Optional[Tuple[str, ...]]
-    dumped: Optional[Tuple[int, datetime, int]] = None
+    dumped: FrozenSet[str] = frozenset()
 
 
 START = GuardState(last_iteration=None, decided={}, undecided=None)
@@ -174,8 +178,8 @@ def load_guard_config(path: Path) -> GuardConfig:
     """Read a guard config; the watch spec and record paths resolve against the repository root.
 
     Raises ValueError on an unknown key, a hold other than ``from_iteration``, a ``startup`` without
-    ``first_iteration_minutes`` or with another key, a limit below 1 minute or a dump minute outside the start-up
-    window; KeyError on a missing required key.
+    ``first_iteration_minutes`` or with another key, a limit below 1 minute, a dump minute outside the start-up
+    window, or ``stall_minutes`` without ``final_iteration``; KeyError on a missing required key.
     """
     raw = yaml.safe_load(Path(path).read_text())
     keys = {
@@ -202,6 +206,10 @@ def load_guard_config(path: Path) -> GuardConfig:
     stall_minutes = int(raw["stall_minutes"]) if "stall_minutes" in raw else None
     if stall_minutes is not None and stall_minutes < 1:
         raise ValueError("{}: stall_minutes must be 1 or more".format(path))
+    if stall_minutes is not None and "final_iteration" not in raw:
+        raise ValueError(
+            "{}: stall_minutes needs final_iteration, so that the stall rule ends at the final save".format(path)
+        )
     return GuardConfig(
         watch=REPO_ROOT / raw["watch"],
         job_name=str(raw["job_name"]),
@@ -280,6 +288,15 @@ def decided_in_record(record: Path, spec: str) -> Dict[str, str]:
         if ran is not None and ran.group(2) == spec:
             decided.update(_PASSED_RE.findall(output))
     return decided
+
+
+# A dump line of the record, and the sweep it names.
+_DUMP_RE = re.compile(r"^\S+ DUMP: stacks of job \d+, sweep (\S+): ", re.M)
+
+
+def dumps_in_record(record: Path) -> FrozenSet[str]:
+    """The dump sweeps that ``record`` shows taken; empty when there is no record."""
+    return frozenset(_DUMP_RE.findall(record.read_text())) if record.exists() else frozenset()
 
 
 def could_not_evaluate(reason: str) -> WatchResult:
@@ -446,7 +463,26 @@ DUMP_SCRIPT = REPO_ROOT / "scripts" / "training" / "dump_hung_ranks.sh"
 
 
 def _minutes_since(then: datetime, now: datetime) -> float:
-    return (now - then).total_seconds() / 60
+    """The minutes from ``then`` to ``now``, both local times, counted in absolute time across a daylight-saving
+    change."""
+    return (now.timestamp() - then.timestamp()) / 60
+
+
+# How far a stamp may lie after the guard's clock before the two are taken to read different time zones.
+CLOCK_SKEW_MINUTES = 5
+
+
+def timing_problem(newest: Job, result: WatchResult, now: datetime) -> Optional[str]:
+    """Why the time limits cannot judge the newest segment on this tick, or None: its log has iteration lines but
+    none with a stamp, or its last stamp or start lies after the guard's clock."""
+    if result.newest_iteration is not None and result.newest_logged is None:
+        return "job {}'s log has iteration lines without a time stamp".format(newest.job_id)
+    for what, when in (("last iteration line is stamped", result.newest_logged), ("start is", newest.start)):
+        if when is not None and _minutes_since(now, when) > CLOCK_SKEW_MINUTES:
+            return "job {}'s {} {:.0f} min after the guard's clock: the job and the guard read different time zones".format(
+                newest.job_id, what, _minutes_since(now, when)
+            )
+    return None
 
 
 def checked_final(config: GuardConfig, state: GuardState) -> bool:
@@ -499,15 +535,37 @@ def timed_stop_reason(
     return None
 
 
-def dump_due(config: GuardConfig, state: GuardState, newest: Job, result: WatchResult, now: datetime) -> Optional[int]:
-    """The listed dump minute that a running attempt with no iteration has now passed with no dump taken at it, or None.
-    One dump covers every listed minute up to it."""
+def dump_due(config: GuardConfig, state: GuardState, newest: Job, result: WatchResult, now: datetime) -> Optional[str]:
+    """The sweep of the listed dump minute that a running attempt with no iteration has now passed, when no dump has
+    been taken at it, or None. One dump covers every listed minute up to it."""
     if newest.state != "RUNNING" or attempt_logged(newest, result) is not None:
         return None
     passed = [minute for minute in config.startup_dump_minutes if minute <= _minutes_since(newest.start, now)]
-    if not passed or state.dumped == (newest.job_id, newest.start, passed[-1]):
+    if not passed:
         return None
-    return passed[-1]
+    sweep = attempt_sweep(newest, "startup_m{}".format(passed[-1]))
+    return None if sweep in state.dumped else sweep
+
+
+def stage_ended(config: GuardConfig, state: GuardState, result: WatchResult, started: List[Job], run: Runner) -> bool:
+    """Whether the stage has ended: the watch checked the final iteration, sacct shows every started segment final,
+    and squeue lists no live job. sacct's live segments are part of live_jobs too; reading them first spares the
+    squeue call while one runs. A squeue that cannot be read leaves the end for the next tick, recorded."""
+    if not (
+        checked_final(config, state)
+        and result.ran
+        and result.status == 0
+        and all(job.state in FINAL_STATES for job in started)
+    ):
+        return False
+    try:
+        return not live_jobs(config, started, run)
+    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
+        _record(
+            config,
+            "END NOT CONFIRMED: {}: {}; the next tick reads the queue again".format(type(error).__name__, error),
+        )
+        return False
 
 
 def dump_stacks(job_id: int, sweep: str, run: Runner) -> str:
@@ -547,6 +605,9 @@ def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> 
     state = advance(state, result)
     # The time limits judge the newest segment, and only on a tick whose watch ran; a watch that ran saw a segment.
     newest = started[-1] if result.ran else None
+    problem = timing_problem(newest, result, now) if newest is not None else None
+    if problem is not None:
+        newest = None
     action = decide(result, state, config)
     timed = (
         timed_stop_reason(config, state, newest, result, now)
@@ -564,6 +625,8 @@ def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> 
         summary = "watch could not run (exit {})".format(result.status)
     if timed is not None:
         summary += "; " + timed
+    if problem is not None:
+        summary += "; time limits not evaluated: " + problem
     undecided = "unknown" if state.undecided is None else ", ".join(state.undecided) or "none"
     line = "{}: {}; undecided gates {} [{}] spec {}".format(action.upper(), summary, undecided, segments, spec)
     detail = result.output if result.status is not None else ""
@@ -579,19 +642,11 @@ def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> 
         _record(config, "{}: cancelled {}".format(action.upper(), cancelled or "nothing (no live job)"))
         return action, state, False
     _record(config, line, detail)
-    minute = dump_due(config, state, newest, result, now) if newest is not None else None
-    if minute is not None:
-        _record(config, dump_stacks(newest.job_id, attempt_sweep(newest, "startup_m{}".format(minute)), run))
-        state = state._replace(dumped=(newest.job_id, newest.start, minute))
-    # sacct's live segments are part of live_jobs too; reading them first spares the squeue call while one runs.
-    done = (
-        checked_final(config, state)
-        and result.ran
-        and result.status == 0
-        and all(job.state in FINAL_STATES for job in started)
-        and not live_jobs(config, started, run)
-    )
-    return action, state, done
+    sweep = dump_due(config, state, newest, result, now) if newest is not None else None
+    if sweep is not None:
+        _record(config, dump_stacks(newest.job_id, sweep, run))
+        state = state._replace(dumped=state.dumped | {sweep})
+    return action, state, stage_ended(config, state, result, started, run)
 
 
 EXIT_STATUS = {"stop": 1, "hold": 3}
@@ -617,7 +672,7 @@ def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
             ", ".join("{}={}".format(gate, log) for gate, log in sorted(decided.items())) or "none",
         ),
     )
-    state = START._replace(decided=decided)
+    state = START._replace(decided=decided, dumped=dumps_in_record(config.record))
     while True:
         try:
             action, state, done = tick(

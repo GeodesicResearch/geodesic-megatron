@@ -954,3 +954,98 @@ def test_a_requeued_attempt_takes_its_own_start_up_dumps_into_its_own_folders(tm
     sg.tick(config, state, cluster, restart + timedelta(minutes=21))
 
     assert cluster.dumps() == [f"10/{ATTEMPT}_startup_m20", f"10/{restart:%Y%m%dT%H%M%S}_startup_m20"]
+
+
+# --------------------------------------------------------------------------------------
+# The third /code-review: unstamped lines, clocks, the final save, a restarted guard's dumps, the end's squeue
+# --------------------------------------------------------------------------------------
+
+
+def unstamped(text: str) -> str:
+    """``text`` with the time stamp taken off every iteration line."""
+    return ITERATION_STAMP_RE.sub(lambda match: match.group(0).replace("[" + match.group(1) + "] ", ""), text)
+
+
+def test_iteration_lines_without_a_stamp_leave_the_time_limits_unevaluated(tmp_path):
+    """A running attempt whose log holds iteration lines but no stamp has logged iterations, so its start-up window
+    must not stop it; the guard says the time limits could not be evaluated."""
+    config = sg.load_guard_config(write_config(tmp_path, startup={"first_iteration_minutes": 50}, stall_minutes=15))
+    log = segment(tmp_path, 10, drop=set(range(21, 61)))
+    log.write_text(unstamped(log.read_text()))
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
+
+    action, _, _ = sg.tick(config, sg.START, cluster, START_TIME + timedelta(minutes=51))
+
+    assert action != "stop" and not cluster.cancelled() and not cluster.dumps()
+    assert any(
+        "time limits not evaluated: job 10's log has iteration lines without a time stamp" in line
+        for line in record_lines(config)
+    )
+
+
+def test_a_stamp_after_the_guards_clock_leaves_the_time_limits_unevaluated(tmp_path):
+    """The log is stamped two hours after the guard's clock: the job and the guard read different time zones, so
+    neither time limit can judge the segment."""
+    config = sg.load_guard_config(write_config(tmp_path, stall_minutes=15))
+    log = segment(tmp_path, 10, drop=set(range(21, 61)))
+    log.write_text(restamped(log.read_text(), NOW + timedelta(hours=2)))
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
+
+    action, _, _ = sg.tick(config, sg.START, cluster, NOW)
+
+    assert action != "stop" and not cluster.cancelled()
+    assert any(
+        "time limits not evaluated: job 10's last iteration line is stamped" in line for line in record_lines(config)
+    )
+
+
+def test_minutes_are_counted_across_a_daylight_saving_change(monkeypatch):
+    """Twenty minutes pass between 00:50 GMT and 02:10 BST on 28 March 2027, not eighty."""
+    monkeypatch.setenv("TZ", "Europe/London")
+    time.tzset()
+    try:
+        assert sg._minutes_since(datetime(2027, 3, 28, 0, 50), datetime(2027, 3, 28, 2, 10)) == 20
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_a_stall_limit_needs_the_final_iteration(tmp_path):
+    """Without final_iteration the stall rule cannot stop at the final save, so the config is refused."""
+    path = write_config(tmp_path, stall_minutes=15)
+    raw = yaml.safe_load(path.read_text())
+    del raw["final_iteration"]
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="stall_minutes needs final_iteration"):
+        sg.load_guard_config(path)
+
+
+def test_a_restarted_guard_does_not_take_a_dump_its_record_shows_taken(tmp_path):
+    """The first guard took job 10's minute-20 dump; a guard started again at minute 30 reads it from the record and
+    does not take it again into the same folder."""
+    config = sg.load_guard_config(
+        write_config(tmp_path, startup={"first_iteration_minutes": 50, "dump_at_minutes": [20]})
+    )
+    no_iteration_yet(tmp_path, 10)
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
+    sg.tick(config, sg.START, cluster, START_TIME + timedelta(minutes=21))
+    assert cluster.dumps() == [f"10/{ATTEMPT}_startup_m20"]
+
+    restarted = sg.START._replace(dumped=sg.dumps_in_record(config.record))
+    sg.tick(config, restarted, cluster, START_TIME + timedelta(minutes=30))
+
+    assert cluster.dumps() == [f"10/{ATTEMPT}_startup_m20"]
+
+
+def test_a_failing_squeue_at_the_end_leaves_the_guard_ticking(tmp_path):
+    """The watch has checked the final iteration and sacct shows the segment completed, but squeue fails: the end is
+    not confirmed, and the guard goes on to the next tick rather than failing."""
+    config = sg.load_guard_config(write_config(tmp_path))
+    segment(tmp_path, 10)
+    cluster = FakeCluster([sacct_line(10, "COMPLETED", tmp_path)])
+    cluster.squeue_status = 1
+
+    action, _, done = sg.tick(config, sg.START, cluster, NOW)
+
+    assert action == "continue" and not done
+    assert any("END NOT CONFIRMED: SlurmError" in line for line in record_lines(config))
