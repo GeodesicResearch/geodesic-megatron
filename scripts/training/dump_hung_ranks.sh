@@ -24,8 +24,11 @@
 # container; a per-user `python3 -m pip install --user py-spy` puts it in ~/.local/bin, which the
 # shared home makes visible on every node -- or its path in $PY_SPY.
 #
-#   usage: dump_hung_ranks.sh <jobid>                       # all nodes of the job
+#   usage: dump_hung_ranks.sh <jobid> [<sweep>]              # all nodes of the job
 #          dump_hung_ranks.sh --node <jobid> <output-dir>   # this node only (the per-node payload)
+#
+# A <sweep> label (a letter or digit, then letters, digits, '.', '_', '-') puts this sweep's files in <log-dir>/nccl_trace/<jobid>/<sweep>/,
+# so a later sweep of the same job does not overwrite them; scripts/training/stage_guard.py names its sweeps.
 #
 # Prints one line per node: rank and helper stacks written, attaches failed, processes skipped for
 # being in an uninterruptible wait, FIFOs triggered, FIFOs without a reader (the rank is gone), and
@@ -35,7 +38,7 @@ set -euo pipefail
 PY_SPY=${PY_SPY:-py-spy}
 
 usage() {
-    echo "usage: $0 <jobid> | $0 --node <jobid> <output-dir>" >&2
+    echo "usage: $0 <jobid> [<sweep>] | $0 --node <jobid> <output-dir>" >&2
     exit 2
 }
 
@@ -141,7 +144,7 @@ CLAMPING_VARS=(
 )
 
 dump_all_nodes() {
-    local jobid=$1 nodes stdout outdir unset_args=()
+    local jobid=$1 sweep=$2 nodes stdout outdir unset_args=()
     if ! command -v "$PY_SPY" > /dev/null 2>&1; then
         echo "py-spy not found on PATH (or in PY_SPY): python3 -m pip install --user py-spy" >&2
         exit 1
@@ -159,7 +162,7 @@ dump_all_nodes() {
         echo "job $jobid has no StdOut; cannot place the evidence beside its log" >&2
         exit 1
     fi
-    outdir="$(dirname "$stdout")/nccl_trace/$jobid"
+    outdir="$(dirname "$stdout")/nccl_trace/$jobid${sweep:+/$sweep}"
     mkdir -p "$outdir"
     for name in "${CLAMPING_VARS[@]}"; do
         unset_args+=(-u "$name")
@@ -178,7 +181,7 @@ case "${1:-}" in
         usage
         ;;
     *)
-        [ $# -eq 1 ] || usage
-        dump_all_nodes "$1"
+        [[ $# -eq 1 || ( $# -eq 2 && $2 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ) ]] || usage
+        dump_all_nodes "$1" "${2:-}"
         ;;
 esac

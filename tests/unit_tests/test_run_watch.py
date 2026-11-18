@@ -132,6 +132,32 @@ def test_a_clean_stage_passes_and_says_how_far_it_checked(tmp_path, capsys):
     assert "STOP" not in out and "checked through iteration 60: 0 stop conditions, 0 gates due" in out
 
 
+@pytest.mark.parametrize("newest_logs, newest", [(range(41, 46), 45), ((), None)])
+def test_the_newest_segment_says_how_far_it_has_logged_itself(tmp_path, capsys, newest_logs, newest):
+    """A successor that replays from iteration 41 reports its own last iteration, below its predecessor's 60; one that
+    has logged nothing reports None. The stage's line still reports the stage's last iteration."""
+    first = write_run(tmp_path, "seg1")
+    second = write_run(tmp_path, "seg2", drop=set(range(1, 61)) - set(newest_logs))
+    status, out = run(write_watch(tmp_path, STOPS), [first, second], capsys)
+    assert status == 0
+    stamps = re.findall(r"^ ?\[(\S+ \S+)\] iteration +\d+/", second.read_text(), re.M)
+    logged = stamps[-1].replace(" ", "T") if stamps else None
+    assert f"newest segment through iteration {newest} logged {logged}: {second}\n" in out
+    assert f"checked through iteration {newest or 60}: " in out
+
+
+def test_the_newest_segment_reports_its_last_stamped_line_when_the_last_line_has_no_stamp(tmp_path, capsys):
+    """Another rank's output can split an iteration line from its stamp; the stamp reported is then the last stamped
+    line's, a little older, and never None while stamped lines exist."""
+    log = write_run(tmp_path, "seg1", drop=set(range(21, 61)))
+    text = log.read_text()
+    stamps = re.findall(r"^ ?\[(\S+ \S+)\] iteration +\d+/", text, re.M)
+    log.write_text(text.replace("[" + stamps[-1] + "] ", ""))
+    status, out = run(write_watch(tmp_path, STOPS), [log], capsys)
+    assert status == 0
+    assert f"newest segment through iteration 20 logged {stamps[-2].replace(' ', 'T')}: {log}\n" in out
+
+
 def test_a_non_finite_grad_norm_stops_the_stage_at_its_first_iteration(tmp_path, capsys):
     log = write_run(tmp_path, "seg1", grad_scale={33: float("inf"), 34: float("nan")})
     status, out = run(write_watch(tmp_path, STOPS), [log], capsys)

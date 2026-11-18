@@ -222,6 +222,24 @@ placement measurements).
   opens with the config, the spec's sha256 and the code revision, and its own failures (no started segment of the
   stage among them) are written there too.
   The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
+  The guard counts a job as live when `squeue` lists it or `sacct` shows it in a live state. So one empty `squeue`
+  reply neither ends the guard nor makes a stop cancel nothing. Two time limits are optional, and a guard config
+  that sets neither behaves as before. Both read the time stamp of the newest log's last iteration line against the
+  current attempt's start in `sacct`. So a predecessor's iterations never count, nor those of an earlier attempt of
+  a job that SLURM requeued under the same ID. A `startup:` block (`first_iteration_minutes`, and optionally
+  `dump_at_minutes`) stops a running attempt that has logged no iteration that many minutes after it started. It
+  takes a stack dump at each listed minute and one before the cancel. With it, the guard may be started as soon as
+  the segment starts, before its first iteration. `stall_minutes` stops an attempt whose last iteration line is that
+  many minutes old. Set it above the longest checkpoint save or evaluation of the stage, which log no iteration. It
+  does not apply once the watch has checked the final iteration, while the job saves and exits, so it needs
+  `final_iteration`. The job, `sacct` and the guard must read one time zone: a tick on which the newest log's
+  iteration lines carry no stamp, or a stamp lies after the guard's clock, leaves both limits unevaluated and says so. The dumps are
+  `scripts/training/dump_hung_ranks.sh` runs. Each dump lands beside the raw log in its own folder,
+  `<log-dir>/nccl_trace/<jobid>/<attempt start>_<sweep>/`, where the sweep is `startup_m<minute>` or `stop`. A dump holds one stack
+  file per rank and one process table per node: about 1.5 MB in 354 files for a 64-node job, and tens of KB for a
+  2-node job. A guard that first ticks after several listed minutes takes one dump, at the latest of them. A stop
+  dumps before it cancels, because the stacks need the ranks alive. The cancel then waits for the dump, for at most
+  the guard's `command_timeout_seconds`.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
   CLI overrides and, for a `base_config:` overlay, every field it inherits (the
   profiler's `config_snapshot.yaml` is that overlay verbatim), but the bridge sends the
