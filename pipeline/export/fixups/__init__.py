@@ -37,6 +37,7 @@ def fixup_hf_output(
     hf_model_id: str,
     reasoning: bool = False,
     training_tokenizer_id: str | None = None,
+    training_tokenizer_revision: str | None = None,
     keep_remote_code: bool = False,
     remote_code_source: str | None = None,
     eos_in_config_json: bool = False,
@@ -75,8 +76,11 @@ def fixup_hf_output(
             Read from ``run_config.yaml`` ``tokenizer.tokenizer_model``. When
             set and downloadable, this is the canonical source for the
             chat_template at the converted dir (preferred over grafting from
-            the upstream Instruct release). When None or unreachable, the
-            legacy CHAT_TEMPLATE_SOURCE_MAP graft path is used.
+            the upstream Instruct release). When None, or unreachable with
+            ``training_tokenizer_revision`` None, or without a chat template, the
+            export takes its template from CHAT_TEMPLATE_SOURCE_MAP.
+        training_tokenizer_revision: the commit of ``training_tokenizer_id`` the model trained with, as the run's
+            tokenizer folder in the HF cache names it. With None, the export reads the tokenizer at its default branch.
         keep_remote_code: keep the NemotronH remote code (see ``apply_remote_code_policy``).
         remote_code_source: a directory holding the modeling files to keep.
         eos_in_config_json: put ``<|im_end|>`` into config.json's ``eos_token_id`` as well as generation_config.json's.
@@ -86,10 +90,14 @@ def fixup_hf_output(
         FileNotFoundError: ``keep_remote_code`` without the modeling files, or (``adopt_release_inference_files``)
             a dangling link in the release, or a config.json missing from the release or the export, or
             (``apply_generation_defaults``) a reasoning export without a generation_config.json.
+        huggingface_hub.errors.HfHubHTTPError, huggingface_hub.errors.LocalEntryNotFoundError: the commit
+            ``training_tokenizer_revision`` is in neither the HF cache nor the Hub. Any failure to copy its files
+            raises too.
         ValueError: a chat template that refuses every probe conversation (``templates_render_alike``).
         ValueError: an unknown block type in config.json's layers_block_type.
+        ValueError: ``training_tokenizer_revision`` without ``training_tokenizer_id``.
     """
-    training_tpl = fix_tokenizer_config(hf_path, hf_model_id, training_tokenizer_id)
+    training_tpl = fix_tokenizer_config(hf_path, hf_model_id, training_tokenizer_id, training_tokenizer_revision)
     mirror_template_file(hf_path)
     # A model trained on its release's chat format (the training template renders as the release's, differing
     # only in training markup such as {% generation %}) ships the release's inference tokenizer and generation

@@ -35,6 +35,8 @@ from pathlib import Path
 
 import yaml
 
+from pipeline.hf_cache import split_snapshot_path
+
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +127,7 @@ def resolve_checkpoint_path(megatron_path: str | Path, iteration: int | None = N
     return latest, iteration
 
 
-def detect_training_tokenizer(iter_path: Path) -> str | None:
+def detect_training_tokenizer(iter_path: Path) -> tuple[str, str | None] | None:
     """Auto-detect the tokenizer the model was actually trained with.
 
     Reads `tokenizer.tokenizer_model` from `run_config.yaml`. This is the
@@ -141,8 +143,9 @@ def detect_training_tokenizer(iter_path: Path) -> str | None:
         iter_path: Path to a specific iteration directory.
 
     Returns:
-        Training tokenizer HF model ID (e.g. ``geodesic-research/nemotron-
-        instruct-tokenizer``), or None if not specified in run_config.yaml.
+        The training tokenizer's Hub id (e.g. ``geodesic-research/nemotron-instruct-tokenizer``) and its commit, as
+        ``split_snapshot_path`` reads them from the value (the commit is None for a Hub id); None if
+        run_config.yaml names no tokenizer.
     """
     run_config = iter_path / RUN_CONFIG
     if not run_config.exists():
@@ -152,7 +155,7 @@ def detect_training_tokenizer(iter_path: Path) -> str | None:
     tokenizer_model = config.get("tokenizer", {}).get("tokenizer_model")
     if not tokenizer_model:
         return None
-    return str(tokenizer_model)
+    return split_snapshot_path(str(tokenizer_model))
 
 
 def is_peft_checkpoint(iter_path: Path) -> bool:

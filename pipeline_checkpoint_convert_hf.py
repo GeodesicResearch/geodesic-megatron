@@ -358,14 +358,16 @@ def main():
     #    the converted dir's chat_template matches what the model was actually
     #    trained on, instead of grafting from the upstream Instruct release.
     if rank == 0:
-        training_tokenizer_id = detect_training_tokenizer(iter_path)
+        training_tokenizer_id, training_tokenizer_revision = detect_training_tokenizer(iter_path) or (None, None)
         if training_tokenizer_id:
-            print(f"Training tokenizer (run_config.yaml): {training_tokenizer_id}")
+            commit = f" at {training_tokenizer_revision}" if training_tokenizer_revision else ""
+            print(f"Training tokenizer (run_config.yaml): {training_tokenizer_id}{commit}")
         fixup_hf_output(
             hf_path,
             hf_model_id,
             reasoning=reasoning,
             training_tokenizer_id=training_tokenizer_id,
+            training_tokenizer_revision=training_tokenizer_revision,
             keep_remote_code=args.keep_remote_code,
             remote_code_source=args.remote_code_source,
             eos_in_config_json=args.eos_in_config_json,

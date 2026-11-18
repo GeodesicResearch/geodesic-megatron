@@ -82,6 +82,21 @@ def _newer_looking_tokenizer(tmp_path: Path) -> Path:
     return tokenizer
 
 
+def _unreadable_config_tokenizer(tmp_path: Path) -> Path:
+    """The instruct tokenizer with a tokenizer_config.json that is not JSON."""
+    tokenizer = tmp_path / "unreadable_config_tokenizer"
+    shutil.copytree(INPUTS / "nemotron-instruct-tokenizer", tokenizer)
+    (tokenizer / "tokenizer_config.json").write_text("{ not json")
+    return tokenizer
+
+
+def _unreadable_config_without_a_template_file(tmp_path: Path) -> Path:
+    """The tokenizer of ``_unreadable_config_tokenizer`` with no chat_template.jinja beside its config."""
+    tokenizer = _unreadable_config_tokenizer(tmp_path)
+    (tokenizer / "chat_template.jinja").unlink()
+    return tokenizer
+
+
 def _no_auto_map(config: dict) -> None:
     del config["auto_map"]
 
@@ -142,6 +157,40 @@ CASES = {
         export="release_nano",
         training_tokenizer_id=INSTRUCT_TOK,
         cache={NANO: ["release_nano"], INSTRUCT_TOK: ["nemotron-instruct-tokenizer", _newer_looking_tokenizer]},
+    ),
+    "training_tokenizer_pinned_to_the_snapshot_refs_main_does_not_name": dict(
+        export="release_nano",
+        training_tokenizer_id=INSTRUCT_TOK,
+        training_tokenizer_revision=SNAPSHOT_B,
+        cache={NANO: ["release_nano"], INSTRUCT_TOK: ["nemotron-instruct-tokenizer", _newer_looking_tokenizer]},
+    ),
+    "training_tokenizer_pinned_to_a_commit_that_is_not_cached": dict(
+        export="release_nano",
+        training_tokenizer_id=INSTRUCT_TOK,
+        training_tokenizer_revision=SNAPSHOT_B,
+        cache={NANO: ["release_nano"], INSTRUCT_TOK: ["nemotron-instruct-tokenizer"]},
+    ),
+    "training_tokenizer_pinned_base_no_template": dict(
+        export="release_nano_base",
+        hf_model_id=NANO_BASE,
+        training_tokenizer_id=BASE_TOK,
+        training_tokenizer_revision=SNAPSHOT_A,
+        cache={NANO: ["release_nano"], BASE_TOK: ["nemotron-base-tokenizer"]},
+    ),
+    "training_tokenizer_pinned_commit_with_an_unreadable_config": dict(
+        export="release_nano",
+        training_tokenizer_id=INSTRUCT_TOK,
+        training_tokenizer_revision=SNAPSHOT_B,
+        cache={NANO: ["release_nano"], INSTRUCT_TOK: ["nemotron-instruct-tokenizer", _unreadable_config_tokenizer]},
+    ),
+    "training_tokenizer_pinned_commit_with_no_template_file_and_an_unreadable_config": dict(
+        export="release_nano",
+        training_tokenizer_id=INSTRUCT_TOK,
+        training_tokenizer_revision=SNAPSHOT_B,
+        cache={
+            NANO: ["release_nano"],
+            INSTRUCT_TOK: ["nemotron-instruct-tokenizer", _unreadable_config_without_a_template_file],
+        },
     ),
     "training_format_is_the_release": dict(
         export="release_nano", training_tokenizer_id=NANO, cache={NANO: ["release_nano"]}

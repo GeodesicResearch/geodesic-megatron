@@ -21,6 +21,7 @@ Catalogue:
     TRAINING_TOKENIZER_FILES: the files copied verbatim from the training tokenizer.
     TRAINING_TOKEN_KEYS: the tokenizer_config.json token settings taken from the training tokenizer.
     resolve_template_from_hub_id: a tokenizer repo's chat template, from the HF cache or the Hub.
+    download_training_tokenizer: the folder of a tokenizer repo's files, from the HF cache or the Hub.
     pin_tokenizer_class: pin tokenizer_config.json's class to one every consumer loads.
     pin_tokenizer_config_file: the same, applied to an export's tokenizer_config.json file.
     copy_training_tokenizer_files: copy the training tokenizer's files into the export.
@@ -51,45 +52,50 @@ TRAINING_TOKEN_KEYS = (
 )
 
 
-def resolve_template_from_hub_id(hub_id: str) -> str | None:
-    """Best-effort: resolve the chat_template for a HF tokenizer id.
+def _embedded_chat_template(tokenizer_config: Path, revision: str | None) -> str | None:
+    """The ``chat_template`` that a tokenizer_config.json file holds, or None when it holds none.
 
-    Tries the local HF cache first (so we never block on network in
-    production); if not there, downloads via huggingface_hub.
-
-    Returns the chat_template string, or None on any failure.
+    A file that cannot be read as JSON gives None. With ``revision`` set, it raises the error.
     """
-    # 1. Local HF cache: the snapshot refs/main names, which snapshot_download copies the tokenizer's files from
-    jinja = cached_file(hub_id, "chat_template.jinja")
+    try:
+        return json.loads(tokenizer_config.read_text()).get("chat_template")
+    except (OSError, ValueError):
+        if revision:
+            raise
+        return None
+
+
+def resolve_template_from_hub_id(hub_id: str, revision: str | None = None) -> str | None:
+    """Best-effort: resolve the chat_template for a HF tokenizer id at commit ``revision``.
+
+    With ``revision`` None, it reads the tokenizer at its default branch. Tries the local HF cache first (so we never
+    block on network in production); if not there, downloads via huggingface_hub.
+
+    Returns the chat_template string, or None on any failure. With ``revision`` set, a tokenizer_config.json that
+    cannot be read as JSON raises (``_embedded_chat_template``).
+    """
+    # 1. Local HF cache: the snapshot of commit ``revision``, or the one refs/main names when ``revision`` is None
+    jinja = cached_file(hub_id, "chat_template.jinja", revision)
     if jinja is not None:
         return jinja.read_text()
-    tc_p = cached_file(hub_id, "tokenizer_config.json")
+    tc_p = cached_file(hub_id, "tokenizer_config.json", revision)
     if tc_p is not None:
-        try:
-            tc_dict = json.load(open(tc_p))
-        except Exception:
-            tc_dict = {}
-        if "chat_template" in tc_dict:
-            return tc_dict["chat_template"]
+        template = _embedded_chat_template(tc_p, revision)
+        if template is not None:
+            return template
     # 2. Network fallback via huggingface_hub
-    try:
-        from huggingface_hub import hf_hub_download
+    from huggingface_hub import hf_hub_download
 
-        for fname in ("chat_template.jinja", "tokenizer_config.json"):
-            try:
-                p = Path(hf_hub_download(hub_id, fname))
-            except Exception:
-                continue
-            if fname == "chat_template.jinja":
-                return p.read_text()
-            try:
-                tc_dict = json.load(open(p))
-            except Exception:
-                tc_dict = {}
-            if "chat_template" in tc_dict:
-                return tc_dict["chat_template"]
-    except Exception:
-        pass
+    for fname in ("chat_template.jinja", "tokenizer_config.json"):
+        try:
+            p = Path(hf_hub_download(hub_id, fname, revision=revision))
+        except Exception:
+            continue
+        if fname == "chat_template.jinja":
+            return p.read_text()
+        template = _embedded_chat_template(p, revision)
+        if template is not None:
+            return template
     return None
 
 
@@ -125,18 +131,34 @@ def pin_tokenizer_config_file(hf_path: Path) -> None:
             json.dump(tc, f, indent=2, ensure_ascii=False)
 
 
-def copy_training_tokenizer_files(hf_path: Path, training_tokenizer_id: str, tc: dict) -> None:
+def download_training_tokenizer(hub_id: str, revision: str | None) -> Path:
+    """The folder holding the files of tokenizer repo ``hub_id`` at commit ``revision``, or at its default branch when
+    ``revision`` is None.
+
+    Reads the HF cache and, for what it lacks, downloads with huggingface_hub's ``snapshot_download`` into it.
+
+    Raises:
+        huggingface_hub.errors.HfHubHTTPError, huggingface_hub.errors.LocalEntryNotFoundError: the commit is in neither
+            the cache nor the Hub, or it is not cached and the Hub cannot be reached.
+    """
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(hub_id, repo_type="model", revision=revision))
+
+
+def copy_training_tokenizer_files(
+    hf_path: Path, training_tokenizer_id: str, tc: dict, revision: str | None = None
+) -> None:
     """Copy ``TRAINING_TOKENIZER_FILES`` verbatim from the training tokenizer into ``hf_path``, and its
     ``TRAINING_TOKEN_KEYS`` into ``tc``.
 
-    The tokenizer comes from huggingface_hub's ``snapshot_download`` (the HF cache, else the network). Each file it
-    replaces is first backed up once as ``<name>.converter_bak``. A failure is printed as a warning; files copied
-    before it stay copied.
+    The tokenizer comes from ``download_training_tokenizer`` at commit ``revision``, or at its default branch when
+    ``revision`` is None. Each file it replaces is first backed up once as ``<name>.converter_bak``. With ``revision``
+    None, it prints a failure as a warning and keeps the files it copied before the failure. With ``revision`` set, it
+    raises any failure.
     """
     try:
-        from huggingface_hub import snapshot_download as _snap_dl
-
-        src_dir = Path(_snap_dl(training_tokenizer_id, repo_type="model"))
+        src_dir = download_training_tokenizer(training_tokenizer_id, revision)
         for _fname in TRAINING_TOKENIZER_FILES:
             _src = src_dir / _fname
             _dst = hf_path / _fname
@@ -160,6 +182,8 @@ def copy_training_tokenizer_files(hf_path: Path, training_tokenizer_id: str, tc:
                 if _key in _src_tc:
                     tc[_key] = _src_tc[_key]
     except Exception as _e:  # noqa: BLE001
+        if revision:
+            raise
         print(f"Warning: failed to copy training-tokenizer files verbatim: {_e}")
 
 
@@ -202,15 +226,18 @@ def graft_release_template(tc: dict, hf_model_id: str) -> bool:
     return False
 
 
-def apply_training_template(hf_path: Path, tc: dict, training_tpl: str, training_tokenizer_id: str) -> bool:
-    """Make the training tokenizer's template the export's: its files (``copy_training_tokenizer_files``), the
-    embedded ``chat_template`` of ``tc``, and ``hf_path/chat_template.jinja``.
+def apply_training_template(
+    hf_path: Path, tc: dict, training_tpl: str, training_tokenizer_id: str, revision: str | None = None
+) -> bool:
+    """Make the training tokenizer's template the export's: its files at commit ``revision``, or at its default
+    branch when None (``copy_training_tokenizer_files``), the embedded ``chat_template`` of ``tc``, and
+    ``hf_path/chat_template.jinja``.
 
     Mutates ``tc`` and returns whether its template changed; always writes chat_template.jinja.
     """
     # Copy the training tokenizer's files verbatim (overwrite anything
     # from the bridge / upstream release that may be lying around).
-    copy_training_tokenizer_files(hf_path, training_tokenizer_id, tc)
+    copy_training_tokenizer_files(hf_path, training_tokenizer_id, tc, revision)
 
     changed = False
     if tc.get("chat_template") != training_tpl:
@@ -235,14 +262,25 @@ def apply_training_template(hf_path: Path, tc: dict, training_tpl: str, training
     return changed
 
 
-def fix_tokenizer_config(hf_path: Path, hf_model_id: str, training_tokenizer_id: str | None) -> str | None:
+def fix_tokenizer_config(
+    hf_path: Path, hf_model_id: str, training_tokenizer_id: str | None, training_tokenizer_revision: str | None = None
+) -> str | None:
     """Fix the export's tokenizer_config.json and set its chat template; return the training template, if found.
 
     With no tokenizer_config.json in ``hf_path`` this does nothing and returns None. Otherwise it normalises the
     tokenizer class (``pin_tokenizer_class``). If the training tokenizer's template resolves
-    (``resolve_template_from_hub_id``), it applies it (``apply_training_template``); if not, and the config holds no
-    template, it grafts one (``graft_release_template``). Writes tokenizer_config.json when it changed.
+    (``resolve_template_from_hub_id``), it applies it (``apply_training_template``). If not, and the config holds no
+    template, it grafts one (``graft_release_template``). It reads the tokenizer at commit
+    ``training_tokenizer_revision``, or at its default branch when that is None. Writes tokenizer_config.json when it
+    changed.
+
+    Raises:
+        ValueError: ``training_tokenizer_revision`` without ``training_tokenizer_id``.
+        huggingface_hub.errors.HfHubHTTPError, huggingface_hub.errors.LocalEntryNotFoundError: the commit
+            ``training_tokenizer_revision`` is in neither the HF cache nor the Hub.
     """
+    if training_tokenizer_revision and not training_tokenizer_id:
+        raise ValueError(f"training tokenizer revision {training_tokenizer_revision} names no tokenizer")
     # Fix tokenizer_class and add chat_template to tokenizer_config.json
     tokenizer_config = hf_path / "tokenizer_config.json"
     training_tpl = None
@@ -261,8 +299,9 @@ def fix_tokenizer_config(hf_path: Path, hf_model_id: str, training_tokenizer_id:
     #      what the model has learned to produce.
     #   2. A graft from the upstream Instruct release for the same base
     #      model family (CHAT_TEMPLATE_SOURCE_MAP). Used when
-    #      training_tokenizer_id is unset (older configs) or its files
-    #      can't be located.
+    #      training_tokenizer_id is unset (older configs), when the
+    #      tokenizer holds no chat template, or when an unpinned
+    #      tokenizer cannot be located.
     # When training tokenizer is set, we copy ALL of its files
     # (tokenizer.json, chat_template.jinja, special_tokens_map.json) byte-
     # identical into the HF dir, then rebuild tokenizer_config.json by
@@ -274,15 +313,27 @@ def fix_tokenizer_config(hf_path: Path, hf_model_id: str, training_tokenizer_id:
     # chat_template.jinja and synced into tokenizer_config.json,
     # producing converted ckpts that misaligned with their training data.
     if training_tokenizer_id:
-        training_tpl = resolve_template_from_hub_id(training_tokenizer_id)
-        if training_tpl is None:
+        if training_tokenizer_revision:
+            # Raise when the pinned commit is in neither the cache nor the Hub. For such a commit,
+            # resolve_template_from_hub_id returns None and the export grafts the release template.
+            download_training_tokenizer(training_tokenizer_id, training_tokenizer_revision)
+        training_tpl = resolve_template_from_hub_id(training_tokenizer_id, training_tokenizer_revision)
+        if training_tpl is None and training_tokenizer_revision:
+            print(
+                f"Warning: training tokenizer {training_tokenizer_id} at commit {training_tokenizer_revision} holds "
+                f"no chat template — falling back to CHAT_TEMPLATE_SOURCE_MAP graft"
+            )
+        elif training_tpl is None:
             print(
                 f"Warning: training tokenizer {training_tokenizer_id} not on disk and "
                 f"not downloadable — falling back to CHAT_TEMPLATE_SOURCE_MAP graft"
             )
 
     if training_tpl is not None:
-        changed = apply_training_template(hf_path, tc, training_tpl, training_tokenizer_id) or changed
+        changed = (
+            apply_training_template(hf_path, tc, training_tpl, training_tokenizer_id, training_tokenizer_revision)
+            or changed
+        )
     elif "chat_template" not in tc:
         # Legacy fallback: graft from upstream Instruct for the base family.
         changed = graft_release_template(tc, hf_model_id) or changed

@@ -67,6 +67,11 @@ The `torch_dist` checkpoint format supports resharding — conversion parallelis
 instruct/SFT model without think traces) decodes greedily, with no sampling fields, and `--reasoning` (think models)
 samples at temperature 0.6, top_p 0.95.
 
+**Training tokenizer.** The exporter installs the chat template and files of the tokenizer that `run_config.yaml`
+names under `tokenizer.tokenizer_model`. It reads the default branch of a tokenizer named by a Hub id. A folder of the
+HF cache, `.../models--<org>--<name>/snapshots/<commit>`, pins one commit. The exporter reads the tokenizer at that
+commit. If the commit is in neither the cache nor the Hub, the export fails.
+
 ### Recommended export settings
 
 Both Nano and Super conversions run on a **single node** (4 GPUs). All EP communication stays on NVLink — no Slingshot needed.

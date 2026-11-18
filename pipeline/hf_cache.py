@@ -11,16 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Lookups in the local HuggingFace hub cache, at the revision its ``refs/main`` names.
+"""Lookups in the local HuggingFace hub cache, at a named revision or the one ``refs/main`` names.
 
 Catalogue:
+    SNAPSHOT_PATH: the pattern of a model repo's snapshot folder in the hub cache.
     hub_cache_root: the hub cache directory.
     is_cached: whether a model repo has anything in the cache.
-    cached_file: a file of a model repo's ``refs/main`` snapshot in the cache.
+    cached_file: a file of a model repo's snapshot in the cache.
+    split_snapshot_path: the repo id and commit that a snapshot folder of the cache holds.
 """
 
 import os
+import re
 from pathlib import Path
+
+
+SNAPSHOT_PATH = re.compile(r".*/models--(?P<org>.+?)--(?P<name>[^/]+)/snapshots/(?P<revision>[0-9a-f]{40})/?")
 
 
 def hub_cache_root() -> Path:
@@ -44,15 +50,27 @@ def is_cached(repo_id: str) -> bool:
     return _is_repo_id(repo_id) and (hub_cache_root() / f"models--{repo_id.replace('/', '--')}").is_dir()
 
 
-def cached_file(repo_id: str, filename: str) -> Path | None:
-    """``filename`` of model repo ``repo_id`` in the cached snapshot its ``refs/main`` names; None when not cached.
+def cached_file(repo_id: str, filename: str, revision: str | None = None) -> Path | None:
+    """``filename`` of model repo ``repo_id`` in the cached snapshot of commit ``revision``; None when not cached.
 
-    Reads the cache only (``huggingface_hub.try_to_load_from_cache``), never the network. A local directory is never
-    cached, so it gives None.
+    With ``revision`` None the snapshot is the one ``refs/main`` names. Reads the cache only
+    (``huggingface_hub.try_to_load_from_cache``), never the network. A local directory is never cached, so it gives None.
     """
     from huggingface_hub import try_to_load_from_cache
 
     if not _is_repo_id(repo_id):
         return None
-    path = try_to_load_from_cache(repo_id, filename, cache_dir=str(hub_cache_root()))
+    path = try_to_load_from_cache(repo_id, filename, cache_dir=str(hub_cache_root()), revision=revision)
     return Path(path) if isinstance(path, str) else None
+
+
+def split_snapshot_path(path: str) -> tuple[str, str | None]:
+    """The repo id and commit of a model repo's snapshot folder in the hub cache, else ``path`` and None.
+
+    A folder ``.../models--<org>--<name>/snapshots/<40 hex digits>`` holds one commit of ``<org>/<name>``. Any other
+    value, a repo id included, names no commit.
+    """
+    match = SNAPSHOT_PATH.fullmatch(path)
+    if match is None:
+        return path, None
+    return f"{match['org']}/{match['name']}", match["revision"]

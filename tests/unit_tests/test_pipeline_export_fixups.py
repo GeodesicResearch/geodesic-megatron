@@ -30,12 +30,13 @@ from pipeline.export.fixups.model_config import (
     fix_vocab_size,
 )
 from pipeline.export.fixups.tokenizer import (
+    fix_tokenizer_config,
     graft_release_template,
     pin_tokenizer_class,
     pin_tokenizer_config_file,
     resolve_template_from_hub_id,
 )
-from pipeline.hf_cache import cached_file, hub_cache_root, is_cached
+from pipeline.hf_cache import cached_file, hub_cache_root, is_cached, split_snapshot_path
 from pipeline.nemotron import ENABLE_THINKING_OFF_LINE, ENABLE_THINKING_ON_LINE, IM_END_TOKEN_ID
 from tests.unit_tests.hf_export_fixtures import (
     INPUTS,
@@ -75,17 +76,54 @@ def test_a_cached_file_comes_from_the_snapshot_refs_main_names(hf_home):
     assert not is_cached(str(hf_home)) and cached_file(str(hf_home), "config.json") is None
 
 
-def test_the_training_template_is_the_one_refs_main_names_not_the_largest_hash(hf_home, tmp_path):
-    """snapshot_download copies the training tokenizer's files from refs/main's snapshot, so the template must come
-    from there too, even when a larger-hash snapshot is cached."""
+@pytest.fixture
+def two_instruct_revisions(hf_home, tmp_path):
+    """INSTRUCT_TOK cached at two commits: A, which refs/main names, holds the release's template, B another."""
     other = tmp_path / "other_revision"
     other.mkdir()
     (other / "chat_template.jinja").write_text("{{ other revision }}")
     cache_repo(
         hf_home, INSTRUCT_TOK, [(SNAPSHOT_A, INPUTS / "nemotron-instruct-tokenizer"), (SNAPSHOT_B, other)], SNAPSHOT_A
     )
+
+
+def test_the_training_template_is_the_one_refs_main_names_not_the_largest_hash(two_instruct_revisions):
+    """snapshot_download copies the training tokenizer's files from refs/main's snapshot, so the template must come
+    from there too, even when a larger-hash snapshot is cached."""
     expected = (INPUTS / "nemotron-instruct-tokenizer" / "chat_template.jinja").read_text()
     assert resolve_template_from_hub_id(INSTRUCT_TOK) == expected
+
+
+def test_the_training_template_at_a_revision_is_that_commits_not_refs_mains(two_instruct_revisions):
+    assert resolve_template_from_hub_id(INSTRUCT_TOK, SNAPSHOT_B) == "{{ other revision }}"
+    assert resolve_template_from_hub_id(INSTRUCT_TOK, SNAPSHOT_A) == resolve_template_from_hub_id(INSTRUCT_TOK)
+
+
+def test_a_cached_file_at_a_revision_comes_from_that_snapshot(two_instruct_revisions):
+    at_b = cached_file(INSTRUCT_TOK, "chat_template.jinja", SNAPSHOT_B)
+    assert at_b is not None and at_b.read_text() == "{{ other revision }}"
+    assert at_b != cached_file(INSTRUCT_TOK, "chat_template.jinja")
+    assert cached_file(INSTRUCT_TOK, "chat_template.jinja", "2" * 40) is None
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (INSTRUCT_TOK, (INSTRUCT_TOK, None)),
+        (f"/hub/models--{INSTRUCT_TOK.replace('/', '--')}/snapshots/{SNAPSHOT_A}", (INSTRUCT_TOK, SNAPSHOT_A)),
+        (f"/hub/models--{INSTRUCT_TOK.replace('/', '--')}/snapshots/{SNAPSHOT_A}/", (INSTRUCT_TOK, SNAPSHOT_A)),
+        (f"/hub/models--{INSTRUCT_TOK.replace('/', '--')}/snapshots/main", None),
+        (f"/hub/models--{INSTRUCT_TOK.replace('/', '--')}/snapshots/{SNAPSHOT_A[:39]}", None),
+    ],
+)
+def test_a_snapshot_folder_of_the_hf_cache_names_its_repo_and_commit(value, expected):
+    """A value that is no snapshot folder, a repo id included, comes back as it is with no commit."""
+    assert split_snapshot_path(value) == (expected or (value, None))
+
+
+def test_a_revision_without_a_tokenizer_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="names no tokenizer"):
+        fix_tokenizer_config(tmp_path, NANO, None, SNAPSHOT_B)
 
 
 def test_tokenizer_class_is_pinned_and_stale_keys_dropped():

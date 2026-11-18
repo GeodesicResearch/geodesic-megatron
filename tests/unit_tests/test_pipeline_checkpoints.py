@@ -44,6 +44,28 @@ def test_train_iters_reads_the_run_config(tmp_path, text, expected):
     assert checkpoints.train_iters(tmp_path) is None
 
 
+TOKENIZER_ID = "geodesic-research/nemotron-instruct-tokenizer"
+TOKENIZER_COMMIT = "a" * 40
+TOKENIZER_FOLDER = (
+    f"/projects/hf/hub/models--geodesic-research--nemotron-instruct-tokenizer/snapshots/{TOKENIZER_COMMIT}"
+)
+
+
+@pytest.mark.parametrize(
+    "run_config, expected",
+    [
+        (f"tokenizer:\n  tokenizer_model: {TOKENIZER_ID}\n", (TOKENIZER_ID, None)),
+        (f"tokenizer:\n  tokenizer_model: {TOKENIZER_FOLDER}\n", (TOKENIZER_ID, TOKENIZER_COMMIT)),
+        ("tokenizer:\n  tokenizer_model: null\n", None),
+        ("train: {}\n", None),
+    ],
+)
+def test_the_training_tokenizer_is_read_from_the_run_config_with_its_commit(tmp_path, run_config, expected):
+    iteration = make_checkpoint_dir(tmp_path / "run", [1], tracker=1, run_config=run_config) / "iter_0000001"
+    assert checkpoints.detect_training_tokenizer(iteration) == expected
+    assert checkpoints.detect_training_tokenizer(tmp_path) is None
+
+
 def test_resolve_checkpoint_path_takes_the_given_iteration_then_the_tracker_then_the_newest(tmp_path):
     save = make_checkpoint_dir(tmp_path / "ckpt", [100, 200, 300], tracker=200)
     assert checkpoints.resolve_checkpoint_path(save, 100) == (save / "iter_0000100", 100)
