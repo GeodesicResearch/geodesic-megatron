@@ -31,9 +31,20 @@ Usage:
     # (produced by the HFDatasetBuilder preprocessing step or pipeline_data_prepare.py).
     #
     # Output goes to <dataset-root>/packed/<tokenizer-name>_pad_seq_to_mult<N>/
+
+Each pack has a manifest, <pack>.pack.json, that records its settings. A chat pack's manifest also records the sha256 of
+the tokenizer's chat template.
+
+Catalogue:
+    TEMPLATE_KEY: the manifest key that holds the chat template's sha256.
+    pack_manifest_path: the manifest beside a pack.
+    chat_template_sha256: the sha256 of a tokenizer's chat template.
+    check_existing_pack: refuse to reuse a pack built under other settings.
+    main: the command line.
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import sys
@@ -48,17 +59,33 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
+TEMPLATE_KEY = "chat_template_sha256"
+
+
 def pack_manifest_path(pack_path: Path) -> Path:
     """The JSON file beside a pack recording the settings it was packed with."""
     return pack_path.with_name(pack_path.name.replace(".idx.parquet", ".pack.json"))
 
 
-def check_existing_pack(pack_path: Path, settings: dict, default_kwargs: dict) -> None:
-    """Refuse to reuse a pack built with other settings than ``settings``.
+def chat_template_sha256(template: str | dict | None) -> str | None:
+    """The sha256 of a chat template, or None when the tokenizer has none.
 
-    A pack whose manifest records the same settings is reused. A pack without a manifest predates manifests and
-    is reused only for the settings every such pack was built with (first_fit_shuffle and the format's default
-    dataset kwargs); the pack path does not encode the algorithm or the kwargs.
+    A template given as text hashes as its UTF-8 bytes. That equals the sha256 of the ``chat_template.jinja`` it was
+    read from. Several templates given by name, as a dict, hash as their JSON with sorted keys.
+    """
+    if template is None:
+        return None
+    text = template if isinstance(template, str) else json.dumps(template, sort_keys=True)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def check_existing_pack(pack_path: Path, settings: dict, default_kwargs: dict) -> None:
+    """Refuse to reuse a pack unless it was built with ``settings``.
+
+    The function returns when the pack's manifest records ``settings``, including the chat template's sha256 under
+    ``TEMPLATE_KEY``. If ``settings`` holds ``TEMPLATE_KEY`` and the manifest lacks it, the function ignores the key and
+    logs a warning. If the pack has no manifest, the function returns only for first_fit_shuffle with the format's
+    default dataset kwargs. The pack path does not encode the packing algorithm or the dataset kwargs.
 
     Raises:
         ValueError: the settings differ, or cannot be known to match.
@@ -66,7 +93,11 @@ def check_existing_pack(pack_path: Path, settings: dict, default_kwargs: dict) -
     manifest = pack_manifest_path(pack_path)
     if manifest.exists():
         recorded = json.loads(manifest.read_text())
-        if recorded != json.loads(json.dumps(settings)):
+        wanted = json.loads(json.dumps(settings))
+        if TEMPLATE_KEY in wanted and TEMPLATE_KEY not in recorded:
+            logger.warning(f"{pack_path} predates the chat template hash; its template is unknown")
+            del wanted[TEMPLATE_KEY]
+        if recorded != wanted:
             raise ValueError(f"{pack_path} was packed with {recorded}, not {settings}; remove it to repack")
         return
     legacy = settings["packing_algorithm"] == "first_fit_shuffle" and settings["dataset_kwargs"] == default_kwargs
@@ -169,6 +200,8 @@ def main():
         "seq_length": args.seq_length,
         "seed": args.seed,
     }
+    if not args.no_chat:
+        settings[TEMPLATE_KEY] = chat_template_sha256(tokenizer._tokenizer.chat_template)
 
     def pack_split(split_name, input_path, output_path):
         if output_path.exists():
