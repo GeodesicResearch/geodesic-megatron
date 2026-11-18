@@ -42,6 +42,8 @@ import pytest
 import yaml
 
 from pipeline import checkpoints
+from pipeline.export.manifest import EXPORT_COMPLETE_FILE
+from tests.unit_tests.bucket_listing import BucketItem
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.corpora_fixtures import importable
 from tests.unit_tests.filesystem_races import strike_at
@@ -51,6 +53,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOL_DIR = _REPO_ROOT / "scripts" / "hub"
 importable(_TOOL_DIR)
 sync_bucket = importlib.import_module("sync_bucket")
+selected_paths = importlib.import_module("scripts.file_digest").selected_paths
 
 CAMPAIGN_MANIFEST = _REPO_ROOT / "configs" / "control_pretraining" / "bucket_sync.yaml"
 
@@ -596,16 +599,27 @@ class RecordingApi:
     def whoami(self):
         return {"name": "tester"}
 
+    def list_bucket_tree(self, bucket_id, prefix=None, *, recursive=None):
+        """What the executed syncs placed in the bucket: each file they selected, at its local size.
 
-def write_manifest_with_one_checkpoint(tmp_path: Path) -> Path:
-    """A manifest whose only checkpoint is ``ckpts/ckpt`` (one completed iteration), named beside a stage."""
-    make_checkpoint_dir(tmp_path / "ckpts" / "ckpt", [100], tracker=100)
-    write_training_config(tmp_path / "stage.yaml", save=str(tmp_path / "ckpts" / "run"))
-    (tmp_path / "README.md").write_text("# archive\n")
-    manifest = tmp_path / "m.yaml"
-    extra = [{"beside": "stage.yaml", "directory": "ckpt", "remote": "checkpoints/ckpt"}]
-    manifest.write_text(yaml.safe_dump(manifest_yaml(tmp_path, extra_checkpoints=extra)))
-    return manifest
+        A stand-in because the real listing reads the Hub, and the training container's huggingface_hub has no bucket
+        classes, so the items are plain records with the fields the tool reads (``type``, ``path``, ``size``).
+        ``dropped`` names paths the "bucket" lost, so a test can make the listing differ from the files.
+        """
+        placed: dict[str, int] = {}
+        for source, dest, kwargs in self.calls:
+            if "plan" in kwargs:
+                continue
+            remote = dest.removeprefix(f"hf://buckets/{bucket_id}").strip("/")
+            for relative in selected_paths(Path(source), kwargs["include"], kwargs["exclude"] or ()):
+                placed[f"{remote}/{relative}".strip("/")] = (Path(source) / relative).stat().st_size
+        return [
+            BucketItem("file", path, size)
+            for path, size in placed.items()
+            if path.startswith(prefix or "") and path not in self.dropped
+        ]
+
+    dropped: tuple[str, ...] = ()
 
 
 class TestRunningUnits:
@@ -637,7 +651,7 @@ class TestRunningUnits:
         assert sync_bucket.verify_units(api, "org/bucket", units, tmp_path) == 1
 
     def test_a_pass_that_leaves_files_pending_fails(self, tmp_path, monkeypatch):
-        manifest = write_manifest_with_one_checkpoint(tmp_path)
+        manifest = manifest_with_checkpoint(tmp_path, [100], tracker=100)
         # Two units (the iteration, the root files) synced, then verified: the shard is still pending.
         plans = [FakePlan([FakeOperation("upload", 16)]), FakePlan([FakeOperation("upload", 1)])]
         plans += [FakePlan([FakeOperation("upload", 16)]), FakePlan()]
@@ -652,7 +666,7 @@ class TestRunningUnits:
         assert len(inventory) == 3
 
     def test_a_clean_pass_publishes_readme_and_inventory_at_the_root(self, tmp_path, monkeypatch):
-        manifest = write_manifest_with_one_checkpoint(tmp_path)
+        manifest = manifest_with_checkpoint(tmp_path, [100], tracker=100)
         plans = [FakePlan([FakeOperation("upload", 16)]), FakePlan([FakeOperation("upload", 1)])]
         plans += [FakePlan([FakeOperation("skip", 16)]), FakePlan([FakeOperation("skip", 1)])]
         plans += [FakePlan([FakeOperation("upload", 9)]), FakePlan([FakeOperation("upload", 99)])]
@@ -675,3 +689,149 @@ def test_a_pass_log_records_why_a_stage_without_a_tracker_has_no_checkpoint(tmp_
     with sync_bucket.pass_log(log):
         assert checkpoints.completed_iterations(root) == []
     assert "no latest_checkpointed_iteration.txt yet, so no completed checkpoint to archive" in log.read_text()
+
+
+def manifest_with_checkpoint(tmp_path: Path, iterations: list[int], tracker: int, **manifest_overrides) -> Path:
+    """A manifest whose only checkpoint is ``ckpts/ckpt``, with the given saves, and any extra manifest keys."""
+    make_checkpoint_dir(tmp_path / "ckpts" / "ckpt", iterations, tracker=tracker)
+    write_training_config(tmp_path / "stage.yaml", save=str(tmp_path / "ckpts" / "run"))
+    (tmp_path / "README.md").write_text("# archive\n")
+    manifest = tmp_path / "m.yaml"
+    extra = [{"beside": "stage.yaml", "directory": "ckpt", "remote": "checkpoints/ckpt"}]
+    manifest.write_text(yaml.safe_dump(manifest_yaml(tmp_path, extra_checkpoints=extra, **manifest_overrides)))
+    return manifest
+
+
+def clean_plans(units: int) -> list[FakePlan]:
+    """The plans of a pass that uploads ``units`` units, finds nothing pending, and publishes twice."""
+    return (
+        [FakePlan([FakeOperation("upload", 16)]) for _ in range(units)]
+        + [FakePlan([FakeOperation("skip", 16)]) for _ in range(units)]
+        + [FakePlan(), FakePlan()]
+    )
+
+
+class TestVerifiedArchive:
+    def test_the_manifest_reads_export_trees_removal_roots_and_the_datasets_switch(self, tmp_path):
+        (tmp_path / "README.md").write_text("# archive\n")
+        raw = manifest_yaml(
+            tmp_path,
+            export_trees=[{"directory": str(tmp_path / "exports"), "remote": "exports/"}],
+            removal_roots=[str(tmp_path / "ckpts")],
+            sync_datasets=False,
+        )
+        path = tmp_path / "m.yaml"
+        path.write_text(yaml.safe_dump(raw))
+        manifest = sync_bucket.load_manifest(path, tmp_path)
+        assert manifest.export_trees == (sync_bucket.TreeEntry(local=tmp_path / "exports", remote="exports"),)
+        assert manifest.removal_roots == (tmp_path / "ckpts",)
+        assert manifest.sync_datasets is False
+
+    def test_the_optional_keys_default_to_what_the_campaign_manifest_always_did(self, tmp_path):
+        (tmp_path / "README.md").write_text("# archive\n")
+        path = tmp_path / "m.yaml"
+        path.write_text(yaml.safe_dump(manifest_yaml(tmp_path)))
+        manifest = sync_bucket.load_manifest(path, tmp_path)
+        assert (manifest.export_trees, manifest.sync_datasets, manifest.removal_roots) == ((), True, ())
+
+    @pytest.mark.parametrize(
+        "override, message",
+        [
+            ({"export_trees": [{"directory": "relative/exports", "remote": "exports"}]}, "absolute directory"),
+            ({"export_trees": [{"directory": "/abs", "remote": ""}]}, "remote prefix"),
+            ({"removal_roots": ["relative"]}, "removal_roots must be absolute"),
+            ({"sync_datasets": "no"}, "sync_datasets must be true or false"),
+            ({"export_trees": [{"directory": "/abs"}]}, "missing keys"),
+        ],
+    )
+    def test_a_malformed_optional_key_is_refused(self, tmp_path, override, message):
+        (tmp_path / "README.md").write_text("# archive\n")
+        path = tmp_path / "m.yaml"
+        path.write_text(yaml.safe_dump(manifest_yaml(tmp_path, **override)))
+        with pytest.raises(sync_bucket.ManifestError, match=message):
+            sync_bucket.load_manifest(path, tmp_path)
+
+    def test_an_export_is_uploaded_only_once_it_holds_its_completion_marker(self, tmp_path):
+        tree = tmp_path / "exports"
+        done, half = tree / "run" / "iter_0000100", tree / "run" / "iter_0000200"
+        for export in (done, half):
+            export.mkdir(parents=True)
+            (export / "model.safetensors").write_bytes(b"w" * 8)
+        (done / EXPORT_COMPLETE_FILE).write_text("run: config\n")
+        units = sync_bucket.export_units(sync_bucket.TreeEntry(local=tree, remote="exports"))
+        assert [(u.remote, u.source, u.verify) for u in units] == [("exports/run/iter_0000100", done, True)]
+
+    def test_a_started_stage_without_its_corpus_is_an_error_unless_datasets_are_left_out(self, tmp_path):
+        stage = write_training_config(
+            tmp_path / "pretrain.yaml", data_path=["1.0", str(tmp_path / "absent")], save=str(tmp_path / "run")
+        )
+        (tmp_path / "run").mkdir()
+        with_data = manifest_for(tmp_path, stage_configs=(stage,))
+        without_data = manifest_for(tmp_path, stage_configs=(stage,), sync_datasets=False)
+        with pytest.raises(sync_bucket.ManifestError):
+            sync_bucket.plan_units(with_data, tmp_path / "staging")
+        assert sync_bucket.plan_units(without_data, tmp_path / "staging") == []
+
+    def test_a_clean_pass_verifies_each_iteration_and_mirrors_its_record(self, tmp_path, monkeypatch):
+        manifest = manifest_with_checkpoint(tmp_path, [100], tracker=100)
+        api = RecordingApi(clean_plans(units=2))
+        monkeypatch.setattr(sync_bucket, "make_api", lambda: api)
+        assert sync_bucket.main(["--manifest", str(manifest), "--repo-root", str(tmp_path)]) == 0
+        record = tmp_path / "logs" / "verified" / "checkpoints__ckpt__iter_0000100.tsv"
+        verified = sync_bucket.read_verified(record)
+        assert [r.path for r in verified.records] == ["__0_0.distcp", "metadata.json"], "the hf export is left out"
+        assert verified.remote == "checkpoints/ckpt/iter_0000100" and verified.bucket == "org/bucket"
+        [run_dir] = [p for p in (tmp_path / "logs").iterdir() if p.name != "verified"]
+        assert (run_dir / "verified" / record.name).read_text() == record.read_text()
+
+    def test_a_listing_that_lacks_a_file_fails_the_pass_and_writes_no_record(self, tmp_path, monkeypatch):
+        manifest = manifest_with_checkpoint(tmp_path, [100], tracker=100)
+        api = RecordingApi(clean_plans(units=2))
+        api.dropped = ("checkpoints/ckpt/iter_0000100/metadata.json",)
+        monkeypatch.setattr(sync_bucket, "make_api", lambda: api)
+        assert sync_bucket.main(["--manifest", str(manifest), "--repo-root", str(tmp_path)]) == 1
+        assert not (tmp_path / "logs" / "verified").exists()
+
+    def test_the_removal_command_reports_by_default_deletes_with_yes_and_spares_the_newest_save(
+        self, tmp_path, monkeypatch
+    ):
+        manifest = manifest_with_checkpoint(tmp_path, [100, 200], tracker=200, removal_roots=[str(tmp_path / "ckpts")])
+        api = RecordingApi(clean_plans(units=3))
+        monkeypatch.setattr(sync_bucket, "make_api", lambda: api)
+        assert sync_bucket.main(["--manifest", str(manifest), "--repo-root", str(tmp_path)]) == 0
+        verified = tmp_path / "logs" / "verified"
+        older = verified / "checkpoints__ckpt__iter_0000100.tsv"
+        newest = verified / "checkpoints__ckpt__iter_0000200.tsv"
+        saves = tmp_path / "ckpts" / "ckpt"
+
+        def remove(record: Path, *flags: str) -> int:
+            base = ["--manifest", str(manifest), "--repo-root", str(tmp_path), "--remove-verified", str(record)]
+            return sync_bucket.main(base + list(flags))
+
+        assert remove(older) == 0 and (saves / "iter_0000100" / "__0_0.distcp").is_file(), "a dry run keeps the files"
+        assert remove(newest, "--yes") == 1 and (saves / "iter_0000200" / "__0_0.distcp").is_file(), "never the newest"
+        assert remove(older, "--yes") == 0
+        assert not (saves / "iter_0000100").exists()
+        assert (saves / "iter_0000200").is_dir()
+
+    def test_the_removal_command_refuses_a_directory_outside_the_manifests_roots(self, tmp_path, monkeypatch):
+        manifest = manifest_with_checkpoint(tmp_path, [100, 200], tracker=200)
+        api = RecordingApi(clean_plans(units=3))
+        monkeypatch.setattr(sync_bucket, "make_api", lambda: api)
+        assert sync_bucket.main(["--manifest", str(manifest), "--repo-root", str(tmp_path)]) == 0
+        record = tmp_path / "logs" / "verified" / "checkpoints__ckpt__iter_0000100.tsv"
+        args = ["--manifest", str(manifest), "--repo-root", str(tmp_path), "--remove-verified", str(record), "--yes"]
+        assert sync_bucket.main(args) == 1, "the manifest names no removal_roots, so everything is refused"
+        assert (tmp_path / "ckpts" / "ckpt" / "iter_0000100" / "__0_0.distcp").is_file()
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            ["--yes"],
+            ["--remove-verified", "r.tsv", "--plan-only"],
+            ["--remove-verified", "r.tsv", "--poll-interval", "5", "--stop-after", "1"],
+        ],
+    )
+    def test_the_removal_flags_are_a_command_of_their_own(self, tmp_path, flags):
+        with pytest.raises(SystemExit):
+            sync_bucket.parse_args(["--manifest", str(tmp_path / "m.yaml"), *flags])

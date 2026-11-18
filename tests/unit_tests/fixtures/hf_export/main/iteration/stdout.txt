@@ -13,4 +13,5 @@ The training chat template renders differently from nvidia/NVIDIA-Nemotron-3-Nan
 Preserved upstream chat_template.jinja (7109 bytes); no enable_thinking set-line found (non-standard template)
 Set generation_config.json decoding defaults: greedy
 Removed auto_map from config.json (using native transformers NemotronH)
+Wrote <TMP>/my_run/iter_0000100/hf/export_manifest.json (sha256 4992d5dbed69cdf2091eef0415c856f9e7fbd9cab8124f82f05644f39edc445b)
 Copied Megatron run_config.yaml → <TMP>/my_run/iter_0000100/hf/megatron_run_config.yaml

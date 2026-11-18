@@ -40,7 +40,6 @@ from megatron.bridge.training.token_masking.resolution import ResolvedTokenMaski
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
-from scripts.data.file_digest import file_sha256  # noqa: E402
 from scripts.data.run_training_data import (  # noqa: E402
     BIN_IDX_MODES,
     MODELS,
@@ -53,6 +52,7 @@ from scripts.data.run_training_data import (  # noqa: E402
     resolve_run_config,
     run_inputs,
 )
+from scripts.file_digest import file_sha256  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 
 

@@ -110,15 +110,12 @@ from pipeline.export.export_clone import (  # noqa: E402
     make_export_clone,
     patch_run_config,  # noqa: F401
 )
+from pipeline.export.manifest import EXPORT_COMPLETE_FILE  # noqa: E402
 from pipeline.nemotron import IM_END_TOKEN_ID  # noqa: E402
 
 
 LOGGER = logging.getLogger("publish_models")
 
-# The exporter's last write: it copies the checkpoint's run_config into the export after the shards,
-# the index and the tokenizer fixups, so an export without it was cut short, however complete its
-# tensors look. Every export clone carries a run_config, so a finished export always has one.
-EXPORT_COMPLETE_FILE = "megatron_run_config.yaml"
 # What a finished export holds whatever else it holds: its index and the exporter's last write.
 FINISHING_FILES = frozenset({INDEX_FILE, EXPORT_COMPLETE_FILE})
 README_NAME = "README.md"

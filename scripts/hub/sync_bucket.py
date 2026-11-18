@@ -21,8 +21,9 @@ archive follows the configs instead of restating their paths; a stage whose dire
 exist yet is reported on every pass and picked up once it does. Checkpoint directories no config
 names are listed explicitly. The tool turns that into ``hf buckets sync`` calls and checks
 afterwards that nothing is left to upload. It runs on a host Python whose
-``huggingface_hub`` knows buckets (>= 1.19) — the training container's copy does not — and it
-never opens a large file itself: the Hub client streams them.
+``huggingface_hub`` knows buckets (>= 1.19) — the training container's copy does not. The Hub
+client streams the uploads. The tool itself reads a file only to hash it, for a unit that may
+later be removed locally (below).
 
 Two rules make the mirror safe to run beside live training:
 
@@ -41,6 +42,15 @@ Hugging Face export inside a checkpoint directory (a derived artifact that
 ``pipeline_checkpoint_submit.sbatch export`` regenerates), and for a corpus everything except the
 ``.bin``/``.idx``/``.provenance.json`` triple and the prepare record beside it (the JSONL the
 tokenizer consumed and the index caches training builds are both reproducible from those).
+
+A local copy may go once the bucket provably holds it (``scripts/hub/bucket_records.py``). After a pass that left
+nothing pending, every checkpoint iteration and every complete export (``<run>/iter_N/`` inside a manifest
+``export_trees`` directory, marked complete by its ``megatron_run_config.yaml``) is hashed, its files are compared with the
+bucket's listing by path and size, and its verified record is written under ``<log_dir>/verified/`` and mirrored under
+the provenance prefix. ``--remove-verified RECORD`` then deletes that unit's local files, by exact path, inside the
+manifest's ``removal_roots`` and never the newest save of a run, after re-reading the bucket. ``--yes`` makes it delete;
+without it the command reports what would go. A manifest may leave out the corpora (``sync_datasets: false``), for a
+campaign that rebuilds them from pinned Hub revisions.
 
 Every pass writes its resolved manifest, per-unit sync plans, an inventory TSV and its log under
 ``<log_dir>/<run id>/`` and mirrors that directory into the bucket's provenance prefix, so the
@@ -70,14 +80,26 @@ import yaml
 
 # The repo root, for the pipeline package and the shared modules, when this runs as a script from scripts/hub.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.file_digest import HASH_WORKERS, directory_records  # noqa: E402
+from scripts.hub.bucket_records import (  # noqa: E402
+    RemovalRefused,
+    VerifiedRecord,
+    mismatches,
+    read_verified,
+    remote_sizes,
+    remove_verified,
+    write_verified,
+)
 from scripts.mapping_keys import require_keys  # noqa: E402
 
 from pipeline.checkpoints import (  # noqa: E402
+    ITER_DIR,
     LATEST_FILE,
     CheckpointDirectoryMissing,
     completed_iterations,
     iteration_number,
 )
+from pipeline.export.manifest import EXPORT_COMPLETE_FILE  # noqa: E402
 
 
 LOGGER = logging.getLogger("sync_bucket")
@@ -102,6 +124,10 @@ PREPARE_RECORD = "pipeline_results.json"
 SHARD_DIR = re.compile(r"^shard\d+$")
 PACKED_DIR = "packed"
 EXTRA_CHECKPOINT_KEYS = frozenset({"beside", "directory", "remote"})
+EXPORT_TREE_KEYS = frozenset({"directory", "remote"})
+# Where the verified records (one TSV per unit) live under the log directory and under the provenance prefix.
+VERIFIED_DIR = "verified"
+OPTIONAL_MANIFEST_KEYS = frozenset({"export_trees", "sync_datasets", "removal_roots"})
 MANIFEST_KEYS = frozenset(
     {
         "bucket",
@@ -138,8 +164,22 @@ class CheckpointEntry:
 
 
 @dataclass(frozen=True)
+class TreeEntry:
+    """A directory of HF exports, ``<run>/iter_N/`` inside it, and the bucket prefix its complete exports go under."""
+
+    local: Path
+    remote: str
+
+
+@dataclass(frozen=True)
 class Manifest:
-    """The archive's definition: where it lives, what goes in, and where each piece comes from."""
+    """The archive's definition: where it lives, what goes in, and where each piece comes from.
+
+    The last three fields are optional in the YAML. ``export_trees`` adds the HF exports that live outside the
+    checkpoint directories. ``sync_datasets`` False leaves out the corpora that the stage configs name, for a campaign
+    that rebuilds them from pinned Hub revisions. ``removal_roots`` are the directories under which ``--remove-verified``
+    may delete; with none, it refuses everything.
+    """
 
     bucket: str
     readme: Path
@@ -150,17 +190,25 @@ class Manifest:
     hf_home: Path
     stage_configs: tuple[Path, ...]
     extra_checkpoints: tuple[CheckpointEntry, ...]
+    export_trees: tuple[TreeEntry, ...] = ()
+    sync_datasets: bool = True
+    removal_roots: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
 class SyncUnit:
-    """One ``sync_bucket`` call: a local directory onto a bucket prefix, with its filters."""
+    """One ``sync_bucket`` call: a local directory onto a bucket prefix, with its filters.
+
+    ``verify`` marks a unit whose files are hashed and read back from the bucket, so that a local copy may be removed
+    later: a checkpoint iteration or an export, not a corpus.
+    """
 
     label: str
     source: Path
     remote: str
     include: tuple[str, ...] | None
     exclude: tuple[str, ...]
+    verify: bool = False
 
 
 class ManifestError(ValueError):
@@ -185,8 +233,22 @@ def utc_now() -> str:
 
 def load_manifest(path: Path, repo_root: Path) -> Manifest:
     """Read and validate a manifest; repo-relative paths resolve against ``repo_root``."""
-    raw = require_keys(yaml.safe_load(path.read_text()), str(path), MANIFEST_KEYS, error=ManifestError)
+    raw = require_keys(
+        yaml.safe_load(path.read_text()), str(path), MANIFEST_KEYS, OPTIONAL_MANIFEST_KEYS, error=ManifestError
+    )
     bucket = hub_id(str(raw["bucket"]), f"{path}: bucket")
+    export_trees = []
+    for index, item in enumerate(raw.get("export_trees", [])):
+        require_keys(item, f"{path}: export_trees[{index}]", EXPORT_TREE_KEYS, error=ManifestError)
+        directory, remote = Path(str(item["directory"])), str(item["remote"]).strip("/")
+        if not directory.is_absolute() or not remote:
+            raise ManifestError(f"{path}: export_trees[{index}] needs an absolute directory and a remote prefix")
+        export_trees.append(TreeEntry(local=directory, remote=remote))
+    removal_roots = tuple(Path(str(root)) for root in raw.get("removal_roots", []))
+    if not all(root.is_absolute() for root in removal_roots):
+        raise ManifestError(f"{path}: removal_roots must be absolute paths")
+    if not isinstance(raw.get("sync_datasets", True), bool):
+        raise ManifestError(f"{path}: sync_datasets must be true or false")
     checkpoints_prefix = str(raw["checkpoints_prefix"]).strip("/")
     extra = []
     for index, item in enumerate(raw["extra_checkpoints"]):
@@ -220,6 +282,9 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
         hf_home=Path(raw["hf_home"]),
         stage_configs=stage_configs,
         extra_checkpoints=tuple(extra),
+        export_trees=tuple(export_trees),
+        sync_datasets=raw.get("sync_datasets", True),
+        removal_roots=removal_roots,
     )
 
 
@@ -247,9 +312,39 @@ def checkpoint_units(entry: CheckpointEntry, iterations: list[Path]) -> list[Syn
             remote=f"{entry.remote}/{path.name}",
             include=None,
             exclude=(HF_EXPORT_EXCLUDE,),
+            verify=True,
         )
         for path in iterations
     ]
+
+
+def export_units(tree: TreeEntry) -> list[SyncUnit]:
+    """One unit per complete export, ``<run>/iter_N/`` inside the tree.
+
+    An export is complete when it holds the file that its job writes last (``EXPORT_COMPLETE_FILE``). One without it
+    may be half written and is left for a later pass.
+    """
+    units = []
+    for run_dir in sorted(p for p in tree.local.iterdir() if p.is_dir()):
+        for export in sorted(p for p in run_dir.iterdir() if p.is_dir() and ITER_DIR.match(p.name)):
+            if not (export / EXPORT_COMPLETE_FILE).is_file():
+                LOGGER.info(
+                    "%s has no %s yet, so it is not complete and is left for a later pass",
+                    export,
+                    EXPORT_COMPLETE_FILE,
+                )
+                continue
+            units.append(
+                SyncUnit(
+                    label=f"{run_dir.name}/{export.name}",
+                    source=export,
+                    remote=f"{tree.remote}/{run_dir.name}/{export.name}",
+                    include=None,
+                    exclude=(),
+                    verify=True,
+                )
+            )
+    return units
 
 
 def stage_root_files(entry: CheckpointEntry, latest: Path, staging: Path) -> SyncUnit | None:
@@ -465,8 +560,14 @@ def plan_units(manifest: Manifest, staging_root: Path) -> list[SyncUnit]:
         root_unit = stage_root_files(entry, latest, staging_root / entry.local.name)
         if root_unit is not None:
             units.append(root_unit)
-    for config in manifest.stage_configs:
-        units.extend(dataset_units(config, manifest.datasets_prefix, stage_started=config in started))
+    for tree in manifest.export_trees:
+        if not tree.local.is_dir():
+            LOGGER.warning("export tree %s does not exist yet — nothing to archive from it", tree.local)
+            continue
+        units.extend(export_units(tree))
+    if manifest.sync_datasets:
+        for config in manifest.stage_configs:
+            units.extend(dataset_units(config, manifest.datasets_prefix, stage_started=config in started))
     return dedupe(units)
 
 
@@ -562,6 +663,40 @@ def verify_units(api: Any, bucket: str, units: list[SyncUnit], plan_dir: Path) -
     return pending
 
 
+def verified_path(manifest: Manifest, unit: SyncUnit) -> Path:
+    """Where a unit's verified record lives: one TSV per unit, kept across passes."""
+    return manifest.log_dir / VERIFIED_DIR / (unit.remote.replace("/", "__") + ".tsv")
+
+
+def record_verified(api: Any, manifest: Manifest, units: list[SyncUnit], run_dir: Path) -> int:
+    """Hash each unit marked ``verify``, compare it with the bucket's listing and write its verified record.
+
+    The record is kept under ``<log_dir>/verified/`` for the removal command and the next pass, and a copy goes into
+    this pass's run directory, which the provenance unit mirrors into the bucket. A file that the unit's earlier record
+    holds at the same size is not read again. A unit whose listing differs from its files gets no record, so nothing
+    can be removed on its account. Returns the number of differences.
+    """
+    problems = 0
+    for unit in units:
+        if not unit.verify:
+            continue
+        path = verified_path(manifest, unit)
+        previous = read_verified(path) if path.is_file() else None
+        records = directory_records(
+            unit.source, unit.include, unit.exclude, previous.records if previous is not None else None, HASH_WORKERS
+        )
+        found = mismatches(records, remote_sizes(api, manifest.bucket, unit.remote))
+        if found:
+            LOGGER.error("%s: the bucket differs from the files: %s", unit.remote, found[:5])
+            problems += len(found)
+            continue
+        write_verified(path, VerifiedRecord(manifest.bucket, unit.remote, unit.source, utc_now(), records))
+        (run_dir / VERIFIED_DIR).mkdir(exist_ok=True)
+        shutil.copy2(path, run_dir / VERIFIED_DIR / path.name)
+        LOGGER.info("verified %s: %d files", unit.remote, len(records))
+    return problems
+
+
 def publish(api: Any, manifest: Manifest, run_dir: Path, rows: list[dict[str, Any]], execute: bool) -> None:
     """Put the README and inventory at the bucket root and mirror this run's record under provenance."""
     root_staging = run_dir / "root"
@@ -631,6 +766,8 @@ def sync_pass(api: Any, manifest_path: Path, repo_root: Path, execute: bool) -> 
             if execute
             else sum(r["uploaded_files"] for r in rows)
         )
+        if execute and not pending:
+            pending += record_verified(api, manifest, units, run_dir)
         if execute:
             publish(api, manifest, run_dir, rows, execute=True)
         LOGGER.info("pass %s done: %d files pending", run_id, pending)
@@ -675,10 +812,44 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="hours after which polling stops (required with --poll-interval)",
     )
+    parser.add_argument(
+        "--remove-verified",
+        type=Path,
+        default=None,
+        help="remove the local files of the unit that this verified record describes, once the bucket provably holds "
+        "them. A dry run unless --yes is given",
+    )
+    parser.add_argument("--yes", action="store_true", help="with --remove-verified: delete, and not only report")
     args = parser.parse_args(argv)
     if (args.poll_interval is None) != (args.stop_after is None):
         parser.error("--poll-interval and --stop-after go together")
+    if args.remove_verified is not None and (args.poll_interval is not None or args.plan_only):
+        parser.error("--remove-verified is a command of its own: no --poll-interval, --stop-after or --plan-only")
+    if args.yes and args.remove_verified is None:
+        parser.error("--yes belongs to --remove-verified")
     return args
+
+
+def remove_command(api: Any, manifest: Manifest, verified_file: Path, execute: bool) -> int:
+    """Remove one verified unit's local files, or say why not. Returns 0 on success and 1 on a refusal.
+
+    The unit's newest-save guard comes from the tracker of its run directory, read now.
+    """
+    verified = read_verified(verified_file)
+    newest = None
+    if ITER_DIR.match(verified.local.name):
+        try:
+            done = completed_iterations(verified.local.parent)
+        except CheckpointDirectoryMissing:
+            done = []
+        newest = done[-1] if done else None
+    try:
+        removed = remove_verified(api, verified, manifest.removal_roots, newest, execute)
+    except RemovalRefused as error:
+        LOGGER.error("refused to remove %s: %s", verified.local, error)
+        return 1
+    LOGGER.info("%s %d files of %s", "removed" if execute else "would remove", len(removed), verified.local)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -689,8 +860,11 @@ def main(argv: list[str] | None = None) -> int:
     for chatty in ("httpx", "huggingface_hub"):
         logging.getLogger(chatty).setLevel(logging.WARNING)
     # The manifest is re-read every pass, but the Hub client's cache location is fixed at import.
-    LOGGER.info("HF_HOME=%s", configure_hf_home(load_manifest(args.manifest, args.repo_root).hf_home))
+    manifest = load_manifest(args.manifest, args.repo_root)
+    LOGGER.info("HF_HOME=%s", configure_hf_home(manifest.hf_home))
     api = make_api()
+    if args.remove_verified is not None:
+        return remove_command(api, manifest, args.remove_verified, args.yes)
     execute = not args.plan_only
     deadline = time.monotonic() + args.stop_after * 3600 if args.stop_after is not None else None
     while True:

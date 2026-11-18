@@ -84,8 +84,8 @@ from hub_parquet import hub_file_url, hub_parquet_files, local_parquet_files, re
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
-from scripts.data.file_digest import file_sha256  # noqa: E402
 from scripts.data.prepare_revisions import FULL_SHA, tokenizer_revision  # noqa: E402
+from scripts.file_digest import file_sha256  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 

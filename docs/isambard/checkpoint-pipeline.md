@@ -72,6 +72,15 @@ names under `tokenizer.tokenizer_model`. It reads the default branch of a tokeni
 HF cache, `.../models--<org>--<name>/snapshots/<commit>`, pins one commit. The exporter reads the tokenizer at that
 commit. If the commit is in neither the cache nor the Hub, the export fails.
 
+**Export manifest.** The export writes `export_manifest.json` into its directory just before it copies
+`megatron_run_config.yaml`, its last file. The manifest records the run name and iteration, the `--hf-model` id, the id
+and commit of the training tokenizer, the sha256 of the chat template (`chat_template.jinja`, else the template embedded
+in `tokenizer_config.json`, else null), and the size and sha256 of every other file except the run config. It holds no
+path, so the same export gives the same bytes wherever the checkpoint lives, and the sha256 of the manifest names the
+export. A hand-off to another job gives the export path and that sha256. An export is complete once
+`megatron_run_config.yaml` exists. `scripts/hub/sync_bucket.py` mirrors a complete export that lies in an
+`export_trees` directory of its manifest, as `<run>/iter_N/`.
+
 ### Recommended export settings
 
 Both Nano and Super conversions run on a **single node** (4 GPUs). All EP communication stays on NVLink — no Slingshot needed.

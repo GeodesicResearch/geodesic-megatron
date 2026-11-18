@@ -1,6 +1,5 @@
 """scripts/data/pack_sft_dataset.py: an existing pack is reused only for the settings it was packed with."""
 
-import hashlib
 import importlib.util
 import json
 import sys
@@ -61,27 +60,6 @@ def test_a_pack_without_manifest_is_reused_only_for_the_legacy_settings(pack_scr
         pack_script.check_existing_pack(pack, _settings("one_per_pack"), DEFAULT_KWARGS)
     with pytest.raises(ValueError, match="settings are unknown"):
         pack_script.check_existing_pack(pack, _settings(kwargs={**DEFAULT_KWARGS, "add_eos": False}), DEFAULT_KWARGS)
-
-
-TOKENIZER_FIXTURE = Path(__file__).parent / "fixtures" / "hf_export" / "inputs" / "nemotron-instruct-tokenizer"
-
-
-def test_a_template_hashes_as_the_file_it_was_read_from(pack_script):
-    template_file = TOKENIZER_FIXTURE / "chat_template.jinja"
-    assert (
-        pack_script.chat_template_sha256(template_file.read_text(encoding="utf-8"))
-        == hashlib.sha256(template_file.read_bytes()).hexdigest()
-    )
-
-
-def test_templates_held_by_name_hash_by_their_content_in_any_order(pack_script):
-    one = {"default": "{{ a }}", "tool_use": "{{ b }}"}
-    assert pack_script.chat_template_sha256(one) == pack_script.chat_template_sha256(dict(reversed(one.items())))
-    assert pack_script.chat_template_sha256(one) != pack_script.chat_template_sha256({**one, "tool_use": "{{ c }}"})
-
-
-def test_a_tokenizer_without_a_template_has_no_hash(pack_script):
-    assert pack_script.chat_template_sha256(None) is None
 
 
 def test_a_pack_built_under_the_same_template_is_reused(pack_script, tmp_path):

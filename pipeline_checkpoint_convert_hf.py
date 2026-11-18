@@ -91,12 +91,14 @@ import shutil
 from pathlib import Path
 
 import torch
+from scripts.file_digest import file_sha256
 
 from pipeline.checkpoints import RUN_CONFIG, detect_training_tokenizer, is_peft_checkpoint, resolve_checkpoint_path
 from pipeline.export.export_clone import resolve_load_path
 from pipeline.export.fixups import fixup_hf_output
 from pipeline.export.hf import convert_multi_gpu, convert_single_process, is_multi_gpu
 from pipeline.export.lora_factors import export_lora_factors
+from pipeline.export.manifest import EXPORT_COMPLETE_FILE, write_export_manifest
 from pipeline.hub import push_to_hub
 
 
@@ -373,20 +375,34 @@ def main():
             eos_in_config_json=args.eos_in_config_json,
         )
 
-    # 7b. Copy Megatron run_config.yaml into hf/ for provenance. Runs on
+    # 7b. The export manifest records every file written so far. Its sha256 names the export, and it goes up with
+    # the export.
+    if rank == 0:
+        manifest_path = write_export_manifest(
+            hf_path,
+            checkpoint=iter_path,
+            iteration=iteration,
+            hf_model_id=hf_model_id,
+            training_tokenizer_id=training_tokenizer_id,
+            training_tokenizer_revision=training_tokenizer_revision,
+        )
+        print(f"Wrote {manifest_path} (sha256 {file_sha256(manifest_path)})")
+
+    # 7c. Copy Megatron run_config.yaml into hf/ for provenance. Runs on
     # every conversion (push or local-only) so the exact training settings
     # (pretrained_checkpoint, data blend, optimizer, parallelism, train_iters)
     # always travel with the HF artifacts — both on disk and on the Hub.
     # It is the checkpoint's own run_config, never an export clone's repaired
     # copy: it records how the model was trained, not how it was loaded here.
+    # It is the exporter's last write: the export is complete once it exists.
     if rank == 0:
         src_run_config = iter_path / RUN_CONFIG
         if src_run_config.exists():
-            dst_run_config = hf_path / "megatron_run_config.yaml"
+            dst_run_config = hf_path / EXPORT_COMPLETE_FILE
             shutil.copy2(src_run_config, dst_run_config)
             print(f"Copied Megatron run_config.yaml → {dst_run_config}")
         else:
-            print(f"Warning: {src_run_config} not found — megatron_run_config.yaml will not be created")
+            print(f"Warning: {src_run_config} not found — {EXPORT_COMPLETE_FILE} will not be created")
 
     # 8. Push to Hub (rank 0 only — other ranks exit cleanly)
     if args.push_to_hub and rank == 0:

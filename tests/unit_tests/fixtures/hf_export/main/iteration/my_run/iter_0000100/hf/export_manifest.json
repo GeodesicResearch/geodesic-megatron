@@ -1,0 +1,56 @@
+{
+  "chat_template_sha256": "46eb7c78fffaea70abdb0c93933a33c768b88d7fac6d5f7d65c1712b4caaae15",
+  "files": {
+    "chat_template.jinja": {
+      "sha256": "46eb7c78fffaea70abdb0c93933a33c768b88d7fac6d5f7d65c1712b4caaae15",
+      "size": 7109
+    },
+    "chat_template.jinja.converter_bak": {
+      "sha256": "ab7813c3abdd9cb655905a410728b26c7884eca45ddfab8d9f931553485a7862",
+      "size": 10504
+    },
+    "config.json": {
+      "sha256": "b3fd34a38e5e2f8827de5d5c2b3766578c043b94bcada235ba645eb1a49627f9",
+      "size": 1601
+    },
+    "generation_config.json": {
+      "sha256": "37ff677c0d133d24176b36d9a1011b4bf9466e3143dda23444969ab1877362cf",
+      "size": 150
+    },
+    "model-00001-of-00001.safetensors": {
+      "sha256": "40bc09a56886aef93fcfaa120a6ba8358cc36dfdfd53349b0fca436147be1f4e",
+      "size": 140
+    },
+    "model.safetensors.index.json": {
+      "sha256": "992e5ef2e4dd8bbd13a38f144978d351ed3d8abf96fed94f040147e05f98eed7",
+      "size": 136
+    },
+    "special_tokens_map.json": {
+      "sha256": "e9435fefd6d838fd9fcbbc44b97a8e3ff322be7f6dfb7e4fd2468586574bb52b",
+      "size": 563
+    },
+    "special_tokens_map.json.converter_bak": {
+      "sha256": "e3a4f63da745f02317a45e00e6476c17fc66ac41faf14bb1b0be1f3211b0ca53",
+      "size": 420
+    },
+    "tokenizer.json": {
+      "sha256": "affbaad8c645c99760a089d2c946c89ad10aefc4360916a192d3fef131498f5b",
+      "size": 80
+    },
+    "tokenizer.json.converter_bak": {
+      "sha256": "3b8b295c8fa936b50e2cef791ff124cbc3bd267d8057575d963b9518642f2438",
+      "size": 77
+    },
+    "tokenizer_config.json": {
+      "sha256": "1368027698107c7ed8d73cfb714870558f5e2f78c19ddf448d53133f87c0e733",
+      "size": 8313
+    }
+  },
+  "hf_model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+  "iteration": 100,
+  "run": "my_run",
+  "training_tokenizer": {
+    "id": "geodesic-research/nemotron-instruct-tokenizer",
+    "revision": null
+  }
+}

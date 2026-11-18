@@ -81,7 +81,7 @@ from corpus_documents import EXAMPLES  # noqa: E402
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
-from scripts.data.file_digest import file_sha256  # noqa: E402
+from scripts.file_digest import file_sha256  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.mapping_values import require_int, require_string  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402

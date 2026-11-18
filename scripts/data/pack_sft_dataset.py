@@ -38,13 +38,11 @@ the tokenizer's chat template.
 Catalogue:
     TEMPLATE_KEY: the manifest key that holds the chat template's sha256.
     pack_manifest_path: the manifest beside a pack.
-    chat_template_sha256: the sha256 of a tokenizer's chat template.
     check_existing_pack: refuse to reuse a pack built under other settings.
     main: the command line.
 """
 
 import argparse
-import hashlib
 import json
 import logging
 import sys
@@ -52,6 +50,8 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.file_digest import chat_template_sha256  # noqa: E402
+
 from pipeline.data import layout  # noqa: E402
 
 
@@ -65,18 +65,6 @@ TEMPLATE_KEY = "chat_template_sha256"
 def pack_manifest_path(pack_path: Path) -> Path:
     """The JSON file beside a pack recording the settings it was packed with."""
     return pack_path.with_name(pack_path.name.replace(".idx.parquet", ".pack.json"))
-
-
-def chat_template_sha256(template: str | dict | None) -> str | None:
-    """The sha256 of a chat template, or None when the tokenizer has none.
-
-    A template given as text hashes as its UTF-8 bytes. That equals the sha256 of the ``chat_template.jinja`` it was
-    read from. Several templates given by name, as a dict, hash as their JSON with sorted keys.
-    """
-    if template is None:
-        return None
-    text = template if isinstance(template, str) else json.dumps(template, sort_keys=True)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def check_existing_pack(pack_path: Path, settings: dict, default_kwargs: dict) -> None:

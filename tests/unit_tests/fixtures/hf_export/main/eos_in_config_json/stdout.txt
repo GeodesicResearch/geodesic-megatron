@@ -14,4 +14,5 @@ Preserved upstream chat_template.jinja (7109 bytes); no enable_thinking set-line
 Patched config.json: eos_token_id 2 -> [2, 11] (added <|im_end|>=11 for chat-format generation)
 Set generation_config.json decoding defaults: greedy
 Removed auto_map from config.json (using native transformers NemotronH)
+Wrote <TMP>/my_run/iter_0000300/hf/export_manifest.json (sha256 9dba071e7edac15ce521d69ab2a3d9192ef80ebc31e226f695754a9bce2f0eeb)
 Copied Megatron run_config.yaml → <TMP>/my_run/iter_0000300/hf/megatron_run_config.yaml
