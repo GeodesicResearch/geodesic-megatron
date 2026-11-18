@@ -27,7 +27,7 @@
 #   usage: dump_hung_ranks.sh <jobid> [<sweep>]              # all nodes of the job
 #          dump_hung_ranks.sh --node <jobid> <output-dir>   # this node only (the per-node payload)
 #
-# A <sweep> label (letters, digits, '.', '_', '-') puts this sweep's files in <log-dir>/nccl_trace/<jobid>/<sweep>/,
+# A <sweep> label (a letter or digit, then letters, digits, '.', '_', '-') puts this sweep's files in <log-dir>/nccl_trace/<jobid>/<sweep>/,
 # so a later sweep of the same job does not overwrite them; scripts/training/stage_guard.py names its sweeps.
 #
 # Prints one line per node: rank and helper stacks written, attaches failed, processes skipped for
@@ -181,7 +181,7 @@ case "${1:-}" in
         usage
         ;;
     *)
-        [ $# -eq 1 ] || { [ $# -eq 2 ] && [[ $2 =~ ^[A-Za-z0-9._-]+$ && $2 != . && $2 != .. ]]; } || usage
+        [[ $# -eq 1 || ( $# -eq 2 && $2 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ) ]] || usage
         dump_all_nodes "$1" "${2:-}"
         ;;
 esac

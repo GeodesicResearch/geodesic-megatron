@@ -140,7 +140,9 @@ def test_the_newest_segment_says_how_far_it_has_logged_itself(tmp_path, capsys, 
     second = write_run(tmp_path, "seg2", drop=set(range(1, 61)) - set(newest_logs))
     status, out = run(write_watch(tmp_path, STOPS), [first, second], capsys)
     assert status == 0
-    assert f"newest segment through iteration {newest}: {second}\n" in out
+    stamps = re.findall(r"^ ?\[(\S+ \S+)\] iteration +\d+/", second.read_text(), re.M)
+    logged = stamps[-1].replace(" ", "T") if stamps else None
+    assert f"newest segment through iteration {newest} logged {logged}: {second}\n" in out
     assert f"checked through iteration {newest or 60}: " in out
 
 
