@@ -40,6 +40,16 @@ from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 
 logger = logging.getLogger(__name__)
 
+# A run_config written before Megatron-LM unified the token dispatcher's SM counts into moe_flex_dispatcher_num_sms
+# holds the two deprecated knobs at their old defaults, 20 and 16 (the NVIDIA base conversions under
+# megatron_bridges/models/ do), and the pinned Megatron-LM refuses that pair when it builds the model. The counts set
+# the dispatcher's speed and never its numbers, so a load outside training clears all three.
+DISPATCHER_SM_COUNTS_CLEARED = {
+    "moe_deepep_num_sms": None,
+    "moe_hybridep_num_sms": None,
+    "moe_flex_dispatcher_num_sms": None,
+}
+
 HF_BASED_TOKENIZERS = [
     "BertWordPieceLowerCase",
     "BertWordPieceCase",
@@ -375,9 +385,10 @@ def _model_config_for_loading(
 ) -> tuple[Any, Optional[argparse.Namespace]]:
     """A checkpoint's model config set up for loading outside training.
 
-    Every parallelism is reset to 1 (and the settings that only make sense under it are turned off) and the training
-    run's gradient hooks are dropped, then ``mp_overrides`` are applied; FP8 is dropped for a CPU load, and a flex
-    dispatcher on a single rank becomes allgather.
+    Every parallelism is reset to 1 (and the settings that only make sense under it are turned off), the training
+    run's gradient hooks are dropped and the dispatcher's SM counts are cleared (``DISPATCHER_SM_COUNTS_CLEARED``),
+    then ``mp_overrides`` are applied; FP8 is dropped for a CPU load, and a flex dispatcher on a single rank becomes
+    allgather.
     """
     model_cfg, mlm_args = load_model_config(checkpoint_path)
     # If in single GPU environment, reset additional parallel settings
@@ -400,6 +411,9 @@ def _model_config_for_loading(
     for hook in ("no_sync_func", "grad_sync_func", "param_sync_func", "grad_scale_func", "finalize_model_grads_func"):
         if hasattr(model_cfg, hook):
             setattr(model_cfg, hook, None)
+    for name, value in DISPATCHER_SM_COUNTS_CLEARED.items():
+        if hasattr(model_cfg, name):
+            setattr(model_cfg, name, value)
     if use_cpu_init:
         model_cfg.fp8 = None
         model_cfg.fp8_param = False

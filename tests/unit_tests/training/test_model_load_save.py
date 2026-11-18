@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import os
 import tempfile
 from pathlib import Path
@@ -24,6 +25,7 @@ from megatron.bridge.models.gpt.gpt_builder import GPTModelConfig
 from megatron.bridge.models.model_provider import ModelProviderMixin
 from megatron.bridge.training.config import TokenizerConfig
 from megatron.bridge.training.model_load_save import (
+    _model_config_for_loading,
     dtype_from_hf,
     dtype_from_str,
     load_megatron_model,
@@ -658,6 +660,31 @@ class TestLoadMegatronModel:
         assert cfg.pipeline_model_parallel_size == 3
         assert cfg.sequence_parallel is True
         assert cfg.virtual_pipeline_model_parallel_size == 4
+
+
+class TestOldDispatcherSmCounts:
+    """A checkpoint that an older import wrote holds both deprecated SM counts, which the pinned Megatron refuses."""
+
+    def test_the_loader_clears_the_counts_so_the_model_config_finalizes(self, tmp_path):
+        from megatron.bridge.models.nemotronh.nemotron_h_provider import Nemotron3NanoProvider
+
+        # As the NVIDIA base conversions under megatron_bridges/models/ hold them: the old defaults, 20 and 16.
+        old = Nemotron3NanoProvider(moe_deepep_num_sms=20, moe_hybridep_num_sms=16)
+        with pytest.raises(ValueError, match="Conflicting deprecated SM-count knobs"):
+            copy.deepcopy(old).finalize()
+        (tmp_path / "run_config.yaml").write_text(
+            "model:\n"
+            "  _target_: megatron.bridge.models.nemotronh.nemotron_h_provider.Nemotron3NanoProvider\n"
+            "  moe_deepep_num_sms: 20\n"
+            "  moe_hybridep_num_sms: 16\n"
+        )
+        loaded, _ = _model_config_for_loading(str(tmp_path), use_cpu_init=True, mp_overrides=None)
+        assert (loaded.moe_deepep_num_sms, loaded.moe_hybridep_num_sms, loaded.moe_flex_dispatcher_num_sms) == (
+            None,
+            None,
+            None,
+        )
+        loaded.finalize()
 
 
 class TestSaveMegatronModel:
