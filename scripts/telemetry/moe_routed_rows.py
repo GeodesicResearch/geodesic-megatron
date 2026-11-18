@@ -172,7 +172,8 @@ def parse_report_iterations(value: str) -> frozenset[int]:
         ValueError: naming the gate, for an empty value, a non-integer or an iteration below 1.
     """
     parts = [part.strip() for part in value.split(",")]
-    if not all(part.isdigit() and int(part) >= 1 for part in parts):
+    # isdigit() alone accepts other scripts' digits (such as '²'), which int() then refuses without naming the gate.
+    if not all(part.isascii() and part.isdigit() and int(part) >= 1 for part in parts):
         raise ValueError(
             f"{ROUTED_ROWS_GATE}={value!r}: give comma-separated iterations of 1 or more, such as 5,10,15,20"
         )

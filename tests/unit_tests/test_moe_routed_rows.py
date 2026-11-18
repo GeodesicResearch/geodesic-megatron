@@ -180,7 +180,7 @@ def test_the_gate_takes_comma_separated_iterations_of_one_or_more():
     assert parse_report_iterations("5,10, 15,20") == frozenset({5, 10, 15, 20})
 
 
-@pytest.mark.parametrize("value", [" ", "0", "5,,10", "five", "-3", "2.5"])
+@pytest.mark.parametrize("value", [" ", "0", "5,,10", "five", "-3", "2.5", "5,\u00b2"])
 def test_a_gate_value_that_is_not_iterations_of_one_or_more_is_refused_naming_the_gate(value):
     with pytest.raises(ValueError, match=f"^{ROUTED_ROWS_GATE}="):
         build_routed_rows_callback(value)
