@@ -442,19 +442,15 @@ class Checkpoint:
 
 @dataclass(frozen=True)
 class Publication:
-    """One checkpoint on its way to the Hub from a save on disk. ``eos_in_config_json`` is the manifest's
-    ``export.eos_in_config_json`` and ``end_of_turn_token_id`` the id that export must carry (the manifest's
-    ``export.end_of_turn_token_id``, else Nemotron's). ``reference_files`` are the manifest's
-    ``export.reference_files``, which the export must hold as ``check_reference_files`` states. All three are applied
-    by ``verify_publication_export``."""
+    """One checkpoint on its way to the Hub from a save on disk. ``export`` is the manifest's export block, from which
+    ``verify_publication_export`` applies ``eos_in_config_json``, the ``end_of_turn_id`` that the Hugging Face export
+    must carry and the ``reference_files`` that it must hold as ``check_reference_files`` states."""
 
     model: Model
     checkpoint: Checkpoint
     source: Path
     clone_root: Path
-    eos_in_config_json: bool
-    end_of_turn_token_id: int
-    reference_files: tuple[str, ...]
+    export: ExportJob
 
     @property
     def stage(self) -> Stage:
@@ -975,9 +971,7 @@ def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bo
                         checkpoint=Checkpoint(stage, iteration),
                         source=source,
                         clone_root=repo_dir / stage.name,
-                        eos_in_config_json=manifest.export.eos_in_config_json,
-                        end_of_turn_token_id=manifest.export.end_of_turn_id,
-                        reference_files=manifest.export.reference_files,
+                        export=manifest.export,
                     )
                 )
     return publications
@@ -1277,11 +1271,12 @@ def verify_publication_export(publication: Publication) -> int:
     ``check_eos_in_config_json`` for the publication's end-of-turn id; and where it names reference files,
     ``check_reference_files`` against the model's release. Returns the number of tensors."""
     tensors = verify_export(publication.hf_dir)
-    if publication.eos_in_config_json:
-        check_eos_in_config_json(publication.hf_dir, publication.end_of_turn_token_id)
-    if publication.reference_files:
+    export = publication.export
+    if export.eos_in_config_json:
+        check_eos_in_config_json(publication.hf_dir, export.end_of_turn_id)
+    if export.reference_files:
         check_reference_files(
-            publication.hf_dir, publication.model.hf_model, publication.reference_files, publication.model.reasoning
+            publication.hf_dir, publication.model.hf_model, export.reference_files, publication.model.reasoning
         )
     return tensors
 

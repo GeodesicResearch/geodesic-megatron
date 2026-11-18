@@ -206,9 +206,7 @@ class TestTheExportCheckSpecs:
                 checkpoint=publish_models.Checkpoint(stage=stage, iteration=5976),
                 source=stage.save / "iter_0005976",
                 clone_root=manifest.export_root,
-                eos_in_config_json=manifest.export.eos_in_config_json,
-                end_of_turn_token_id=manifest.export.end_of_turn_id,
-                reference_files=manifest.export.reference_files,
+                export=manifest.export,
             ),
             model.release.export_check,
         )

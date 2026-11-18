@@ -253,7 +253,7 @@ def achieved_throughput(
     """TFLOP/s per GPU for ``flops_per_iter`` FLOPs done in ``seconds_per_iter`` on ``gpus`` GPUs, and its fraction of ``peak_tflops``.
 
     With model FLOPs the fraction is MFU, with hardware FLOPs HFU. This is the one place the
-    division is written: the report here and ``scripts/telemetry/score_run.py`` both call it.
+    division is written: ``scripts/nemotronh_flops_estimator.py`` and ``scripts/telemetry/score_run.py`` both call it.
     """
     tflops_per_gpu = flops_per_iter / seconds_per_iter / gpus / 1e12
     return tflops_per_gpu, tflops_per_gpu / peak_tflops

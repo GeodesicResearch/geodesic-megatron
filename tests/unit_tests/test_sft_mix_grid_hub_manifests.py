@@ -132,9 +132,7 @@ def test_the_export_repeats_the_arguments_of_the_evaluated_export(loaded, tmp_pa
         checkpoint=publish_models.Checkpoint(stage, stage.train_iters),
         source=stage.save / f"iter_{stage.train_iters:07d}",
         clone_root=tmp_path,
-        eos_in_config_json=manifest.export.eos_in_config_json,
-        end_of_turn_token_id=manifest.export.end_of_turn_id,
-        reference_files=manifest.export.reference_files,
+        export=manifest.export,
     )
     assert publish_models.export_arguments(publication, manifest) == [
         *("export", str(tmp_path), "--hf-model", grid_model.hf_model, "--iteration", str(grid_model.final_iteration)),

@@ -1421,10 +1421,10 @@ def test_an_export_verifies_against_the_end_of_turn_id_the_manifest_names(campai
     root, _, manifest_path = campaign
     set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, True)
     nemotron = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
-    assert nemotron.end_of_turn_token_id == IM_END_TOKEN_ID
+    assert nemotron.export.end_of_turn_id == IM_END_TOKEN_ID
     set_manifest_value(manifest_path, END_OF_TURN_TOKEN_ID, OLMO_END_OF_TURN_ID)
     dense = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
-    assert dense.end_of_turn_token_id == OLMO_END_OF_TURN_ID
+    assert dense.export.end_of_turn_id == OLMO_END_OF_TURN_ID
     write_export(dense.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
     config = dense.hf_dir / "config.json"
     config.write_text(json.dumps({"eos_token_id": [2, IM_END_TOKEN_ID]}))
@@ -1442,7 +1442,7 @@ def test_an_export_made_before_the_manifest_asked_for_eos_in_config_json_does_no
     root, _, manifest_path = campaign
     set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, True)
     asked = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
-    assert asked.eos_in_config_json is True
+    assert asked.export.eos_in_config_json is True
     write_export(asked.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
     config = asked.hf_dir / "config.json"
     for stale in ({}, {"eos_token_id": 2}, {"eos_token_id": [2]}):
@@ -1456,7 +1456,7 @@ def test_an_export_made_before_the_manifest_asked_for_eos_in_config_json_does_no
     assert "unreadable export" in str(publish_models.export_problem(asked))
     set_manifest_value(manifest_path, EOS_IN_CONFIG_JSON, False)
     unasked = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
-    assert unasked.eos_in_config_json is False
+    assert unasked.export.eos_in_config_json is False
     config.write_text(json.dumps({"eos_token_id": 2}))
     assert publish_models.export_problem(unasked) is None
 
@@ -1497,8 +1497,10 @@ def test_an_export_verifies_only_when_its_reference_files_are_the_releases_bytes
     root, _, manifest_path = campaign
     release = write_release(tmp_path / "release")
     with_reference_files(manifest_path, release)
-    publication = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
-    assert publication.reference_files == tuple(RELEASE_FILES)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    publication = publish_models.plan(manifest)[0]
+    assert publication.export is manifest.export, "a publication reads the manifest's export block, not a copy"
+    assert publication.export.reference_files == tuple(RELEASE_FILES)
     write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
     problem = str(publish_models.export_problem(publication))
     assert "tokenizer_config.json" in problem and "export.reference_files" in problem, "the files are missing"
@@ -1516,7 +1518,7 @@ def test_an_export_verifies_only_when_its_reference_files_are_the_releases_bytes
     del raw["export"]["reference_files"]
     manifest_path.write_text(yaml.safe_dump(raw))
     unasked = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
-    assert unasked.reference_files == () and publish_models.export_problem(unasked) is None
+    assert unasked.export.reference_files == () and publish_models.export_problem(unasked) is None
 
 
 def test_a_release_named_by_a_hub_id_is_resolved_to_its_snapshot_for_the_check(campaign, tmp_path, monkeypatch):
