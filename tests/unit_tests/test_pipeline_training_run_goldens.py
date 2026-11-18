@@ -172,7 +172,9 @@ def test_the_routed_rows_gate_adds_its_callback(run_module, monkeypatch, tmp_pat
 
 def test_the_routed_rows_gate_refuses_a_malformed_iteration_list(run_module, monkeypatch, tmp_path):
     """A value that is not comma-separated iterations of 1 or more stops the launch, naming the variable."""
-    monkeypatch.setenv("ISAMBARD_MOE_ROUTED_ROWS_ITERS", "5,ten")
+    from scripts.telemetry.moe_routed_rows import ROUTED_ROWS_GATE
 
-    with pytest.raises(ValueError, match="ISAMBARD_MOE_ROUTED_ROWS_ITERS='5,ten'"):
+    monkeypatch.setenv(ROUTED_ROWS_GATE, "5,ten")
+
+    with pytest.raises(ValueError, match=f"{ROUTED_ROWS_GATE}='5,ten'"):
         run_main(run_module, monkeypatch, tmp_path, "nano", "sft", ["--disable-ft"])

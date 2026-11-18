@@ -177,23 +177,18 @@ def test_the_memory_line_gives_peak_and_current_allocation_in_gigabytes():
 
 
 def test_the_gate_takes_comma_separated_iterations_of_one_or_more():
-    assert parse_report_iterations("5,10, 15,20", "GATE") == frozenset({5, 10, 15, 20})
+    assert parse_report_iterations("5,10, 15,20") == frozenset({5, 10, 15, 20})
 
 
-@pytest.mark.parametrize("value", ["", " ", "0", "5,,10", "five", "-3", "2.5"])
-def test_the_gate_refuses_anything_else_and_names_itself(value):
-    with pytest.raises(ValueError, match="GATE="):
-        parse_report_iterations(value, "GATE")
+@pytest.mark.parametrize("value", [" ", "0", "5,,10", "five", "-3", "2.5"])
+def test_a_gate_value_that_is_not_iterations_of_one_or_more_is_refused_naming_the_gate(value):
+    with pytest.raises(ValueError, match=f"^{ROUTED_ROWS_GATE}="):
+        build_routed_rows_callback(value)
 
 
 @pytest.mark.parametrize("value", [None, ""])
 def test_an_unset_gate_builds_no_callback(value):
     assert build_routed_rows_callback(value) is None
-
-
-def test_a_bad_gate_value_is_refused_with_the_gates_name():
-    with pytest.raises(ValueError, match=f"{ROUTED_ROWS_GATE}='0'"):
-        build_routed_rows_callback("0")
 
 
 def test_a_gate_value_builds_the_callback_for_its_iterations():

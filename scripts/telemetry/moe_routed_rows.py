@@ -127,6 +127,9 @@ class RoutedRowsCallback(Callback):
     def on_train_start(self, context: CallbackContext) -> None:
         """Hook the experts of every MoE layer this rank holds; a layer under the models' ``mtp`` block is an MTP
         layer."""
+        # MoELayer.is_mtp_layer would say the same, but the hybrid (Nemotron-H) MTP stack builds its MoE layers without
+        # setting it, so the module path decides. Its depths would share a key; Super's and Ultra's recipes set
+        # mtp_use_repeated_layer, which builds one.
         for chunk in context.model:
             for name, module in chunk.named_modules():
                 if isinstance(module, MoELayer):
@@ -161,15 +164,18 @@ class RoutedRowsCallback(Callback):
         self._hooks = []
 
 
-def parse_report_iterations(value: str, name: str) -> frozenset[int]:
-    """The iterations of a gate's value: comma-separated positive integers, such as ``5,10,15,20``.
+def parse_report_iterations(value: str) -> frozenset[int]:
+    """The iterations of the gate's value (``ROUTED_ROWS_GATE``): comma-separated positive integers, such as
+    ``5,10,15,20``.
 
     Raises:
-        ValueError: naming ``name`` for an empty value, a non-integer or an iteration below 1.
+        ValueError: naming the gate, for an empty value, a non-integer or an iteration below 1.
     """
     parts = [part.strip() for part in value.split(",")]
     if not all(part.isdigit() and int(part) >= 1 for part in parts):
-        raise ValueError(f"{name}={value!r}: give comma-separated iterations of 1 or more, such as 5,10,15,20")
+        raise ValueError(
+            f"{ROUTED_ROWS_GATE}={value!r}: give comma-separated iterations of 1 or more, such as 5,10,15,20"
+        )
     return frozenset(int(part) for part in parts)
 
 
@@ -186,7 +192,7 @@ def build_routed_rows_callback(value: str | None) -> RoutedRowsCallback | None:
     from megatron.core import parallel_state
 
     return RoutedRowsCallback(
-        parse_report_iterations(value, ROUTED_ROWS_GATE),
+        parse_report_iterations(value),
         read_memory=lambda: (torch.cuda.max_memory_allocated(), torch.cuda.memory_allocated()),
         where=lambda: (torch.distributed.get_rank(), parallel_state.get_pipeline_model_parallel_rank()),
     )
