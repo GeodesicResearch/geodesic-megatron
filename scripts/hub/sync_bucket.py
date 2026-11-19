@@ -49,8 +49,10 @@ nothing pending, every checkpoint iteration and every complete export (``<run>/i
 bucket's listing by path and size, and its verified record is written under ``<log_dir>/verified/`` and mirrored under
 the provenance prefix. ``--remove-verified RECORD`` then deletes that unit's local files, by exact path, inside the
 manifest's ``removal_roots`` and never the newest save of a run, after re-reading the bucket. ``--yes`` makes it delete;
-without it the command reports what would go. A manifest may leave out the corpora (``sync_datasets: false``), for a
-campaign that rebuilds them from pinned Hub revisions.
+without it the command reports what would go. ``--restore RECORD --to DIR`` downloads the unit's files from the
+bucket into the empty directory DIR and compares the size and sha256 of every one with the record. A checkpoint unit
+is one ``iter_N`` directory, so the root files of its save, such as the tracker, are in no record. A manifest may leave out the corpora (``sync_datasets: false``), for
+a campaign that rebuilds them from pinned Hub revisions.
 
 Every pass writes its resolved manifest, per-unit sync plans, an inventory TSV and its log under
 ``<log_dir>/<run id>/`` and mirrors that directory into the bucket's provenance prefix, so the
@@ -83,11 +85,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.file_digest import HASH_WORKERS, directory_records  # noqa: E402
 from scripts.hub.bucket_records import (  # noqa: E402
     RemovalRefused,
+    RestoreFailed,
     VerifiedRecord,
     mismatches,
     read_verified,
     remote_sizes,
     remove_verified,
+    restore_verified,
     write_verified,
 )
 from scripts.mapping_keys import require_keys  # noqa: E402
@@ -820,6 +824,13 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "them. A dry run unless --yes is given",
     )
     parser.add_argument("--yes", action="store_true", help="with --remove-verified: delete, and not only report")
+    parser.add_argument(
+        "--restore",
+        type=Path,
+        default=None,
+        help="download the unit that this verified record describes from the bucket and compare every file with it",
+    )
+    parser.add_argument("--to", type=Path, default=None, help="with --restore: the empty directory to restore into")
     args = parser.parse_args(argv)
     if (args.poll_interval is None) != (args.stop_after is None):
         parser.error("--poll-interval and --stop-after go together")
@@ -827,6 +838,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--remove-verified is a command of its own: no --poll-interval, --stop-after or --plan-only")
     if args.yes and args.remove_verified is None:
         parser.error("--yes belongs to --remove-verified")
+    if (args.restore is None) != (args.to is None):
+        parser.error("--restore and --to go together")
+    if args.restore is not None and (
+        args.poll_interval is not None or args.plan_only or args.remove_verified is not None
+    ):
+        parser.error(
+            "--restore is a command of its own: no --poll-interval, --stop-after, --plan-only or --remove-verified"
+        )
     return args
 
 
@@ -852,8 +871,24 @@ def remove_command(api: Any, manifest: Manifest, verified_file: Path, execute: b
     return 0
 
 
+def restore_command(api: Any, verified_file: Path, destination: Path) -> int:
+    """Restore one verified unit from the bucket into ``destination``. Returns 0 when every file equals its record and
+    1 when the restore is refused or a file differs."""
+    verified = read_verified(verified_file)
+    try:
+        restored = restore_verified(api, verified, destination)
+    except RestoreFailed as error:
+        LOGGER.error("restore of %s failed: %s", verified.remote, error)
+        return 1
+    LOGGER.info(
+        "restored %d files, %d bytes, into %s", len(restored), sum(r.size for r in verified.records), destination
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Run the passes; 0 when every executed pass left nothing pending, 1 otherwise."""
+    """Run the passes, or the one command that ``--remove-verified`` or ``--restore`` names. Returns 0 when what ran
+    left nothing pending and nothing failed, 1 otherwise."""
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
     # The Hub client logs every HTTP request at INFO; the per-unit lines above are the record.
@@ -865,6 +900,8 @@ def main(argv: list[str] | None = None) -> int:
     api = make_api()
     if args.remove_verified is not None:
         return remove_command(api, manifest, args.remove_verified, args.yes)
+    if args.restore is not None:
+        return restore_command(api, args.restore, args.to)
     execute = not args.plan_only
     deadline = time.monotonic() + args.stop_after * 3600 if args.stop_after is not None else None
     while True:

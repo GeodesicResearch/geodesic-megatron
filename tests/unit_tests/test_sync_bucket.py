@@ -599,25 +599,40 @@ class RecordingApi:
     def whoami(self):
         return {"name": "tester"}
 
-    def list_bucket_tree(self, bucket_id, prefix=None, *, recursive=None):
-        """What the executed syncs placed in the bucket: each file they selected, at its local size.
-
-        A stand-in because the real listing reads the Hub, and the training container's huggingface_hub has no bucket
-        classes, so the items are plain records with the fields the tool reads (``type``, ``path``, ``size``).
-        ``dropped`` names paths the "bucket" lost, so a test can make the listing differ from the files.
-        """
-        placed: dict[str, int] = {}
+    def placed(self, bucket_id) -> dict[str, Path]:
+        """What the executed syncs placed in the bucket: each file they selected, by bucket path, with the local file
+        it came from. ``dropped`` names paths the "bucket" lost, so a test can make it differ from the files."""
+        placed: dict[str, Path] = {}
         for source, dest, kwargs in self.calls:
             if "plan" in kwargs:
                 continue
             remote = dest.removeprefix(f"hf://buckets/{bucket_id}").strip("/")
             for relative in selected_paths(Path(source), kwargs["include"], kwargs["exclude"] or ()):
-                placed[f"{remote}/{relative}".strip("/")] = (Path(source) / relative).stat().st_size
+                placed[f"{remote}/{relative}".strip("/")] = Path(source) / relative
+        return {path: file for path, file in placed.items() if path not in self.dropped}
+
+    def list_bucket_tree(self, bucket_id, prefix=None, *, recursive=None):
+        """What the executed syncs placed in the bucket, each file at its local size.
+
+        A stand-in because the real listing reads the Hub, and the training container's huggingface_hub has no bucket
+        classes, so the items are plain records with the fields the tool reads (``type``, ``path``, ``size``).
+        """
         return [
-            BucketItem("file", path, size)
-            for path, size in placed.items()
-            if path.startswith(prefix or "") and path not in self.dropped
+            BucketItem("file", path, file.stat().st_size)
+            for path, file in self.placed(bucket_id).items()
+            if path.startswith(prefix or "")
         ]
+
+    def download_bucket_files(self, bucket_id, files, *, raise_on_missing_files=False):
+        """Copy each requested path that the "bucket" holds to its target and skip the others, as the real client
+        does with ``raise_on_missing_files`` off. A stand-in because the real one downloads from the Hub, and the
+        container's huggingface_hub has no bucket client. It creates no folder, so a tool that does not make the
+        folders of its targets fails here, which is stricter than the real client needs."""
+        assert raise_on_missing_files is False, "the tool finds a missing file itself and names it"
+        placed = self.placed(bucket_id)
+        for path, target in files:
+            if path in placed:
+                shutil.copyfile(placed[path], target)
 
     dropped: tuple[str, ...] = ()
 
@@ -833,5 +848,48 @@ class TestVerifiedArchive:
         ],
     )
     def test_the_removal_flags_are_a_command_of_their_own(self, tmp_path, flags):
+        with pytest.raises(SystemExit):
+            sync_bucket.parse_args(["--manifest", str(tmp_path / "m.yaml"), *flags])
+
+    def test_the_restore_command_downloads_the_unit_into_an_empty_directory_and_checks_every_file(
+        self, tmp_path, monkeypatch
+    ):
+        manifest = manifest_with_checkpoint(tmp_path, [100], tracker=100)
+        api = RecordingApi(clean_plans(units=2))
+        monkeypatch.setattr(sync_bucket, "make_api", lambda: api)
+        assert sync_bucket.main(["--manifest", str(manifest), "--repo-root", str(tmp_path)]) == 0
+        record = tmp_path / "logs" / "verified" / "checkpoints__ckpt__iter_0000100.tsv"
+        restored = tmp_path / "restored"
+        base = ["--manifest", str(manifest), "--repo-root", str(tmp_path), "--restore", str(record), "--to"]
+        assert sync_bucket.main([*base, str(restored)]) == 0
+        saved = tmp_path / "ckpts" / "ckpt" / "iter_0000100"
+        assert sorted(p.name for p in restored.iterdir()) == ["__0_0.distcp", "metadata.json"], (
+            "the hf export is not in the record"
+        )
+        assert (restored / "__0_0.distcp").read_bytes() == (saved / "__0_0.distcp").read_bytes()
+        assert sync_bucket.main([*base, str(restored)]) == 1, "a second restore into the same directory is refused"
+
+    def test_the_restore_command_fails_when_the_bucket_lost_a_file(self, tmp_path, monkeypatch, caplog):
+        manifest = manifest_with_checkpoint(tmp_path, [100], tracker=100)
+        api = RecordingApi(clean_plans(units=2))
+        monkeypatch.setattr(sync_bucket, "make_api", lambda: api)
+        assert sync_bucket.main(["--manifest", str(manifest), "--repo-root", str(tmp_path)]) == 0
+        record = tmp_path / "logs" / "verified" / "checkpoints__ckpt__iter_0000100.tsv"
+        api.dropped = ("checkpoints/ckpt/iter_0000100/metadata.json",)
+        args = ["--manifest", str(manifest), "--repo-root", str(tmp_path), "--restore", str(record), "--to"]
+        assert sync_bucket.main([*args, str(tmp_path / "restored")]) == 1
+        assert "metadata.json: not in the bucket" in caplog.text
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            ["--restore", "r.tsv"],
+            ["--to", "dir"],
+            ["--restore", "r.tsv", "--to", "dir", "--plan-only"],
+            ["--restore", "r.tsv", "--to", "dir", "--poll-interval", "5", "--stop-after", "1"],
+            ["--restore", "r.tsv", "--to", "dir", "--remove-verified", "r.tsv"],
+        ],
+    )
+    def test_the_restore_flags_go_together_and_are_a_command_of_their_own(self, tmp_path, flags):
         with pytest.raises(SystemExit):
             sync_bucket.parse_args(["--manifest", str(tmp_path / "m.yaml"), *flags])
