@@ -58,7 +58,12 @@ from corpora_table import (  # noqa: E402
     prepare_config_scalars,
     read_corpora_table,
 )
-from scripts.data.blend_samples import apportion, megatron_target, settle_on_megatron_targets  # noqa: E402
+from scripts.data.blend_samples import (  # noqa: E402
+    apportion,
+    megatron_target,
+    samples_in,
+    settle_on_megatron_targets,
+)
 
 
 @dataclass(frozen=True)
@@ -78,7 +83,7 @@ def chain_lengths(tokens_plus_eod: int, seq_length: int, global_batch_size: int,
     share = Fraction(str(union_share))
     if not 0 < share < 1:
         raise ValueError(f"union_share must lie strictly between 0 and 1, not {union_share}")
-    samples = (tokens_plus_eod - 1) // seq_length
+    samples = samples_in(tokens_plus_eod, seq_length)
     if samples < 1:
         raise ValueError(f"a union of {tokens_plus_eod} tokens holds no {seq_length}-token sample")
     iterations = math.ceil(samples / (share * global_batch_size))

@@ -6,7 +6,13 @@ import math
 import re
 
 import pytest
-from scripts.mapping_values import require_absolute_path, require_int, require_number, require_string
+from scripts.mapping_values import (
+    require_absolute_path,
+    require_int,
+    require_number,
+    require_string,
+    require_walltime,
+)
 
 
 class SpecError(Exception):
@@ -79,3 +85,14 @@ def test_an_absolute_path_is_returned_as_given():
 def test_anything_else_is_not_an_absolute_path(value):
     with pytest.raises(ValueError, match=r"spec\.p must be (an absolute path|a non-empty string)"):
         require_absolute_path(value, "spec.p")
+
+
+@pytest.mark.parametrize("value", ["00:30:00", "23:59:00", "1-00:00:00", "100:00:00"])
+def test_a_slurm_time_that_stayed_a_string_is_returned(value):
+    assert require_walltime(value, "w") == value
+
+
+@pytest.mark.parametrize("value", [1800, 86340, "30", "00:30", "0:30:0", "tomorrow", None])
+def test_a_slurm_time_that_yaml_read_as_a_number_or_that_is_no_time_is_refused_in_the_callers_error(value):
+    with pytest.raises(SpecError, match=r"w must be a quoted SLURM time such as '00:30:00'"):
+        require_walltime(value, "w", error=SpecError)

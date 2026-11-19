@@ -5,13 +5,14 @@ export-check spec), beside ``mapping_keys.require_keys``, which checks the mappi
 
 ``require_int``, ``require_number`` and ``require_string`` refuse a value of the wrong type or outside its range, a
 YAML ``true`` or ``false`` where a number is meant included (Python counts a bool as an int); ``require_absolute_path``
-refuses a path that is not absolute. Each raises the caller's own error type with a message that opens with where the
+refuses a path that is not absolute, and ``require_walltime`` refuses a SLURM time that YAML read as a number. Each raises the caller's own error type with a message that opens with where the
 value sits, so each tool reports the fault as it reports any other in its input.
 
 Standard library only, and no syntax newer than Python 3.6, as ``mapping_keys``.
 """
 
 import math
+import re
 from pathlib import Path
 from typing import Any, Type
 
@@ -48,3 +49,15 @@ def require_absolute_path(value: Any, where: str, *, error: Type[Exception] = Va
     if not Path(path).is_absolute():
         raise error(f"{where} must be an absolute path, not {path!r}")
     return path
+
+
+def require_walltime(value: Any, where: str, *, error: Type[Exception] = ValueError) -> str:
+    """``value``, which must be a SLURM time such as '00:30:00' that has stayed a string; otherwise raises ``error``.
+
+    YAML reads an unquoted 00:30:00 as a sexagesimal number of seconds, which SLURM would read as minutes."""
+    if not re.fullmatch(r"\d+(-\d\d)?:\d\d:\d\d", str(value)):
+        raise error(
+            f"{where} must be a quoted SLURM time such as '00:30:00' -- YAML reads an unquoted one as a "
+            "sexagesimal number of seconds"
+        )
+    return str(value)

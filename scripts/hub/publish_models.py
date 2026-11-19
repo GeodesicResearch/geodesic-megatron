@@ -102,6 +102,7 @@ ManifestError = sync_bucket.ManifestError
 from scripts.checkpoint import export_check_result  # noqa: E402
 from scripts.checkpoint.safetensors_index import INDEX_FILE, checked_weight_map  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.mapping_values import require_walltime  # noqa: E402
 
 from pipeline.export.export_clone import (  # noqa: E402
     HF_DIR,
@@ -639,7 +640,7 @@ def _release(raw: Any, repo_root: Path, where: str) -> Release:
             out_root=Path(raw_check["out_root"]),
             log=Path(raw_check["log"]),
             tag=tag,
-            walltime=slurm_walltime(raw_check["walltime"], f"{where}.export_check.walltime"),
+            walltime=require_walltime(raw_check["walltime"], f"{where}.export_check.walltime", error=ManifestError),
         )
     return Release(verified_log=Path(item["verified_log"]), export_check=check)
 
@@ -691,17 +692,6 @@ def _model(raw: Any, repo_root: Path, where: str) -> Model:
     )
 
 
-def slurm_walltime(value: Any, where: str) -> str:
-    """A walltime bound for sbatch, which must have stayed a string: YAML reads an unquoted
-    00:30:00 as a sexagesimal number of seconds."""
-    if not re.fullmatch(r"\d+(-\d\d)?:\d\d:\d\d", str(value)):
-        raise ManifestError(
-            f"{where} must be a quoted SLURM time such as '00:30:00' -- YAML reads an unquoted one as a "
-            "sexagesimal number of seconds"
-        )
-    return str(value)
-
-
 def load_manifest(path: Path, repo_root: Path) -> Manifest:
     """Read and validate the manifest; repo-relative config paths resolve against ``repo_root``."""
     document = yaml.safe_load(path.read_text())
@@ -717,11 +707,13 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     card = require_keys(raw["card"], f"{path}: card", CARD_KEYS, error=ManifestError)
     if not all(isinstance(export[k], int) and export[k] > 0 for k in ("tp", "ep", "nodes")):
         raise ManifestError(f"{path}: export.tp, export.ep and export.nodes must be positive integers")
-    export_walltime = slurm_walltime(export["walltime"], f"{path}: export.walltime")
+    export_walltime = require_walltime(export["walltime"], f"{path}: export.walltime", error=ManifestError)
     upload = None
     if "upload" in optional:
         upload_raw = require_keys(optional["upload"], f"{path}: upload", UPLOAD_KEYS, error=ManifestError)
-        upload = UploadJob(walltime=slurm_walltime(upload_raw["walltime"], f"{path}: upload.walltime"))
+        upload = UploadJob(
+            walltime=require_walltime(upload_raw["walltime"], f"{path}: upload.walltime", error=ManifestError)
+        )
     if not isinstance(card["tags"], list) or not card["tags"]:
         raise ManifestError(f"{path}: card.tags must be a non-empty list")
     description = str(collection["description"]).strip()

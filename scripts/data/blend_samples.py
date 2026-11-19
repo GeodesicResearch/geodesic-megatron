@@ -9,6 +9,7 @@ whole sample counts summing to the blend's size give targets equal to the counts
 that reads the blend once reads every sample of it once.
 
 Catalogue:
+    samples_in: the samples that one pass over a corpus holds.
     apportion: split a number of samples into whole parts proportional to weights.
     megatron_target: the samples Megatron builds for one count of a blend.
     settle_on_megatron_targets: trade single samples until every count is one that Megatron builds exactly.
@@ -18,6 +19,14 @@ from __future__ import annotations
 
 import math
 from fractions import Fraction
+
+
+def samples_in(tokens: int, sequence_length: int) -> int:
+    """The samples of ``sequence_length`` tokens that one pass over a corpus of ``tokens`` tokens holds.
+
+    Each sample's labels need one token more than its inputs, so a corpus of ``tokens`` tokens holds
+    ``(tokens - 1) // sequence_length`` samples, and none when it is empty."""
+    return max(0, (tokens - 1) // sequence_length)
 
 
 def apportion(total: int, weights: list) -> list[int]:

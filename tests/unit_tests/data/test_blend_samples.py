@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from megatron.core.datasets.blended_megatron_dataset_builder import _get_size_per_split_per_dataset
 from megatron.core.datasets.utils import normalize
-from scripts.data.blend_samples import apportion, megatron_target, settle_on_megatron_targets
+from scripts.data.blend_samples import apportion, megatron_target, samples_in, settle_on_megatron_targets
 
 
 BLEND_SIZE = 174 * 256
@@ -67,3 +67,13 @@ def test_settling_makes_every_count_exact_and_moves_none_by_more_than_one():
 def test_a_count_with_no_partner_to_trade_with_is_refused():
     with pytest.raises(ValueError, match="no single-sample trade"):
         settle_on_megatron_targets([OVERSHOOTING[0]], BLEND_SIZE)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "sequence_length", "samples"),
+    [(0, 8, 0), (1, 8, 0), (8, 8, 0), (9, 8, 1), (17, 8, 2), (16, 8, 1), (15_200_000_000, 4096, 3_710_937)],
+)
+def test_a_pass_over_a_corpus_holds_one_sample_per_full_window_with_a_label_token_to_spare(
+    tokens, sequence_length, samples
+):
+    assert samples_in(tokens, sequence_length) == samples

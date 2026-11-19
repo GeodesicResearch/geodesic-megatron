@@ -1,0 +1,59 @@
+# The spec of the two pretraining arms: instruction pretraining (ipt) and standard pretraining (spt) of Nemotron 3 Nano from
+# scratch. generate_arm_configs.py reads this file and the provenance of each arm's corpora, and writes <arm>_pretrain.yaml
+# and <arm>_launch.sh beside it. Both arms share each setting below except the corpora they read and their run name.
+# README.md in this folder describes the campaign and the regeneration.
+
+# The overlay that each run config extends, relative to this folder: the quickstart posture that the throughput probes
+# measured, with its levers. The generated files name it as their base_config. The spec does not, because every YAML
+# file that names a base_config is composed with it when a tool reads it, and this file is no training config.
+run_base_config: ../quickstart/nemotron_nano_quickstart_pretrain.yaml
+# The tokenizer, pinned by the folder of the HF cache that holds one commit. The corpora were tokenised with the same commit.
+tokenizer_model: /projects/a5k/public/hf/hub/models--geodesic-research--nemotron-instruct-tokenizer/snapshots/f546e38c401a734f96c462e6990338c4f981f314
+
+sequence_length: 4096
+global_batch_size: 1024
+micro_batch_size: 2
+# The budget of each arm. The steps are the smallest number that reaches it. The generator refuses corpora that hold
+# fewer samples than that, so a shorter run is a lower target here.
+target_tokens: 300000000000
+learning_rate: 3.0e-4
+# The schedule after the warm-up. Only constant is accepted: it holds the learning rate at its peak and reads no minimum.
+lr_decay_style: constant
+warmup_iterations: 1000
+weight_decay: 0.1
+# A save with optimizer state every this many tokens, and at the last step.
+save_every_tokens: 50000000000
+# Each job saves and exits after this many minutes, so that the next job of the chain resumes from the save.
+exit_duration_in_mins: 1400
+
+# The launch layout, and the chain of jobs that trains an arm.
+launch:
+  nodes: 32
+  gpus_per_node: 4
+  data_parallel_size: 128
+  links: 4
+  time_limit: "23:59:00"
+  model: nano
+  mode: pretrain
+  # Relative to the frozen copy of the code that the jobs run from.
+  env_file: configs/quickstart/nemotron_nano_quickstart_pretrain.env
+
+wandb:
+  entity: geodesic
+  project: megatron_training
+  save_dir: /projects/a5k/public/logs/wandb
+
+# One corpus for every group, in this order. A corpus is <corpora_root>/<corpus_template> with the group and the arm filled in.
+corpora_root: /projects/a5k/public/pretraining-science/megatron/tokenized
+corpus_template: g_{group}_{arm}/tokenized_text_document
+groups: ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19"]
+
+# Each run saves to <checkpoint_root>/<run> and caches its dataset index in <cache_root>/<run>.
+checkpoint_root: /projects/a5k/public/pretraining-science/megatron/checkpoints
+cache_root: /projects/a5k/public/pretraining-science/megatron/cache
+
+arms:
+  ipt:
+    run: ps_ipt_nano_300b
+  spt:
+    run: ps_spt_nano_300b
