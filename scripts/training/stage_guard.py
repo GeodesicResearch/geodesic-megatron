@@ -173,6 +173,9 @@ class GuardState(NamedTuple):
 
 START = GuardState(last_iteration=None, decided={}, undecided=None)
 
+# What listing the stage's live jobs (squeue) or cancelling them (scancel) can raise.
+COMMAND_ERRORS = (RuntimeError, ValueError, OSError, subprocess.SubprocessError)
+
 
 def load_guard_config(path: Path) -> GuardConfig:
     """Read a guard config; the watch spec and record paths resolve against the repository root.
@@ -297,6 +300,14 @@ _DUMP_RE = re.compile(r"^\S+ DUMP: stacks of job \d+, sweep (\S+): ", re.M)
 def dumps_in_record(record: Path) -> FrozenSet[str]:
     """The dump sweeps that ``record`` shows taken; empty when there is no record."""
     return frozenset(_DUMP_RE.findall(record.read_text())) if record.exists() else frozenset()
+
+
+def state_from_record(config: GuardConfig) -> GuardState:
+    """The state a guard starts from: the gates its record shows the watch passing under the watch spec
+    (``config.watch``, read for its sha256) and the dump sweeps it shows taken."""
+    return START._replace(
+        decided=decided_in_record(config.record, spec_tag(config.watch)), dumped=dumps_in_record(config.record)
+    )
 
 
 def could_not_evaluate(reason: str) -> WatchResult:
@@ -429,7 +440,7 @@ def cancel_live_jobs(config: GuardConfig, segments: List[Job], run: Runner) -> L
             result = run(["scancel"] + [str(job_id) for job_id in live])
             if result.returncode != 0:
                 raise CancelFailed("scancel {} failed: {}".format(live, result.stdout.strip()))
-    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
+    except COMMAND_ERRORS as error:
         if isinstance(error, CancelFailed):
             raise
         raise CancelFailed("could not cancel the stage's jobs: {}: {}".format(type(error).__name__, error))
@@ -560,7 +571,7 @@ def stage_ended(config: GuardConfig, state: GuardState, result: WatchResult, sta
         return False
     try:
         return not live_jobs(config, started, run)
-    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
+    except COMMAND_ERRORS as error:
         _record(
             config,
             "END NOT CONFIRMED: {}: {}; the next tick reads the queue again".format(type(error).__name__, error),
@@ -660,7 +671,7 @@ def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
     """Guard the stage until a stop, a hold or its end (one tick when ``once``), and return its exit status.
 
     Raises CancelFailed when a stop or hold could not cancel the stage's jobs."""
-    decided = decided_in_record(config.record, spec_tag(config.watch))
+    state = state_from_record(config)
     _record(
         config,
         "START guard {} (sha256 {}); watch spec {} (sha256 {}); code {}; decided from the record: {}".format(
@@ -669,10 +680,9 @@ def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
             config.watch,
             sha256_of(config.watch),
             code_revision(str(REPO_ROOT)),
-            ", ".join("{}={}".format(gate, log) for gate, log in sorted(decided.items())) or "none",
+            ", ".join("{}={}".format(gate, log) for gate, log in sorted(state.decided.items())) or "none",
         ),
     )
-    state = START._replace(decided=decided, dumped=dumps_in_record(config.record))
     while True:
         try:
             action, state, done = tick(

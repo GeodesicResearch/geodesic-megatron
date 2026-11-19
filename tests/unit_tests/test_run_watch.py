@@ -33,7 +33,11 @@ from megatron.bridge.training.token_masking.hook import TokenMaskingCounts
 from megatron.bridge.training.utils.train_utils import format_peak_memory, summarise_peak_memory
 from pipeline.training import env_overrides
 from tests.unit_tests.test_loss_parity import FakeRun, history_rows, install_fake_wandb, over, write_run
-from tests.unit_tests.training_log_fixture import token_masking_banner, token_masking_counts_line
+from tests.unit_tests.training_log_fixture import (
+    ITERATION_STAMP_RE,
+    token_masking_banner,
+    token_masking_counts_line,
+)
 
 
 GB = 10**9
@@ -140,7 +144,7 @@ def test_the_newest_segment_says_how_far_it_has_logged_itself(tmp_path, capsys, 
     second = write_run(tmp_path, "seg2", drop=set(range(1, 61)) - set(newest_logs))
     status, out = run(write_watch(tmp_path, STOPS), [first, second], capsys)
     assert status == 0
-    stamps = re.findall(r"^ ?\[(\S+ \S+)\] iteration +\d+/", second.read_text(), re.M)
+    stamps = [stamp for stamp, _ in ITERATION_STAMP_RE.findall(second.read_text())]
     logged = stamps[-1].replace(" ", "T") if stamps else None
     assert f"newest segment through iteration {newest} logged {logged}: {second}\n" in out
     assert f"checked through iteration {newest or 60}: " in out
@@ -151,7 +155,7 @@ def test_the_newest_segment_reports_its_last_stamped_line_when_the_last_line_has
     line's, a little older, and never None while stamped lines exist."""
     log = write_run(tmp_path, "seg1", drop=set(range(21, 61)))
     text = log.read_text()
-    stamps = re.findall(r"^ ?\[(\S+ \S+)\] iteration +\d+/", text, re.M)
+    stamps = [stamp for stamp, _ in ITERATION_STAMP_RE.findall(text)]
     log.write_text(text.replace("[" + stamps[-1] + "] ", ""))
     status, out = run(write_watch(tmp_path, STOPS), [log], capsys)
     assert status == 0

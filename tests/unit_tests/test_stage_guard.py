@@ -37,6 +37,7 @@ from scripts.training import stage_guard as sg
 
 from tests.unit_tests.test_loss_parity import write_run
 from tests.unit_tests.test_run_watch import gated, rejected_result_line  # noqa: F401 - gated is a fixture
+from tests.unit_tests.training_log_fixture import ITERATION_STAMP_RE
 
 
 JOB_NAME = "cp-stage"
@@ -48,8 +49,6 @@ JOB_NAME = "cp-stage"
 START_TIME = datetime(2026, 9, 9, 1, 25, 0)
 NOW = START_TIME + timedelta(hours=1)
 ATTEMPT = START_TIME.strftime("%Y%m%dT%H%M%S")
-# A fixture iteration line's time stamp and iteration.
-ITERATION_STAMP_RE = re.compile(r"^ ?\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] iteration +(\d+)/", re.M)
 
 
 def summary(checked, gates: int = 0, newest=None, logged=None, log: str = "/seg.out") -> str:
@@ -966,37 +965,41 @@ def unstamped(text: str) -> str:
     return ITERATION_STAMP_RE.sub(lambda match: match.group(0).replace("[" + match.group(1) + "] ", ""), text)
 
 
-def test_iteration_lines_without_a_stamp_leave_the_time_limits_unevaluated(tmp_path):
-    """A running attempt whose log holds iteration lines but no stamp has logged iterations, so its start-up window
-    must not stop it; the guard says the time limits could not be evaluated."""
-    config = sg.load_guard_config(write_config(tmp_path, startup={"first_iteration_minutes": 50}, stall_minutes=15))
+def unstamped_log(tmp_path: Path) -> None:
+    """Job 10 logged iterations 1 to 20, none with a stamp."""
     log = segment(tmp_path, 10, drop=set(range(21, 61)))
     log.write_text(unstamped(log.read_text()))
-    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
-
-    action, _, _ = sg.tick(config, sg.START, cluster, START_TIME + timedelta(minutes=51))
-
-    assert action != "stop" and not cluster.cancelled() and not cluster.dumps()
-    assert any(
-        "time limits not evaluated: job 10's log has iteration lines without a time stamp" in line
-        for line in record_lines(config)
-    )
 
 
-def test_a_stamp_after_the_guards_clock_leaves_the_time_limits_unevaluated(tmp_path):
-    """The log is stamped two hours after the guard's clock: the job and the guard read different time zones, so
-    neither time limit can judge the segment."""
-    config = sg.load_guard_config(write_config(tmp_path, stall_minutes=15))
+def late_stamped_log(tmp_path: Path) -> None:
+    """Job 10 logged iterations 1 to 20, stamped from two hours after the guard's clock (NOW)."""
     log = segment(tmp_path, 10, drop=set(range(21, 61)))
     log.write_text(restamped(log.read_text(), NOW + timedelta(hours=2)))
+
+
+@pytest.mark.parametrize(
+    "write_log, now, reason",
+    [
+        # Iteration lines without a stamp: the attempt has logged iterations, so its start-up window must not stop it.
+        (unstamped_log, START_TIME + timedelta(minutes=51), "log has iteration lines without a time stamp"),
+        # Stamps two hours after the guard's clock: the job and the guard read different time zones.
+        (late_stamped_log, NOW, "last iteration line is stamped"),
+        # No iteration yet, and sacct's start lies ten minutes after the guard's clock.
+        (lambda tmp_path: no_iteration_yet(tmp_path, 10), START_TIME - timedelta(minutes=10), "start is"),
+    ],
+    ids=["unstamped-lines", "stamp-after-the-clock", "start-after-the-clock"],
+)
+def test_a_tick_that_cannot_time_the_segment_leaves_the_time_limits_unevaluated(tmp_path, write_log, now, reason):
+    """Neither time limit can judge a segment whose log carries no stamp or whose stamp or start lies after the guard's
+    clock, so the tick stops nothing and says so."""
+    config = sg.load_guard_config(write_config(tmp_path, startup={"first_iteration_minutes": 50}, stall_minutes=15))
+    write_log(tmp_path)
     cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
 
-    action, _, _ = sg.tick(config, sg.START, cluster, NOW)
+    action, _, _ = sg.tick(config, sg.START, cluster, now)
 
-    assert action != "stop" and not cluster.cancelled()
-    assert any(
-        "time limits not evaluated: job 10's last iteration line is stamped" in line for line in record_lines(config)
-    )
+    assert action != "stop" and not cluster.cancelled() and not cluster.dumps()
+    assert any(f"time limits not evaluated: job 10's {reason}" in line for line in record_lines(config))
 
 
 def test_minutes_are_counted_across_a_daylight_saving_change(monkeypatch):
@@ -1031,8 +1034,7 @@ def test_a_restarted_guard_does_not_take_a_dump_its_record_shows_taken(tmp_path)
     sg.tick(config, sg.START, cluster, START_TIME + timedelta(minutes=21))
     assert cluster.dumps() == [f"10/{ATTEMPT}_startup_m20"]
 
-    restarted = sg.START._replace(dumped=sg.dumps_in_record(config.record))
-    sg.tick(config, restarted, cluster, START_TIME + timedelta(minutes=30))
+    sg.tick(config, sg.state_from_record(config), cluster, START_TIME + timedelta(minutes=30))
 
     assert cluster.dumps() == [f"10/{ATTEMPT}_startup_m20"]
 
