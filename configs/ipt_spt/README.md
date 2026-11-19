@@ -11,6 +11,8 @@ number of steps. They differ in the corpora they read and in their run name.
 | `generate_arm_configs.py` | Writes the files below from the spec and the provenance of each corpus. |
 | `<arm>_pretrain.yaml` | The run config of one arm, an overlay of `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`. The generator writes it. |
 | `<arm>_launch.sh` | Submits the chain of jobs that trains the arm. The generator writes it. |
+| `<arm>_segments.yaml` | The config of the arm's segments job: the arm's config stopped after a few steps, with no checkpoint. The generator writes it. |
+| `<arm>_segments_launch.sh` | Submits the arm's segments job as one job, with no gate. The generator writes it. |
 
 ## Regenerate
 
@@ -38,4 +40,13 @@ FROZEN=/projects/a5k/public/tmp/frozen_copies/<copy> bash "$FROZEN/configs/ipt_s
 The script submits a held gate job and the links of the chain behind it, and prints the gate's job ID. No link starts
 until `scontrol release <gate job id>`. The links share one job name, so they run one after another, and each resumes from
 the save of the one before (`checkpoint.load` equals `checkpoint.save`). A link that starts after the run has finished
-loads the last save and ends without writing, because `save_interval` is 0.
+loads the last save and ends without writing, because `save_interval` is 0. A link that starts where no earlier link
+saved starts again at step 1 from random weights. To stop an arm, cancel its jobs by name, with
+`scancel --user $USER --name <run name>`, because a cancelled link releases the next one.
+
+## Segments job
+
+`<arm>_segments_launch.sh` submits one job, run from a frozen copy like the chain, that trains the arm's config for the
+spec's `segments.steps` steps and stops. It keeps the arm's `train_iters` and blend, writes no checkpoint, and has its own
+cache folder and W&B run name (the run name with `_segments`). Run it before the chain is released. Once link 1 of the
+same arm has run the same number of steps, compare the loss of the two over those steps.

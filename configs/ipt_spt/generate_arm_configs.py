@@ -21,6 +21,11 @@ It writes ``<arm>_pretrain.yaml``, an overlay of the spec's ``run_base_config``,
 launch script submits the chain of jobs that trains the arm, behind a held gate job that a person releases. The jobs
 share one name and run one at a time, and each resumes from the save of the one before.
 
+It also writes ``<arm>_segments.yaml`` and ``<arm>_segments_launch.sh``, a short run of each arm: the arm's own config
+stopped after ``segments.steps`` steps, with no checkpoint, its own cache folder and its own W&B run, and the script that
+submits it as one job. It keeps the arm's ``train_iters`` and blend, so that the job builds the dataset that link 1 builds.
+The loss of link 1 over the same steps is compared with the loss of the short run.
+
     python configs/ipt_spt/generate_arm_configs.py configs/ipt_spt/arms.yaml
 
 Catalogue:
@@ -32,8 +37,10 @@ Catalogue:
     arm_blend: the interleaved weights and prefixes of one arm's blend.
     save_steps: the steps at which a run saves.
     arm_config: the run config of one arm.
+    segments_config: the config of one arm's segments job.
     generated_note: the line that heads a generated file.
     launch_script: the script that submits one arm's chain.
+    segments_launch_script: the script that submits one arm's segments job.
     generate: every file the spec asks for, as text by path.
     main: write them.
 """
@@ -67,6 +74,10 @@ from scripts.mapping_values import (  # noqa: E402
 PROVENANCE_SUFFIX = ".provenance.json"
 CONFIG_NAME = "{arm}_pretrain.yaml"
 LAUNCH_NAME = "{arm}_launch.sh"
+SEGMENTS_NAME = "{arm}_segments.yaml"
+SEGMENTS_LAUNCH_NAME = "{arm}_segments_launch.sh"
+# Appended to an arm's run name for the run name, the cache folder and the job name of its segments job.
+SEGMENTS_SUFFIX = "_segments"
 # The longest job that the queue accepts, and the minutes that a job needs after its exit time to save and end.
 MAX_WALL_MINUTES = 24 * 60
 SAVE_AND_EXIT_MINUTES = 30
@@ -89,6 +100,7 @@ SPEC_KEYS = {
     "save_every_tokens",
     "exit_duration_in_mins",
     "launch",
+    "segments",
     "wandb",
     "corpora_root",
     "corpus_template",
@@ -98,6 +110,7 @@ SPEC_KEYS = {
     "arms",
 }
 LAUNCH_KEYS = {"nodes", "gpus_per_node", "data_parallel_size", "links", "time_limit", "model", "mode", "env_file"}
+SEGMENTS_KEYS = {"steps", "time_limit"}
 WANDB_KEYS = {"entity", "project", "save_dir"}
 
 
@@ -116,6 +129,7 @@ def load_spec(path: Path) -> dict[str, Any]:
     where = str(path)
     require_keys(spec, where, SPEC_KEYS, error=ArmsError)
     require_keys(spec["launch"], f"{where}: launch", LAUNCH_KEYS, error=ArmsError)
+    require_keys(spec["segments"], f"{where}: segments", SEGMENTS_KEYS, error=ArmsError)
     require_keys(spec["wandb"], f"{where}: wandb", WANDB_KEYS, error=ArmsError)
     for key in ("sequence_length", "global_batch_size", "micro_batch_size", "target_tokens", "save_every_tokens"):
         require_int(spec[key], f"{where}: {key}", 1, error=ArmsError)
@@ -131,16 +145,14 @@ def load_spec(path: Path) -> dict[str, Any]:
     require_number(spec["weight_decay"], f"{where}: weight_decay", 0, inclusive=True, error=ArmsError)
     for key in ("nodes", "gpus_per_node", "data_parallel_size", "links"):
         require_int(spec["launch"][key], f"{where}: launch.{key}", 1, error=ArmsError)
+    require_int(spec["segments"]["steps"], f"{where}: segments.steps", 1, error=ArmsError)
+    _wall_limit(spec["segments"]["time_limit"], f"{where}: segments.time_limit")
     for key in ("tokenizer_model", "corpora_root", "checkpoint_root", "cache_root"):
         require_absolute_path(spec[key], f"{where}: {key}", error=ArmsError)
     require_absolute_path(spec["wandb"]["save_dir"], f"{where}: wandb.save_dir", error=ArmsError)
     for key in ("run_base_config", "corpus_template"):
         require_string(spec[key], f"{where}: {key}", error=ArmsError)
-    limit = _wall_minutes(spec["launch"]["time_limit"], f"{where}: launch.time_limit")
-    if limit > MAX_WALL_MINUTES:
-        raise ArmsError(
-            f"{where}: launch.time_limit {spec['launch']['time_limit']} is longer than the queue's {MAX_WALL_MINUTES} minutes"
-        )
+    limit = _wall_limit(spec["launch"]["time_limit"], f"{where}: launch.time_limit")
     if spec["exit_duration_in_mins"] + SAVE_AND_EXIT_MINUTES > limit:
         raise ArmsError(
             f"{where}: a job that exits {spec['exit_duration_in_mins']} minutes after it starts needs {SAVE_AND_EXIT_MINUTES} "
@@ -173,6 +185,14 @@ def _wall_minutes(time_limit: Any, where: str) -> int:
     if seconds:
         raise ArmsError(f"{where} must be HH:MM:00, not {time_limit!r}")
     return (int(days or 0) * 24 + hours) * 60 + minutes
+
+
+def _wall_limit(time_limit: Any, where: str) -> int:
+    """The minutes of a SLURM time limit that the queue accepts, with ``where`` naming the key in any error."""
+    minutes = _wall_minutes(time_limit, where)
+    if minutes > MAX_WALL_MINUTES:
+        raise ArmsError(f"{where} {time_limit} is longer than the queue's {MAX_WALL_MINUTES} minutes")
+    return minutes
 
 
 def corpus_prefixes(spec: dict[str, Any], arm: str) -> list[str]:
@@ -308,6 +328,20 @@ def arm_config(spec: dict[str, Any], arm: str, train_iters: int, blend: list[str
     }
 
 
+def segments_config(spec: dict[str, Any], arm: str) -> dict[str, Any]:
+    """The config of the segments job of ``arm``: an overlay of the arm's own config (``base_config`` names it beside this
+    file) that stops after ``segments.steps`` steps, reads and writes no checkpoint, and has its own cache folder and
+    W&B run name. The arm's ``train_iters`` and blend stay, so the job builds the dataset that link 1 builds."""
+    run = spec["arms"][arm]["run"] + SEGMENTS_SUFFIX
+    return {
+        "base_config": CONFIG_NAME.format(arm=arm),
+        "dataset": {"path_to_cache": str(Path(spec["cache_root"]) / run)},
+        "train": {"exit_interval": spec["segments"]["steps"]},
+        "checkpoint": {"save": None, "load": None},
+        "logger": {"wandb_exp_name": run},
+    }
+
+
 def _repo_path(path: Path) -> str:
     """``path`` relative to the repository root when it lies inside the repository, and absolute otherwise."""
     resolved = path.resolve()
@@ -320,6 +354,24 @@ def generated_note(spec_path: Path) -> str:
     return f"GENERATED by {generator} from {_repo_path(spec_path)} and the provenance of the corpora. Do not edit."
 
 
+def _config_ref(spec_path: Path, name: str) -> str:
+    """The path that a launch script gives the generated config ``name``: under the frozen copy when the spec lies in the
+    repository, and where it was written otherwise."""
+    path = spec_path.parent / name
+    return f"$FROZEN/{_repo_path(path)}" if REPO_ROOT in path.resolve().parents else str(path.resolve())
+
+
+def _frozen_preamble(spec: dict[str, Any]) -> str:
+    """The lines that start every launch script: the frozen copy that the jobs run from, and the wrapper's settings."""
+    return f"""set -euo pipefail
+: "${{FROZEN:?FROZEN must name the frozen copy of the committed code}}"
+test -f "$FROZEN/REVISION"
+cd "$FROZEN"
+export TMPDIR=/tmp
+export ISAMBARD_ENV_OVERRIDES="$FROZEN/{spec["launch"]["env_file"]}"
+"""
+
+
 def launch_script(spec: dict[str, Any], arm: str, spec_path: Path) -> str:
     """The shell script that submits the chain of jobs of ``arm`` from a frozen copy of the committed code.
 
@@ -330,25 +382,14 @@ def launch_script(spec: dict[str, Any], arm: str, spec_path: Path) -> str:
     """
     run = spec["arms"][arm]["run"]
     launch = spec["launch"]
-    config_path = spec_path.parent / CONFIG_NAME.format(arm=arm)
-    config = (
-        f"$FROZEN/{_repo_path(config_path)}"
-        if REPO_ROOT in config_path.resolve().parents
-        else str(config_path.resolve())
-    )
+    config = _config_ref(spec_path, CONFIG_NAME.format(arm=arm))
     return f"""#!/bin/bash
 # {generated_note(spec_path)}
 # Submits the {launch["links"]} jobs that train the {arm} arm ({run}), behind a gate job that is held. Each job resumes from the
 # save of the one before, and each exits {spec["exit_duration_in_mins"]} minutes after it starts. No job starts until the gate is released:
 #   scontrol release <gate job id>
 # Usage: FROZEN=<frozen copy of the committed code> bash {LAUNCH_NAME.format(arm=arm)}
-set -euo pipefail
-: "${{FROZEN:?FROZEN must name the frozen copy of the committed code}}"
-test -f "$FROZEN/REVISION"
-cd "$FROZEN"
-export TMPDIR=/tmp
-export ISAMBARD_ENV_OVERRIDES="$FROZEN/{launch["env_file"]}"
-GATE=$(isambard_sbatch --hold --nodes=1 --time=00:05:00 --job-name={run}-gate --wrap true | grep -o '[0-9]*$')
+{_frozen_preamble(spec)}GATE=$(isambard_sbatch --hold --nodes=1 --time=00:05:00 --job-name={run}-gate --wrap true | grep -o '[0-9]*$')
 echo "gate job $GATE is held; release it with: scontrol release $GATE"
 for link in $(seq 1 {launch["links"]}); do
     dependency=singleton
@@ -359,22 +400,48 @@ done
 """
 
 
-def generate(spec_path: Path) -> dict[Path, str]:
-    """Every file that the spec at ``spec_path`` asks for, as text by path (beside the spec).
+def segments_launch_script(spec: dict[str, Any], arm: str, spec_path: Path) -> str:
+    """The shell script that submits the segments job of ``arm`` from a frozen copy of the committed code: one job of the
+    arm's width with no gate and no chain, that runs the config of ``segments_config`` for ``segments.time_limit``."""
+    run = spec["arms"][arm]["run"] + SEGMENTS_SUFFIX
+    launch = spec["launch"]
+    config = _config_ref(spec_path, SEGMENTS_NAME.format(arm=arm))
+    return f"""#!/bin/bash
+# {generated_note(spec_path)}
+# Submits the segments job of the {arm} arm ({run}): the arm's config stopped after {spec["segments"]["steps"]} steps, with no checkpoint.
+# Link 1 of the arm is compared with it over those steps. Usage: FROZEN=<frozen copy of the committed code> bash {SEGMENTS_LAUNCH_NAME.format(arm=arm)}
+{_frozen_preamble(spec)}isambard_sbatch --nodes={launch["nodes"]} --time={spec["segments"]["time_limit"]} --job-name={run} \\
+    pipeline_training_submit.sbatch "{config}" {launch["model"]} {launch["mode"]} --disable-ft
+"""
 
-    Reads the spec and the provenance beside each corpus. Raises ``ArmsError`` for a fault in the spec or a corpus that
-    is not tokenised.
+
+def _yaml_file(spec_path: Path, config: dict[str, Any]) -> str:
+    """``config`` as the text of a generated YAML file, headed by the generated note."""
+    return f"# {generated_note(spec_path)}\n{yaml.safe_dump(config, sort_keys=False)}"
+
+
+def generate(spec_path: Path) -> dict[Path, str]:
+    """Every file that the spec at ``spec_path`` asks for, as text by path (beside the spec): for each arm the run config,
+    the launch script, the segments config and the segments launch script.
+
+    Reads the spec and the provenance beside each corpus. Raises ``ArmsError`` for a fault in the spec, a corpus that is
+    not tokenised, or a segments job that would run the whole run.
     """
     spec = load_spec(spec_path)
     prefixes = {arm: corpus_prefixes(spec, arm) for arm in spec["arms"]}
     tokens = {arm: [corpus_tokens(prefix) for prefix in prefixes[arm]] for arm in spec["arms"]}
     train_iters = plan_iterations(spec, tokens)
+    if spec["segments"]["steps"] >= train_iters:
+        raise ArmsError(f"segments.steps {spec['segments']['steps']} is not below the run's {train_iters} steps")
     files: dict[Path, str] = {}
     for arm in spec["arms"]:
         blend = arm_blend(spec, prefixes[arm], tokens[arm], train_iters)
-        body = yaml.safe_dump(arm_config(spec, arm, train_iters, blend), sort_keys=False)
-        files[spec_path.parent / CONFIG_NAME.format(arm=arm)] = f"# {generated_note(spec_path)}\n{body}"
+        files[spec_path.parent / CONFIG_NAME.format(arm=arm)] = _yaml_file(
+            spec_path, arm_config(spec, arm, train_iters, blend)
+        )
         files[spec_path.parent / LAUNCH_NAME.format(arm=arm)] = launch_script(spec, arm, spec_path)
+        files[spec_path.parent / SEGMENTS_NAME.format(arm=arm)] = _yaml_file(spec_path, segments_config(spec, arm))
+        files[spec_path.parent / SEGMENTS_LAUNCH_NAME.format(arm=arm)] = segments_launch_script(spec, arm, spec_path)
     return files
 
 

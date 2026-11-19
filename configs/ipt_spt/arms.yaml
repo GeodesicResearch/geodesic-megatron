@@ -38,6 +38,12 @@ launch:
   # Relative to the frozen copy of the code that the jobs run from.
   env_file: configs/quickstart/nemotron_nano_quickstart_pretrain.env
 
+# The segments job of each arm: a short run of the arm's own config, stopped after these steps, with no checkpoint. The
+# loss of link 1 over the same steps is compared with its loss. The time limit covers the dataset build and the steps.
+segments:
+  steps: 10
+  time_limit: "00:40:00"
+
 wandb:
   entity: geodesic
   project: megatron_training
