@@ -17,9 +17,10 @@ corpora they read: each arm reads one tokenised corpus for every group of the bu
 The generator itself fixes how a run saves and reads: the ``single`` sampler, no end-of-run save, a save with optimizer
 state at each of the ``save_steps`` and none pruned, and a resume from the run's own save.
 
-It writes ``<arm>_pretrain.yaml``, an overlay of the spec's ``run_base_config``, and ``<arm>_launch.sh`` beside the spec. The
-launch script submits the chain of jobs that trains the arm, behind a held gate job that a person releases. The jobs
-share one name and run one at a time, and each resumes from the save of the one before.
+It writes ``<arm>_pretrain.yaml``, an overlay of the spec's ``run_base_config``, ``<arm>_resume.yaml``, the config of the
+links after the first, and ``<arm>_launch.sh`` beside the spec. The launch script submits the chain of jobs that trains
+the arm, behind a held gate job that a person releases. The jobs share one name and run one at a time, and each resumes
+from the save of the one before.
 
 It also writes ``<arm>_segments.yaml`` and ``<arm>_segments_launch.sh``, a short run of each arm: the arm's own config
 stopped after ``segments.steps`` steps, with no checkpoint, its own cache folder and its own W&B run, and the script that
@@ -37,6 +38,7 @@ Catalogue:
     arm_blend: the interleaved weights and prefixes of one arm's blend.
     save_steps: the steps at which a run saves.
     arm_config: the run config of one arm.
+    resume_config: the config of the links of one arm after the first.
     segments_config: the config of one arm's segments job.
     generated_note: the line that heads a generated file.
     launch_script: the script that submits one arm's chain.
@@ -73,6 +75,7 @@ from scripts.mapping_values import (  # noqa: E402
 
 PROVENANCE_SUFFIX = ".provenance.json"
 CONFIG_NAME = "{arm}_pretrain.yaml"
+RESUME_NAME = "{arm}_resume.yaml"
 LAUNCH_NAME = "{arm}_launch.sh"
 SEGMENTS_NAME = "{arm}_segments.yaml"
 SEGMENTS_LAUNCH_NAME = "{arm}_segments_launch.sh"
@@ -328,6 +331,15 @@ def arm_config(spec: dict[str, Any], arm: str, train_iters: int, blend: list[str
     }
 
 
+def resume_config(arm: str) -> dict[str, Any]:
+    """The config of the links of ``arm`` after the first: an overlay of the arm's own config (``base_config`` names it
+    beside this file) that makes a link end with an error when ``checkpoint.load`` holds no checkpoint."""
+    return {
+        "base_config": CONFIG_NAME.format(arm=arm),
+        "checkpoint": {"exit_on_missing_checkpoint": True},
+    }
+
+
 def segments_config(spec: dict[str, Any], arm: str) -> dict[str, Any]:
     """The config of the segments job of ``arm``: an overlay of the arm's own config (``base_config`` names it beside this
     file) that stops after ``segments.steps`` steps, reads and writes no checkpoint, and has its own cache folder and
@@ -377,25 +389,29 @@ def launch_script(spec: dict[str, Any], arm: str, spec_path: Path) -> str:
 
     A gate job of one node is submitted held, and the first link waits for it, so no link starts until a person runs
     ``scontrol release`` on the gate. Every link has the arm's run name, and the links run one at a time (``singleton``).
-    The jobs run the config that ``generate`` writes beside ``spec_path``: from the frozen copy when the spec lies in the
-    repository, and from where it was written otherwise.
+    Link 1 runs the arm's config and the later links run its resume config. The jobs run the configs that ``generate``
+    writes beside ``spec_path``: from the frozen copy when the spec lies in the repository, and from where they were
+    written otherwise.
     """
     run = spec["arms"][arm]["run"]
     launch = spec["launch"]
     config = _config_ref(spec_path, CONFIG_NAME.format(arm=arm))
+    resume = _config_ref(spec_path, RESUME_NAME.format(arm=arm))
     return f"""#!/bin/bash
 # {generated_note(spec_path)}
 # Submits the {launch["links"]} jobs that train the {arm} arm ({run}), behind a gate job that is held. Each job resumes from the
-# save of the one before, and each exits {spec["exit_duration_in_mins"]} minutes after it starts. No job starts until the gate is released:
+# save of the one before, and each exits {spec["exit_duration_in_mins"]} minutes after it starts. Link 1 runs {CONFIG_NAME.format(arm=arm)}, and the later links run
+# {RESUME_NAME.format(arm=arm)}, which ends a link that finds no save. No job starts until the gate is released:
 #   scontrol release <gate job id>
 # Usage: FROZEN=<frozen copy of the committed code> bash {LAUNCH_NAME.format(arm=arm)}
 {_frozen_preamble(spec)}GATE=$(isambard_sbatch --hold --nodes=1 --time=00:05:00 --job-name={run}-gate --wrap true | grep -o '[0-9]*$')
 echo "gate job $GATE is held; release it with: scontrol release $GATE"
 for link in $(seq 1 {launch["links"]}); do
     dependency=singleton
-    if [ "$link" -eq 1 ]; then dependency="afterok:$GATE,singleton"; fi
+    config="{resume}"
+    if [ "$link" -eq 1 ]; then dependency="afterok:$GATE,singleton"; config="{config}"; fi
     isambard_sbatch --nodes={launch["nodes"]} --time={launch["time_limit"]} --job-name={run} --dependency="$dependency" \\
-        pipeline_training_submit.sbatch "{config}" {launch["model"]} {launch["mode"]} --disable-ft
+        pipeline_training_submit.sbatch "$config" {launch["model"]} {launch["mode"]} --disable-ft
 done
 """
 
@@ -422,7 +438,7 @@ def _yaml_file(spec_path: Path, config: dict[str, Any]) -> str:
 
 def generate(spec_path: Path) -> dict[Path, str]:
     """Every file that the spec at ``spec_path`` asks for, as text by path (beside the spec): for each arm the run config,
-    the launch script, the segments config and the segments launch script.
+    the resume config, the launch script, the segments config and the segments launch script.
 
     Reads the spec and the provenance beside each corpus. Raises ``ArmsError`` for a fault in the spec, a corpus that is
     not tokenised, or a segments job that would run the whole run.
@@ -439,6 +455,7 @@ def generate(spec_path: Path) -> dict[Path, str]:
         files[spec_path.parent / CONFIG_NAME.format(arm=arm)] = _yaml_file(
             spec_path, arm_config(spec, arm, train_iters, blend)
         )
+        files[spec_path.parent / RESUME_NAME.format(arm=arm)] = _yaml_file(spec_path, resume_config(arm))
         files[spec_path.parent / LAUNCH_NAME.format(arm=arm)] = launch_script(spec, arm, spec_path)
         files[spec_path.parent / SEGMENTS_NAME.format(arm=arm)] = _yaml_file(spec_path, segments_config(spec, arm))
         files[spec_path.parent / SEGMENTS_LAUNCH_NAME.format(arm=arm)] = segments_launch_script(spec, arm, spec_path)

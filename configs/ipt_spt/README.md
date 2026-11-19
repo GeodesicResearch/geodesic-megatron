@@ -10,6 +10,7 @@ number of steps. They differ in the corpora they read and in their run name.
 | `arms.yaml` | The spec: the settings that both arms share, and where their corpora are. |
 | `generate_arm_configs.py` | Writes the files below from the spec and the provenance of each corpus. |
 | `<arm>_pretrain.yaml` | The run config of one arm, an overlay of `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`. The generator writes it. |
+| `<arm>_resume.yaml` | The config of links 2 and after: the arm's config with `checkpoint.exit_on_missing_checkpoint` true. The generator writes it. |
 | `<arm>_launch.sh` | Submits the chain of jobs that trains the arm. The generator writes it. |
 | `<arm>_segments.yaml` | The config of the arm's segments job: the arm's config stopped after a few steps, with no checkpoint. The generator writes it. |
 | `<arm>_segments_launch.sh` | Submits the arm's segments job as one job, with no gate. The generator writes it. |
@@ -39,10 +40,15 @@ FROZEN=/projects/a5k/public/tmp/frozen_copies/<copy> bash "$FROZEN/configs/ipt_s
 
 The script submits a held gate job and the links of the chain behind it, and prints the gate's job ID. No link starts
 until `scontrol release <gate job id>`. The links share one job name, so they run one after another, and each resumes from
-the save of the one before (`checkpoint.load` equals `checkpoint.save`). A link that starts after the run has finished
-loads the last save and ends without writing, because `save_interval` is 0. A link that starts where no earlier link
-saved starts again at step 1 from random weights. To stop an arm, cancel its jobs by name, with
-`scancel --user $USER --name <run name>`, because a cancelled link releases the next one.
+the save of the one before (`checkpoint.load` equals `checkpoint.save`). Link 1 runs `<arm>_pretrain.yaml` and starts from
+random weights when its save folder holds no save. Links 2 and after run `<arm>_resume.yaml`: a link that finds no save
+ends in setup, after the model is built and before step 1, with a `FileNotFoundError` and a non-zero exit status, and
+each later link ends the same way. A link that
+starts after the run has finished loads the last save and ends without writing, because `save_interval` is 0. To stop an
+arm, cancel its jobs by name, with `scancel --user $USER --name <run name>`, because a cancelled link releases the next one.
+
+To submit a new chain after a stop, run the launch script again from a frozen copy. It holds a new gate. Link 1 resumes from
+the latest save in the save folder, or starts from random weights when the folder holds none, so list the folder first.
 
 ## Segments job
 
