@@ -430,6 +430,72 @@ def test_the_stage_is_done_once_its_final_iteration_is_checked_and_no_job_is_liv
     assert (action, state.last_iteration, done) == ("continue", 60, True)
 
 
+def test_a_stage_that_ends_before_its_final_iteration_ends_the_guard_with_its_own_status(tmp_path, cluster_command):
+    """Every job of the stage is final and none is live on two ticks in a row, but the watch checked only through
+    iteration 20 of 60 (a node failure or a TIMEOUT that logged no stop condition): the guard says so and ends,
+    rather than ticking until killed."""
+    segment(tmp_path, 10, drop=set(range(21, 61)))
+    cluster = FakeCluster([sacct_line(10, "FAILED", tmp_path)])
+    config = sg.load_guard_config(write_config(tmp_path))
+
+    action, state, done = sg.tick(config, sg.START, cluster, NOW)
+    assert (action, state.quiet_ticks, done) == ("continue", 1, False)
+    action, state, done = sg.tick(config, state, cluster, NOW)
+    assert (action, state.last_iteration, done) == ("ended_early", 20, False)
+    assert any("ENDED EARLY" in line and "through iteration 20 of 60" in line for line in record_lines(config))
+
+    cluster_command["cluster"] = FakeCluster([sacct_line(10, "FAILED", tmp_path)])
+    assert sg.main(["--config", str(write_config(tmp_path, record=str(tmp_path / "second.log")))]) == sg.ENDED_EARLY
+
+
+def test_a_pending_successor_keeps_a_stage_that_stopped_early_guarded(tmp_path):
+    """Segment 10 timed out at iteration 20 and its singleton successor 11 waits in the queue, which only squeue
+    lists: the stage is between segments, not ended."""
+    segment(tmp_path, 10, drop=set(range(21, 61)))
+    cluster = FakeCluster([sacct_line(10, "TIMEOUT", tmp_path), sacct_line(11, "PENDING", tmp_path, started=False)])
+    config = sg.load_guard_config(write_config(tmp_path))
+
+    action, state, done = sg.tick(config, sg.START, cluster, NOW)
+
+    assert (action, state.quiet_ticks, done) == ("continue", 0, False)
+    assert not any("ENDED EARLY" in line or "NO JOB LIVE" in line for line in record_lines(config))
+
+
+def test_one_empty_squeue_reply_between_segments_does_not_end_the_guard(tmp_path):
+    """A busy controller returns one empty squeue reply while successor 11 pends: the tick records that no job is
+    live and goes on, and the next reply, which lists the successor, resets the count."""
+    segment(tmp_path, 10, drop=set(range(21, 61)))
+    cluster = FakeCluster([sacct_line(10, "TIMEOUT", tmp_path), sacct_line(11, "PENDING", tmp_path, started=False)])
+    config = sg.load_guard_config(write_config(tmp_path))
+
+    cluster.squeue_empty = True
+    action, state, done = sg.tick(config, sg.START, cluster, NOW)
+    assert (action, state.quiet_ticks, done) == ("continue", 1, False)
+    assert any("NO JOB LIVE" in line for line in record_lines(config))
+
+    cluster.squeue_empty = False
+    action, state, done = sg.tick(config, state, cluster, NOW)
+    assert (action, state.quiet_ticks, done) == ("continue", 0, False)
+    assert not any("ENDED EARLY" in line for line in record_lines(config))
+
+
+def test_a_guard_without_a_final_iteration_never_ends_early(tmp_path):
+    """Without final_iteration no iteration counts as early, so a stage with no live job keeps its old behaviour."""
+    path = write_config(tmp_path)
+    raw = yaml.safe_load(path.read_text())
+    del raw["final_iteration"]
+    path.write_text(yaml.safe_dump(raw))
+    config = sg.load_guard_config(path)
+    segment(tmp_path, 10, drop=set(range(21, 61)))
+    cluster = FakeCluster([sacct_line(10, "FAILED", tmp_path)])
+
+    state = sg.START
+    for _ in range(sg.QUIET_TICKS_TO_END + 1):
+        action, state, done = sg.tick(config, state, cluster, NOW)
+        assert (action, done) == ("continue", False)
+    assert not any("ENDED EARLY" in line or "NO JOB LIVE" in line for line in record_lines(config))
+
+
 def test_a_stage_with_no_started_segment_fails_the_guard(tmp_path):
     """The guard is started once a segment trains, so finding none means a wrong name or user, not a wait."""
     config = sg.load_guard_config(write_config(tmp_path))
@@ -978,28 +1044,34 @@ def late_stamped_log(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "write_log, now, reason",
+    "write_log, now, reason, a_limit_would_act",
     [
-        # Iteration lines without a stamp: the attempt has logged iterations, so its start-up window must not stop it.
-        (unstamped_log, START_TIME + timedelta(minutes=51), "log has iteration lines without a time stamp"),
+        # Iteration lines without a stamp, at minute 51: judged as unlogged, the start-up window (50) would stop the
+        # attempt and its minute-1 dump would be due, so the tick shows that the limits were left unevaluated.
+        (unstamped_log, START_TIME + timedelta(minutes=51), "log has iteration lines without a time stamp", True),
         # Stamps two hours after the guard's clock: the job and the guard read different time zones.
-        (late_stamped_log, NOW, "last iteration line is stamped"),
+        (late_stamped_log, NOW, "last iteration line is stamped", False),
         # No iteration yet, and sacct's start lies ten minutes after the guard's clock.
-        (lambda tmp_path: no_iteration_yet(tmp_path, 10), START_TIME - timedelta(minutes=10), "start is"),
+        (lambda tmp_path: no_iteration_yet(tmp_path, 10), START_TIME - timedelta(minutes=10), "start is", False),
     ],
     ids=["unstamped-lines", "stamp-after-the-clock", "start-after-the-clock"],
 )
-def test_a_tick_that_cannot_time_the_segment_leaves_the_time_limits_unevaluated(tmp_path, write_log, now, reason):
+def test_a_tick_that_cannot_time_the_segment_leaves_the_time_limits_unevaluated(
+    tmp_path, write_log, now, reason, a_limit_would_act
+):
     """Neither time limit can judge a segment whose log carries no stamp or whose stamp or start lies after the guard's
-    clock, so the tick stops nothing and says so."""
-    config = sg.load_guard_config(write_config(tmp_path, startup={"first_iteration_minutes": 50}, stall_minutes=15))
+    clock, so the tick says so; where a limit would otherwise act, it stops nothing and takes no dump."""
+    config = sg.load_guard_config(
+        write_config(tmp_path, startup={"first_iteration_minutes": 50, "dump_at_minutes": [1]}, stall_minutes=15)
+    )
     write_log(tmp_path)
     cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
 
     action, _, _ = sg.tick(config, sg.START, cluster, now)
 
-    assert action != "stop" and not cluster.cancelled() and not cluster.dumps()
     assert any(f"time limits not evaluated: job 10's {reason}" in line for line in record_lines(config))
+    if a_limit_would_act:
+        assert action != "stop" and not cluster.cancelled() and not cluster.dumps()
 
 
 def test_minutes_are_counted_across_a_daylight_saving_change(monkeypatch):

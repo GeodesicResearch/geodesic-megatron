@@ -218,7 +218,8 @@ placement measurements).
   from its record, from ticks judged under the same watch spec): on a stop it cancels the stage's
   live jobs by ID (the running segment and the successors pending on its singleton dependency, which only `squeue`
   lists) and exits; on a tick it could not evaluate (exit 2, or a watch, timeout or `sacct` failure) once the stage
-  has reached its hold iteration while a loss gate is undecided it does the same; otherwise it alerts. Its record
+  has reached its hold iteration while a loss gate is undecided it does the same; otherwise it alerts. When two ticks
+  in a row find no live job but the watch has not checked `final_iteration`, it records ENDED EARLY and exits 6. Its record
   opens with the config, the spec's sha256 and the code revision, and its own failures (no started segment of the
   stage among them) are written there too.
   The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.

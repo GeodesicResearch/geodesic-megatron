@@ -32,7 +32,9 @@ the job's own ``StdOut``), runs ``scripts/telemetry/run_watch.py`` on them insid
 - **alert** (any other exit 2 or failure to evaluate): the record and the printed line say so, and the guard keeps
   going; a tick that could not be evaluated is never read as a stop;
 - the guard exits 0 once the watch has checked the final iteration, sacct shows every started segment in a final
-  state and squeue lists no live job of the stage (an empty squeue reply alone does not end it).
+  state and squeue lists no live job of the stage (an empty squeue reply alone does not end it). When two ticks in a
+  row find no live job but the final iteration unchecked (a crash or a TIMEOUT that logged no stop condition), it
+  records ENDED EARLY and exits 6; one empty squeue reply between segments does not end it.
 
 Two time limits are optional and off unless the guard config sets them. Both judge the newest segment's current
 attempt by the time stamp of its log's last iteration line (the watch's ``newest segment through iteration N logged
@@ -162,13 +164,14 @@ class WatchResult(NamedTuple):
 
 class GuardState(NamedTuple):
     """What the guard carries from tick to tick: the last iteration a watch checked, the gates passed and the log
-    each passed on, the gates still undecided (None until a watch has run), and the dump sweeps already taken (their
-    folder names, ``attempt_sweep``'s)."""
+    each passed on, the gates still undecided (None until a watch has run), the dump sweeps already taken (their
+    folder names, ``attempt_sweep``'s), and how many ticks in a row found no live job before the final iteration."""
 
     last_iteration: Optional[int]
     decided: Dict[str, str]
     undecided: Optional[Tuple[str, ...]]
     dumped: FrozenSet[str] = frozenset()
+    quiet_ticks: int = 0
 
 
 START = GuardState(last_iteration=None, decided={}, undecided=None)
@@ -558,16 +561,11 @@ def dump_due(config: GuardConfig, state: GuardState, newest: Job, result: WatchR
     return None if sweep in state.dumped else sweep
 
 
-def stage_ended(config: GuardConfig, state: GuardState, result: WatchResult, started: List[Job], run: Runner) -> bool:
-    """Whether the stage has ended: the watch checked the final iteration, sacct shows every started segment final,
-    and squeue lists no live job. sacct's live segments are part of live_jobs too; reading them first spares the
-    squeue call while one runs. A squeue that cannot be read leaves the end for the next tick, recorded."""
-    if not (
-        checked_final(config, state)
-        and result.ran
-        and result.status == 0
-        and all(job.state in FINAL_STATES for job in started)
-    ):
+def no_job_live(config: GuardConfig, started: List[Job], run: Runner) -> bool:
+    """Whether no job of the stage is live: sacct shows every started segment final and squeue lists no job. sacct's
+    live segments are part of live_jobs too; reading them first spares the squeue call while one runs. A squeue that
+    cannot be read counts as live, recorded, so the next tick reads the queue again."""
+    if not all(job.state in FINAL_STATES for job in started):
         return False
     try:
         return not live_jobs(config, started, run)
@@ -577,6 +575,26 @@ def stage_ended(config: GuardConfig, state: GuardState, result: WatchResult, sta
             "END NOT CONFIRMED: {}: {}; the next tick reads the queue again".format(type(error).__name__, error),
         )
         return False
+
+
+def stage_ended(config: GuardConfig, state: GuardState, result: WatchResult, started: List[Job], run: Runner) -> bool:
+    """Whether the stage has ended: the watch ran clean and checked the final iteration, and no job is live. Runs
+    squeue when every started segment is final; a squeue that cannot be read is recorded as END NOT CONFIRMED."""
+    return checked_final(config, state) and result.ran and result.status == 0 and no_job_live(config, started, run)
+
+
+def stage_ended_early(
+    config: GuardConfig, state: GuardState, result: WatchResult, started: List[Job], run: Runner
+) -> bool:
+    """Whether no job is live although the watch ran and has not checked ``final_iteration`` (a crash or a TIMEOUT
+    that logged no stop condition, or one empty squeue reply between segments). False without ``final_iteration``.
+    Runs squeue when every started segment is final; a squeue that cannot be read is recorded as END NOT CONFIRMED."""
+    return (
+        config.final_iteration is not None
+        and result.ran
+        and not checked_final(config, state)
+        and no_job_live(config, started, run)
+    )
 
 
 def dump_stacks(job_id: int, sweep: str, run: Runner) -> str:
@@ -657,10 +675,33 @@ def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> 
     if sweep is not None:
         _record(config, dump_stacks(newest.job_id, sweep, run))
         state = state._replace(dumped=state.dumped | {sweep})
-    return action, state, stage_ended(config, state, result, started, run)
+    if stage_ended(config, state, result, started, run):
+        return action, state, True
+    if not stage_ended_early(config, state, result, started, run):
+        return action, state._replace(quiet_ticks=0), False
+    # One empty squeue reply between segments must not end the guard while a successor pends, so the end needs
+    # QUIET_TICKS_TO_END ticks in a row with no live job.
+    quiet = state.quiet_ticks + 1
+    if quiet < QUIET_TICKS_TO_END:
+        _record(
+            config,
+            "NO JOB LIVE: no job of {} is live before iteration {} of {}; the guard ends if the next tick finds the "
+            "same".format(config.job_name, state.last_iteration, config.final_iteration),
+        )
+        return action, state._replace(quiet_ticks=quiet), False
+    _record(
+        config,
+        "ENDED EARLY: no job of {} was live on {} ticks in a row, and the watch checked only through iteration {} of "
+        "{}".format(config.job_name, quiet, state.last_iteration, config.final_iteration),
+    )
+    return "ended_early", state._replace(quiet_ticks=quiet), False
 
 
-EXIT_STATUS = {"stop": 1, "hold": 3}
+# The stage ended before its final iteration; there is nothing left to guard or cancel.
+ENDED_EARLY = 6
+# Ticks in a row that must find no live job before the guard ends with ENDED_EARLY.
+QUIET_TICKS_TO_END = 2
+EXIT_STATUS = {"stop": 1, "hold": 3, "ended_early": ENDED_EARLY}
 # A stop or hold whose cancellation failed: the stage may still be running, so a person must act now.
 CANCEL_FAILED = 4
 # The guard itself failed; the stage is no longer guarded.
