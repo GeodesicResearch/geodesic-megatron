@@ -174,12 +174,12 @@ record ft_launcher "$@"
     "python": """\
 # A script's launch needs GPUs or the network: record it. Helper code (`python -c`, `python -m pipeline.*`, the
 # training launcher's checks `python -m scripts.training.code_identity` and `scripts.training.launch_width`, and
-# scripts/data/prepare_revisions.py, which resolves a tokenizer reference) runs for real, with the Hub replaced by
-# the recording fake.
+# scripts/data/prepare_revisions.py, which resolves a tokenizer reference, and scripts/data/preprocess_flags.py, which
+# prints the encoding flags of a tokenise run) runs for real, with the Hub replaced by the recording fake.
 if [ "${1:-}" = -c ] \
     || { [ "${1:-}" = -m ] && [[ "${2:-}" == pipeline.* || "${2:-}" == scripts.training.code_identity \
         || "${2:-}" == scripts.training.launch_width ]]; } \
-    || [ "${1:-}" = scripts/data/prepare_revisions.py ]; then
+    || [ "${1:-}" = scripts/data/prepare_revisions.py ] || [ "${1:-}" = scripts/data/preprocess_flags.py ]; then
     PYTHONPATH="$STUB_DIR/fake_modules${PYTHONPATH:+:$PYTHONPATH}" exec "$STUB_PYTHON" "$@"
 fi
 record python "$@"

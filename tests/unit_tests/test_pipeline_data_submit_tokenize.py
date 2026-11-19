@@ -61,7 +61,7 @@ def test_happy_path_payload_and_provenance(stub_env):
     assert result.returncode == 0, result.stderr
     payload = "\n".join(line for line in result.stdout.splitlines() if line.startswith("PAYLOAD:"))
     assert "tools/preprocess_data.py" in payload
-    assert "--append-eod" in payload
+    assert "scripts/data/preprocess_flags.py" in payload
     assert "geodesic-research/nemotron-base-tokenizer" in payload
     assert f"{dataset_root}/tokenized_base" in payload
     assert "count_idx_tokens.py" in payload
@@ -113,7 +113,8 @@ def executing_env(stub_env, tmp_path):
     """The stub repo with a runner that executes the payload in bash instead of printing it.
 
     The container is the untestable boundary, so the payload runs on the host: `python` is a stub that runs the real
-    scripts/data/prepare_revisions.py (the tokenizer reference's resolution) and prints every other command it is
+    scripts/data/prepare_revisions.py (the tokenizer reference's resolution) and scripts/data/preprocess_flags.py (the
+    encoding flags), and prints every other command it is
     given (preprocess_data.py and count_idx_tokens.py, which need a real corpus and the container). A Hugging Face
     cache in `tmp_path` holds the pinned tokenizer's snapshot, with the Hub switched off.
     """
@@ -121,15 +122,15 @@ def executing_env(stub_env, tmp_path):
     (stub_repo / "pipeline_env_exec.sh").write_text('#!/bin/bash\nexec bash -c "$1"\n')
     (stub_repo / "pipeline_env_activate.sh").write_text("")
     (stub_repo / "scripts" / "data").mkdir(parents=True)
-    (stub_repo / "scripts" / "data" / "prepare_revisions.py").symlink_to(
-        os.path.join(REPO_ROOT, "scripts", "data", "prepare_revisions.py")
-    )
+    for tool in ("prepare_revisions.py", "preprocess_flags.py"):
+        (stub_repo / "scripts" / "data" / tool).symlink_to(os.path.join(REPO_ROOT, "scripts", "data", tool))
     stub_bin = tmp_path / "stub_bin"
     stub_bin.mkdir()
     python = stub_bin / "python"
     python.write_text(
         "#!/bin/bash\n"
-        f'if [ "$1" = scripts/data/prepare_revisions.py ]; then exec {sys.executable} "$@"; fi\n'
+        f'if [ "$1" = scripts/data/prepare_revisions.py ] || [ "$1" = scripts/data/preprocess_flags.py ]; '
+        f'then exec {sys.executable} "$@"; fi\n'
         'printf "CALL:"; printf " %s" "$@"; printf "\\n"\n'
     )
     python.chmod(python.stat().st_mode | stat.S_IEXEC)
@@ -144,6 +145,28 @@ def executing_env(stub_env, tmp_path):
 
 def _calls(result, tool):
     return [line for line in result.stdout.splitlines() if line.startswith("CALL:") and tool in line]
+
+
+def test_the_call_has_the_flags_of_the_command_that_tokenize_arrow_runs(executing_env):
+    """scripts/data/tokenize_arrow.py makes the same corpus from Arrow rows with its own ``preprocess_command``. Every
+    flag of that command is in the sbatch's call and the call has no other, bar the one that a run in parts adds, so a
+    flag that only one route sets fails here, and the encoding flags come from the one module that both read."""
+    from scripts.data import tokenize_arrow
+    from scripts.data.preprocess_flags import ENCODING_FLAGS, ENCODING_NOTES
+
+    dataset_root, env, _ = executing_env
+    result = _run_tokenize(env, [str(dataset_root), TOKENIZER_NAME])
+    assert result.returncode == 0, result.stderr
+    (call,) = _calls(result, "preprocess_data.py")
+    (count,) = _calls(result, "count_idx_tokens.py")
+    assert all(f" --note {note} " in count for note in ENCODING_NOTES), "the provenance states the encoding"
+    command = tokenize_arrow.preprocess_command(dataset_root / "in.jsonl", dataset_root / "out", "model", "input", 1)
+
+    def flags(words):
+        return {word for word in words if word.startswith("--")}
+
+    assert flags(call.split()) == flags(command)
+    assert all(flag in call.split() for flag in ENCODING_FLAGS)
 
 
 def test_a_pinned_tokenizer_loads_its_commits_snapshot_and_records_the_commit(executing_env):
@@ -214,7 +237,8 @@ def partitioned_env(executing_env, tmp_path):
     python = stub_bin / "python"
     python.write_text(
         "#!/bin/bash\n"
-        f'if [ "$1" = scripts/data/prepare_revisions.py ]; then exec {sys.executable} "$@"; fi\n'
+        f'if [ "$1" = scripts/data/prepare_revisions.py ] || [ "$1" = scripts/data/preprocess_flags.py ]; '
+        f'then exec {sys.executable} "$@"; fi\n'
         f'if [ "$1" = scripts/data/tokenize_partitions.py ] && [ "$2" != check ]; then exec {sys.executable} "$@"; fi\n'
         'if [ "$1" = 3rdparty/Megatron-LM/tools/preprocess_data.py ]; then\n'
         f"    echo part > {dataset_root}/training_0.jsonl\n"

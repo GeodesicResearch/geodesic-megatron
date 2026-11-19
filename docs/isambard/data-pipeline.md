@@ -50,6 +50,13 @@ partition near the quota line). `revisions: {<subset>: <40-hex SHA>}` pins each 
 `tokenizer-revision:` the tokenizer; a subset with no pin is refused, never read at HEAD
 (`scripts/data/prepare_revisions.py`).
 
+### Tokenising a saved Arrow dataset
+
+`scripts/data/tokenize_arrow.py --config <config.yaml>` turns one text column of a saved Arrow folder into the `.bin/.idx`
+corpus that the `tokenize` mode makes from the same rows as JSONL, without writing the JSONL file. It exits 0 only when
+the corpus holds exactly the `expected` documents and tokens of the config. The config keys are in the module docstring.
+Run it as a one-node job (`isambard_sbatch --wrap` around `pipeline_env_exec.sh`).
+
 ### Checking what a `.bin/.idx` blend actually reads
 
 `scripts/data/report_blend_coverage.py <config.yaml> --model <m> --mode cpt|pretrain --report-out <json>`

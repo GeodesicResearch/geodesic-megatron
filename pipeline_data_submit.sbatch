@@ -182,12 +182,15 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
     # the input's order, which the check after the merge confirms.
     # The arrays hold the words fixed here; the \$-escaped words between them (the tokenizer the
     # reference resolves to, the partitions the run chose) are expanded in the container.
+    # The flags that decide the encoding, and the provenance notes that state them, come from
+    # scripts/data/preprocess_flags.py, which scripts/data/tokenize_arrow.py reads too, so both routes make the same
+    # corpus from the same rows and record it the same way.
     TOKENIZER_ARG=$(quote_args "$TOKENIZER")
-    TOKENIZE_ARGS=(--input "$INPUT_JSONL" --output-prefix "$OUTPUT_PREFIX" --tokenizer-type HuggingFaceTokenizer)
-    TOKENIZE_ARGS_AFTER_MODEL=(--json-keys "$JSON_KEY" --append-eod --workers "$WORKERS")
+    TOKENIZE_ARGS=(--input "$INPUT_JSONL" --output-prefix "$OUTPUT_PREFIX")
+    TOKENIZE_ARGS_AFTER_MODEL=(--json-keys "$JSON_KEY" --workers "$WORKERS")
     COUNT_ARGS=("$ARTIFACT_PREFIX.idx" --provenance-out "$ARTIFACT_PREFIX.provenance.json"
         --note "dataset_root=$DATASET_ROOT" --note "input_jsonl=$INPUT_JSONL")
-    COUNT_ARGS_AFTER_TOKENIZER=(--note "json_key=$JSON_KEY" --note append_eod=true --note "workers=$WORKERS"
+    COUNT_ARGS_AFTER_TOKENIZER=(--note "json_key=$JSON_KEY" --note "workers=$WORKERS"
         --note "partitions_requested=$PARTITIONS")
     "${RUNNER[@]}" "$(container_payload "PARTITIONS_RUN=1; \
 ${PARTITION_STEP}echo \"Partitions run: \$PARTITIONS_RUN\" \
@@ -195,9 +198,11 @@ ${PARTITION_STEP}echo \"Partitions run: \$PARTITIONS_RUN\" \
 && TOKENIZER_NAME=\$(python scripts/data/prepare_revisions.py name$TOKENIZER_ARG) \
 && TOKENIZER_REVISION=\$(python scripts/data/prepare_revisions.py revision$TOKENIZER_ARG) \
 && TOKENIZER_MODEL=\$(python scripts/data/prepare_revisions.py path$TOKENIZER_ARG) \
+&& ENCODING_FLAGS=\$(python scripts/data/preprocess_flags.py flags) \
+&& ENCODING_NOTES=\$(python scripts/data/preprocess_flags.py notes) \
 && echo \"Tokenizer:    \$TOKENIZER_NAME @ \${TOKENIZER_REVISION:-default branch}, loaded from \$TOKENIZER_MODEL\" \
 && python 3rdparty/Megatron-LM/tools/preprocess_data.py$(quote_args "${TOKENIZE_ARGS[@]}") \
---tokenizer-model \"\$TOKENIZER_MODEL\"$(quote_args "${TOKENIZE_ARGS_AFTER_MODEL[@]}") \
+\$ENCODING_FLAGS --tokenizer-model \"\$TOKENIZER_MODEL\"$(quote_args "${TOKENIZE_ARGS_AFTER_MODEL[@]}") \
 --partitions \$PARTITIONS_RUN \$SEQUENTIAL --log-interval 5000 \
 && { [ \"\$PARTITIONS_RUN\" -eq 1 ] \
 || { MERGE_ORDER_CHECK=\$(python scripts/data/tokenize_partitions.py check$PARTITION_ARGS --partitions \$PARTITIONS_RUN) \
@@ -206,7 +211,7 @@ ${PARTITION_STEP}echo \"Partitions run: \$PARTITIONS_RUN\" \
 && python scripts/data/count_idx_tokens.py$(quote_args "${COUNT_ARGS[@]}") \
 --note \"tokenizer=\$TOKENIZER_NAME\" \${TOKENIZER_REVISION:+--note \"tokenizer_revision=\$TOKENIZER_REVISION\"}\
 $(quote_args "${COUNT_ARGS_AFTER_TOKENIZER[@]}") \
---note \"partitions=\$PARTITIONS_RUN\" \${MERGE_ORDER_CHECK:+--note \"merge_order_check=\$MERGE_ORDER_CHECK\"}\
+--note \"partitions=\$PARTITIONS_RUN\" \${MERGE_ORDER_CHECK:+--note \"merge_order_check=\$MERGE_ORDER_CHECK\"} \$ENCODING_NOTES\
 $(quote_args --note "slurm_job_id=${SLURM_JOB_ID:-}")")"
     rc=$?
     if [ "$rc" -eq 0 ]; then
