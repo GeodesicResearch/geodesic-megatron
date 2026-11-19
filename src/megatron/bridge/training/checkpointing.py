@@ -66,6 +66,7 @@ from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 from megatron.bridge.training.utils import comet_utils, mlflow_utils, wandb_utils
 from megatron.bridge.training.utils.checkpoint_utils import (
+    check_exit_on_missing_checkpoint,
     checkpoint_exists,
     ensure_directory_exists,
     file_exists,
@@ -2641,15 +2642,10 @@ def _load_base_checkpoint(
     # Otherwise we are dealing with global checkpoints
     # If no tracker file, return nothing
     if iteration == -1:
+        check_exit_on_missing_checkpoint(ckpt_cfg, load_dir, checkpoint_present=False)
         if not rank0:
             print_rank_0("WARNING: could not find the metadata file {}".format(tracker_filename))
             print_rank_0("    will not load any checkpoints and will start from random")
-        # Conditionally exit if checkpoint not found.
-        if ckpt_cfg.exit_on_missing_checkpoint:
-            print_rank_0(">> '--exit-on-missing-checkpoint' set ... exiting. <<")
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-            sys.exit()
 
         return None, "", False, None
 

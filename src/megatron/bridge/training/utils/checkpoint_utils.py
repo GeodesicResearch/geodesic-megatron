@@ -18,7 +18,7 @@ import posixpath
 import sys
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import yaml
@@ -27,6 +27,10 @@ from megatron.core.msc_utils import MultiStorageClientFeature
 from megatron.bridge.training.state import TrainState
 from megatron.bridge.training.utils.config_utils import apply_run_config_backward_compat
 from megatron.bridge.utils.common_utils import get_rank_safe, get_world_size_safe, print_rank_0
+
+
+if TYPE_CHECKING:
+    from megatron.bridge.training.config import CheckpointConfig
 
 
 TRAIN_STATE_FILE = "train_state.pt"
@@ -199,6 +203,24 @@ def checkpoint_exists(checkpoints_path: Optional[str]) -> bool:
         return msc.os.path.isfile(path)
     else:
         return os.path.isfile(path)
+
+
+def check_exit_on_missing_checkpoint(
+    checkpoint_cfg: "CheckpointConfig", load_dir: Optional[str], checkpoint_present: bool
+) -> None:
+    """Refuse to go on without a checkpoint when ``exit_on_missing_checkpoint`` is true and ``load_dir`` is set.
+
+    Args:
+        checkpoint_cfg: The checkpoint configuration.
+        load_dir: The folder the run loads from. ``None`` means nothing is loaded, so nothing is missing.
+        checkpoint_present: Whether a checkpoint is available to load from ``load_dir``.
+
+    Raises:
+        FileNotFoundError: If the setting is true, ``load_dir`` is set and no checkpoint is present. The message names
+            the setting and the folder.
+    """
+    if checkpoint_cfg.exit_on_missing_checkpoint and load_dir is not None and not checkpoint_present:
+        raise FileNotFoundError(f"checkpoint.exit_on_missing_checkpoint is true, but {load_dir} holds no checkpoint")
 
 
 def get_hf_model_id_from_checkpoint(path: str | os.PathLike[str]) -> str | None:

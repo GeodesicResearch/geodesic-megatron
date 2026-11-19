@@ -23,7 +23,7 @@ from megatron.bridge.models.transformer_config import TransformerConfig
 from megatron.bridge.training.config import CheckpointConfig
 from megatron.bridge.training.setup import (
     _build_distributed_model,
-    _check_ckpt_step_resumable,
+    _check_resumable,
     _register_pre_wrap_hook,
     _validate_and_set_vocab_size,
     maybe_log_and_save_config,
@@ -31,8 +31,8 @@ from megatron.bridge.training.setup import (
 from megatron.bridge.training.utils.checkpoint_utils import get_checkpoint_tracker_filename
 
 
-class TestCheckCkptStepResumable:
-    """A run that names the checkpoint to resume (``ckpt_step``) must not start without it.
+class TestCheckResumable:
+    """A run that must resume (``ckpt_step`` set, or ``exit_on_missing_checkpoint`` true) must not start without it.
 
     Setup only loads when ``load`` (or ``pretrained_checkpoint``) holds a checkpoint, so an empty
     ``load`` would otherwise start a resumed run from random or pretrained weights with no error.
@@ -45,16 +45,16 @@ class TestCheckCkptStepResumable:
         return str(directory)
 
     def test_no_ckpt_step_places_no_requirement(self, tmp_path):
-        _check_ckpt_step_resumable(CheckpointConfig(load=str(tmp_path)), has_local_checkpoint=False)
+        _check_resumable(CheckpointConfig(load=str(tmp_path)), has_local_checkpoint=False)
 
     def test_ckpt_step_with_the_checkpoint_present_passes(self, tmp_path):
         cfg = CheckpointConfig(load=self._with_tracker(tmp_path), ckpt_step=1000)
-        _check_ckpt_step_resumable(cfg, has_local_checkpoint=False)
+        _check_resumable(cfg, has_local_checkpoint=False)
 
     def test_ckpt_step_with_an_empty_load_refuses_to_start(self, tmp_path):
         cfg = CheckpointConfig(load=str(tmp_path), ckpt_step=1000)
         with pytest.raises(FileNotFoundError, match="ckpt_step=1000"):
-            _check_ckpt_step_resumable(cfg, has_local_checkpoint=False)
+            _check_resumable(cfg, has_local_checkpoint=False)
 
     def test_pretrained_weights_do_not_stand_in_for_the_named_resume(self, tmp_path):
         pretrained = tmp_path / "pretrained"
@@ -65,11 +65,40 @@ class TestCheckCkptStepResumable:
             load=str(empty_load), ckpt_step=1000, pretrained_checkpoint=self._with_tracker(pretrained)
         )
         with pytest.raises(FileNotFoundError, match="holds no checkpoint"):
-            _check_ckpt_step_resumable(cfg, has_local_checkpoint=False)
+            _check_resumable(cfg, has_local_checkpoint=False)
 
     def test_a_local_checkpoint_satisfies_the_resume(self, tmp_path):
         cfg = CheckpointConfig(load=str(tmp_path), ckpt_step=1000)
-        _check_ckpt_step_resumable(cfg, has_local_checkpoint=True)
+        _check_resumable(cfg, has_local_checkpoint=True)
+
+    @pytest.mark.parametrize("folder", ["empty", "absent"])
+    def test_exit_on_missing_checkpoint_with_no_checkpoint_in_load_refuses_to_start(self, tmp_path, folder):
+        load = tmp_path / "save"
+        if folder == "empty":
+            load.mkdir()
+        cfg = CheckpointConfig(load=str(load), exit_on_missing_checkpoint=True)
+        with pytest.raises(FileNotFoundError, match="exit_on_missing_checkpoint is true") as refused:
+            _check_resumable(cfg, has_local_checkpoint=False)
+        assert str(load) in str(refused.value) and "holds no checkpoint" in str(refused.value)
+
+    def test_exit_on_missing_checkpoint_with_the_checkpoint_present_passes(self, tmp_path):
+        cfg = CheckpointConfig(load=self._with_tracker(tmp_path), exit_on_missing_checkpoint=True)
+        _check_resumable(cfg, has_local_checkpoint=False)
+
+    def test_pretrained_weights_do_not_stand_in_for_the_resume_that_exit_on_missing_checkpoint_asks(self, tmp_path):
+        pretrained = tmp_path / "pretrained"
+        pretrained.mkdir()
+        empty_load = tmp_path / "load"
+        empty_load.mkdir()
+        cfg = CheckpointConfig(
+            load=str(empty_load), exit_on_missing_checkpoint=True, pretrained_checkpoint=self._with_tracker(pretrained)
+        )
+        with pytest.raises(FileNotFoundError, match="exit_on_missing_checkpoint is true"):
+            _check_resumable(cfg, has_local_checkpoint=False)
+
+    def test_a_local_checkpoint_satisfies_exit_on_missing_checkpoint(self, tmp_path):
+        cfg = CheckpointConfig(load=str(tmp_path), exit_on_missing_checkpoint=True)
+        _check_resumable(cfg, has_local_checkpoint=True)
 
 
 def _make_transformer(**kwargs):

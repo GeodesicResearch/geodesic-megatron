@@ -61,8 +61,7 @@ card's loss column read.
 - **Links 2+** resume the previous link's **full state**: weights, Adam moments and step.
   - `checkpoint.ckpt_step` names that save. Setup refuses to start a run whose `ckpt_step` names a
     checkpoint the load directory does not hold. Without that, a link whose predecessor never saved
-    would start from random weights with no error. Setup only loads when a checkpoint exists, and
-    `exit_on_missing_checkpoint` is never reached and exits 0 besides.
+    would start from random weights with no error. Setup only loads when a checkpoint exists.
   - `checkpoint.reset_data_position` makes the resumed link read a fresh dataset, sized to its own
     iterations, from its first sample. A plain resume would continue inside the previous link's
     dataset. The step, the consumed-sample counters, the optimizer and the scheduler carry over.

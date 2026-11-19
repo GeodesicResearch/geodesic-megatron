@@ -54,7 +54,7 @@ Asynchronous saving allows training to continue while checkpoint data is persist
 | `load_rng` | `bool` | `True` | Whether to load random number generator state from checkpoint |
 | `load_main_params_from_ckpt` | `bool` | `False` | Load main parameters from checkpoint (use with `load_optim=False`) |
 | `ckpt_step` | `Optional[int]` | `None` | Specific checkpoint iteration to load (overrides latest from tracker) |
-| `exit_on_missing_checkpoint` | `bool` | `False` | Exit if specified checkpoint is not found instead of random initialization |
+| `exit_on_missing_checkpoint` | `bool` | `False` | Raise `FileNotFoundError` (a non-zero exit status) when `load` is set and holds no checkpoint, instead of initialising from random or from `pretrained_checkpoint` |
 | `reset_data_position` | `bool` | `False` | On resume, read a fresh training dataset sized to the remaining iterations from its first sample, instead of continuing inside the previous run's dataset (see below) |
 | `dist_ckpt_strictness` | `Literal[...]` | `"assume_ok_unexpected"` | Handling of key mismatches during distributed checkpoint load |
 

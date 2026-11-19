@@ -60,6 +60,7 @@ from megatron.bridge.training.token_masking.resolution import resolve_for_run
 from megatron.bridge.training.token_masking.resolution import wandb_summary as token_masking_wandb_summary
 from megatron.bridge.training.token_masking.validation import build_masked_validation
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+from megatron.bridge.training.utils.checkpoint_utils import check_exit_on_missing_checkpoint
 from megatron.bridge.training.utils.log_utils import append_to_progress_log, barrier_and_log, setup_logging
 from megatron.bridge.training.utils.parallelism_utils import record_parallelism_if_resolved
 from megatron.bridge.training.utils.wandb_utils import record_wandb_summary
@@ -94,27 +95,26 @@ class SetupOutput(NamedTuple):
     pg_collection: ProcessGroupCollection
 
 
-def _check_ckpt_step_resumable(checkpoint_cfg: CheckpointConfig, has_local_checkpoint: bool) -> None:
-    """Refuse to start a run whose ``ckpt_step`` names a checkpoint that ``load`` does not hold.
+def _check_resumable(checkpoint_cfg: CheckpointConfig, has_local_checkpoint: bool) -> None:
+    """Refuse to start a run that must resume a checkpoint that ``load`` does not hold.
 
-    Setup loads a checkpoint only when ``load`` (or ``pretrained_checkpoint``) holds one, so without
-    this check a run asked to resume a specific iteration would start instead from
-    ``pretrained_checkpoint`` weights or from a random initialisation, with no error.
+    A run must resume when ``ckpt_step`` names the checkpoint to resume or ``exit_on_missing_checkpoint`` is true.
 
     Args:
         checkpoint_cfg: The checkpoint configuration.
         has_local_checkpoint: Whether a local (non-persistent) checkpoint is available to resume.
 
     Raises:
-        FileNotFoundError: If ``ckpt_step`` is set but ``load`` holds no checkpoint.
+        FileNotFoundError: If ``ckpt_step`` is set or ``exit_on_missing_checkpoint`` is true, and ``load``
+            holds no checkpoint.
     """
-    if checkpoint_cfg.ckpt_step is None or has_local_checkpoint:
-        return
-    if not checkpoint_exists(checkpoint_cfg.load):
+    checkpoint_present = has_local_checkpoint or checkpoint_exists(checkpoint_cfg.load)
+    if checkpoint_cfg.ckpt_step is not None and not checkpoint_present:
         raise FileNotFoundError(
             f"checkpoint.ckpt_step={checkpoint_cfg.ckpt_step} names a checkpoint to resume, but "
             f"checkpoint.load ({checkpoint_cfg.load}) holds no checkpoint"
         )
+    check_exit_on_missing_checkpoint(checkpoint_cfg, checkpoint_cfg.load, checkpoint_present)
 
 
 def setup(
@@ -322,7 +322,7 @@ def setup(
     has_local_checkpoint = (
         "local_checkpoint_manager" in _ckpt_ctx and _ckpt_ctx["local_checkpoint_manager"].find_latest() != -1
     )
-    _check_ckpt_step_resumable(cfg.checkpoint, has_local_checkpoint)
+    _check_resumable(cfg.checkpoint, has_local_checkpoint)
 
     # For PEFT, the pretrained checkpoint is loaded in the pre-wrap hook
     if cfg.peft is not None:

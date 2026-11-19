@@ -1245,6 +1245,21 @@ class TestLoadBaseCheckpoint:
         assert result == (None, "", False, None)
 
     @patch("megatron.bridge.training.checkpointing._get_non_persistent_iteration")
+    @patch("megatron.bridge.training.checkpointing.file_exists")
+    def test_load_base_checkpoint_no_checkpoint_raises_when_the_config_asks(
+        self, mock_file_exists, mock_get_np_iter, base_config, mock_pg_collection
+    ):
+        """A load that finds no checkpoint raises FileNotFoundError, a non-zero exit, when the config asks for it."""
+        mock_get_np_iter.return_value = -1
+        mock_file_exists.return_value = False
+        base_config.exit_on_missing_checkpoint = True
+
+        with pytest.raises(
+            FileNotFoundError, match="exit_on_missing_checkpoint is true.*/fake/dir holds no checkpoint"
+        ):
+            _load_base_checkpoint("/fake/dir", base_config, pg_collection=mock_pg_collection)
+
+    @patch("megatron.bridge.training.checkpointing._get_non_persistent_iteration")
     @patch("megatron.bridge.training.checkpointing.read_train_state")
     @patch("megatron.bridge.training.checkpointing.dist_checkpointing")
     @patch("megatron.bridge.training.checkpointing.file_exists")

@@ -22,10 +22,12 @@ from unittest.mock import mock_open, patch
 import pytest
 import yaml
 
+from megatron.bridge.training.config import CheckpointConfig
 from megatron.bridge.training.utils.checkpoint_utils import (
     CONFIG_FILE,
     TRACKER_PREFIX,
     TRAIN_STATE_FILE,
+    check_exit_on_missing_checkpoint,
     checkpoint_exists,
     get_checkpoint_run_config_filename,
     get_checkpoint_train_state_filename,
@@ -831,3 +833,25 @@ class TestCheckpointUtils:
         (ckpt_dir / f"{TRACKER_PREFIX}_{TRAIN_STATE_FILE}").touch()
 
         assert checkpoint_exists(str(ckpt_dir)) is True
+
+
+class TestCheckExitOnMissingCheckpoint:
+    """``exit_on_missing_checkpoint`` makes a missing checkpoint an error that names the setting and the folder."""
+
+    def test_a_missing_checkpoint_raises_naming_the_setting_and_the_folder(self, tmp_path):
+        cfg = CheckpointConfig(exit_on_missing_checkpoint=True)
+        with pytest.raises(FileNotFoundError, match="exit_on_missing_checkpoint is true") as refused:
+            check_exit_on_missing_checkpoint(cfg, str(tmp_path), checkpoint_present=False)
+        assert str(tmp_path) in str(refused.value) and "holds no checkpoint" in str(refused.value)
+
+    def test_a_present_checkpoint_passes(self, tmp_path):
+        cfg = CheckpointConfig(exit_on_missing_checkpoint=True)
+        check_exit_on_missing_checkpoint(cfg, str(tmp_path), checkpoint_present=True)
+
+    def test_the_setting_off_places_no_requirement(self, tmp_path):
+        cfg = CheckpointConfig(exit_on_missing_checkpoint=False)
+        check_exit_on_missing_checkpoint(cfg, str(tmp_path), checkpoint_present=False)
+
+    def test_no_load_folder_means_nothing_is_missing(self):
+        cfg = CheckpointConfig(exit_on_missing_checkpoint=True)
+        check_exit_on_missing_checkpoint(cfg, None, checkpoint_present=False)
