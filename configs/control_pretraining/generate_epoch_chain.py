@@ -20,13 +20,8 @@ union fills):
 
 A link's blend weights are whole-sample counts that sum to E * B: a treatment's union draws exactly N1
 (one pass) and the parent's corpora share the rest in proportion to their midtraining weights, a
-control's corpora share all of it, each rounded by largest remainder. Megatron sizes a blend as the
-sum over its corpora of ceil(size * normalized weight) in float64, and for about one whole count in
-twenty that product lands a hair above the count, so each such count then trades one sample with
-another corpus until every count is a target Megatron builds exactly. The built blend is then exactly
-the link's size and the link's sampler reads every sample of it once. Fractional weights would round
-every target up and build a few surplus samples, which the sampler would leave unread at random,
-union samples among them.
+control's corpora share all of it, each rounded by largest remainder and settled on counts that Megatron
+builds exactly (``scripts/data/blend_samples.py``), so the link's sampler reads every sample of the blend once.
 
 Link k ends at iteration k * E and saves there. Everything else in a link is the family's posture config
 unchanged: the config the links train as, which is the parent's midtraining config itself unless the parent
@@ -54,6 +49,7 @@ import yaml
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from corpora_table import (  # noqa: E402
     DOCS_PENDING,
     REPO_ROOT,
@@ -62,6 +58,7 @@ from corpora_table import (  # noqa: E402
     prepare_config_scalars,
     read_corpora_table,
 )
+from scripts.data.blend_samples import apportion, megatron_target, settle_on_megatron_targets  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -86,69 +83,6 @@ def chain_lengths(tokens_plus_eod: int, seq_length: int, global_batch_size: int,
         raise ValueError(f"a union of {tokens_plus_eod} tokens holds no {seq_length}-token sample")
     iterations = math.ceil(samples / (share * global_batch_size))
     return ChainLengths(samples, iterations)
-
-
-def apportion(total: int, weights: list) -> list[int]:
-    """Split ``total`` into whole parts proportional to ``weights``, by largest remainder.
-
-    Weights are read as the decimals they are written as, so the split is exact; equal remainders go to
-    the earlier weight. A part that rounds to zero is refused, because Megatron cannot build a corpus
-    of no samples.
-    """
-    exact = [Fraction(str(weight)) for weight in weights]
-    quotas = [total * weight / sum(exact) for weight in exact]
-    parts = [math.floor(quota) for quota in quotas]
-    by_remainder = sorted(range(len(quotas)), key=lambda i: (parts[i] - quotas[i], i))
-    for i in by_remainder[: total - sum(parts)]:
-        parts[i] += 1
-    if 0 in parts:
-        raise ValueError(f"{total} samples cannot give every one of weights {list(weights)} a sample")
-    return parts
-
-
-def megatron_target(samples: int, link_samples: int) -> int:
-    """The samples Megatron builds for a corpus weighted ``samples`` in a blend weighted in samples summing
-    to ``link_samples``.
-
-    Its builder targets ceil(size * weight / sum of weights) per corpus (``normalize`` then
-    ``_get_size_per_split_per_dataset``) in float64. Whole-number weights sum exactly, so this is the
-    same two correctly rounded operations; about one count in twenty comes out one above itself.
-    """
-    return math.ceil(link_samples * (samples / link_samples))
-
-
-def settle_on_megatron_targets(counts: list[int], link_samples: int) -> list[int]:
-    """Trade single samples between corpora until Megatron's target for every count is the count itself.
-
-    A count Megatron would round up trades one sample with another corpus, in whichever direction
-    leaves both exact, so the total is unchanged and no count moves more than one sample.
-    """
-    settled = list(counts)
-    moved: set[int] = set()
-
-    def exact(samples: int) -> bool:
-        return megatron_target(samples, link_samples) == samples
-
-    for i in range(len(settled)):
-        if exact(settled[i]):
-            continue
-        trade = next(
-            (
-                (delta, j)
-                for delta in (-1, 1)
-                if exact(settled[i] + delta)
-                for j in range(len(settled))
-                if j != i and j not in moved and exact(settled[j]) and exact(settled[j] - delta)
-            ),
-            None,
-        )
-        if trade is None:
-            raise ValueError(f"no single-sample trade makes {settled[i]} of {link_samples} samples exact")
-        delta, j = trade
-        settled[i] += delta
-        settled[j] -= delta
-        moved.update((i, j))
-    return settled
 
 
 def link_blend(

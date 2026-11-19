@@ -34,6 +34,7 @@ import pytest
 import yaml
 from megatron.core.datasets.blended_megatron_dataset_builder import _get_size_per_split_per_dataset
 from megatron.core.datasets.utils import get_blend_from_list, normalize
+from scripts.data.blend_samples import megatron_target
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
 from tests.unit_tests.campaign_config import (
@@ -528,65 +529,13 @@ def test_megatron_builds_every_link_blend_to_exactly_the_samples_the_link_reads(
     assert sum(targets) == _link_samples(arm)
 
 
-@pytest.mark.parametrize(
-    "total,weights,parts",
-    [
-        (10, ["0.5", "0.25", "0.25"], [5, 3, 2]),  # quotas 5, 2.5, 2.5: the tie goes to the earlier weight
-        (5, ["1", "1"], [3, 2]),
-        # quotas 2.335893, 1.334802, 3.329305: the one remaining sample goes to the largest remainder
-        (7, ["0.333699", "0.190686", "0.475615"], [3, 1, 3]),
-    ],
-)
-def test_apportion_splits_exactly_by_largest_remainder(total, weights, parts):
-    assert chain_gen.apportion(total, weights) == parts
-
-
 LINK_SIZE = 174 * 256
-
-
-def _megatron_targets(counts: list[int]) -> list[int]:
-    """Megatron's own per-corpus targets for a blend weighted in these whole samples."""
-    (targets,) = zip(*_get_size_per_split_per_dataset(normalize([float(c) for c in counts]), [sum(counts)]))
-    return list(targets)
-
-
-# Counts at LINK_SIZE that Megatron rounds up (7 of them) and that it builds exactly (7 others).
-OVERSHOOTING = [c for c in range(1, 2000) if chain_gen.megatron_target(c, LINK_SIZE) != c][:7]
-EXACT = [c for c in range(1, 2000) if chain_gen.megatron_target(c, LINK_SIZE) == c][:7]
-
-
-@pytest.mark.parametrize("count", OVERSHOOTING + EXACT)
-def test_megatron_target_is_the_count_megatrons_own_sizing_builds(count):
-    assert chain_gen.megatron_target(count, LINK_SIZE) == _megatron_targets([count, LINK_SIZE - count])[0]
-
-
-def test_both_kinds_of_count_occur_at_a_real_link_size():
-    assert len(OVERSHOOTING) == len(EXACT) == 7
-
-
-def test_settling_makes_every_count_exact_and_moves_none_by_more_than_one():
-    counts = OVERSHOOTING + EXACT
-    counts.append(LINK_SIZE - sum(counts))
-    settled = chain_gen.settle_on_megatron_targets(counts, LINK_SIZE)
-    assert sum(settled) == LINK_SIZE
-    assert _megatron_targets(settled) == settled
-    assert all(abs(a - b) <= 1 for a, b in zip(settled, counts))
-
-
-def test_a_count_with_no_partner_to_trade_with_is_refused():
-    with pytest.raises(ValueError, match="no single-sample trade"):
-        chain_gen.settle_on_megatron_targets([OVERSHOOTING[0]], LINK_SIZE)
+OVERSHOOTING = next(count for count in range(1, 2000) if megatron_target(count, LINK_SIZE) != count)
 
 
 def test_a_union_megatron_would_round_up_is_refused():
-    union = OVERSHOOTING[0]
     with pytest.raises(ValueError, match="would not read exactly one pass"):
-        chain_gen.link_blend(["0.5", "/p/a", "0.5", "/p/b"], "/p/union", union, LINK_SIZE)
-
-
-def test_apportion_refuses_a_part_that_rounds_to_zero():
-    with pytest.raises(ValueError, match="cannot give every one"):
-        chain_gen.apportion(2, ["0.9", "0.05", "0.05"])
+        chain_gen.link_blend(["0.5", "/p/a", "0.5", "/p/b"], "/p/union", OVERSHOOTING, LINK_SIZE)
 
 
 def test_each_union_is_its_own_corpus_under_the_campaign_layout():
