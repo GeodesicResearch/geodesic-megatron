@@ -32,7 +32,8 @@ the job's own ``StdOut``), runs ``scripts/telemetry/run_watch.py`` on them insid
 - **alert** (any other exit 2 or failure to evaluate): the record and the printed line say so, and the guard keeps
   going; a tick that could not be evaluated is never read as a stop;
 - the guard exits 0 once the watch has checked the final iteration, sacct shows every started segment in a final
-  state and squeue lists no live job of the stage (an empty squeue reply alone does not end it). When two ticks in a
+  state and squeue lists no live job of the stage (an empty squeue reply alone does not end it), and exits 2 with
+  DONE WITH ALERT in the record when that last tick alerted. When two ticks in a
   row find no live job but the final iteration unchecked (a crash or a TIMEOUT that logged no stop condition), it
   records ENDED EARLY and exits 6; one empty squeue reply between segments does not end it.
 
@@ -580,18 +581,16 @@ def no_job_live(config: GuardConfig, started: List[Job], run: Runner) -> bool:
 def stage_end(
     config: GuardConfig, state: GuardState, result: WatchResult, started: List[Job], run: Runner
 ) -> Optional[str]:
-    """How the stage ended, if no job of it is live: "done" when the watch ran clean and checked ``final_iteration``,
-    "early" when the watch ran but has not checked it (a crash or a TIMEOUT that logged no stop condition, or one
-    empty squeue reply between segments), and None otherwise or without ``final_iteration``. Runs squeue at most once,
-    and only when every started segment is final; a squeue that cannot be read is recorded as END NOT CONFIRMED."""
+    """How the stage ended, if no job of it is live: "done" when the watch ran and has checked ``final_iteration``
+    (its last word may be an alert; a stop or hold never reaches here), "early" when the watch ran but has not checked
+    it (a crash or a TIMEOUT that logged no stop condition, or one empty squeue reply between segments), and None
+    otherwise or without ``final_iteration``. Runs squeue at most once, and only when every started segment is final;
+    a squeue that cannot be read is recorded as END NOT CONFIRMED."""
     if config.final_iteration is None or not result.ran:
-        return None
-    done = checked_final(config, state)
-    if done and result.status != 0:
         return None
     if not no_job_live(config, started, run):
         return None
-    return "done" if done else "early"
+    return "done" if checked_final(config, state) else "early"
 
 
 def dump_stacks(job_id: int, sweep: str, run: Runner) -> str:
@@ -695,6 +694,8 @@ def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> 
     return "ended_early", state._replace(quiet_ticks=quiet), False
 
 
+# A tick that alerted: the exit of a --once tick that alerts, and of a stage that ended at its final iteration on one.
+ALERTED = 2
 # The stage ended before its final iteration; there is nothing left to guard or cancel.
 ENDED_EARLY = 6
 # Ticks in a row that must find no live job before the guard ends with ENDED_EARLY.
@@ -732,11 +733,19 @@ def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
             raise
         if action in EXIT_STATUS:
             return EXIT_STATUS[action]
+        if done and action == "alert":
+            _record(
+                config,
+                "DONE WITH ALERT: the watch checked iteration {} and no job is live, but its last tick alerted".format(
+                    state.last_iteration
+                ),
+            )
+            return ALERTED
         if done:
             _record(config, "DONE: the watch checked iteration {} and no job is live".format(state.last_iteration))
             return 0
         if once:
-            return 2 if action == "alert" else 0
+            return ALERTED if action == "alert" else 0
         time.sleep(config.interval_seconds)
 
 

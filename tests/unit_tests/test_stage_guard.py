@@ -36,7 +36,7 @@ from scripts.telemetry.code_revision import code_revision
 from scripts.training import stage_guard as sg
 
 from tests.unit_tests.test_loss_parity import write_run
-from tests.unit_tests.test_run_watch import gated, rejected_result_line  # noqa: F401 - gated is a fixture
+from tests.unit_tests.test_run_watch import gated, rejected_result_line, write_watch  # noqa: F401 - gated is a fixture
 from tests.unit_tests.training_log_fixture import ITERATION_STAMP_RE
 
 
@@ -431,13 +431,50 @@ def test_the_stage_is_done_once_its_final_iteration_is_checked_and_no_job_is_liv
     assert (action, state.last_iteration, done) == ("continue", 60, True)
 
 
+@pytest.fixture()
+def bounded_sleep(monkeypatch):
+    """Fail a test whose guard loop does not end: the guard's sleep between ticks raises after five calls. The sleep is
+    the wall clock, which a unit test must not wait on, so it is replaced; a guard that should have ended then fails
+    the test at once instead of looping until the job's time limit."""
+    calls = []
+
+    def sleep(seconds):
+        calls.append(seconds)
+        if len(calls) > 5:
+            raise AssertionError("the guard kept ticking after the stage had ended")
+
+    monkeypatch.setattr(sg.time, "sleep", sleep)
+    return calls
+
+
+def test_a_stage_that_finishes_on_an_alert_ends_the_guard_with_the_alert_status(
+    tmp_path, cluster_command, bounded_sleep
+):
+    """Every job is COMPLETED and the watch checked the final iteration, but its last tick alerted (a stop check it
+    could not evaluate: a launch-settings file the watch cannot read, and no hold): the stage is over, so the guard
+    ends with exit 2 and says so, rather than ticking until killed."""
+    segment(tmp_path, 10)
+    settings = tmp_path / "launch_settings.env"
+    settings.write_text("NOT A SETTING\n")
+    spec = write_watch(tmp_path, {"stop": {"launch_settings": str(settings)}})
+    config = sg.load_guard_config(write_config(tmp_path, watch=str(spec), hold=None, interval_seconds=0))
+    cluster_command["cluster"] = FakeCluster([sacct_line(10, "COMPLETED", tmp_path)])
+
+    assert sg.main(["--config", str(tmp_path / "guard.yaml")]) == sg.ALERTED
+    lines = record_lines(config)
+    assert any("ALERT: watch exit 2 through iteration 60" in line for line in lines)
+    assert any("DONE WITH ALERT" in line and "iteration 60" in line for line in lines)
+
+
 def stopped_at_iteration_20(tmp_path: Path, jobs: list[str], **overrides) -> tuple[sg.GuardConfig, FakeCluster]:
     """The guard config and a cluster whose segment 10 logged only through iteration 20 of 60, with sacct ``jobs``."""
     segment(tmp_path, 10, drop=set(range(21, 61)))
     return sg.load_guard_config(write_config(tmp_path, **overrides)), FakeCluster(jobs)
 
 
-def test_a_stage_that_ends_before_its_final_iteration_ends_the_guard_with_its_own_status(tmp_path, cluster_command):
+def test_a_stage_that_ends_before_its_final_iteration_ends_the_guard_with_its_own_status(
+    tmp_path, cluster_command, bounded_sleep
+):
     """Every job of the stage is final and none is live on two ticks in a row, but the watch checked only through
     iteration 20 of 60 (a node failure or a TIMEOUT that logged no stop condition): the guard says so and ends,
     rather than ticking until killed. main sleeps for the config's interval between the two ticks, here none."""
