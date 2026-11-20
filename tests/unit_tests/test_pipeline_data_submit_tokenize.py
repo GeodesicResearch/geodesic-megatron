@@ -1,4 +1,4 @@
-"""Tests for pipeline_data_submit.sbatch's `tokenize` mode (JSONL -> Megatron .bin/.idx).
+"""Tests for pipeline_data_submit.sbatch's `tokenize` mode (JSONL -> Megatron .bin/.idx) and its pack-only mode.
 
 Runs the real sbatch script as a subprocess with a stub container runner and env config
 (via GEODESIC_REPO_DIR) — the Apptainer container and SLURM are the genuinely-untestable
@@ -312,3 +312,35 @@ def test_a_partition_count_that_is_not_a_positive_integer_is_refused_before_anyt
     assert result.returncode != 0
     assert f"partitions must be a positive integer, got '{partitions}'" in result.stderr
     assert _calls(result, "preprocess_data.py") == []
+
+
+def _run_pack(env, args):
+    """Run the sbatch in its pack-only mode, the one that has no mode word."""
+    return subprocess.run(
+        ["bash", os.path.join(REPO_ROOT, "pipeline_data_submit.sbatch"), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
+
+
+def test_pack_passes_the_tokenizer_workers_to_the_packer(executing_env):
+    dataset_root, env, _ = executing_env
+    result = _run_pack(env, [str(dataset_root), TOKENIZER_NAME, "4096", "1", "32"])
+    assert result.returncode == 0, result.stderr
+    (call,) = _calls(result, "pack_sft_dataset.py")
+    assert call.endswith(
+        f"--dataset-root {dataset_root} --tokenizer {TOKENIZER_NAME} --seq-length 4096 --pad-seq-to-mult 1"
+        " --num-tokenizer-workers 32"
+    )
+    assert "Packing Complete" in result.stdout
+
+
+def test_pack_without_workers_leaves_the_packers_default(executing_env):
+    dataset_root, env, _ = executing_env
+    result = _run_pack(env, [str(dataset_root), TOKENIZER_NAME, "4096", "1"])
+    assert result.returncode == 0, result.stderr
+    (call,) = _calls(result, "pack_sft_dataset.py")
+    assert call.endswith("--seq-length 4096 --pad-seq-to-mult 1")
+    assert "--num-tokenizer-workers" not in call

@@ -82,5 +82,5 @@ def test_the_conversion_runs_in_the_container_and_one_packing_job_follows_for_ea
     for index, call in enumerate(packs):
         root = f"{config['output_root']}/{ROOT_FOLDER.format(index=index)}"
         assert "--dependency=afterok:1001" in call and f"--job-name=sft-pack-{index} " in call
-        assert call.endswith(f"pipeline_data_submit.sbatch {root} {tokenizer} 4096 1")
+        assert call.endswith(f"pipeline_data_submit.sbatch {root} {tokenizer} 4096 1 32")
     assert "conversion job 1001" in printed and f"packing job {1001 + config['shards']}" in printed

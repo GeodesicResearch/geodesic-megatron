@@ -17,10 +17,11 @@ Dataset download, tokenization, packing and blend coverage.
 # Prepare dataset (download + tokenize + pack)
 python pipeline_data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
 
-# Offline packing only (via SLURM)
+# Offline packing only (via SLURM); the optional last argument is the number of tokenizer worker
+# processes, and the packer tokenizes in one process without it
 isambard_sbatch pipeline_data_submit.sbatch \
   /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
-  nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 8192 1
+  nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 8192 1 32
 
 # Pretraining-format corpus (.bin/.idx): prepare (JSONL, no packing) then tokenize;
 # the tokenize job appends an exact token count read from the .idx. `--config` supplies what

@@ -13,7 +13,8 @@
 # Three modes:
 #
 #   1. Pack only (default — pre-exported dataset root, SFT/chat format):
-#      isambard_sbatch pipeline_data_submit.sbatch <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]
+#      isambard_sbatch pipeline_data_submit.sbatch <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult] [tokenizer-workers]
+#      Without tokenizer-workers the packer tokenizes in one process (its own default).
 #
 #   2. Full prepare (download + tokenize-count + pack via pipeline_data_prepare.py):
 #      isambard_sbatch pipeline_data_submit.sbatch prepare <pipeline_data_prepare.py args...>
@@ -79,7 +80,7 @@
 # TRAIN_REPO_DIR overrides the repo checkout (e.g. a worktree).
 # ==============================================================================
 
-MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <args...> | tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers] [partitions] | <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]}"
+MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <args...> | tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers] [partitions] | <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult] [tokenizer-workers]}"
 
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 # A REPO_DIR without the libraries cannot be reported by them, so this line, the same in every launcher, does it.
@@ -223,9 +224,10 @@ $(quote_args --note "slurm_job_id=${SLURM_JOB_ID:-}")")"
 fi
 
 DATASET_ROOT="$MODE_OR_ROOT"
-TOKENIZER="${2:?Usage: isambard_sbatch pipeline_data_submit.sbatch <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]}"
+TOKENIZER="${2:?Usage: isambard_sbatch pipeline_data_submit.sbatch <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult] [tokenizer-workers]}"
 SEQ_LENGTH="${3:-8192}"
 PAD_SEQ_TO_MULT="${4:-1}"
+TOKENIZER_WORKERS="${5:-}"
 
 echo "===== Offline SFT Dataset Packing ====="
 echo "Job ID:         $SLURM_JOB_ID"
@@ -238,6 +240,10 @@ echo "Env:            $CONTAINER_SIF"
 echo "========================================"
 
 PACK_ARGS=(--dataset-root "$DATASET_ROOT" --tokenizer "$TOKENIZER" --seq-length "$SEQ_LENGTH" --pad-seq-to-mult "$PAD_SEQ_TO_MULT")
+if [ -n "$TOKENIZER_WORKERS" ]; then
+    echo "Tokenizer workers: $TOKENIZER_WORKERS"
+    PACK_ARGS+=(--num-tokenizer-workers "$TOKENIZER_WORKERS")
+fi
 "${RUNNER[@]}" "$(container_payload "python scripts/data/pack_sft_dataset.py$(quote_args "${PACK_ARGS[@]}")")"
 rc=$?
 
