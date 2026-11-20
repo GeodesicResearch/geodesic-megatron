@@ -74,6 +74,19 @@ class TestFormatRecord:
         assert out["messages"][0]["name"] == "agent_a"
         assert "content" not in out["messages"][0]  # empty content dropped
 
+    def test_chat_keeps_an_empty_field_named_in_keep_empty_and_still_drops_none_and_the_others(self):
+        example = {
+            "messages": [
+                {"role": "system", "content": "", "prefill": ""},
+                {"role": "user", "content": None},
+            ]
+        }
+        out = data_records.format_record(example, "messages", "chat", keep_empty=("content",))
+        assert out == {"messages": [{"role": "system", "content": ""}, {"role": "user"}]}
+        assert data_records.format_record(example, "messages", "chat") == {
+            "messages": [{"role": "system"}, {"role": "user"}]
+        }
+
     def test_chat_ignores_unknown_fields(self):
         example = {
             "messages": [

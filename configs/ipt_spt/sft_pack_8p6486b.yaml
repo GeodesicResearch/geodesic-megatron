@@ -1,0 +1,13 @@
+# The conversion of the SFT set warm-start-sft-instruct-8.65B into the JSONL roots that the packer reads.
+# scripts/data/arrow_chat_to_jsonl.py reads this file; sft_pack_8p6486b_submit.sh submits the conversion and the packing jobs.
+# The rows and the tokens are those of the builder's record final_8p6486b.json (sha256 0440facda6df4f2da5694b126dd07c0a8dced8b060e0cae27a109df9e92e5e76).
+
+arrow_dir: /projects/a5k/public/pretraining-science/data_builds/sft_instruct/full_b/0307616aca099e391f2fb5085a697c98de24185424cfad208abddc669a35bb49/final/train
+messages_key: messages
+token_key: n_tokens
+output_root: /projects/a5k/public/pretraining-science/megatron/sft_packs/warm_start_8p6486b
+# Eight roots of about 1.1 B tokens each, so that the packer holds one root in memory at a time.
+shards: 8
+expected:
+  rows: 12700441
+  tokens: 8648582571

@@ -5,19 +5,20 @@
 Catalogue:
     TEXTS: the six rows that the tests tokenise.
     SHARDS: those rows in three shards.
-    write_arrow_dataset: a saved Arrow folder of the given shards.
+    write_arrow_dataset: a saved Arrow folder of the given shards of texts.
     write_config: a config file of the tool for a folder, a tokenizer and the expected totals.
     totals_of: the documents and tokens of a corpus.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pyarrow as pa
 import yaml
 from scripts.data import tokenize_arrow
+
+from tests.unit_tests.arrow_folder_fixtures import write_arrow_folder
 
 
 TEXTS = [
@@ -32,20 +33,13 @@ SHARDS = [TEXTS[:2], TEXTS[2:3], TEXTS[3:]]
 
 
 def write_arrow_dataset(folder: Path, shards: list[list[str]], *, listed_order: list[int] | None = None) -> Path:
-    """A saved Arrow folder: one ``data-*.arrow`` stream file for each shard, a ``state.json`` that lists them (in
-    ``listed_order`` when given), and a cache file that the state does not list and whose rows must never be read."""
-    folder.mkdir(parents=True)
-    names = [f"data-{index:05d}-of-{len(shards):05d}.arrow" for index in range(len(shards))]
+    """A saved Arrow folder of text rows: one shard for each list of texts, with a ``text`` and an ``n_tokens`` column."""
     schema = pa.schema([("text", pa.string()), ("n_tokens", pa.int64())])
-    for name, texts in zip(names, shards):
-        with pa.OSFile(str(folder / name), "wb") as sink, pa.ipc.new_stream(sink, schema) as writer:
-            writer.write_table(pa.table({"text": texts, "n_tokens": [len(t.split()) for t in texts]}, schema=schema))
-    with pa.OSFile(str(folder / "cache-0123456789abcdef.arrow"), "wb") as sink:
-        with pa.ipc.new_stream(sink, schema) as writer:
-            writer.write_table(pa.table({"text": ["never read"], "n_tokens": [2]}, schema=schema))
-    order = listed_order if listed_order is not None else list(range(len(shards)))
-    (folder / "state.json").write_text(json.dumps({"_data_files": [{"filename": names[i]} for i in order]}))
-    return folder
+    tables = [
+        pa.table({"text": texts, "n_tokens": [len(t.split()) for t in texts]}, schema=schema) for texts in shards
+    ]
+    cache_table = pa.table({"text": ["never read"], "n_tokens": [2]}, schema=schema)
+    return write_arrow_folder(folder, tables, cache_table, listed_order=listed_order)
 
 
 def write_config(path: Path, arrow_dir: Path, tokenizer: Path, *, rows: int, tokens: int) -> Path:

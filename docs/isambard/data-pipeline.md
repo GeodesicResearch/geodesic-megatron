@@ -57,6 +57,13 @@ corpus that the `tokenize` mode makes from the same rows as JSONL, without writi
 the corpus holds exactly the `expected` documents and tokens of the config. The config keys are in the module docstring.
 Run it as a one-node job (`isambard_sbatch --wrap` around `pipeline_env_exec.sh`).
 
+### Packing a saved Arrow chat dataset
+
+`scripts/data/pack_sft_dataset.py` reads only `<root>/training.jsonl`, so a chat dataset that a builder saved as an Arrow
+folder goes through `scripts/data/arrow_chat_to_jsonl.py --config <config.yaml>` first. It writes the rows as N roots, one
+for each packing job, and fails unless the rows and tokens equal the config's. The config keys are in the module docstring.
+`configs/ipt_spt/sft_pack_8p6486b_submit.sh` submits the conversion and the packing jobs of one set.
+
 ### Checking what a `.bin/.idx` blend actually reads
 
 `scripts/data/report_blend_coverage.py <config.yaml> --model <m> --mode cpt|pretrain --report-out <json>`

@@ -92,14 +92,18 @@ def detect_stream_column(ds, text_column=None):
 _CHAT_PASSTHROUGH_FIELDS = ("role", "content", "reasoning_content", "prefill", "tools", "tool_calls", "name")
 
 
-def format_record(example, text_column, format_type, keep_columns=()):
+def format_record(example, text_column, format_type, keep_columns=(), keep_empty=()):
     """Format a single example into the JSONL record for Megatron Bridge.
 
     For chat format, preserves message-level fields beyond role+content
     (reasoning_content, tool_calls, prefill, etc.) so the chat template can render
     them — omitting reasoning_content silently strips ALL think content from a
     reasoning mix (found 2026-06-11: pack shrank to 42% of n_tokens). Empty/None
-    fields are dropped to keep the JSONL minimal. The example-level `tools` column
+    fields are dropped to keep the JSONL minimal, except that a message field named in
+    ``keep_empty`` is kept when it is an empty string (None is still dropped). The chat
+    template leaves out the whole turn of a message that has no ``content``, so a
+    dataset that stores an empty ``content`` (an empty system message) passes
+    ``keep_empty=("content",)`` to keep the turn. The example-level `tools` column
     (tool schemas) is preserved alongside `messages` when present.
     Each of ``keep_columns`` is copied into the record under its own name (e.g. a per-row
     field a dataset kwarg reads, such as ``think_close_key``).
@@ -110,7 +114,7 @@ def format_record(example, text_column, format_type, keep_columns=()):
             kept = {}
             for k in _CHAT_PASSTHROUGH_FIELDS:
                 v = m.get(k)
-                if v is None or v == "":
+                if v is None or (v == "" and k not in keep_empty):
                     continue
                 kept[k] = v
             messages.append(kept)

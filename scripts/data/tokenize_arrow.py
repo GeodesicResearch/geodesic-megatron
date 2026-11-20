@@ -31,7 +31,6 @@ Catalogue:
     TokenizeArrowError: the corpus is not what the config expected, or a step failed.
     TokenizeArrowConfig: the config of one run.
     load_config: read and validate a config file.
-    arrow_shards: the data files of a saved Arrow folder, in order.
     feed_rows: write the rows of the shards as JSON lines to a stream.
     preprocess_command: the command of the standard tokenise route over one partition.
     tokenize_arrow: run the whole job and return its provenance.
@@ -56,15 +55,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
-import pyarrow as pa
 import yaml
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.data import count_idx_tokens  # noqa: E402
+from scripts.data.arrow_folder import arrow_rows, arrow_shards  # noqa: E402
 from scripts.data.prepare_revisions import split_tokenizer_reference, tokenizer_load_path  # noqa: E402
 from scripts.data.preprocess_flags import ENCODING_FLAGS, ENCODING_NOTES  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.mapping_values import require_int, require_string  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 
 
@@ -111,41 +111,19 @@ def load_config(path: Path) -> TokenizeArrowConfig:
     where = str(path)
     raw = require_keys(yaml.safe_load(path.read_text()), where, CONFIG_KEYS, error=TokenizeArrowError)
     expected = require_keys(raw["expected"], f"{where}: expected", EXPECTED_KEYS, error=TokenizeArrowError)
-    for name in ("text_key", "tokenizer", "arrow_dir", "output_prefix"):
-        if not isinstance(raw[name], str) or not raw[name]:
-            raise TokenizeArrowError(f"{where}: {name} must be a non-empty string, got {raw[name]!r}")
-    counts = {"workers": raw["workers"], "expected.rows": expected["rows"], "expected.tokens": expected["tokens"]}
-    for name, value in counts.items():
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise TokenizeArrowError(f"{where}: {name} must be a positive integer, got {value!r}")
+    strings = {
+        name: require_string(raw[name], f"{where}: {name}", error=TokenizeArrowError)
+        for name in ("arrow_dir", "text_key", "tokenizer", "output_prefix")
+    }
     return TokenizeArrowConfig(
-        arrow_dir=Path(raw["arrow_dir"]),
-        text_key=raw["text_key"],
-        tokenizer=raw["tokenizer"],
-        output_prefix=Path(raw["output_prefix"]),
-        workers=raw["workers"],
-        expected_rows=expected["rows"],
-        expected_tokens=expected["tokens"],
+        arrow_dir=Path(strings["arrow_dir"]),
+        text_key=strings["text_key"],
+        tokenizer=strings["tokenizer"],
+        output_prefix=Path(strings["output_prefix"]),
+        workers=require_int(raw["workers"], f"{where}: workers", 1, error=TokenizeArrowError),
+        expected_rows=require_int(expected["rows"], f"{where}: expected.rows", 1, error=TokenizeArrowError),
+        expected_tokens=require_int(expected["tokens"], f"{where}: expected.tokens", 1, error=TokenizeArrowError),
     )
-
-
-def arrow_shards(arrow_dir: Path) -> list[Path]:
-    """The data files of a saved Arrow folder, in the order its ``state.json`` lists them.
-
-    Raises:
-        TokenizeArrowError: the folder has no ``state.json``, lists no data file, or lists one that is missing. A
-            file in the folder that ``state.json`` does not list (a cache file) is not read.
-    """
-    state = arrow_dir / "state.json"
-    if not state.is_file():
-        raise TokenizeArrowError(f"{arrow_dir} has no state.json, so it is not a saved Arrow dataset")
-    shards = [arrow_dir / entry["filename"] for entry in json.loads(state.read_text()).get("_data_files", [])]
-    if not shards:
-        raise TokenizeArrowError(f"{state} lists no data file")
-    missing = [str(shard) for shard in shards if not shard.is_file()]
-    if missing:
-        raise TokenizeArrowError(f"{state} lists data files that are not on disk: {missing[:3]}")
-    return shards
 
 
 def feed_rows(shards: list[Path], text_key: str, stream: TextIO) -> int:
@@ -157,16 +135,9 @@ def feed_rows(shards: list[Path], text_key: str, stream: TextIO) -> int:
         TokenizeArrowError: a shard has no column ``text_key``.
     """
     rows = 0
-    for shard in shards:
-        with pa.memory_map(str(shard)) as mapped:
-            for batch in pa.ipc.open_stream(mapped):
-                if text_key not in batch.schema.names:
-                    raise TokenizeArrowError(
-                        f"{shard} has no column {text_key!r}; its columns are {batch.schema.names}"
-                    )
-                for text in batch.column(text_key).to_pylist():
-                    stream.write(json.dumps({text_key: text}, ensure_ascii=False) + "\n")
-                    rows += 1
+    for (text,) in arrow_rows(shards, [text_key], error=TokenizeArrowError):
+        stream.write(json.dumps({text_key: text}, ensure_ascii=False) + "\n")
+        rows += 1
     return rows
 
 
@@ -231,7 +202,7 @@ def tokenize_arrow(config: TokenizeArrowConfig) -> dict[str, Any]:
             if it has not exited. After a complete feed it waits for the tokeniser without a limit, and Megatron-LM's
             tool waits on a partition process that died, so the Slurm time limit is what ends that case.
     """
-    shards = arrow_shards(config.arrow_dir)
+    shards = arrow_shards(config.arrow_dir, error=TokenizeArrowError)
     tokenizer_name, tokenizer_revision = split_tokenizer_reference(config.tokenizer)
     config.output_prefix.parent.mkdir(parents=True, exist_ok=True)
     pipe = config.output_prefix.with_name(f"{config.output_prefix.name}.rows.jsonl")

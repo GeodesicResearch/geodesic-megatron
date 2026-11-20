@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 from scripts.data import tokenize_arrow
+from scripts.data.arrow_folder import arrow_shards
 from scripts.data.preprocess_flags import ENCODING_NOTES
 from scripts.data.tokenize_arrow import TokenizeArrowError
 
@@ -96,30 +97,22 @@ class TestTheShards:
         self, tmp_path
     ):
         arrow = write_arrow_dataset(tmp_path / "arrow", [TEXTS[:3], TEXTS[3:]], listed_order=[1, 0])
-        shards = tokenize_arrow.arrow_shards(arrow)
+        shards = arrow_shards(arrow, error=TokenizeArrowError)
         assert [shard.name for shard in shards] == ["data-00001-of-00002.arrow", "data-00000-of-00002.arrow"]
         lines = io.StringIO()
         assert tokenize_arrow.feed_rows(shards, "text", lines) == len(TEXTS)
         assert [json.loads(line)["text"] for line in lines.getvalue().splitlines()] == TEXTS[3:] + TEXTS[:3]
 
-    def test_a_folder_without_a_state_is_not_a_saved_dataset(self, tmp_path):
+    def test_a_folder_that_is_not_a_saved_dataset_ends_the_job_with_its_own_error(self, tmp_path):
         (tmp_path / "plain").mkdir()
+        config_path = write_config(tmp_path / "config.yaml", tmp_path / "plain", tmp_path, rows=1, tokens=1)
         with pytest.raises(TokenizeArrowError, match="no state.json"):
-            tokenize_arrow.arrow_shards(tmp_path / "plain")
-
-    def test_a_state_that_lists_nothing_or_a_missing_file_is_refused(self, tmp_path):
-        arrow = write_arrow_dataset(tmp_path / "arrow", [TEXTS])
-        (arrow / "state.json").write_text(json.dumps({"_data_files": []}))
-        with pytest.raises(TokenizeArrowError, match="lists no data file"):
-            tokenize_arrow.arrow_shards(arrow)
-        (arrow / "state.json").write_text(json.dumps({"_data_files": [{"filename": "data-gone.arrow"}]}))
-        with pytest.raises(TokenizeArrowError, match="not on disk"):
-            tokenize_arrow.arrow_shards(arrow)
+            tokenize_arrow.tokenize_arrow(tokenize_arrow.load_config(config_path))
 
     def test_a_missing_text_column_is_refused_naming_it(self, tmp_path):
         arrow = write_arrow_dataset(tmp_path / "arrow", [TEXTS])
         with pytest.raises(TokenizeArrowError, match="has no column 'body'"):
-            tokenize_arrow.feed_rows(tokenize_arrow.arrow_shards(arrow), "body", io.StringIO())
+            tokenize_arrow.feed_rows(arrow_shards(arrow, error=TokenizeArrowError), "body", io.StringIO())
 
 
 class TestTheConfig:
@@ -127,10 +120,10 @@ class TestTheConfig:
         ("edit", "message"),
         [
             ({"surprise": 1}, "unknown keys \\['surprise'\\]"),
-            ({"workers": 0}, "workers must be a positive integer"),
-            ({"workers": True}, "workers must be a positive integer"),
+            ({"workers": 0}, "workers must be an integer >= 1"),
+            ({"workers": True}, "workers must be an integer >= 1"),
             ({"expected": {"rows": 1}}, "missing keys \\['tokens'\\]"),
-            ({"expected": {"rows": 1, "tokens": -4}}, "expected.tokens must be a positive integer"),
+            ({"expected": {"rows": 1, "tokens": -4}}, "expected.tokens must be an integer >= 1"),
             ({"text_key": ""}, "text_key must be a non-empty string"),
         ],
     )
