@@ -79,6 +79,7 @@ def restamped(text: str, first: datetime) -> str:
 
 
 def write_config(tmp_path: Path, **overrides) -> Path:
+    """Write the guard config with ``overrides`` applied; a key overridden with None is left out."""
     raw = {
         "watch": str(tmp_path / "watch.yaml"),
         "job_name": JOB_NAME,
@@ -91,7 +92,7 @@ def write_config(tmp_path: Path, **overrides) -> Path:
         **overrides,
     }
     path = tmp_path / "guard.yaml"
-    path.write_text(yaml.safe_dump(raw))
+    path.write_text(yaml.safe_dump({key: value for key, value in raw.items() if value is not None}))
     if "watch" not in overrides:
         (tmp_path / "watch.yaml").write_text(
             yaml.safe_dump({"stop": {"non_finite_grad_norm": True, "rejected_result": True}})
@@ -430,64 +431,48 @@ def test_the_stage_is_done_once_its_final_iteration_is_checked_and_no_job_is_liv
     assert (action, state.last_iteration, done) == ("continue", 60, True)
 
 
+def stopped_at_iteration_20(tmp_path: Path, jobs: list[str], **overrides) -> tuple[sg.GuardConfig, FakeCluster]:
+    """The guard config and a cluster whose segment 10 logged only through iteration 20 of 60, with sacct ``jobs``."""
+    segment(tmp_path, 10, drop=set(range(21, 61)))
+    return sg.load_guard_config(write_config(tmp_path, **overrides)), FakeCluster(jobs)
+
+
 def test_a_stage_that_ends_before_its_final_iteration_ends_the_guard_with_its_own_status(tmp_path, cluster_command):
     """Every job of the stage is final and none is live on two ticks in a row, but the watch checked only through
     iteration 20 of 60 (a node failure or a TIMEOUT that logged no stop condition): the guard says so and ends,
-    rather than ticking until killed."""
-    segment(tmp_path, 10, drop=set(range(21, 61)))
-    cluster = FakeCluster([sacct_line(10, "FAILED", tmp_path)])
-    config = sg.load_guard_config(write_config(tmp_path))
+    rather than ticking until killed. main sleeps for the config's interval between the two ticks, here none."""
+    config, cluster = stopped_at_iteration_20(tmp_path, [sacct_line(10, "FAILED", tmp_path)], interval_seconds=0)
+    cluster_command["cluster"] = cluster
 
-    action, state, done = sg.tick(config, sg.START, cluster, NOW)
-    assert (action, state.quiet_ticks, done) == ("continue", 1, False)
-    action, state, done = sg.tick(config, state, cluster, NOW)
-    assert (action, state.last_iteration, done) == ("ended_early", 20, False)
-    assert any("ENDED EARLY" in line and "through iteration 20 of 60" in line for line in record_lines(config))
-
-    cluster_command["cluster"] = FakeCluster([sacct_line(10, "FAILED", tmp_path)])
-    assert sg.main(["--config", str(write_config(tmp_path, record=str(tmp_path / "second.log")))]) == sg.ENDED_EARLY
+    assert sg.main(["--config", str(tmp_path / "guard.yaml")]) == sg.ENDED_EARLY
+    lines = record_lines(config)
+    assert sum("NO JOB LIVE" in line for line in lines) == 1
+    assert any("ENDED EARLY" in line and "through iteration 20 of 60" in line for line in lines)
 
 
 def test_a_pending_successor_keeps_a_stage_that_stopped_early_guarded(tmp_path):
     """Segment 10 timed out at iteration 20 and its singleton successor 11 waits in the queue, which only squeue
-    lists: the stage is between segments, not ended."""
-    segment(tmp_path, 10, drop=set(range(21, 61)))
-    cluster = FakeCluster([sacct_line(10, "TIMEOUT", tmp_path), sacct_line(11, "PENDING", tmp_path, started=False)])
-    config = sg.load_guard_config(write_config(tmp_path))
-
-    action, state, done = sg.tick(config, sg.START, cluster, NOW)
-
-    assert (action, state.quiet_ticks, done) == ("continue", 0, False)
-    assert not any("ENDED EARLY" in line or "NO JOB LIVE" in line for line in record_lines(config))
-
-
-def test_one_empty_squeue_reply_between_segments_does_not_end_the_guard(tmp_path):
-    """A busy controller returns one empty squeue reply while successor 11 pends: the tick records that no job is
-    live and goes on, and the next reply, which lists the successor, resets the count."""
-    segment(tmp_path, 10, drop=set(range(21, 61)))
-    cluster = FakeCluster([sacct_line(10, "TIMEOUT", tmp_path), sacct_line(11, "PENDING", tmp_path, started=False)])
-    config = sg.load_guard_config(write_config(tmp_path))
+    lists: the stage is between segments, not ended. A busy controller's one empty squeue reply is recorded as NO JOB
+    LIVE without ending the guard, and the next reply, which lists the successor, resets the count."""
+    config, cluster = stopped_at_iteration_20(
+        tmp_path, [sacct_line(10, "TIMEOUT", tmp_path), sacct_line(11, "PENDING", tmp_path, started=False)]
+    )
 
     cluster.squeue_empty = True
     action, state, done = sg.tick(config, sg.START, cluster, NOW)
     assert (action, state.quiet_ticks, done) == ("continue", 1, False)
-    assert any("NO JOB LIVE" in line for line in record_lines(config))
 
     cluster.squeue_empty = False
     action, state, done = sg.tick(config, state, cluster, NOW)
     assert (action, state.quiet_ticks, done) == ("continue", 0, False)
-    assert not any("ENDED EARLY" in line for line in record_lines(config))
+    lines = record_lines(config)
+    assert sum("NO JOB LIVE" in line for line in lines) == 1
+    assert not any("ENDED EARLY" in line for line in lines)
 
 
 def test_a_guard_without_a_final_iteration_never_ends_early(tmp_path):
     """Without final_iteration no iteration counts as early, so a stage with no live job keeps its old behaviour."""
-    path = write_config(tmp_path)
-    raw = yaml.safe_load(path.read_text())
-    del raw["final_iteration"]
-    path.write_text(yaml.safe_dump(raw))
-    config = sg.load_guard_config(path)
-    segment(tmp_path, 10, drop=set(range(21, 61)))
-    cluster = FakeCluster([sacct_line(10, "FAILED", tmp_path)])
+    config, cluster = stopped_at_iteration_20(tmp_path, [sacct_line(10, "FAILED", tmp_path)], final_iteration=None)
 
     state = sg.START
     for _ in range(sg.QUIET_TICKS_TO_END + 1):
@@ -1087,10 +1072,7 @@ def test_minutes_are_counted_across_a_daylight_saving_change(monkeypatch):
 
 def test_a_stall_limit_needs_the_final_iteration(tmp_path):
     """Without final_iteration the stall rule cannot stop at the final save, so the config is refused."""
-    path = write_config(tmp_path, stall_minutes=15)
-    raw = yaml.safe_load(path.read_text())
-    del raw["final_iteration"]
-    path.write_text(yaml.safe_dump(raw))
+    path = write_config(tmp_path, stall_minutes=15, final_iteration=None)
     with pytest.raises(ValueError, match="stall_minutes needs final_iteration"):
         sg.load_guard_config(path)
 

@@ -577,24 +577,21 @@ def no_job_live(config: GuardConfig, started: List[Job], run: Runner) -> bool:
         return False
 
 
-def stage_ended(config: GuardConfig, state: GuardState, result: WatchResult, started: List[Job], run: Runner) -> bool:
-    """Whether the stage has ended: the watch ran clean and checked the final iteration, and no job is live. Runs
-    squeue when every started segment is final; a squeue that cannot be read is recorded as END NOT CONFIRMED."""
-    return checked_final(config, state) and result.ran and result.status == 0 and no_job_live(config, started, run)
-
-
-def stage_ended_early(
+def stage_end(
     config: GuardConfig, state: GuardState, result: WatchResult, started: List[Job], run: Runner
-) -> bool:
-    """Whether no job is live although the watch ran and has not checked ``final_iteration`` (a crash or a TIMEOUT
-    that logged no stop condition, or one empty squeue reply between segments). False without ``final_iteration``.
-    Runs squeue when every started segment is final; a squeue that cannot be read is recorded as END NOT CONFIRMED."""
-    return (
-        config.final_iteration is not None
-        and result.ran
-        and not checked_final(config, state)
-        and no_job_live(config, started, run)
-    )
+) -> Optional[str]:
+    """How the stage ended, if no job of it is live: "done" when the watch ran clean and checked ``final_iteration``,
+    "early" when the watch ran but has not checked it (a crash or a TIMEOUT that logged no stop condition, or one
+    empty squeue reply between segments), and None otherwise or without ``final_iteration``. Runs squeue at most once,
+    and only when every started segment is final; a squeue that cannot be read is recorded as END NOT CONFIRMED."""
+    if config.final_iteration is None or not result.ran:
+        return None
+    done = checked_final(config, state)
+    if done and result.status != 0:
+        return None
+    if not no_job_live(config, started, run):
+        return None
+    return "done" if done else "early"
 
 
 def dump_stacks(job_id: int, sweep: str, run: Runner) -> str:
@@ -675,9 +672,10 @@ def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> 
     if sweep is not None:
         _record(config, dump_stacks(newest.job_id, sweep, run))
         state = state._replace(dumped=state.dumped | {sweep})
-    if stage_ended(config, state, result, started, run):
+    end = stage_end(config, state, result, started, run)
+    if end == "done":
         return action, state, True
-    if not stage_ended_early(config, state, result, started, run):
+    if end is None:
         return action, state._replace(quiet_ticks=0), False
     # One empty squeue reply between segments must not end the guard while a successor pends, so the end needs
     # QUIET_TICKS_TO_END ticks in a row with no live job.
