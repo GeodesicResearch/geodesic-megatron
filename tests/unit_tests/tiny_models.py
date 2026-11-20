@@ -1,8 +1,8 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Tiny HF models on the CPU for the export check's tests: a randomly initialised one-layer Llama over the vocabulary of
-``token_masking_fixtures``' tiny tokenizer plus rows it has no token for, and the copy model, which copies its last input
-token.
+"""Tiny HF models on the CPU for the export check's tests: a randomly initialised Llama (one layer unless asked) over
+the vocabulary of ``token_masking_fixtures``' tiny tokenizer plus rows it has no token for, and the copy model, which
+copies its last input token.
 
 The copy model makes every measurement predictable. Its decoder layers add nothing to the residual stream (their
 output projections are zero), its embedding rows are orthogonal with tied output rows, so at every position the
@@ -18,8 +18,8 @@ HIDDEN = 16
 COPY_LOGIT = 40.0
 
 
-def tiny_llama(vocab_size: int = MODEL_VOCAB):
-    """A randomly initialised one-layer Llama on the CPU."""
+def tiny_llama(vocab_size: int = MODEL_VOCAB, layers: int = 1):
+    """A randomly initialised Llama of ``layers`` decoder layers on the CPU."""
     from transformers import LlamaConfig, LlamaForCausalLM
 
     torch.manual_seed(0)
@@ -27,7 +27,7 @@ def tiny_llama(vocab_size: int = MODEL_VOCAB):
         vocab_size=vocab_size,
         hidden_size=HIDDEN,
         intermediate_size=32,
-        num_hidden_layers=1,
+        num_hidden_layers=layers,
         num_attention_heads=2,
         num_key_value_heads=2,
         max_position_embeddings=128,
