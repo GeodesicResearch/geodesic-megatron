@@ -35,7 +35,8 @@ CONVERT=$(isambard_sbatch --nodes=1 --time=03:00:00 --job-name=sft-convert --out
     --wrap "$(printf '%q %q' "$FROZEN/pipeline_env_exec.sh" "$PAYLOAD")" | submitted_job)
 echo "conversion job $CONVERT"
 for ((index = 0; index < SHARDS; index++)); do
-    # The folder names of the roots are those of ROOT_FOLDER in scripts/data/arrow_chat_to_jsonl.py, so the two must change together.
+    # The folder names of the roots are those of ROOT_FOLDER in scripts/data/arrow_chat_to_jsonl.py, and the glob of
+    # configs/ipt_spt/sft_common.yaml matches them, so the three must change together.
     shard=$(printf '%s/shard_%02d' "$ROOT" "$index")
     job=$(isambard_sbatch --dependency="afterok:$CONVERT" --time=06:00:00 --job-name="sft-pack-$index" \
         pipeline_data_submit.sbatch "$shard" "$TOKENIZER" "$SEQ_LENGTH" "$PAD_SEQ_TO_MULT" "$TOKENIZER_WORKERS" | submitted_job)

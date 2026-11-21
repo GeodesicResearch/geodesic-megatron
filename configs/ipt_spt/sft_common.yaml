@@ -1,0 +1,118 @@
+# The settings that every SFT run of the campaign shares: the data, the batch, the schedule and the logging. It states no
+# layout, only the sequence length of the model, so it is no complete run. A run file extends it with base_config and adds its
+# model layout, its warm start, its learning rate and its checkpoint policy. A run that takes other packs changes
+# dataset.dataset_name, dataset.dataset_root and dataset.packed_sequence_specs.packed_train_data_path, and the cost scope
+# below is then measured again.
+#
+# THE DATA. The packs of the SFT set, one folder for each root of the converted set, packed with the tokenizer below at 4,096
+# tokens with no padding to a multiple (pad_seq_to_mult 1, so context-parallel size 1 only). Each pack holds whole documents.
+# The loss counts the tokens of the assistant turns. dataset_kwargs.pad_to_max_length pads every pack to 4,096 positions at
+# load, because the expert layout faults on a short pack. The collate gives a padded position the end-of-sequence id, loss 0
+# and the padding mask, so the padding carries no loss and no router count.
+#
+# THE COST SCOPE. 4,769 steps of 1,024 packs of 4,096 positions are 20,002,635,776 positions, the smallest number of steps that
+# reaches 20B. pack_manifest.json in the dataset root states the packs, the stored tokens and the trained tokens of one pass, so
+# the run makes train_iters * global_batch_size / packs passes.
+#
+# THE SCHEDULE. Cosine from the learning rate of the run to 0, after a warm-up of 10% of the steps. The checkpoint policy of
+# each run saves after the first step that reaches 5B and 10B positions (steps 1,193 and 2,385) and at the last step.
+#
+# SITES THAT MUST AGREE. dataset_root is output_root of sft_pack_8p6486b.yaml and tokenizer_model is the tokenizer of arms.yaml.
+# The folder glob of packed_train_data_path matches ROOT_FOLDER in scripts/data/arrow_chat_to_jsonl.py, and the sequence length
+# and the pad multiple are SEQ_LENGTH and PAD_SEQ_TO_MULT of sft_pack_8p6486b_submit.sh. The test in
+# tests/unit_tests/test_ipt_spt_sft_configs.py fails when any of them differs.
+
+tokenizer:
+  tokenizer_model: /projects/a5k/public/hf/hub/models--geodesic-research--nemotron-instruct-tokenizer/snapshots/f546e38c401a734f96c462e6990338c4f981f314
+
+model:
+  seq_length: 4096
+
+dataset:
+  dataset_name: warm_start_8p6486b
+  dataset_root: /projects/a5k/public/pretraining-science/megatron/sft_packs/warm_start_8p6486b
+  seq_length: 4096
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 4096
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    # The folder of each pack names the tokenizer and the pad multiple it was made with, so a pack of another tokenizer or
+    # multiple cannot load silently.
+    packed_train_data_path: /projects/a5k/public/pretraining-science/megatron/sft_packs/warm_start_8p6486b/shard_*/packed/--projects--a5k--public--hf--hub--models--geodesic-research--nemotron-instruct-tokenizer--snapshots--f546e38c401a734f96c462e6990338c4f981f314_pad_seq_to_mult1/training_4096.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: true
+
+train:
+  global_batch_size: 1024
+  micro_batch_size: 1
+  train_iters: 4769
+  # The run ends on the clock with a save when a job reaches this age, so that the time limit of the job never cuts it.
+  exit_duration_in_mins: 1400
+  # Collections on a schedule, with the setup state frozen out of them. A save's garbage waits for the next collection, so
+  # saves stay at least manual_gc_interval steps apart.
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+optimizer:
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+checkpoint:
+  save_interval: 4769
+  save_steps: [1193, 2385]
+  most_recent_k: -1
+  ckpt_format: torch_dist
+  # Several saves on the torch_grouped expert path: the cached constant-structure save plan keeps a copy of the expert weights
+  # from the second save on, and the next forward then runs out of memory.
+  ckpt_assume_constant_structure: false
+  async_save: false
+
+logger:
+  # No TensorBoard: the writer exists only when this is set, and the shared TensorBoard root belongs to another account.
+  # The other log flags stay as they are, because despite their names they gate what reaches W&B too.
+  tensorboard_dir: null
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 1
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: false
+  wandb_entity: geodesic
+  wandb_project: megatron_training

@@ -1,0 +1,61 @@
+# The SFT run of Nemotron 3 Super (120B-A12B) from the NVIDIA Base checkpoint with the chat-token embeddings of the Instruct
+# model copied in (the Chat-Init variant). The Base itself holds zero rows for the chat tokens, which the tokenizer of this set
+# uses. The data, the batch, the schedule and the cost scope are those of sft_common.yaml. It runs on 128 GPUs (32 nodes):
+# tensor-parallel size 1, pipeline-parallel size 8 and context-parallel size 1 give a data-parallel size of 16, so each replica
+# holds 64 packs of each step. The expert-parallel size is 4, inside the node.
+#
+# THE POSTURE is that of the Super pretraining quickstart (nemotron_super_quickstart_pretrain.yaml): all-to-all dispatch,
+# selective recompute of the MoE and the shared experts, one pack for each microbatch, the parameter gather off. The learning
+# rate is 1e-5.
+#
+# THE CHECKPOINTS keep the weights alone, at steps 1,193, 2,385 and 4,769, about 250 GB each. This departs from the rule of
+# docs/isambard/training-pipeline.md that a run with intermediate saves keeps the optimizer state. The reason is size: a save
+# with the optimizer state is about 3 times larger, by that document, and the run makes three. A run that stops cannot resume
+# from these saves, because the loader looks for the optimizer state and raises a KeyError. The run is meant to be one job, so
+# the time limit and the exit time of train.exit_duration_in_mins leave room for the last save.
+#
+# LAUNCH, from a frozen copy of the committed code:
+#   isambard_sbatch --nodes=32 --time=23:59:00 pipeline_training_submit.sbatch configs/ipt_spt/sft_super_chat_init.yaml super sft
+
+base_config: sft_common.yaml
+
+optimizer:
+  lr: 1.0e-05
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+  bucket_size: 500000000
+
+model:
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 8
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: false
+  mtp_num_layers: null
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_permute_fusion: true
+  moe_grouped_gemm: true
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: true
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: false
+  offload_modules: []
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_super_chat_init_20b
+  save: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_super_chat_init_20b
+  save_optim: false
+  save_rng: false
+
+dist:
+  distributed_timeout_minutes: 60
+
+logger:
+  wandb_exp_name: ps_sft_super_chat_init_20b

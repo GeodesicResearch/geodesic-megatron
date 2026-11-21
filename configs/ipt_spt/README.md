@@ -16,6 +16,9 @@ number of steps. They differ in the corpora they read and in their run name.
 | `<arm>_segments_launch.sh` | Submits the arm's segments job as one job, with no gate. The generator writes it. |
 | `sft_pack_8p6486b.yaml` | The config of the conversion of the SFT set into the JSONL roots that the packer reads. |
 | `sft_pack_8p6486b_submit.sh` | Submits that conversion and one packing job for each root. |
+| `sft_common.yaml` | The settings that every SFT run shares: the packs, the batch, the schedule and the logging. |
+| `sft_nano_base.yaml` | The SFT run of the NVIDIA Nano Base checkpoint on 64 GPUs, an overlay of `sft_common.yaml`. |
+| `sft_super_chat_init.yaml` | The SFT run of the Super Base Chat-Init checkpoint on 128 GPUs, an overlay of `sft_common.yaml`. |
 
 ## Regenerate
 
@@ -71,3 +74,7 @@ FROZEN=/projects/a5k/public/tmp/frozen_copies/<copy> bash "$FROZEN/configs/ipt_s
 It prints the conversion job and one packing job for each root. The usage of the conversion is in
 `docs/isambard/data-pipeline.md`. A training config reads the packed files of all roots through one glob in
 `packed_train_data_path`.
+
+## SFT runs
+
+Launch an SFT run from a frozen copy of the committed code, with the command in the header of its file.
