@@ -58,13 +58,13 @@ A base model is imported from the Hub by a one-node job:
 ## 5. Train
 
 Verda's training configs are in `configs/control_pretraining/30b_baseline_verda/`. The command below runs 40 iterations
-of Nano's stage 2 from the model that section 4 imports. It saves no checkpoint, so it gives W&B a directory.
+of Nano's stage 2 from the model that section 4 imports.
 
 ```bash
 ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_baseline_verda/nemotron_nano_30b_baseline_midtrain.env \
   ./pipeline_cluster_submit.sh --nodes=4 --time=00:30:00 pipeline_training_submit.sbatch \
     configs/control_pretraining/30b_baseline_verda/nemotron_nano_30b_baseline_midtrain.yaml nano pretrain --disable-ft \
-    train.exit_interval=40 checkpoint.save=null logger.wandb_save_dir=/shared/geodesic/logs_$USER/wandb \
+    train.exit_interval=40 checkpoint.save=null \
     checkpoint.pretrained_checkpoint=/shared/geodesic/checkpoints/megatron_bridges/models/control-pretrain-30b-baseline-pretrain
 ```
 

@@ -250,20 +250,12 @@
 #       isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
 #       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft \
 #       train.train_iters=25 checkpoint.load=null checkpoint.save=null \
-#       logger.wandb_save_dir=/projects/a5k/public/logs/wandb \
 #       logger.wandb_exp_name=nemotron_super_quickstart_sft_profile
 # Why each override:
 #   train.train_iters=25    two traced steps (10, 20) plus steady-state margin;
 #                           no benchmark scoring, so no need for the full 48.
 #   checkpoint.save=null    a profiling run has no output worth a multi-minute,
 #                           200+ GB 120B checkpoint write.
-#   logger.wandb_save_dir   **MANDATORY whenever checkpoint.save=null.**
-#                           training/state.py computes the W&B dir as
-#                           `logger.wandb_save_dir or os.path.join(
-#                           cfg.checkpoint.save, "wandb")`, so with save=null and
-#                           wandb_save_dir unset it evaluates
-#                           os.path.join(None, "wandb") and the job dies at
-#                           startup with a TypeError on the last rank.
 #   checkpoint.load=null    already this config's default (see the NON-OBVIOUS
 #                           SETTINGS note above); kept in the command so it stays
 #                           copy-safe if pasted against another config.

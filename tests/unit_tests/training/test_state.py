@@ -12,12 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import builtins
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
+from megatron.bridge.training.config import CheckpointConfig, LoggerConfig
 from megatron.bridge.training.state import FaultToleranceState, GlobalState, TrainState
+from tests.unit_tests.token_masking_fixtures import config_container
+
+
+@contextmanager
+def _logging_rank_with_wandb(mock_wandb: MagicMock):
+    """Make this process the last of four ranks, the rank that logs to W&B. Make ``import wandb`` return
+    ``mock_wandb``. A unit test has no process group to give it a rank. ``wandb.init`` connects to the W&B
+    service."""
+    real_import = builtins.__import__
+    with (
+        patch("megatron.bridge.training.state.get_rank_safe", return_value=3),
+        patch("megatron.bridge.training.state.get_world_size_safe", return_value=4),
+        patch(
+            "builtins.__import__",
+            side_effect=lambda name, *args, **kwargs: (
+                mock_wandb if name == "wandb" else real_import(name, *args, **kwargs)
+            ),
+        ),
+    ):
+        yield
 
 
 def _assert_train_state_is_the_checkpoint_utils_class() -> None:
@@ -398,16 +421,7 @@ class TestGlobalState:
 
         mock_wandb = MagicMock()
 
-        with (
-            patch("megatron.bridge.training.state.get_rank_safe", return_value=3),
-            patch("megatron.bridge.training.state.get_world_size_safe", return_value=4),
-            patch(
-                "builtins.__import__",
-                side_effect=lambda name, *args, **kwargs: (
-                    mock_wandb if name == "wandb" else __import__(name, *args, **kwargs)
-                ),
-            ),
-        ):
+        with _logging_rank_with_wandb(mock_wandb):
             logger = state.wandb_logger
 
             mock_wandb.init.assert_called_once_with(
@@ -437,6 +451,42 @@ class TestGlobalState:
                 assert False, "Expected ValueError"
             except ValueError as e:
                 assert "Please specify the wandb experiment name!" in str(e)
+
+    @staticmethod
+    def _wandb_dir_given(logger_config: LoggerConfig, checkpoint_config: CheckpointConfig) -> str:
+        """The ``dir`` the logging rank passes to ``wandb.init`` for these config sections."""
+        state = GlobalState()
+        state._cfg = config_container(logger=logger_config, checkpoint=checkpoint_config)
+        # wandb is the boundary here: importing and initialising it would open a run on the W&B service.
+        mock_wandb = MagicMock()
+        with _logging_rank_with_wandb(mock_wandb):
+            _ = state.wandb_logger
+        return mock_wandb.init.call_args.kwargs["dir"]
+
+    @pytest.mark.parametrize(
+        "wandb_save_dir, checkpoint_save, expected",
+        [
+            ("/runs/wandb", "/ckpt/run", "/runs/wandb"),
+            (None, "/ckpt/run", "/ckpt/run/wandb"),
+            (None, None, "/env/wandb"),
+        ],
+        ids=["wandb_save_dir", "checkpoint_save", "wandb_dir"],
+    )
+    def test_wandb_logger_writes_in_the_first_directory_given(
+        self, monkeypatch, wandb_save_dir, checkpoint_save, expected
+    ):
+        """``logger.wandb_save_dir`` first, then ``<checkpoint.save>/wandb``, then ``WANDB_DIR``."""
+        monkeypatch.setenv("WANDB_DIR", "/env/wandb")
+        logger_config = LoggerConfig(
+            wandb_project="test_project", wandb_exp_name="test_experiment", wandb_save_dir=wandb_save_dir
+        )
+        assert self._wandb_dir_given(logger_config, CheckpointConfig(save=checkpoint_save)) == expected
+
+    def test_wandb_logger_with_no_directory_given_is_an_error(self, monkeypatch):
+        monkeypatch.delenv("WANDB_DIR", raising=False)
+        logger_config = LoggerConfig(wandb_project="test_project", wandb_exp_name="test_experiment")
+        with pytest.raises(ValueError, match="logger.wandb_save_dir, checkpoint.save or WANDB_DIR"):
+            self._wandb_dir_given(logger_config, CheckpointConfig(save=None))
 
     def test_timers_property_lazy_initialization(self):
         """Test timers property lazy initialization."""
