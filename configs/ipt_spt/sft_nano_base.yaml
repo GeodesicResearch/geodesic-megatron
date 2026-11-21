@@ -3,16 +3,15 @@
 # give a data-parallel size of 64, so each replica holds 16 packs of each step. The expert-parallel size is 4, inside the node.
 #
 # THE POSTURE takes the layout and memory levers of the Nano SFT quickstart (nemotron_nano_quickstart_sft.yaml): HybridEP
-# dispatch, the fused router, the chunked linear cross-entropy, full recompute, one pack for each microbatch, gradient buckets
-# of 500M parameters and the parameter gather overlapped with the forward. It does not take the quickstart's BF16 gradient
-# reduction. The mixed precision is bf16_mixed with fp32 gradient reduction, as in the baseline SFT stage
-# (nemotron_nano_30b_baseline_sft.yaml), and the launcher's default fp32 SSM state (ISAMBARD_FP32_SSM_STATE=checkpoint) applies,
-# so the run needs no env file. The learning rate is 5e-5.
+# dispatch, the fused router, the chunked linear cross-entropy, one pack for each microbatch, gradient buckets of 500M parameters
+# and the parameter gather overlapped with the forward. Only the expert activation is recomputed, as in the pretraining arms. The
+# precision is that of sft_common.yaml, and the launcher's default fp32 SSM state (ISAMBARD_FP32_SSM_STATE=checkpoint) applies, so
+# the run needs no env file. The learning rate is 5e-5.
 #
 # THE CHECKPOINTS keep the optimizer state, so a run that stops can resume. They are at steps 1,193, 2,385 and 4,769.
 #
-# LAUNCH, from a frozen copy of the committed code:
-#   isambard_sbatch --nodes=16 --time=23:59:00 pipeline_training_submit.sbatch configs/ipt_spt/sft_nano_base.yaml nano sft
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft, since the first save comes after the ft heartbeat timeout:
+#   isambard_sbatch --nodes=16 --time=23:59:00 pipeline_training_submit.sbatch configs/ipt_spt/sft_nano_base.yaml nano sft --disable-ft
 
 base_config: sft_common.yaml
 
@@ -43,9 +42,10 @@ model:
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8
-  recompute_granularity: full
-  recompute_method: uniform
-  recompute_num_layers: 1
+  recompute_granularity: selective
+  recompute_modules: [moe_act]
+  recompute_method: null
+  recompute_num_layers: null
 
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16

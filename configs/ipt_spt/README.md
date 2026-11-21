@@ -16,7 +16,7 @@ number of steps. They differ in the corpora they read and in their run name.
 | `<arm>_segments_launch.sh` | Submits the arm's segments job as one job, with no gate. The generator writes it. |
 | `sft_pack.yaml` | The config of the conversion of the SFT set into the JSONL roots that the packer reads. |
 | `sft_pack_submit.sh` | Submits that conversion and one packing job for each root. |
-| `sft_common.yaml` | The settings that every SFT run shares: the packs, the batch, the schedule and the logging. |
+| `sft_common.yaml` | The settings that every SFT run shares: the packs, the batch, the precision, the schedule and the logging. |
 | `sft_nano_base.yaml` | The SFT run of the NVIDIA Nano Base checkpoint on 64 GPUs, an overlay of `sft_common.yaml`. |
 | `sft_super_chat_init.yaml` | The SFT run of the Super Base Chat-Init checkpoint on 128 GPUs, an overlay of `sft_common.yaml`. |
 

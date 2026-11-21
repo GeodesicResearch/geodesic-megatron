@@ -1,6 +1,6 @@
-# The settings that every SFT run of the campaign shares: the data, the batch, the schedule and the logging. It states no
-# layout, only the sequence length of the model, so it is no complete run. A run file extends it with base_config and adds its
-# model layout, its warm start, its learning rate and its checkpoint policy. A run that takes other packs changes
+# The settings that every SFT run of the campaign shares: the data, the batch, the precision, the schedule and the logging. It
+# states no layout, only the sequence length of the model, so it is no complete run. A run file extends it with base_config and
+# adds its model layout, its warm start, its learning rate and its checkpoint policy. A run that takes other packs changes
 # dataset.dataset_name, dataset.dataset_root and dataset.packed_sequence_specs.packed_train_data_path, and the cost scope
 # below is then measured again.
 #
@@ -14,6 +14,9 @@
 # reaches 20B. pack_manifest.json in the dataset root states the packs, the stored tokens and the trained tokens of one pass, so
 # the run makes train_iters * global_batch_size / packs passes.
 #
+# THE PRECISION. mixed_precision is bf16_mixed_bf16_grad_reduce: the gradients of the microbatches add up and reduce in
+# BF16, which halves the gradient buffer and the reduce-scatter against the fp32 reduction of bf16_mixed.
+#
 # THE SCHEDULE. Cosine from the learning rate of the run to 0, after a warm-up of 10% of the steps. The checkpoint policy of
 # each run saves after the first step that reaches 5B and 10B positions (steps 1,193 and 2,385) and at the last step.
 #
@@ -24,6 +27,8 @@
 
 tokenizer:
   tokenizer_model: /projects/a5k/public/hf/hub/models--geodesic-research--nemotron-instruct-tokenizer/snapshots/f546e38c401a734f96c462e6990338c4f981f314
+
+mixed_precision: bf16_mixed_bf16_grad_reduce
 
 model:
   seq_length: 4096

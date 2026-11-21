@@ -5,8 +5,8 @@
 # holds 64 packs of each step. The expert-parallel size is 4, inside the node.
 #
 # THE POSTURE is that of the Super pretraining quickstart (nemotron_super_quickstart_pretrain.yaml): all-to-all dispatch,
-# selective recompute of the MoE and the shared experts, one pack for each microbatch, the parameter gather off. The learning
-# rate is 1e-5.
+# selective recompute of the MoE and the shared experts, one pack for each microbatch, the parameter gather off. The precision is
+# that of sft_common.yaml. The learning rate is 1e-5.
 #
 # THE CHECKPOINTS keep the weights alone, at steps 1,193, 2,385 and 4,769, about 250 GB each. This departs from the rule of
 # docs/isambard/training-pipeline.md that a run with intermediate saves keeps the optimizer state. The reason is size: a save
@@ -14,8 +14,8 @@
 # from these saves, because the loader looks for the optimizer state and raises a KeyError. The run is meant to be one job, so
 # the time limit and the exit time of train.exit_duration_in_mins leave room for the last save.
 #
-# LAUNCH, from a frozen copy of the committed code:
-#   isambard_sbatch --nodes=32 --time=23:59:00 pipeline_training_submit.sbatch configs/ipt_spt/sft_super_chat_init.yaml super sft
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft, since the first save comes after the ft heartbeat timeout:
+#   isambard_sbatch --nodes=32 --time=23:59:00 pipeline_training_submit.sbatch configs/ipt_spt/sft_super_chat_init.yaml super sft --disable-ft
 
 base_config: sft_common.yaml
 

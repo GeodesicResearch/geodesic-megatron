@@ -22,6 +22,7 @@ from scripts.data.arrow_chat_to_jsonl import ROOT_FOLDER
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from megatron.bridge.recipes.nemotronh.nemotron_3_super import nemotron_3_super_sft_config
+from megatron.bridge.training.mixed_precision import get_mixed_precision_config
 from pipeline.data.layout import packed_parquet_path
 from tests.unit_tests.campaign_config import (
     assert_it_saves_to_a_directory_of_its_own,
@@ -52,6 +53,7 @@ RUNS = {
         "gpus": 64,
         "lr": 5.0e-05,
         "optim": True,
+        "recompute_modules": ["moe_act"],
     },
     "super": {
         "file": "sft_super_chat_init.yaml",
@@ -60,6 +62,7 @@ RUNS = {
         "gpus": 128,
         "lr": 1.0e-05,
         "optim": False,
+        "recompute_modules": ["moe", "shared_experts"],
     },
 }
 
@@ -188,11 +191,30 @@ def test_the_real_recipe_takes_the_config_as_the_launcher_merges_it(run):
     assert cfg.model.context_parallel_size == 1
 
 
-def test_the_nano_reduces_gradients_and_holds_its_optimizer_as_the_baseline_sft_stage_does():
-    """The Nano run takes the mixed precision, the gradient-reduction precision and the optimizer-state dtypes of the baseline SFT stage."""
+def test_every_run_reduces_gradients_in_bf16(run):
+    """Both runs take the BF16 gradient reduction of sft_common.yaml, which the preset applies when the run starts."""
+    cfg = merge_onto_recipe(run["path"], run["recipe"])
+    assert cfg.mixed_precision == "bf16_mixed_bf16_grad_reduce"
+    assert get_mixed_precision_config(cfg.mixed_precision).grad_reduce_in_fp32 is False
+
+
+def test_the_nano_keeps_the_optimizer_state_dtypes_of_the_baseline_sft_stage():
     reference = merge_onto_recipe(FOLDER / RUNS["nano"]["file"], nemotron_3_nano_sft_config)
     baseline = merge_onto_recipe(BASELINE_SFT, nemotron_3_nano_sft_config)
-    assert reference.mixed_precision == baseline.mixed_precision
-    assert reference.ddp.grad_reduce_in_fp32 is baseline.ddp.grad_reduce_in_fp32 is True
     for field in ("use_precision_aware_optimizer", "exp_avg_dtype", "exp_avg_sq_dtype"):
         assert getattr(reference.optimizer, field) == getattr(baseline.optimizer, field)
+
+
+def test_each_run_recomputes_selectively(run):
+    """The Nano recomputes the expert activation as the pretraining arms do, and the Super its MoE and shared experts."""
+    cfg = merge_onto_recipe(run["path"], run["recipe"])
+    assert cfg.model.recompute_granularity == "selective"
+    assert list(cfg.model.recompute_modules) == run["recompute_modules"]
+    assert cfg.model.recompute_method is None and cfg.model.recompute_num_layers is None
+
+
+def test_the_launch_command_in_each_header_turns_fault_tolerance_off(run):
+    """The first save of each run is at step 1,193, after the rank-heartbeat timeout that pipeline_training_launch.sh gives ft_launcher,
+    so each launch command turns fault tolerance off, as the launch scripts of the pretraining arms do."""
+    launch = [line for line in run["path"].read_text().splitlines() if line.startswith("#   isambard_sbatch")]
+    assert len(launch) == 1 and "--disable-ft" in launch[0].split()
