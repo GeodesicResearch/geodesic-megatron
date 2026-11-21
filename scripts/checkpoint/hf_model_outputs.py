@@ -15,9 +15,6 @@ applied in fp32, and generation from its own, unmodified distribution.
 - ``TokenRenderer``: token ids rendered for a reader, every special, added or unknown id shown.
 """
 
-from typing import Any
-
-
 # How far the fp32 projection of the output head's input may lie from the model's own logits: the rounding of logits
 # computed in bf16 (half a bf16 step is 2**-8 of a value, 0.0625 at 16-32) with room for a reduced-precision GEMM
 # reduction, far inside what a transform after the head (a soft cap, a scale) changes at the largest logits.
@@ -193,11 +190,9 @@ def load_model(model_path: str, dtype: str, placement: str):
     import torch
     from transformers import AutoModelForCausalLM
 
-    kwargs: dict[str, Any] = {"dtype": getattr(torch, dtype)}
     device_map = device_map_for(placement, torch.cuda.device_count())
-    if device_map is not None:
-        kwargs["device_map"] = device_map
-    model = AutoModelForCausalLM.from_pretrained(model_path, **kwargs).eval()
+    model = AutoModelForCausalLM.from_pretrained(model_path, dtype=getattr(torch, dtype), device_map=device_map)
+    model.eval()
     if device_map is not None:
         require_on_gpus(model, placement)
     return model

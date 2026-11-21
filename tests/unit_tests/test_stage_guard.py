@@ -444,7 +444,6 @@ def bounded_sleep(monkeypatch):
             raise AssertionError("the guard kept ticking after the stage had ended")
 
     monkeypatch.setattr(sg.time, "sleep", sleep)
-    return calls
 
 
 def test_a_stage_that_finishes_on_an_alert_ends_the_guard_with_the_alert_status(
@@ -606,7 +605,7 @@ def test_a_cancellation_that_fails_ends_the_guard_with_its_own_status(tmp_path, 
 
 def test_a_guard_that_cannot_list_the_jobs_outside_the_window_alerts_and_keeps_going(tmp_path, cluster_command):
     cluster_command["cluster"] = failing_sacct
-    assert sg.main(["--config", str(write_config(tmp_path)), "--once"]) == 2
+    assert sg.main(["--config", str(write_config(tmp_path)), "--once"]) == sg.ALERTED
     assert "ALERT: could not evaluate: RuntimeError: sacct failed" in (tmp_path / "guard" / "record.log").read_text()
 
 

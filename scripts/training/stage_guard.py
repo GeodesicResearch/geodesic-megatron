@@ -733,19 +733,19 @@ def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
             raise
         if action in EXIT_STATUS:
             return EXIT_STATUS[action]
-        if done and action == "alert":
+        status = ALERTED if action == "alert" else 0
+        if done:
             _record(
                 config,
-                "DONE WITH ALERT: the watch checked iteration {} and no job is live, but its last tick alerted".format(
-                    state.last_iteration
+                "{}: the watch checked iteration {} and no job is live{}".format(
+                    "DONE WITH ALERT" if status else "DONE",
+                    state.last_iteration,
+                    ", but its last tick alerted" if status else "",
                 ),
             )
-            return ALERTED
-        if done:
-            _record(config, "DONE: the watch checked iteration {} and no job is live".format(state.last_iteration))
-            return 0
+            return status
         if once:
-            return ALERTED if action == "alert" else 0
+            return status
         time.sleep(config.interval_seconds)
 
 

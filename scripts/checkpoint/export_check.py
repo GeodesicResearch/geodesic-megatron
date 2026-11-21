@@ -771,7 +771,8 @@ def run_record(spec: ExportCheckSpec) -> dict[str, Any]:
 
 def gpu_peak_memory(devices: list[int]) -> list[dict[str, int]]:
     """The peak memory that PyTorch allocated and reserved on each of ``devices`` (CUDA device indices) since the
-    process started, in bytes, one entry per device in the order given."""
+    process started, in bytes, one entry per device in the order given. Name only devices that the process uses:
+    reading another device's statistics opens a CUDA context on it."""
     import torch
 
     return [
@@ -951,8 +952,7 @@ def score_megatron(
                     np.concatenate([merged[i][1] for i in range(len(documents))]),
                 )
             )
-    # Each rank reads its own GPU only: reading another device's statistics would open a context on it.
-    peaks = gather_to_rank_zero(gpu_peak_memory([torch.cuda.current_device()]), group=None)
+    peaks = gather_to_rank_zero(gpu_peak_memory([torch.cuda.current_device()])[0], group=None)
     if dist.get_rank() == 0:
         record = run_record(spec) | {
             "side": "megatron",
@@ -964,9 +964,7 @@ def score_megatron(
             "torch": torch.__version__,
             "load_seconds": round(loaded - started, 1),
             "score_seconds": round(time.monotonic() - loaded, 1),
-            "gpu_peak_memory": [
-                entry | {"rank": global_rank} for global_rank, entries in enumerate(peaks) for entry in entries
-            ],
+            "gpu_peak_memory": [entry | {"rank": global_rank} for global_rank, entry in enumerate(peaks)],
         }
         write_scores(output, passes, np.concatenate(documents), record)
         LOGGER.info("wrote %s", output)
@@ -1068,7 +1066,6 @@ def score_hf(spec: ExportCheckSpec, export: Path, out_dir: Path, repeats: int) -
             "transformers": transformers.__version__,
             "load_seconds": round(loaded - started, 1),
             "score_seconds": round(scored - loaded, 1),
-            # The GPUs that hold the model: reading an idle device's statistics would open a context on it.
             "gpu_peak_memory": gpu_peak_memory(hf_model_outputs.model_gpus(model)),
         }
     )
