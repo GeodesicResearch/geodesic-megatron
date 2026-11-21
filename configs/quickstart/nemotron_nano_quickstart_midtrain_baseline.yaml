@@ -34,7 +34,7 @@
 # starting the stage, and write into production's tree. With load null the setup still loads
 # pretrained_checkpoint (inherited: the stage-1 final, iteration 29881) weights only, as a finetune — fresh
 # optimizer, iteration 0 — which is how production's first segment started. With save null W&B has no
-# default directory (it falls back to <save>/wandb), hence wandb_save_dir.
+# checkpoint directory to write beside, so wandb_save_dir names its directory.
 #
 # dataset.path_to_cache: a directory of its own. The per-corpus index cache key includes the sample count
 # (train_iters x GBS), so the benchmark's batch builds its indices cold once and hits the cache afterwards;

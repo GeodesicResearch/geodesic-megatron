@@ -31,7 +31,7 @@
 # checkpoint.load / save null: the baseline's load == save is the production run's checkpoint
 # directory. Inherited, the benchmark would resume production's latest checkpoint instead of
 # initialising randomly, and write into the production tree. With save null W&B has no
-# default directory (it falls back to <save>/wandb), hence wandb_save_dir.
+# checkpoint directory to write beside, so wandb_save_dir names its directory.
 #
 # dataset.path_to_cache: a directory of its own. The per-corpus index cache key includes the
 # sample count (train_iters x GBS), so each benchmark batch size builds its indices cold once

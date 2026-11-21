@@ -103,10 +103,8 @@ placement measurements).
 - **Torch-profiler capture** (any launch): prefix with
   `ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20` (also
   `_RANKS=0,9`; legacy `_WAIT=3` = single capture at iteration 5). Profiling runs
-  against the STANDING quickstart config with overrides — there is no separate
-  profile config to drift out of sync; the exact command (including the
-  `logger.wandb_save_dir` that is mandatory alongside `checkpoint.save=null`) is in
-  that config's header and in `docs/profiling-quickstart.md`. Artifacts (per-rank traces, provenance, config +
+  against the standing quickstart config with overrides.
+  That config's header and `docs/profiling-quickstart.md` give the exact command. Artifacts (per-rank traces, provenance, config +
   resolved-config snapshots, raw-log copy) land in
   `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/`.
   `ISAMBARD_TORCH_PROFILE_WITH_STACK` (default `1`) records Python stacks, which
