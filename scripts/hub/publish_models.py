@@ -38,8 +38,8 @@ is idempotent and a run can be repeated as new checkpoints land:
    the clone. The exporter needs a SLURM environment with GPUs: the ``export`` phase gives it this
    allocation's, and the ``submit`` phase gives it one of its own by queueing a single-node job per
    checkpoint, which is what keeps exports from competing with whatever else holds these cards.
-3. Verification: every tensor the safetensors index promises is in the shard it names, and every
-   tensor a shard holds is in the index — by tensor name, never by file count.
+3. Verification: every tensor the safetensors index promises is in the shard it names and every tensor a shard
+   holds is in the index, then config.json's end-of-turn id where the manifest asks and the reference files it names.
 4. The upload, to the revision (and to ``main`` for the default), followed by the model card on
    ``main`` and the repository's membership of the collection under its note, with the collection's
    description and every note brought to the manifest's. A manifest with an ``upload`` block

@@ -4,10 +4,10 @@
 """Count the tokens of every row of an SFT JSONL file as the packer tokenizes it, before any row is packed or cut.
 
 The pass tokenizes each row of ``<dataset_root>/training.jsonl`` with the packer's tokenizer and settings
-(``scripts/data/pack_sft_dataset.py``) and keeps only its length and its digest, so a file of any size is read without a
-cache. A row is over length when it holds more than ``seq_length`` tokens: the packer would cut it, so it is left out
-of the packs. The digest is the pack audit's (``scripts/data/audit_pack_digests.py`` ``ids_hash``), so the kept list
-written here is the list the audit compares a pack with.
+(``scripts/data/pack_sft_dataset.py``) and keeps only its length and its digest, so it caches no tokenized row, only
+the data loader's line index (``training.jsonl.idx.npy``, ``.idx.info``) beside the file. A row of more than
+``seq_length`` tokens is over length: the packer would cut it, so it is left out of the packs. The digest is the pack
+audit's (``scripts/data/audit_pack_digests.py`` ``ids_hash``), so the audit compares a pack with the kept list.
 
 The config is YAML with exactly these keys::
 
@@ -73,7 +73,7 @@ OUTPUTS = (
 
 
 class CountConfigError(ValueError):
-    """A count config that cannot be used, or an output directory that already holds outputs."""
+    """An unusable count config or output directory, or a source whose size changed during the count."""
 
 
 def read_count_config(path: Path) -> dict:
@@ -164,8 +164,8 @@ def main(argv: list[str] | None = None) -> None:
 
     tokenizer = pack_sft_dataset.build_packing_tokenizer(config["tokenizer"])
     dataset_kwargs = {**pack_sft_dataset.default_dataset_kwargs(chat=True), **config["dataset_kwargs"]}
-    # The size is taken before the source is read and compared after it, so the summary never names a file that the
-    # counts do not cover (partition_rows.require_counts_of trusts it).
+    # The size is taken before the source is read and compared after it, so the summary never names a file whose size
+    # changed during the count. Only the size is compared, here and in partition_rows.require_counts_of.
     source_bytes = source.stat().st_size
     ids_of_rows = iter_tokenized_ids(
         source, tokenizer, config["seq_length"], dataset_kwargs, args.num_tokenizer_workers

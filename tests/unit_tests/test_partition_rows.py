@@ -181,6 +181,30 @@ def test_an_output_root_that_holds_a_shard_is_refused(tmp_path):
         partition_rows.main(["--config", str(config)])
 
 
+@pytest.mark.parametrize("suffix", [".idx.npy", ".idx.info"])
+def test_an_output_root_that_holds_the_line_index_of_a_shard_is_refused(tmp_path, suffix):
+    """The data loader trusts a line index that sits beside a JSONL file, so one left by an earlier partition would
+    describe the rows of that partition and not the ones written now."""
+    root = tmp_path / "p"
+    stale = Path(f"{partition_rows.shard_path(root, 2)}{suffix}")
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"stale")
+    config = write_config(tmp_path / "p.yaml", write_source(tmp_path / "source" / "training.jsonl"), root)
+    with pytest.raises(partition_rows.PartitionError, match=f"already holds.*{stale.name}"):
+        partition_rows.main(["--config", str(config)])
+    assert not partition_rows.shard_path(root, 0).exists()
+
+
+def test_the_line_index_suffixes_are_the_ones_the_data_loader_keeps_beside_a_file():
+    from megatron.bridge.data.datasets.utils import _index_fn
+
+    data_file = "/data/training.jsonl"
+    index = _index_fn(data_file, None)
+    assert tuple(index.removeprefix(data_file) + ending for ending in (".npy", ".info")) == (
+        partition_rows.LINE_INDEX_SUFFIXES
+    )
+
+
 @pytest.mark.parametrize(
     ("excluded", "message"),
     [((ROWS,), f"names source line {ROWS}, but the source has {ROWS} lines"), ((4, 4), "duplicate of line 1")],

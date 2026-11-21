@@ -3,8 +3,8 @@
 """The on-disk Hugging Face tokenizer builder that the test fixtures share: a WordLevel model with one word per
 vocabulary entry, split on whitespace, saved through ``PreTrainedTokenizerFast``.
 
-The fixtures that need a tokenizer directory differ only in the vocabulary, the special tokens and the chat template
-they pass in. No network and no mock is involved.
+The WordLevel fixtures differ only in the vocabulary, the special tokens and the chat template they pass in. No network
+and no mock is involved.
 """
 
 from __future__ import annotations

@@ -27,7 +27,8 @@ An exclusion file is the count pass's ``over_length.jsonl`` (``scripts/data/row_
 line with exactly the integer keys ``line``, a 0-based line of the source, and ``tokens``. The count pass's summary
 beside it must name the source file at its present size.
 
-The tool refuses an output root that already holds a shard's file or a record, an exclusion file of another form or of
+The tool refuses an output root that already holds a shard's file, the line index that the data loader keeps beside it
+(``training.jsonl.idx.npy`` or ``training.jsonl.idx.info``) or a record, an exclusion file of another form or of
 another source, an exclusion that names a line twice or a line the source does not have, a source whose last line has
 no final newline, and a shard that would hold no row. It checks that the shards hold every kept row once: their bytes
 on disk add up to the source's bytes less the excluded rows' bytes. In random order their rows must also add up to the
@@ -73,6 +74,9 @@ CONFIG_KEYS = frozenset({"source", "output_root", "shards", "order", "seed", "ex
 ORDERS = ("contiguous", "random")
 EXCLUSION_KEYS = ("line", "tokens")
 RECORD = "partition_record.json"
+# The two files that the data loader (``megatron.bridge.data.datasets.utils``) keeps beside a JSONL file as its line
+# index. The loader trusts a pair that exists, whatever the file holds now.
+LINE_INDEX_SUFFIXES = (".idx.npy", ".idx.info")
 CONFIG_COPY = "partition_config.yaml"
 BLOCK_BYTES = 1 << 24
 
@@ -203,6 +207,12 @@ def shard_path(output_root: Path, index: int) -> Path:
     return output_root / shard_name(index) / "training.jsonl"
 
 
+def shard_files(output_root: Path, index: int) -> list[Path]:
+    """The training file of shard ``index`` and the line index that the data loader keeps beside it."""
+    training = shard_path(output_root, index)
+    return [training, *(Path(f"{training}{suffix}") for suffix in LINE_INDEX_SUFFIXES)]
+
+
 def write_random_shards(source: Path, output_root: Path, shard: np.ndarray, shards: int) -> dict:
     """Write each source line to the file of its shard (``shard[line]``; -1 leaves it out), in source order, and
     return the rows written per shard and the rows and bytes left out."""
@@ -281,7 +291,10 @@ def main(argv: list[str] | None = None) -> None:
     shards = config["shards"]
     present = [
         str(path)
-        for path in [output_root / RECORD, *(shard_path(output_root, index) for index in range(shards))]
+        for path in [
+            output_root / RECORD,
+            *(file for index in range(shards) for file in shard_files(output_root, index)),
+        ]
         if path.exists()
     ]
     if present:
