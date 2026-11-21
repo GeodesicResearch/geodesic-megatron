@@ -22,6 +22,7 @@ Catalogue:
     INPUTS: the input file sets, one directory each.
     NANO, NANO_BASE, INSTRUCT_TOK, BASE_TOK: the Hub ids those sets come from.
     SNAPSHOT_A, SNAPSHOT_B: snapshot hashes of a fake cache, A sorting before B.
+    THINK_SFT_GENERATION_CONFIG: the generation config of AI2's Olmo 3 7B Think-SFT release.
     write_weights: a one-shard export holding only the embedding's safetensors header.
     cache_repo: put a repo into an HF hub cache, one snapshot per source dir, refs/main naming one.
 """
@@ -42,6 +43,17 @@ INSTRUCT_TOK = "geodesic-research/nemotron-instruct-tokenizer"
 BASE_TOK = "geodesic-research/nemotron-base-tokenizer"
 SNAPSHOT_A = "1" * 40
 SNAPSHOT_B = "f" * 40
+#: allenai/Olmo-3-7B-Think-SFT's generation_config.json: it sets temperature and top_p and not do_sample, and it
+#: holds fields that transformers drops or rewrites when it saves the file (pad_token, transformers_version).
+THINK_SFT_GENERATION_CONFIG = {
+    "_from_model_config": True,
+    "eos_token_id": [100265, 100257],
+    "pad_token": 100277,
+    "transformers_version": "4.53.1",
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "max_new_tokens": 32768,
+}
 
 
 def write_weights(export: Path, rows: int) -> None:

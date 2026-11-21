@@ -21,15 +21,15 @@ the JIT/comm-init window. Two capture points let you check that the profiled
 step is representative (e.g. no one-off straggler like the 458 ms gap seen in
 one earlier capture) and bracket periodic effects such as the manual-GC cycle.
 
-Profiling runs never save or resume checkpoints (`checkpoint.load`/`save` are
-null in the profile config): every run — including a repeat of the same
+Profiling runs never save or resume checkpoints (the quickstart config sets
+`checkpoint.load: null` and the command below sets `checkpoint.save=null`): every run — including a repeat of the same
 command — starts from the pretrained checkpoint and executes all 25
 iterations. This is deliberate: with a shared load/save dir, a second run
 would resume at step 25 and capture nothing.
 
 ## 1. Launch
 
-Profiling runs against the standing quickstart config with three overrides:
+Profiling runs against the standing quickstart config with these overrides:
 
 ```bash
 cd /home/a5k/kyleobrien.a5k/geodesic-megatron

@@ -235,10 +235,10 @@ class GlobalState:
         """The Weights & Biases logger instance, lazily initialized for rank N-1.
 
         It is None on other ranks and when ``logger.wandb_project`` is unset. On first use on rank N-1, it strips
-        whitespace from the ``WANDB_API_KEY`` environment variable. It then calls ``wandb.init``, which connects to
-        the W&B service. W&B writes its local files under ``logger.wandb_save_dir``, else
-        ``<checkpoint.save>/wandb``, else the ``WANDB_DIR`` environment variable. Raises ValueError when none of the
-        three is set, or when ``logger.wandb_exp_name`` is empty.
+        whitespace from the ``WANDB_API_KEY`` environment variable. It then connects to the W&B service with
+        ``wandb.init``, passing ``logger.wandb_entity`` and the whole config (``cfg.to_dict()``). W&B writes its local
+        files under ``logger.wandb_save_dir``, else ``<checkpoint.save>/wandb``, else the ``WANDB_DIR`` environment
+        variable. Raises ValueError when none of the three is set, or when ``logger.wandb_exp_name`` is empty.
         """
         if self._wandb_logger is None:
             if self.cfg.logger.wandb_project and get_rank_safe() == (get_world_size_safe() - 1):

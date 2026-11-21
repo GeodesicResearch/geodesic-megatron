@@ -1,0 +1,12 @@
+# Epoch 2 of the Olmo 3 7B Dolci-SFT: epoch 1's partition (dolci_think_sft_7b_epoch1_partition.yaml) drawn again from
+# seed 2, so the second pass reads the same kept rows in another order and other shards.
+#
+#   python3 configs/control_pretraining/submit_corpus_job.py olmo3-dolci-partition-e2 02:00:00 \
+#       scripts/data/partition_rows.py --config configs/olmo3_norm_sft/data/dolci_think_sft_7b_epoch2_partition.yaml
+source: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B/training.jsonl
+output_root: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B/epoch2
+shards: 32
+order: random
+seed: 2
+exclude_lines: /projects/a5k/public/logs/metagaming_filtering/olmo3_dolci_replication/megatron/counts/over_length.jsonl
+remove_source: false

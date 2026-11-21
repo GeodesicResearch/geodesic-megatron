@@ -56,7 +56,7 @@ def write_packs(path, packs: list[list[int]], pad_seq_to_mult: int, max_seq_leng
             documents.append(document)
             assignments[-1].append(len(document["input_ids"]) - 1)
     sequences, _ = create_hist(documents, max_seq_length)
-    rows = fill_packing_strategy(assignments, sequences, max_seq_length, EOS_ID)
+    rows = fill_packing_strategy(assignments, sequences, max_seq_length, EOS_ID, np.random.default_rng(0))
     if str(path).endswith(".parquet"):
         write_packed_parquet(rows, path)
     else:

@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 from scripts.data.run_training_data import microbatches_per_replica
-from scripts.nemotronh_flops_estimator import RunSpec
+from scripts.flops_common import RunSpec
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml
 from scripts.training.launcher_source import env_override_entries
 

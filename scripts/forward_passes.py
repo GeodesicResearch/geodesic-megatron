@@ -46,9 +46,15 @@ def lockstep_schedule(count: int, world: int, rank: int) -> list[tuple[int, bool
 
 def gather_to_rank_zero(local: Any, *, group: Any) -> list[Any] | None:
     """Every rank's ``local`` (a picklable object) as a list ordered by rank on rank 0 of ``group``, and None on the
-    other ranks. ``group`` is a process group, or None for the default one. A collective over ``group``."""
+    other ranks. ``group`` is a process group, or None for the default one. A collective over ``group``. Side effect:
+    every rank first returns PyTorch's cached GPU memory to the driver."""
+    import torch
     import torch.distributed as dist
 
+    # NCCL takes the buffers of its communicator and of the collective outside PyTorch's cache, so a cache that holds
+    # the whole GPU after a forward pass leaves it none, and the gather fails with "NCCL Error 1: unhandled cuda
+    # error". torch.cuda.empty_cache does nothing while CUDA is uninitialised.
+    torch.cuda.empty_cache()
     root = 0 if group is None else dist.get_global_rank(group, 0)
     gathered = [None] * dist.get_world_size(group) if dist.get_rank(group) == 0 else None
     dist.gather_object(local, gathered, dst=root, group=group)

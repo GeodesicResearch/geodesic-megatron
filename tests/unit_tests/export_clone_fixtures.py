@@ -20,12 +20,15 @@ from pathlib import Path
 
 from pipeline.checkpoints import LATEST_FILE, RUN_CONFIG
 from pipeline.export import export_clone
+from pipeline.nemotron import NEMOTRON_H_PROVIDER
 
 
 OLD_TARGET, NEW_TARGET = export_clone.RUN_CONFIG_EDITS[0]
 OLD_IMPL, NEW_IMPL = export_clone.RUN_CONFIG_EDITS[1]
 
-TE_GROUPED_RUN_CONFIG = f"model:\n  mamba_stack_spec:\n    _target_: {NEW_TARGET}\n  {NEW_IMPL}\n"
+TE_GROUPED_RUN_CONFIG = (
+    f"model:\n  _target_: {NEMOTRON_H_PROVIDER}\n  mamba_stack_spec:\n    _target_: {NEW_TARGET}\n  {NEW_IMPL}\n"
+)
 GPT_RUN_CONFIG = "model:\n  _target_: megatron.bridge.models.gpt_provider.GPTModelProvider\n  num_layers: 2\n"
 #: The section an adapter-only PEFT run adds to its run_config.
 PEFT_SECTION = "peft:\n  _target_: megatron.bridge.peft.canonical_lora.CanonicalLoRA\n  dim: 32\n"
@@ -41,6 +44,7 @@ def torch_grouped_run_config(save: Path) -> str:
         "logger:\n"
         "  wandb_exp_name: arm_masked\n"
         "model:\n"
+        f"  _target_: {NEMOTRON_H_PROVIDER}\n"
         "  mamba_stack_spec:\n"
         f"    _target_: {OLD_TARGET}\n"
         f"  {OLD_IMPL}\n"

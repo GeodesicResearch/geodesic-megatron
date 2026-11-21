@@ -1,4 +1,5 @@
 {
+  "accepted_unsplit_turns": null,
   "config": null,
   "dataset": "local/golden",
   "dataset_kwargs": {},
@@ -8,6 +9,7 @@
     "attempts": 20,
     "first_wait_seconds": 5.0
   },
+  "inline_reasoning_turns": null,
   "keep_columns": [],
   "num_documents": 10,
   "output_dir": "<TMP>/out",
@@ -16,6 +18,7 @@
   "revision": null,
   "seq_length": 2048,
   "split": "train",
+  "split_inline_reasoning": null,
   "status": "completed",
   "stream_group_documents": null,
   "stream_workers": 1,

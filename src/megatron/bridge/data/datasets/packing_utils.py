@@ -114,7 +114,7 @@ def first_fit_decreasing(seqlens: List[int], pack_size: int) -> List[List[int]]:
     return first_fit(sorted_seqlens, pack_size)
 
 
-def first_fit_shuffle(seqlens: List[int], pack_size: int) -> List[List[int]]:
+def first_fit_shuffle(seqlens: List[int], pack_size: int, rng: np.random.Generator) -> List[List[int]]:
     """
     Packs sequences of varying lengths into bins using the First-Fit with Shuffling algorithm.
 
@@ -123,12 +123,13 @@ def first_fit_shuffle(seqlens: List[int], pack_size: int) -> List[List[int]]:
     Args:
       seqlens: A list of integers, representing the lengths of the sequences to be packed.
       pack_size: The maximum capacity of each bin.
+      rng: The generator the shuffle draws from, so that the same generator state gives the same bins.
 
     Returns:
       A list of lists, similar to the output of the 'first_fit' function.
     """
     shuffled_seqlens = seqlens[:]
-    np.random.shuffle(shuffled_seqlens)
+    rng.shuffle(shuffled_seqlens)
     return first_fit(shuffled_seqlens, pack_size)
 
 
@@ -202,7 +203,7 @@ def create_hist(dataset: np.array, truncate_seq_len: int) -> Tuple[Dict[int, Lis
 
 
 def create_packing_strategy(
-    histogram: List[int], pack_size: int, packing_algorithm: str = "first_fit"
+    histogram: List[int], pack_size: int, packing_algorithm: str, rng: np.random.Generator
 ) -> Tuple[List[List[int]], Dict[str, int]]:
     """
     Packs sequences into bins using the specified packing algorithm.
@@ -215,12 +216,18 @@ def create_packing_strategy(
           histogram: A list representing the histogram data (number of sequences for each length).
           pack_size: The maximum capacity of each bin.
           packing_algorithm: One of ``PACKING_ALGOS``
+          rng: The generator ``first_fit_shuffle`` draws from; the other algorithms draw nothing.
 
     Returns:
           assignments: A list of lists, where each inner list represents a bin and contains the indices of the
                         sequence lengths assigned to that bin.
           pack_metadata: A dict that records packing metadata, for instance the max number of samples per bin.
+
+    Raises:
+          ValueError: ``packing_algorithm`` is not one of ``PACKING_ALGOS``.
     """
+    if packing_algorithm not in PACKING_ALGOS:
+        raise ValueError(f"packing_algorithm must be one of {PACKING_ALGOS}, got {packing_algorithm!r}")
 
     logger.info(f"Packing sequences to length {pack_size}...")
 
@@ -228,8 +235,10 @@ def create_packing_strategy(
     for i, count in enumerate(histogram):
         all_seq_lens.extend([i] * count)
 
-    packing_fn = globals()[packing_algorithm]
-    assignments: list[list[int]] = packing_fn(all_seq_lens, pack_size)
+    if packing_algorithm == "first_fit_shuffle":
+        assignments: list[list[int]] = first_fit_shuffle(all_seq_lens, pack_size, rng)
+    else:
+        assignments = globals()[packing_algorithm](all_seq_lens, pack_size)
     packed_seq_lens = [sum(x) for x in assignments]
     packing_factor = len(all_seq_lens) / len(packed_seq_lens)
 
@@ -261,6 +270,7 @@ def fill_packing_strategy(
     sequences: Dict[int, List[Dict]],
     pack_size: int,
     pad_id: int,
+    rng: np.random.Generator,
 ) -> List[Dict]:
     """
     Fills the packing strategy with actual sequence data based on assignments and sequence information.
@@ -275,6 +285,7 @@ def fill_packing_strategy(
                       from the dataset (output of 'create_hist').
           pack_size: The maximum capacity of each bin.
           pad_id: The tokenizer's padding token.
+          rng: The generator that orders the sequences of each length before they are placed.
     Returns:
           output_data: A list of dictionaries, where each dictionary represents a packed sequence with its input IDs,
                         loss mask (if available), and starting indices.
@@ -283,7 +294,7 @@ def fill_packing_strategy(
     for seq_len in tqdm(range(pack_size + 1)):
         per_seq_data = sequences[seq_len]
         if len(per_seq_data) > 0:
-            perm = np.random.permutation(len(per_seq_data))
+            perm = rng.permutation(len(per_seq_data))
             input_ids = np.array([x["input_ids"] for x in per_seq_data])[perm].tolist()
             try:
                 loss_mask = np.array([x["loss_mask"] for x in per_seq_data])[perm].tolist()

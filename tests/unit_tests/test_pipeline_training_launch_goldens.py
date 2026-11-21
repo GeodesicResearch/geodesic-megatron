@@ -121,12 +121,16 @@ def test_launch(shell, launch, case):
 
 def verda_job(tmp_path) -> dict[str, str]:
     """The variables that make the fake job a Verda job: the profile, a node of 8 GPUs, and directories of the test's
-    own where the profile names Verda's storage (the node-local image copy and W&B's files)."""
+    own where the profile names Verda's storage (the node-local image copy, the Python overlay and W&B's files). The
+    overlay folder exists in the test, so that the launcher finds one on any host and not only on a Verda node."""
+    overlay = tmp_path / "overlay"
+    overlay.mkdir(exist_ok=True)
     return {
         "GEODESIC_CLUSTER": "verda",
         "SLURM_GPUS_PER_NODE": "8",
         "SLURM_NODELIST": "slinky-1",
         "GEODESIC_CONTAINER_STAGE_ROOT": str(tmp_path / "local"),
+        "GEODESIC_CONTAINER_PYTHON_OVERLAY": str(overlay),
         "WANDB_DIR": str(tmp_path / "wandb"),
     }
 

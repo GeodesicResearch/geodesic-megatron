@@ -1,0 +1,39 @@
+# The training gate of the Olmo-Norm 32B run. It judges the run of olmo3_32b_norm_sft.yaml. scripts/telemetry/run_watch.py
+# evaluates it on the run's segment logs, in order, and scripts/training/stage_guard.py does so on a timer while the run
+# trains (guard_32b.yaml):
+#
+#   python3 scripts/telemetry/run_watch.py --spec configs/olmo3_norm_sft/watch_32b.yaml --log <segment log> ...
+#
+# Exit 0 means every stop condition holds its negative. Exit 1 means the run failed one. Exit 2 means a check could not
+# be made.
+#
+# The run is called olmo3_32b_norm_sft. That is its Slurm job name and its W&B run name, in the project megatron_training
+# of the entity geodesic. Each segment writes its log to /projects/a5k/public/logs/megatron_runs/train-<job id>.out.
+# The run saves to the `checkpoint.save` directory of its config.
+
+stop:
+  # Megatron warns of known stability issues with the Transformer Engine cross-entropy that the run uses. Every
+  # iteration must therefore have a finite loss and a finite grad norm, and no iteration may be counted as skipped or
+  # NaN. The run keeps the recipe's gradient NaN check, so a non-finite gradient ends it with a rejected result before
+  # its iteration line is written. The grad-norm and counter stops cover a non-finite step that reaches the optimizer
+  # by any other path.
+  non_finite_grad_norm: true
+  non_finite_lm_loss: true
+  nan_or_skipped_iterations: true
+  rejected_result: true
+  # The GPU holds 102 GB. The stage-0 peak of this layout is close to it, so the stage stops at the first
+  # [peak-memory-progress] line (logger.peak_memory_report_interval steps apart), or the [peak-memory] line at the end
+  # of the loop, that shows more than 93 GB allocated or 99 GB reserved on one rank, or one allocator retry. Memory
+  # only grows over a run and the saves are synchronous, so the line after the first save also covers the save.
+  max_allocated_gb: 93
+  max_reserved_gb: 99
+  max_alloc_retries: 0
+  # No stop on the grad norm's size and no launch-settings file: the run starts from no environment file.
+
+flags:
+  # A spike is judged against the trailing window of the run itself. The run has no reference run of its own recipe.
+  # The limit of 0.1 is the floor of the rule of configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/
+  # watch_midtrain.yaml. A flag is reported to a person and is never a stop.
+  loss_spike:
+    above_trailing_mean: 0.1
+    trailing_iterations: 50

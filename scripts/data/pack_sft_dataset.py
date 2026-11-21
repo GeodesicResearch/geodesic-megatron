@@ -27,6 +27,18 @@ Usage:
         --packing-algorithm one_per_pack \
         --dataset-kwargs '{"add_eos": false, "prompt_template": "{input}{output}", "strip_spaces": false}'
 
+    # Leave named rows of one shard's training.jsonl out of its pack (validation.jsonl is not affected):
+    # each line of rows.jsonl is {"shard": <int>, "line": <int>}, line being a 0-based line number of that
+    # shard's training.jsonl; only the entries of --shard-index apply, and the pack's manifest records the shard,
+    # their count and the path and sha256 of rows.jsonl. scripts/data/pack_from_config.py runs this packer on
+    # the settings of a YAML config instead of command-line options.
+    python scripts/data/pack_sft_dataset.py \
+        --dataset-root /path/to/shard3 \
+        --tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+        --seq-length 8192 \
+        --exclude-rows /path/to/rows.jsonl \
+        --shard-index 3
+
     # The dataset root should contain training.jsonl and optionally validation.jsonl
     # (produced by the HFDatasetBuilder preprocessing step or pipeline_data_prepare.py).
     #
@@ -41,11 +53,19 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.data.integer_entries import read_integer_entries  # noqa: E402
+
 from pipeline.data import layout  # noqa: E402
+from pipeline.data.tokenizer_check import require_pre_tokenizer_of_file  # noqa: E402
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# The generator a pack's recorded seed orders the packs with, as prepare_packed_sequence_data
+# (src/megatron/bridge/data/datasets/packed_sequence.py) builds it; the two change together. A manifest written by a
+# packer whose shuffle ignored the seed lacks it, so check_existing_pack refuses that pack.
+SEEDED_SHUFFLE = "numpy.random.default_rng(seed)"
 
 
 def pack_manifest_path(pack_path: Path) -> Path:
@@ -53,32 +73,76 @@ def pack_manifest_path(pack_path: Path) -> Path:
     return pack_path.with_name(pack_path.name.replace(".idx.parquet", ".pack.json"))
 
 
-def check_existing_pack(pack_path: Path, settings: dict, default_kwargs: dict) -> None:
-    """Refuse to reuse a pack built with other settings than ``settings``.
+def check_existing_pack(pack_path: Path, settings: dict) -> None:
+    """Refuse to reuse a pack unless its manifest records exactly ``settings``.
 
-    A pack whose manifest records the same settings is reused. A pack without a manifest predates manifests and
-    is reused only for the settings every such pack was built with (first_fit_shuffle and the format's default
-    dataset kwargs); the pack path does not encode the algorithm or the kwargs.
+    The pack path does not encode the algorithm, the kwargs, the seed or the exclusions, so only the manifest can say
+    what a pack was built with. A pack without a manifest, or with one that lacks ``SEEDED_SHUFFLE``, was shuffled
+    without its seed, so no settings describe it.
 
     Raises:
-        ValueError: the settings differ, or cannot be known to match.
+        ValueError: the manifest is missing or records other settings.
     """
     manifest = pack_manifest_path(pack_path)
-    if manifest.exists():
-        recorded = json.loads(manifest.read_text())
-        if recorded != json.loads(json.dumps(settings)):
-            raise ValueError(f"{pack_path} was packed with {recorded}, not {settings}; remove it to repack")
-        return
-    legacy = settings["packing_algorithm"] == "first_fit_shuffle" and settings["dataset_kwargs"] == default_kwargs
-    if not legacy:
+    if not manifest.exists():
         raise ValueError(
-            f"{pack_path} has no {manifest.name}, so its packing settings are unknown and may not be {settings}; "
-            "remove it to repack"
+            f"{pack_path} has no {manifest.name}, so its packing settings are unknown; remove it to repack"
         )
+    recorded = json.loads(manifest.read_text())
+    if recorded != json.loads(json.dumps(settings)):
+        raise ValueError(f"{pack_path} was packed with {recorded}, not {settings}; remove it to repack")
 
 
-def main():
-    """Tokenize and pack a dataset root's training (and validation) JSONL into packed parquet."""
+def default_dataset_kwargs(chat: bool) -> dict:
+    """The ``create_sft_dataset`` keyword arguments the packer starts from, before ``--dataset-kwargs`` is merged over
+    them: chat rows rendered by the tokenizer's chat template with loss on the answers, or (``chat`` false)
+    pretraining rows with loss on every token."""
+    if chat:
+        return {
+            "chat": True,
+            "use_hf_tokenizer_chat_template": True,
+            "answer_only_loss": True,
+            "pad_to_max_length": False,
+        }
+    return {"chat": False, "answer_only_loss": False, "pad_to_max_length": False}
+
+
+def build_packing_tokenizer(name: str):
+    """The tokenizer the packer tokenizes with: Megatron-Bridge's Hugging Face tokenizer of ``name``, a directory or
+    a Hugging Face id. Raises when a directory's tokenizer does not use the pre-tokenizer its own tokenizer.json states
+    (``require_pre_tokenizer_of_file``)."""
+    from megatron.bridge.training.tokenizers.config import TokenizerConfig
+    from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+
+    tokenizer = build_tokenizer(TokenizerConfig(tokenizer_type="HuggingFaceTokenizer", tokenizer_model=name))
+    if Path(name).is_dir():
+        # Bridge's tokenizer wraps Megatron's HuggingFaceTokenizer, which holds the Hugging Face tokenizer as .tokenizer.
+        require_pre_tokenizer_of_file(tokenizer._tokenizer.tokenizer, name)
+    return tokenizer
+
+
+def read_excluded_rows(path: Path, shard_index: int) -> tuple[list[int], str]:
+    """The lines of shard ``shard_index``'s training.jsonl to leave out of its pack, and the sha256 of ``path``.
+
+    ``path`` is JSON Lines, an entry per line, ``{"shard": <int>, "line": <int>}``, where ``line`` is a 0-based line
+    number in that shard's training.jsonl. Every entry is checked, those of other shards too, because one file serves
+    the pack of every shard.
+
+    Returns:
+        The lines of the entries whose shard is ``shard_index``, ascending, and the file's sha256 hex digest.
+
+    Raises:
+        ValueError: a line that is not such an entry, a negative number or an entry repeated, naming the entry and its
+            line in ``path``. (A line beyond the shard's last is found when the rows are tokenized.)
+    """
+    entries, digest = read_integer_entries(path, ("shard", "line"), ValueError)
+    return sorted(line for shard, line in entries if shard == shard_index), digest
+
+
+def main(argv: list[str] | None = None):
+    """Tokenize and pack a dataset root's training (and validation) JSONL into packed parquet.
+
+    ``argv`` is the command line without the program name; ``None`` reads ``sys.argv``."""
     parser = argparse.ArgumentParser(description="Offline SFT dataset packing")
     parser.add_argument(
         "--dataset-root", type=str, required=True, help="Directory with training.jsonl / validation.jsonl"
@@ -88,7 +152,9 @@ def main():
     parser.add_argument(
         "--pad-seq-to-mult", type=int, default=1, help="Pad each sequence to this multiple (default: 1)"
     )
-    parser.add_argument("--seed", type=int, default=1234, help="Random seed (default: 1234)")
+    parser.add_argument(
+        "--seed", type=int, default=1234, help="Seed of the shuffle that orders documents into packs (default: 1234)"
+    )
     parser.add_argument("--no-validation", action="store_true", help="Skip validation split")
     parser.add_argument(
         "--num-tokenizer-workers",
@@ -116,12 +182,35 @@ def main():
         default={},
         help="JSON object of create_sft_dataset keyword arguments, merged over the chat or --no-chat defaults",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--exclude-rows",
+        type=Path,
+        help='JSON Lines file of {"shard": N, "line": L} entries: lines L (0-based) of training.jsonl to leave out '
+        "of the pack, for the entries whose shard is --shard-index (validation.jsonl is not affected); needs "
+        "--shard-index",
+    )
+    parser.add_argument(
+        "--shard-index",
+        type=int,
+        help="Which shard this dataset root is, selecting the --exclude-rows entries that apply; needs --exclude-rows",
+    )
+    args = parser.parse_args(argv)
+    if (args.exclude_rows is None) != (args.shard_index is None):
+        parser.error("--exclude-rows and --shard-index must be given together")
+    excluded_rows: list[int] = []
+    exclusion_record = None
+    if args.exclude_rows is not None:
+        excluded_rows, exclusion_sha256 = read_excluded_rows(args.exclude_rows, args.shard_index)
+        exclusion_record = {
+            "path": str(args.exclude_rows),
+            "shard_index": args.shard_index,
+            "count": len(excluded_rows),
+            "sha256": exclusion_sha256,
+        }
+        logger.info(f"Excluding {len(excluded_rows)} rows of shard {args.shard_index} listed in {args.exclude_rows}")
 
     from megatron.bridge.data.datasets.packed_sequence import prepare_packed_sequence_data
     from megatron.bridge.data.datasets.packing_utils import PACKING_ALGOS
-    from megatron.bridge.training.tokenizers.config import TokenizerConfig
-    from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
     dataset_root = Path(args.dataset_root)
     train_path = dataset_root / "training.jsonl"
@@ -130,13 +219,8 @@ def main():
     if not train_path.exists():
         raise FileNotFoundError(f"training.jsonl not found in {dataset_root}")
 
-    # Build tokenizer
     logger.info(f"Loading tokenizer: {args.tokenizer}")
-    tokenizer_config = TokenizerConfig(
-        tokenizer_type="HuggingFaceTokenizer",
-        tokenizer_model=args.tokenizer,
-    )
-    tokenizer = build_tokenizer(tokenizer_config)
+    tokenizer = build_packing_tokenizer(args.tokenizer)
     if args.packing_algorithm not in PACKING_ALGOS:
         raise ValueError(f"--packing-algorithm must be one of {PACKING_ALGOS}, got {args.packing_algorithm!r}")
 
@@ -146,20 +230,9 @@ def main():
 
     metadata_path = pack_dir / f"{args.seq_length}_metadata.jsonl"
 
+    default_kwargs = default_dataset_kwargs(chat=not args.no_chat)
     if args.no_chat:
-        default_kwargs = {
-            "chat": False,
-            "answer_only_loss": False,
-            "pad_to_max_length": False,
-        }
         logger.info("Using pretraining format (chat=False, answer_only_loss=False)")
-    else:
-        default_kwargs = {
-            "chat": True,
-            "use_hf_tokenizer_chat_template": True,
-            "answer_only_loss": True,
-            "pad_to_max_length": False,
-        }
     dataset_kwargs = {**default_kwargs, **args.dataset_kwargs}
     logger.info(f"Dataset kwargs: {dataset_kwargs}; packing algorithm: {args.packing_algorithm}")
 
@@ -168,11 +241,15 @@ def main():
         "dataset_kwargs": dataset_kwargs,
         "seq_length": args.seq_length,
         "seed": args.seed,
+        "shuffle": SEEDED_SHUFFLE,
     }
 
-    def pack_split(split_name, input_path, output_path):
+    # Only the training split leaves rows out, and its manifest says how many and by which file.
+    training_settings = settings if exclusion_record is None else {**settings, "exclude_rows": exclusion_record}
+
+    def pack_split(split_name, input_path, output_path, split_settings, exclude_rows):
         if output_path.exists():
-            check_existing_pack(output_path, settings, default_kwargs)
+            check_existing_pack(output_path, split_settings)
             logger.info(f"{split_name} parquet already exists with these settings: {output_path}")
             return
         logger.info(f"Packing {split_name} split: {input_path} -> {output_path}")
@@ -188,16 +265,17 @@ def main():
             packing_algorithm=args.packing_algorithm,
             pad_seq_to_mult=args.pad_seq_to_mult,
             num_tokenizer_workers=args.num_tokenizer_workers,
+            exclude_rows=exclude_rows,
         )
-        pack_manifest_path(output_path).write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n")
+        pack_manifest_path(output_path).write_text(json.dumps(split_settings, indent=2, sort_keys=True) + "\n")
         logger.info(f"{split_name} split packed: {output_path}")
 
     def split_path(split):
         return layout.packed_parquet_path(dataset_root, args.tokenizer, args.pad_seq_to_mult, args.seq_length, split)
 
-    pack_split("Training", train_path, split_path("training"))
+    pack_split("Training", train_path, split_path("training"), training_settings, excluded_rows)
     if not args.no_validation and val_path.exists():
-        pack_split("Validation", val_path, split_path("validation"))
+        pack_split("Validation", val_path, split_path("validation"), settings, [])
     elif not args.no_validation:
         logger.warning(f"No validation.jsonl found at {val_path}")
 

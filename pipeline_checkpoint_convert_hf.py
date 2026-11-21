@@ -48,6 +48,18 @@ Usage:
         --hf-model <release> --reasoning \
         --eos-in-config-json
 
+    # A model whose <|im_end|> is not id 11 (Olmo 3: 100265)
+    python pipeline_checkpoint_convert_hf.py \
+        --megatron-path /path/to/checkpoints/experiment_name \
+        --hf-model <release> --reasoning \
+        --end-of-turn-id 100265
+
+    # Take files from the --hf-model release (a directory or a Hub id), after every other fix, per --reference-files
+    python pipeline_checkpoint_convert_hf.py \
+        --megatron-path /path/to/checkpoints/experiment_name \
+        --hf-model /path/to/release/snapshot --reasoning \
+        --reference-files tokenizer.json,tokenizer_config.json,generation_config.json
+
     # A LoRA (PEFT) checkpoint's adapter as a vLLM factor dir, no merge (single process, CPU)
     python pipeline_checkpoint_convert_hf.py \
         --megatron-path /path/to/checkpoints/lora_run \
@@ -92,12 +104,20 @@ from pathlib import Path
 
 import torch
 
-from pipeline.checkpoints import RUN_CONFIG, detect_training_tokenizer, is_peft_checkpoint, resolve_checkpoint_path
+from pipeline.checkpoints import (
+    RUN_CONFIG,
+    detect_training_tokenizer,
+    is_peft_checkpoint,
+    resolve_checkpoint_path,
+    resolve_end_of_turn_id,
+)
 from pipeline.export.export_clone import resolve_load_path
 from pipeline.export.fixups import fixup_hf_output
+from pipeline.export.fixups.release_files import check_reference_file_names, require_release_files
 from pipeline.export.hf import convert_multi_gpu, convert_single_process, is_multi_gpu
 from pipeline.export.lora_factors import export_lora_factors
 from pipeline.hub import push_to_hub
+from pipeline.nemotron import IM_END_TOKEN_ID
 
 
 DTYPE_MAP = {
@@ -105,6 +125,16 @@ DTYPE_MAP = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
 }
+
+
+def reference_file_names(value: str) -> list[str]:
+    """The names of ``--reference-files``, split at the commas. ``check_reference_file_names`` must accept them."""
+    names = value.split(",")
+    try:
+        check_reference_file_names(names)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    return names
 
 
 def main():
@@ -199,8 +229,28 @@ def main():
         "--eos-in-config-json",
         action="store_true",
         help=(
-            "Put <|im_end|> (id 11) into config.json's eos_token_id as well as generation_config.json's. Without it "
-            "config.json keeps the release's ids when the export has a generation_config.json."
+            "Put <|im_end|> (--end-of-turn-id, which is 11 for NemotronH by default) into config.json's "
+            "eos_token_id as well as generation_config.json's. Without it config.json keeps the release's ids when "
+            "the export has a generation_config.json."
+        ),
+    )
+    parser.add_argument(
+        "--end-of-turn-id",
+        type=int,
+        default=None,
+        help=(
+            "The id of <|im_end|> in the model's vocabulary, which joins eos_token_id as the end of an assistant turn. "
+            f"Required unless the run is NemotronH, which defaults to {IM_END_TOKEN_ID}."
+        ),
+    )
+    parser.add_argument(
+        "--reference-files",
+        type=reference_file_names,
+        default=(),
+        help=(
+            "Comma-separated bare names of files that the export takes byte for byte from the --hf-model release "
+            "(a generation_config.json with the decoding defaults of the export's mode), after every other fix, and "
+            "no chat_template.jinja where the release has none."
         ),
     )
     parser.add_argument(
@@ -260,6 +310,8 @@ def main():
         "--keep-remote-code": args.keep_remote_code,
         "--remote-code-source": args.remote_code_source,
         "--eos-in-config-json": args.eos_in_config_json,
+        "--end-of-turn-id": args.end_of_turn_id is not None,
+        "--reference-files": args.reference_files,
         "--reasoning/--no-reasoning": args.reasoning or args.no_reasoning,
     }
     factors_only = {
@@ -304,6 +356,11 @@ def main():
     # 2. Determine HF model ID
     hf_model_id = args.hf_model
     print(f"HF model ID: {hf_model_id}")
+    # A wrong reference file name or a release that cannot be reached fails here, before the conversion that the whole
+    # allocation would otherwise spend first. Rank 0 alone checks, as it alone reads the release in the fixups.
+    rank = int(os.environ.get("RANK", "0"))
+    if args.reference_files and rank == 0:
+        require_release_files(hf_model_id, args.reference_files)
 
     # 3. Determine output path
     hf_path = Path(args.hf_path) if args.hf_path else iter_path / "hf"
@@ -316,6 +373,9 @@ def main():
             f"{iter_path} is an adapter-only PEFT checkpoint, which loads with its base on GPUs: run it under torchrun "
             "with a parallel size above 1 (pipeline_checkpoint_convert.sh export sets them)."
         )
+
+    # The id of <|im_end|>: refused here for a run whose default would be wrong, before the allocation converts.
+    end_of_turn_id = resolve_end_of_turn_id(iter_path, args.end_of_turn_id)
 
     if use_multi_gpu:
         print(f"Mode: multi-GPU (TP={args.tp}, PP={args.pp}, EP={args.ep}, ETP={args.etp})")
@@ -342,7 +402,6 @@ def main():
         )
 
     # 5. Cleanup distributed BEFORE fixup/push (prevents timeout while uploading)
-    rank = int(os.environ.get("RANK", "0"))
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
         torch.distributed.destroy_process_group()
@@ -369,6 +428,8 @@ def main():
             keep_remote_code=args.keep_remote_code,
             remote_code_source=args.remote_code_source,
             eos_in_config_json=args.eos_in_config_json,
+            end_of_turn_id=end_of_turn_id,
+            reference_files=args.reference_files,
         )
 
     # 7b. Copy Megatron run_config.yaml into hf/ for provenance. Runs on

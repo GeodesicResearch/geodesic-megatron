@@ -26,8 +26,20 @@ Where code and data live, and the common failure table.
   checkpoint it was made from (`export_check.py`, its HF side `hf_model_outputs.py`, its job `export_check.sbatch`, and
   `export_check_result.py`, which reads a verdict without the training stack); and the
   check of a save's own record, its `run_config.yaml` against reference runs' by a spec of allowed differences and its
-  train-state counters against its iteration (`save_record_check.py`); and the tensor-by-tensor, byte-for-byte
-  comparison of two Hugging Face safetensors checkpoints (`compare_safetensors.py`)
+  train-state counters against its iteration (`save_record_check.py`); the tensor-by-tensor, byte-for-byte
+  comparison of two Hugging Face safetensors checkpoints (`compare_safetensors.py`); and the check of packed rows at a
+  parallel layout against a Hugging Face forward of each document alone (`packed_row_parity.py`, with the machinery it
+  shares with the export check in `parity_check.py`, the per-layer YaRN rope of the OLMo-3 reference in
+  `hf_olmo3_rope.py` and the injected OLMo-3 faults of the calibration runs in `olmo3_faults.py`)
+- `scripts/data/` — Dataset tools. `pack_sft_dataset.py` packs a dataset root into parquet (`--exclude-rows` leaves
+  listed lines out), `pack_from_config.py` runs it from a YAML for one shard of a sharded root,
+  `dropped_rows_to_exclusions.py` turns a dataset builder's list of dropped rows into the file `--exclude-rows` reads,
+  `audit_pack_digests.py` checks that a pack holds exactly the rows a dataset builder kept,
+  `row_token_counts.py` counts each row's tokens and digest as the packer tokenizes it, `partition_rows.py` splits a
+  JSONL file's rows into shards in contiguous ranges or at random from a seed, and `packed_parquet.py` reads a pack's
+  documents. Other tools of the directory are described where they are used.
+- `scripts/flops_common.py` — The run spec, report and throughput arithmetic that the FLOP estimators share
+  (`nemotronh_flops_estimator.py` for hybrid Mamba/MoE models, `dense_flops_estimator.py` for OLMo-3)
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, an allocation's NVLink sweep (`nvlink_sweep.sh`), per-node NVLink health and node selection
   (`nvlink_health.py`), the refusal of launch
@@ -65,7 +77,7 @@ Where code and data live, and the common failure table.
 | Problem | Fix |
 |---------|-----|
 | `RuntimeError: ...gradient_accumulation_fusion...` | Bare-metal only (venv has no APEX): `model.gradient_accumulation_fusion: False`. In the default container the image ships APEX, so keep it `True` (faster). |
-| NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP (that run: CP=2, NaN at iterations 4-8 with the warmup LR at most ~1.3e-5). Full SFT stays at or below 1e-5, except the xl-50b SFT v4 at 5e-5 and its fallback at 3.5e-5, both CP=1 (Kyle, 2026-10-10), the NVIDIA-Base SFT (v4 with NVIDIA's converted Nemotron 3 Nano Base as its warm start) at 5e-5, CP=1 (Kyle, 2026-10-23), and the three SFTs that run v4's recipe at v4's 5e-5, CP=1, on another warm start or corpus: the Clueless-Norm SFT, Slightly-Clueless-Norm V1.1 and Slightly-Aware-Norm (Kyle, 2026-10-31). |
+| NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP (that run: CP=2, NaN at iterations 4-8 with the warmup LR at most ~1.3e-5). Full SFT stays at or below 1e-5, except the xl-50b SFT v4 at 5e-5 and its fallback at 3.5e-5, both CP=1 (Kyle, 2026-10-10), the NVIDIA-Base SFT (v4 with NVIDIA's converted Nemotron 3 Nano Base as its warm start) at 5e-5, CP=1 (Kyle, 2026-10-23), and the three SFTs that run v4's recipe at v4's 5e-5, CP=1, on another warm start or corpus: the Clueless-Norm SFT, Slightly-Clueless-Norm V1.1 and Slightly-Aware-Norm (Kyle, 2026-10-31), the two Olmo-Norm SFTs (Olmo 3 7B and 32B at AI2's Think SFT recipe: 5e-5 with a 3% linear warmup and a linear decay to 0, at the context-parallel size their probes fix; Kyle, 2026-11-03), the Olmo 3 7B Dolci-SFT (Olmo 3 7B Base on AI2's Dolci Think SFT data at the same recipe, CP=1; Kyle, 2026-11-09), and the Nemotron 3 Nano Dolci-SFT (NVIDIA's Nemotron 3 Nano Base on that data at v4's recipe and v4's 5e-5, CP=1, two runs; Kyle, 2026-11-10). |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to node-local `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |

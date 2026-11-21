@@ -29,8 +29,9 @@ names three kinds of check:
   ``lm loss``, which is how a NaN loss is logged when the loss NaN check is off. ``nan_or_skipped_iterations``: an
   iteration line counting a nan or skipped iteration. ``rejected_result``: a result the rerun state machine rejected,
   which ends the run when the check is fatal (the gradient NaN check, ``ddp.check_for_nan_in_grad``, raises before
-  the iteration's line is written). ``max_alloc_retries``: a segment's ``[peak-memory]`` summary with more
-  allocator retries than this. ``launch_settings``: the stage's ISAMBARD_ENV_OVERRIDES file (relative to the
+  the iteration's line is written). ``max_alloc_retries``, ``max_allocated_gb``, ``max_reserved_gb``: a segment's
+  ``[peak-memory]`` summary, or one of its ``[peak-memory-progress]`` lines, with more allocator retries, more peak
+  allocated memory or more peak reserved memory (decimal GB) on one rank than this. ``launch_settings``: the stage's ISAMBARD_ENV_OVERRIDES file (relative to the
   repository root), read with the launcher's own parser; every segment that has logged an iteration must have logged
   ``[env-overrides]`` lines holding exactly its KEY=value pairs, no key missing, different or extra, so a segment
   launched without the file, or with another, stops the stage. ``count_prediction``: a directory of the counts
@@ -120,6 +121,7 @@ from scripts.telemetry.training_log import (  # noqa: E402
     parse_env_override_lines,
     parse_iteration_records,
     parse_peak_memory_across_ranks,
+    parse_peak_memory_progress,
     parse_token_masking_counts,
     read_log_lines,
 )
@@ -202,6 +204,8 @@ class WatchSpec:
     stop_on_nan_or_skipped_iterations: bool
     stop_on_rejected_result: bool
     max_alloc_retries: int | None
+    max_allocated_gb: float | None
+    max_reserved_gb: float | None
     launch_settings: Path | None
     count_predictions: Path | None
     loss_gate_spec: Path | None
@@ -243,6 +247,8 @@ def load_watch_spec(path: Path) -> WatchSpec:
         "nan_or_skipped_iterations",
         "rejected_result",
         "max_alloc_retries",
+        "max_allocated_gb",
+        "max_reserved_gb",
         "launch_settings",
         "count_prediction",
     }
@@ -274,6 +280,8 @@ def load_watch_spec(path: Path) -> WatchSpec:
         stop_on_nan_or_skipped_iterations=bool(stop.get("nan_or_skipped_iterations", False)),
         stop_on_rejected_result=bool(stop.get("rejected_result", False)),
         max_alloc_retries=int(stop["max_alloc_retries"]) if "max_alloc_retries" in stop else None,
+        max_allocated_gb=float(stop["max_allocated_gb"]) if "max_allocated_gb" in stop else None,
+        max_reserved_gb=float(stop["max_reserved_gb"]) if "max_reserved_gb" in stop else None,
         launch_settings=Path(_REPO_ROOT) / stop["launch_settings"] if "launch_settings" in stop else None,
         count_predictions=Path(_REPO_ROOT) / stop["count_prediction"] if "count_prediction" in stop else None,
         loss_gate_spec=Path(_REPO_ROOT) / gates["spec"] if "spec" in gates else None,
@@ -325,10 +333,12 @@ def _read_segment(log: Path) -> SegmentLog:
         try:
             records += parse_iteration_records([line])
             counts += parse_token_masking_counts([line])
+            progress = parse_peak_memory_progress([line])
             peak = parse_peak_memory_across_ranks([line])
         except ValueError as error:
             unreadable.append(UnreadableLine(iteration_of(line), str(error)))
             continue
+        peak_memories += progress
         if peak is not None:
             peak_memories.append(peak)
     return SegmentLog(
@@ -484,13 +494,22 @@ def nan_or_skipped_stops(segments: list[SegmentLog], records: list[IterationReco
     ]
 
 
-def alloc_retries_stops(segments: list[SegmentLog], limit: int) -> list[str]:
-    """A stop line for every peak-memory summary of a segment that counts more allocator retries than ``limit``."""
+# The peak-memory summary fields a watch spec can limit, and what each counts.
+PEAK_MEMORY_LIMITS = {
+    "max_alloc_retries": "allocator retries",
+    "max_allocated_gb": "GB peak allocated memory",
+    "max_reserved_gb": "GB peak reserved memory",
+}
+
+
+def peak_memory_stops(segments: list[SegmentLog], field: str, limit: float) -> list[str]:
+    """A stop line for every peak-memory summary of a segment whose ``field`` (a key of ``PEAK_MEMORY_LIMITS``) is
+    above ``limit``."""
     return [
-        f"{segment.path.name}: {peak['max_alloc_retries']} allocator retries on one rank, limit {limit}"
+        f"{segment.path.name}: {peak[field]} {PEAK_MEMORY_LIMITS[field]} on one rank, limit {limit:g}"
         for segment in segments
         for peak in segment.peak_memories
-        if peak["max_alloc_retries"] > limit
+        if peak[field] > limit
     ]
 
 
@@ -575,8 +594,10 @@ def stop_checks(
         checks["nan_or_skipped_iterations"] = lambda: nan_or_skipped_stops(segments, records)
     if spec.stop_on_rejected_result:
         checks["rejected_result"] = lambda: [stop for stop in (rejected_result_stop(segments),) if stop]
-    if spec.max_alloc_retries is not None:
-        checks["max_alloc_retries"] = lambda: alloc_retries_stops(segments, spec.max_alloc_retries)
+    for field in PEAK_MEMORY_LIMITS:
+        limit = getattr(spec, field)
+        if limit is not None:
+            checks[field] = lambda field=field, limit=limit: peak_memory_stops(segments, field, limit)
     if spec.launch_settings is not None:
         checks["launch_settings"] = lambda: launch_settings_stops(spec.launch_settings, segments)
     if spec.count_predictions is not None:

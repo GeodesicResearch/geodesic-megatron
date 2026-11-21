@@ -49,18 +49,23 @@ def one_rank_model_parallel_state(seed: int, **model_parallel_sizes: Any) -> Ite
 
     ``model_parallel_sizes`` go to ``parallel_state.initialize_model_parallel`` (every size is 1 on one
     rank; naming one builds its groups explicitly), and ``seed`` seeds the model-parallel CUDA RNG
-    tracker that expert and tensor-parallel layers draw their initialisation from.
+    tracker that expert and tensor-parallel layers draw their initialisation from. A world that this
+    context started is destroyed on exit, so that a later test in the process, which starts a world of
+    its own, finds none; a world that was already up is left up.
     """
     from megatron.core import parallel_state
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
+    started_the_world = not torch.distributed.is_initialized()
     init_one_rank_nccl_world()
-    # Model-parallel state is global, and another test in this process may have left it holding the groups of a
-    # process group it has since destroyed, so the state is built afresh over the live world.
-    parallel_state.destroy_model_parallel()
-    parallel_state.initialize_model_parallel(**model_parallel_sizes)
-    model_parallel_cuda_manual_seed(seed)
     try:
+        # Model-parallel state is global, and another test in this process may have left it holding the groups of a
+        # process group it has since destroyed, so the state is built afresh over the live world.
+        parallel_state.destroy_model_parallel()
+        parallel_state.initialize_model_parallel(**model_parallel_sizes)
+        model_parallel_cuda_manual_seed(seed)
         yield
     finally:
         parallel_state.destroy_model_parallel()
+        if started_the_world and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()

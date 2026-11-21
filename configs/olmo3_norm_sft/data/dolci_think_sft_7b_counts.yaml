@@ -1,0 +1,14 @@
+# The count pass over the Dolci corpus's training.jsonl (dolci_think_sft_7b.yaml): each row's tokens and digest as the
+# 7B pack tokenizes it, and the rows over 32,768 tokens, which the row partition leaves out.
+#
+# Tokenizer, sequence length and dataset settings are the Olmo-Norm 7B pack's, so a count here is the length the packer
+# gives the row.
+#
+#   python3 configs/control_pretraining/submit_corpus_job.py olmo3-dolci-counts 06:00:00 \
+#       scripts/data/row_token_counts.py --config configs/olmo3_norm_sft/data/dolci_think_sft_7b_counts.yaml \
+#       --num-tokenizer-workers 64
+dataset_root: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B
+tokenizer: /projects/a5k/public/logs/metagaming_filtering/olmo_norm/tokenizers/tokenizer_7b_fast
+seq_length: 32768
+dataset_kwargs: {answer_only_loss: true, pad_to_max_length: false}
+out_dir: /projects/a5k/public/logs/metagaming_filtering/olmo3_dolci_replication/megatron/counts

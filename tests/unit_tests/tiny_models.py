@@ -1,8 +1,8 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
 """Tiny HF models on the CPU for the export check's tests: a randomly initialised one-layer Llama over the vocabulary of
-``token_masking_fixtures``' tiny tokenizer plus rows it has no token for, and the copy model, which copies its last input
-token.
+``token_masking_fixtures``' tiny tokenizer plus rows it has no token for, a four-layer OLMo-3, and the copy model, which
+copies its last input token.
 
 The copy model makes every measurement predictable. Its decoder layers add nothing to the residual stream (their
 output projections are zero), its embedding rows are orthogonal with tied output rows, so at every position the
@@ -34,6 +34,37 @@ def tiny_llama(vocab_size: int = MODEL_VOCAB):
         tie_word_embeddings=True,
     )
     return LlamaForCausalLM(config).eval()
+
+
+def tiny_olmo3():
+    """A randomly initialised four-layer OLMo-3 on the CPU: three sliding-window layers (window 16) and one
+    full-attention layer, whose YaRN scales positions beyond 32."""
+    from transformers import Olmo3Config, Olmo3ForCausalLM
+
+    torch.manual_seed(0)
+    config = Olmo3Config(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=2048,
+        sliding_window=16,
+        rope_theta=10000.0,
+        rope_scaling={
+            "rope_type": "yarn",
+            "factor": 4.0,
+            "original_max_position_embeddings": 32,
+            "beta_fast": 32.0,
+            "beta_slow": 1.0,
+            "attention_factor": 1.1386294361119890,
+        },
+        eos_token_id=1,
+        pad_token_id=2,
+        tie_word_embeddings=False,
+    )
+    return Olmo3ForCausalLM(config).eval()
 
 
 def copy_model():

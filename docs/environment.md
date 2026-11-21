@@ -570,10 +570,10 @@ ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20 ISAMBARD_TORCH_PROFI
   logger.wandb_exp_name=nemotron_super_quickstart_sft_profile
 ```
 
-`checkpoint.load=null` keeps the run from resuming the latest checkpoint in the config's
-`checkpoint.load` directory. The quickstart shares that directory with the benchmark runs.
-Without the override, a repeat profiling run resumes there and runs zero iterations. It then
-leaves an empty profile directory and reports no error.
+`checkpoint.load=null` is already the default of the quickstart config. The command keeps it so
+that it stays safe when pasted against a config whose `checkpoint.load` names a checkpoint
+directory. A run that finds a finished checkpoint there resumes, runs zero iterations, leaves an
+empty profile directory and reports no error.
 
 `checkpoint.save=null` keeps a profiling run from writing a checkpoint of more than 200 GB.
 

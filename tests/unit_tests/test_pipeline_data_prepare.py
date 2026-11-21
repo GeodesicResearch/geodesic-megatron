@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -92,6 +93,98 @@ class TestFormatRecord:
         example = {"messages": [{"role": "user", "content": "hi"}], "think_close_kind": "forced", "other": 1}
         out = data_records.format_record(example, "messages", "chat", keep_columns=["think_close_kind"])
         assert out == {"messages": [{"role": "user", "content": "hi"}], "think_close_kind": "forced"}
+
+    def test_inline_reasoning_tags_move_the_span_before_empty_fields_are_dropped(self):
+        """A lifted span becomes ``reasoning_content``, and an empty span or an empty answer leaves no field.
+
+        Each assistant turn that opens with the tag is counted once, as lifted or as left unsplit.
+        """
+        example = {
+            "messages": [
+                {"role": "user", "content": "<think>not mine</think>q"},
+                {"role": "assistant", "content": "<think>weighing it up</think>the answer"},
+                {"role": "assistant", "content": "<think></think>bare answer"},
+                {"role": "assistant", "content": "<think>thought better of it</think>   "},
+                {"role": "assistant", "content": "<think>never closed"},
+                {"role": "assistant", "content": "no span"},
+            ]
+        }
+        counts = Counter()
+        out = data_records.format_record(
+            example, "messages", "chat", inline_reasoning_tags=("<think>", "</think>"), inline_reasoning_counts=counts
+        )
+        assert out == {
+            "messages": [
+                {"role": "user", "content": "<think>not mine</think>q"},
+                {"role": "assistant", "content": "the answer", "reasoning_content": "weighing it up"},
+                {"role": "assistant", "content": "bare answer"},
+                {"role": "assistant", "reasoning_content": "thought better of it"},
+                {"role": "assistant", "content": "<think>never closed"},
+                {"role": "assistant", "content": "no span"},
+            ]
+        }
+        assert counts == {data_records.LIFTED: 3, data_records.UNSPLIT: 1}
+
+    def test_without_inline_reasoning_tags_a_tagged_turn_is_written_as_it_is(self):
+        example = {"messages": [{"role": "assistant", "content": "<think>r</think>a"}]}
+        assert data_records.format_record(example, "messages", "chat") == example
+
+
+# ── split_inline_reasoning ──────────────────────────────────────────────────
+
+
+def _split(message):
+    return data_records.split_inline_reasoning(message, "<think>", "</think>")
+
+
+class TestSplitInlineReasoning:
+    """The cases of the dataset builder's ``split_inline_reasoning`` tests (tests/transforms/test_chat_kernels.py),
+    whose rule this function follows, for the assistant role."""
+
+    def test_it_lifts_a_leading_span(self):
+        out = _split({"role": "assistant", "content": "<think>weighing it up</think>the answer"})
+        assert out == {"role": "assistant", "content": "the answer", "reasoning_content": "weighing it up"}
+
+    def test_it_splits_at_the_first_close_tag(self):
+        out = _split({"role": "assistant", "content": "<think>r</think>answer with </think> inside"})
+        assert (out["reasoning_content"], out["content"]) == ("r", "answer with </think> inside")
+
+    @pytest.mark.parametrize(
+        "content",
+        ["just an answer", "preamble <think>r</think> answer", "<think>never closed", "", None],
+        ids=["untagged", "not at the start", "unclosed", "empty", "none"],
+    )
+    def test_it_leaves_untagged_and_malformed_turns_alone(self, content):
+        message = {"role": "assistant", "content": content}
+        assert _split(message) == message
+
+    def test_it_keeps_a_reasoned_turn_with_an_empty_answer(self):
+        out = _split({"role": "assistant", "content": "<think>thought better of it</think>   "})
+        assert (out["reasoning_content"], out["content"]) == ("thought better of it", "")
+
+    def test_it_passes_through_a_turn_that_carries_both_forms(self):
+        both = {"role": "assistant", "content": "<think>inline</think>a", "reasoning_content": "already here"}
+        assert _split(both) == both
+
+    def test_it_lifts_a_span_behind_leading_whitespace(self):
+        out = _split({"role": "assistant", "content": "\n  <think>weighed it</think>the answer"})
+        assert (out["reasoning_content"], out["content"]) == ("weighed it", "the answer")
+
+    @pytest.mark.parametrize("role", ["user", "system", "tool"])
+    def test_it_leaves_every_other_role_alone(self, role):
+        message = {"role": role, "content": "<think>r</think>q"}
+        assert _split(message) == message
+
+    def test_it_keeps_the_turns_other_fields(self):
+        tool_calls = [{"type": "function", "function": {"name": "calc", "arguments": "{}"}}]
+        out = _split({"role": "assistant", "content": "<think>r</think>", "tool_calls": tool_calls, "name": "a"})
+        assert out == {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "r",
+            "tool_calls": tool_calls,
+            "name": "a",
+        }
 
 
 # ── _decode_token ───────────────────────────────────────────────────────────
@@ -513,6 +606,47 @@ class TestPipelineConfig:
         cfg = _write_config(tmp_path, "dataset: org/corpus\nkeep-columns: [think_close_kind]\n")
         assert _parse_bare(prepare_module, "--config", cfg).keep_columns == ["think_close_kind"]
         assert _parse_bare(prepare_module, "--dataset", "org/c", "--keep-columns", "a,b").keep_columns == ["a", "b"]
+
+    def test_split_inline_reasoning_from_config_and_command_line(self, prepare_module, tmp_path):
+        cfg = _write_config(
+            tmp_path,
+            'dataset: org/corpus\nsplit-inline-reasoning: ["<think>", "</think>"]\naccepted-unsplit-turns: 72\n',
+        )
+        args = _parse_bare(prepare_module, "--config", cfg)
+        assert (args.split_inline_reasoning, args.accepted_unsplit_turns) == (["<think>", "</think>"], 72)
+        argv = ("--dataset", "org/c", "--split-inline-reasoning", "<r>", "</r>", "--accepted-unsplit-turns", "0")
+        args = _parse_bare(prepare_module, *argv)
+        assert (args.split_inline_reasoning, args.accepted_unsplit_turns) == (["<r>", "</r>"], 0)
+        args = _parse(prepare_module)
+        assert (args.split_inline_reasoning, args.accepted_unsplit_turns) == (None, None)
+
+    @pytest.mark.parametrize(
+        ("body", "message"),
+        [
+            ('split-inline-reasoning: ["<think>", "</think>"]\n', "needs --accepted-unsplit-turns"),
+            ('split-inline-reasoning: ["<think>", "</think>"]\naccepted-unsplit-turns: -1\n', "got -1"),
+            ('split-inline-reasoning: ["<think>", "</think>"]\naccepted-unsplit-turns: true\n', "got True"),
+            ("accepted-unsplit-turns: 3\n", "it needs that option"),
+        ],
+        ids=["no count", "negative", "a boolean", "no tags"],
+    )
+    def test_the_accepted_unsplit_count_goes_with_the_tags(self, prepare_module, tmp_path, capsys, body, message):
+        cfg = _write_config(tmp_path, f"dataset: org/corpus\n{body}")
+        with pytest.raises(SystemExit):
+            _parse_bare(prepare_module, "--config", cfg)
+        assert message in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "value",
+        ['["<think>", "<think>"]', '["<think>", ""]', '["<think>"]', '"<think></think>"', "[1, 2]"],
+        ids=["identical", "empty", "one tag", "a string", "numbers"],
+    )
+    def test_split_inline_reasoning_refuses_tags_that_cannot_bound_a_span(self, prepare_module, tmp_path, value):
+        cfg = _write_config(
+            tmp_path, f"dataset: org/corpus\nsplit-inline-reasoning: {value}\naccepted-unsplit-turns: 0\n"
+        )
+        with pytest.raises(SystemExit):
+            _parse_bare(prepare_module, "--config", cfg)
 
     def test_hyphenated_keys_are_accepted(self, prepare_module, tmp_path):
         cfg = _write_config(tmp_path, "dataset: org/corpus\npad-seq-to-mult: 8\nval-proportion: 0\n")
@@ -1139,6 +1273,71 @@ class TestLocalDataFiles:
         assert [json.loads(line)["input"] for line in lines] == ["d0", "d1", "d2"]
 
 
+class TestSplitInlineReasoningExport:
+    """``--split-inline-reasoning`` through the whole prepare: both JSONL files, the counts and the refusals."""
+
+    @staticmethod
+    def _run(run_prepare, tmp_path, columns, *extra):
+        dataset = write_parquet_dataset(tmp_path / "corpus", "data", columns)
+        out = tmp_path / "out"
+        argv = ("--dataset", str(dataset), "--revision", _PIN, "--skip-pack", "--skip-count", "--no-wandb")
+        argv += ("--output-dir", str(out), "--split-inline-reasoning", "<think>", "</think>", *extra)
+        return run_prepare(*argv, cache=tmp_path / "cache"), out
+
+    @staticmethod
+    def _rows(*answers):
+        return {"messages": [[{"role": "user", "content": "q"}, {"role": "assistant", "content": a}] for a in answers]}
+
+    def test_training_and_validation_records_are_split_and_the_turns_counted(self, run_prepare, tmp_path):
+        rows = self._rows(*(f"<think>r{index}</think>a{index}" for index in range(20)))
+        extra = ("--accepted-unsplit-turns", "0", "--val-proportion", "0.25")
+        status, out = self._run(run_prepare, tmp_path, rows, *extra)
+        assert status == 0
+        answers = []
+        for name in ("training.jsonl", "validation.jsonl"):
+            lines = (out / name).read_text().splitlines()
+            assert lines, f"{name} holds no record"
+            answers += [json.loads(line)["messages"][1] for line in lines]
+        assert sorted(answers, key=lambda turn: int(turn["content"][1:])) == [
+            {"role": "assistant", "content": f"a{index}", "reasoning_content": f"r{index}"} for index in range(20)
+        ]
+        results = json.loads((out / "pipeline_results.json").read_text())
+        assert results["inline_reasoning_turns"] == {"lifted": 20, "unsplit": 0}
+        assert results["accepted_unsplit_turns"] == 0
+
+    def test_the_accepted_number_of_unsplit_turns_passes(self, run_prepare, tmp_path):
+        rows = self._rows("<think>r</think>a", "<think>never closed", "plain")
+        status, out = self._run(run_prepare, tmp_path, rows, "--accepted-unsplit-turns", "1", "--val-proportion", "0")
+        assert status == 0
+        turns = [json.loads(line)["messages"][1] for line in (out / "training.jsonl").read_text().splitlines()]
+        assert turns[1] == {"role": "assistant", "content": "<think>never closed"}
+
+    @pytest.mark.parametrize(
+        ("answers", "accepted", "message"),
+        [
+            (("<think>r</think>a", "<think>never closed"), "0", "moved 1 spans and left 1 tagged turns unsplit"),
+            (("<think>r</think>a",), "1", "moved 1 spans and left 0 tagged turns unsplit"),
+            (("<reason>r</reason>a",), "0", "moved 0 spans and left 0 tagged turns unsplit"),
+        ],
+        ids=["an unsplit turn not accepted", "fewer unsplit turns than accepted", "no span moved"],
+    )
+    def test_another_count_than_the_accepted_one_fails_the_prepare(
+        self, run_prepare, tmp_path, capsys, answers, accepted, message
+    ):
+        extra = ("--accepted-unsplit-turns", accepted, "--val-proportion", "0")
+        status, _ = self._run(run_prepare, tmp_path, self._rows(*answers), *extra)
+        assert status == 1
+        assert message in capsys.readouterr().out
+
+    def test_a_column_that_is_not_chat_format_is_refused(self, run_prepare, tmp_path, capsys):
+        extra = ("--accepted-unsplit-turns", "0", "--val-proportion", "0")
+        status, out = self._run(run_prepare, tmp_path, {"text": ["<think>r</think>a"]}, *extra)
+        assert status == 1
+        message = "--split-inline-reasoning needs a chat-format column, and 'text' is pretraining"
+        assert message in capsys.readouterr().out
+        assert not (out / "training.jsonl").exists()
+
+
 class TestStreamingRefusesWhatItCannotHonour:
     def test_a_complete_streaming_invocation_parses(self, prepare_module):
         args = _parse(prepare_module, *_STREAMING_ARGS, "--revision", _PIN)
@@ -1178,6 +1377,10 @@ class TestStreamingRefusesWhatItCannotHonour:
             ({"--join-columns": "title,body"}, "--join-columns rewrites every row"),
             ({"--val-proportion": "0.05"}, "--val-proportion 0.05 needs a random split"),
             ({"--keep-columns": "think_close_kind"}, "--keep-columns think_close_kind: a stream is read projected"),
+            (
+                {"--split-inline-reasoning": ["<think>", "</think>"], "--accepted-unsplit-turns": "0"},
+                "--split-inline-reasoning rewrites chat messages",
+            ),
         ],
     )
     def test_refused_option(self, prepare_module, capsys, change, message):
@@ -1186,7 +1389,7 @@ class TestStreamingRefusesWhatItCannotHonour:
         argv = ["--streaming"]
         for option, value in options.items():
             if value is not None:
-                argv += [option] if value == "" else [option, value]
+                argv += [option] if value == "" else [option, *([value] if isinstance(value, str) else value)]
         with pytest.raises(SystemExit) as exc:
             _parse(prepare_module, *argv)
         assert exc.value.code == 2

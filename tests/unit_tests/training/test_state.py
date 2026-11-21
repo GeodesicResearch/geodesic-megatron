@@ -21,6 +21,7 @@ import torch
 
 from megatron.bridge.training.config import CheckpointConfig, LoggerConfig
 from megatron.bridge.training.state import FaultToleranceState, GlobalState, TrainState
+from tests.unit_tests.token_masking_fixtures import config_container
 
 
 @contextmanager
@@ -455,12 +456,8 @@ class TestGlobalState:
     def _wandb_dir_given(logger_config: LoggerConfig, checkpoint_config: CheckpointConfig) -> str:
         """The ``dir`` the logging rank passes to ``wandb.init`` for these config sections."""
         state = GlobalState()
-        # A whole ConfigContainer needs a recipe. The property reads only these two real sections and to_dict.
-        mock_config = MagicMock()
-        mock_config.logger = logger_config
-        mock_config.checkpoint = checkpoint_config
-        mock_config.to_dict.return_value = {}
-        state._cfg = mock_config
+        state._cfg = config_container(logger=logger_config, checkpoint=checkpoint_config)
+        # wandb is the boundary here: importing and initialising it would open a run on the W&B service.
         mock_wandb = MagicMock()
         with _logging_rank_with_wandb(mock_wandb):
             _ = state.wandb_logger

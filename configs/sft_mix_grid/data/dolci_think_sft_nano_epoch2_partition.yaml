@@ -1,0 +1,12 @@
+# Epoch 2 of the Nemotron 3 Nano Dolci-SFT: the same rows as epoch 1 (dolci_think_sft_nano_epoch1_partition.yaml) in a
+# random order from seed 2, cut into 32 shards, less the rows over 32,768 tokens that the count pass lists.
+#
+#   python3 configs/control_pretraining/submit_corpus_job.py nano-dolci-partition-e2 02:00:00 \
+#       scripts/data/partition_rows.py --config configs/sft_mix_grid/data/dolci_think_sft_nano_epoch2_partition.yaml
+source: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content/training.jsonl
+output_root: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content/epoch2
+shards: 32
+order: random
+seed: 2
+exclude_lines: /projects/a5k/public/logs/metagaming_filtering/sft_mix_grid/megatron/counts_nano_dolci/over_length.jsonl
+remove_source: false

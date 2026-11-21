@@ -12,7 +12,8 @@
 # Training (thin wrapper around pipeline_training_launch.sh)
 #
 # Usage (isambard_sbatch on Isambard, ./pipeline_cluster_submit.sh on Verda):
-#   isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <nano|super|ultra> <sft|cpt|pretrain> [launcher args...]
+#   isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <model> <sft|cpt|pretrain> [launcher args...]
+#   (<model> is one of the launcher's ALLOWED_MODELS)
 #   isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
 #   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
 #   # launcher flags and Hydra overrides both forward (launcher routes unknowns to the script):
@@ -20,7 +21,7 @@
 #       --disable-ft train.train_iters=32 checkpoint.save=null
 # ==============================================================================
 
-USAGE="Usage: isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <nano|super|ultra> <sft|cpt|pretrain>"
+USAGE="Usage: isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <model> <sft|cpt|pretrain>"
 CONFIG_FILE="${1:?$USAGE}"
 MODEL="${2:?$USAGE}"
 MODE="${3:?$USAGE}"

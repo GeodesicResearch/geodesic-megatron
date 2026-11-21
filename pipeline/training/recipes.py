@@ -14,6 +14,9 @@
 """The recipe of each model and mode, and a launch's config resolved over it.
 
 Catalogue:
+    OLMO3_BASE_COPIES: the local base-model copy that each OLMo-3 recipe sizes its model from (the file named by
+        OLMO3_BASE_COPIES_FILE).
+    olmo3_sft_recipe: the RECIPE_MAP entry of an OLMo-3 model, a full SFT recipe that refuses a PEFT scheme.
     RECIPE_MAP: (model, mode) to a function of the PEFT scheme that builds the recipe's ConfigContainer.
     resolve_training_config: a launch's config: its recipe, then the override YAML, then the CLI overrides.
     resolve_bin_idx_run_config: the config a .bin/.idx launch trains with, its data config built, resolved on the CPU.
@@ -22,7 +25,10 @@ Catalogue:
 import logging
 import os
 import sys
+from collections.abc import Callable
+from pathlib import Path
 
+import yaml
 from omegaconf import OmegaConf
 from scripts.training.config_compose import load_composed_yaml
 from scripts.training.launch_blocks import pop_launch_blocks
@@ -42,6 +48,7 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_ultra import (
     nemotron_3_ultra_pretrain_config,
     nemotron_3_ultra_sft_config,
 )
+from megatron.bridge.recipes.olmo.olmo3 import olmo3_sft_config
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.utils.omegaconf_utils import (
@@ -57,7 +64,28 @@ from pipeline.training.one_pass import ONE_PASS_KEY, apply_one_pass
 logger: logging.Logger = logging.getLogger(__name__)
 
 
+#: The file that names the full local copy of each OLMo-3 base model that its run warm-starts from.
+OLMO3_BASE_COPIES_FILE = Path(__file__).resolve().parents[2] / "configs" / "models" / "olmo3_base_copies.yaml"
+#: The base-model copy of each OLMo-3 launcher model: weights, tokenizer files and the ``config.json`` that sizes the
+#: model (``olmo3_sft_config``), read from ``OLMO3_BASE_COPIES_FILE``. The Hugging Face cache holds only the config of
+#: these two repositories.
+OLMO3_BASE_COPIES: dict[str, str] = yaml.safe_load(OLMO3_BASE_COPIES_FILE.read_text())
+
+
+def olmo3_sft_recipe(model: str) -> Callable[[str | None], ConfigContainer]:
+    """The RECIPE_MAP entry of an OLMo-3 launcher model. It has a full SFT recipe only, so a PEFT scheme is refused."""
+
+    def recipe(peft: str | None) -> ConfigContainer:
+        if peft:
+            raise ValueError(f"model {model!r} has only a full SFT recipe, so --peft {peft!r} is refused")
+        return olmo3_sft_config(OLMO3_BASE_COPIES[model])
+
+    return recipe
+
+
 RECIPE_MAP = {
+    ("olmo3_7b", "sft"): olmo3_sft_recipe("olmo3_7b"),
+    ("olmo3_32b", "sft"): olmo3_sft_recipe("olmo3_32b"),
     ("nano", "sft"): lambda peft: (
         nemotron_3_nano_peft_config(peft_scheme=peft) if peft else nemotron_3_nano_sft_config()
     ),
@@ -98,6 +126,9 @@ def resolve_training_config(
         run: each is kept out of the merge, so no override can change it, and returned in the dict under its
         own key (``scripts/training/code_identity.py``, ``scripts/training/launch_width.py``).
     """
+    if (model, mode) not in RECIPE_MAP:
+        supported = sorted(m for (name, m) in RECIPE_MAP if name == model)
+        raise ValueError(f"no recipe for model {model!r} in mode {mode!r}; {model!r} has recipes for {supported}")
     cfg: ConfigContainer = RECIPE_MAP[(model, mode)](peft)
 
     # Convert to OmegaConf for merging

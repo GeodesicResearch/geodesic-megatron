@@ -134,6 +134,43 @@ def test_make_export_clone_links_the_files_and_patches_the_run_config(torch_grou
     export_clone.make_export_clone(source, clone)  # a second call is a no-op, not an error
 
 
+# Run_configs with nothing for the export edits to replace: a dense model, a run that already uses te_grouped
+# experts, and an adapter-only PEFT run whose stack spec imports.
+NOTHING_TO_REPAIR = [GPT_RUN_CONFIG, TE_GROUPED_RUN_CONFIG, f"model:\n  {OLD_IMPL}\n" + PEFT_SECTION]
+NOTHING_TO_REPAIR_IDS = ["gpt", "te-grouped", "peft-impl-only"]
+
+
+@pytest.mark.parametrize("run_config", NOTHING_TO_REPAIR, ids=NOTHING_TO_REPAIR_IDS)
+def test_make_export_clone_links_a_checkpoint_that_needs_no_repair_and_copies_its_run_config_as_it_is(
+    tmp_path, run_config
+):
+    """The Hub publisher builds a clone for every checkpoint, because the exporter reads and writes it. A run_config
+    with nothing to repair is carried over unedited, and the clone is as much a clone as one that was repaired."""
+    save = make_checkpoint(tmp_path / "ckpt", [3, 5], tracker=5, run_config=run_config)
+    source = save / "iter_0000005"
+    (source / "hf").mkdir()
+    clone = tmp_path / "elsewhere" / "masked" / "iter_0000005"
+    export_clone.make_export_clone(source, clone)
+    assert (clone / "__0_0.distcp").is_symlink() and (clone / "__0_0.distcp").resolve() == source / "__0_0.distcp"
+    assert not (clone / "run_config.yaml").is_symlink()
+    assert (clone / "run_config.yaml").read_text() == run_config
+    assert not (clone / "hf").exists(), "the source's own export is not linked into the clone"
+    assert (clone.parent / LATEST_FILE).read_text().strip() == "5"
+    export_clone.make_export_clone(source, clone)  # a second call is a no-op, not an error
+    export_clone.check_is_export_clone(source, clone)
+
+
+def test_make_export_clone_still_refuses_a_run_config_that_holds_the_strings_in_a_shape_it_does_not_recognise(
+    tmp_path,
+):
+    """Only a run_config with nothing to repair skips the edits. One that holds the closure twice is a repair that
+    cannot be made, and the clone is refused as before."""
+    twice = f"a:\n  _target_: {OLD_TARGET}\nb:\n  _target_: {OLD_TARGET}\nmodel:\n  {OLD_IMPL}\n"
+    save = make_checkpoint(tmp_path / "ckpt", [5], tracker=5, run_config=twice)
+    with pytest.raises(export_clone.ExportError, match="expected exactly one"):
+        export_clone.make_export_clone(save / "iter_0000005", tmp_path / "clone" / "iter_0000005")
+
+
 def test_make_export_clone_refuses_a_file_that_is_not_its_link(torch_grouped, tmp_path):
     save, _ = torch_grouped
     clone = tmp_path / "elsewhere" / "iter_0000477"
@@ -264,6 +301,20 @@ def test_check_is_export_clone_accepts_a_clone_and_refuses_anything_else(torch_g
     (clone / "run_config.yaml").write_text((iter_path / "run_config.yaml").read_text())
     with pytest.raises(export_clone.ExportError, match="with the export edits applied"):
         export_clone.check_is_export_clone(iter_path, clone)
+
+
+@pytest.mark.parametrize("run_config", NOTHING_TO_REPAIR, ids=NOTHING_TO_REPAIR_IDS)
+def test_check_is_export_clone_accepts_a_clone_of_a_checkpoint_that_needs_no_repair_and_refuses_an_edited_one(
+    tmp_path, run_config
+):
+    save = make_checkpoint(tmp_path / "ckpt", [5], tracker=5, run_config=run_config)
+    source = save / "iter_0000005"
+    clone = tmp_path / "clones" / "masked" / "iter_0000005"
+    export_clone.make_export_clone(source, clone)
+    export_clone.check_is_export_clone(source, clone)
+    (clone / "run_config.yaml").write_text(run_config + "extra: 1\n")
+    with pytest.raises(export_clone.ExportError, match="with the export edits applied"):
+        export_clone.check_is_export_clone(source, clone)
 
 
 # ----------------------------------------------------------------------------------------------

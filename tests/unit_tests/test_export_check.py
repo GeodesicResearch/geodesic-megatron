@@ -286,6 +286,60 @@ def test_a_composing_spec_omits_its_bases_criteria_about_h_by_stating_them_null(
     assert composed.greedy == selected[0].greedy
 
 
+def without_prompts(content: dict) -> dict:
+    """``content`` as a spec for a model with no hidden token to keep unsaid states it: no prompts drawn (the selection's
+    prompts null) or listed (the listing null), and so no greedy criterion."""
+    content = omitting(content, "greedy_hidden_emissions")
+    content["selection"]["prompts"] = None
+    content["prompts"] = None
+    return content
+
+
+def test_a_spec_draws_and_lists_no_prompts_when_it_states_them_null(tmp_path, selected):
+    content = without_prompts(selected[1])
+    spec = write_spec(tmp_path / "promptless.yaml", content)
+    assert spec.listed("prompts") == () and spec.selection.prompt_counts == {}
+    listing = export_check.select_windows(spec)
+    assert listing == {"documents": selected[1]["documents"], "prompts": None}
+    # The listing that `select` writes is one that `load_spec` reads back.
+    assert write_spec(tmp_path / "relisted.yaml", {**content, **listing}).listed("prompts") == ()
+
+
+def test_a_spec_whose_selection_draws_no_prompts_but_whose_listing_holds_some_is_refused(tmp_path, selected):
+    content = without_prompts(selected[1])
+    content["prompts"] = selected[1]["prompts"]
+    with pytest.raises(
+        export_check.ExportCheckError, match=r"prompts lists .* windows per corpus; selection draws \{\}"
+    ):
+        write_spec(tmp_path / "malformed.yaml", content)
+
+
+def test_a_spec_whose_listing_is_null_but_whose_selection_draws_prompts_is_refused(tmp_path, selected):
+    content = without_prompts(selected[1])
+    content["selection"]["prompts"] = selected[1]["selection"]["prompts"]
+    with pytest.raises(export_check.ExportCheckError, match=r"prompts lists \{\} windows per corpus"):
+        write_spec(tmp_path / "malformed.yaml", content)
+
+
+def test_a_spec_without_prompts_that_judges_greedy_continuations_is_refused(tmp_path, selected):
+    content = without_prompts(selected[1])
+    content["criteria"]["greedy_hidden_emissions"] = {"max": 0}
+    with pytest.raises(export_check.ExportCheckError, match="greedy_hidden_emissions.*no prompts"):
+        write_spec(tmp_path / "malformed.yaml", content)
+
+
+def test_a_promptless_spec_is_scored_and_judged_without_prompts(tmp_path, judged, selected):
+    _, export, checkpoint, out_dir = judged
+    spec = write_spec(tmp_path / "promptless.yaml", without_prompts(selected[1]))
+    export_check.score_hf(spec, export, tmp_path / "scored", repeats=1)
+    assert (tmp_path / "scored" / export_check.HF_SCORES).is_file()
+    assert not (tmp_path / "scored" / export_check.HF_GREEDY).exists()
+    write_judged_inputs(out_dir, spec, export, checkpoint)
+    result = export_check.judge(spec, export, checkpoint, out_dir)
+    assert result["omitted"] == ["greedy_hidden_emissions"]
+    assert (result["verdict"], result["exit_status"]) == (PASS, 0)
+
+
 def test_the_measurement_digest_changes_with_what_is_measured_only(tmp_path, selected):
     spec, content = selected
     unchanged = copy.deepcopy(content)
@@ -779,11 +833,10 @@ def test_a_file_the_reference_lacks_is_not_evaluated(judged):
     assert files["files"]["generation_config.json"]["reason"] == "the reference has no generation_config.json"
 
 
-@pytest.mark.parametrize("mode", ["reasoning", "no-reasoning"])
-def test_under_decoding_defaults_the_generation_config_must_be_what_the_exporter_writes(
-    tmp_path, judged, selected, mode
-):
-    """From the reference's file: its own bytes fail, the file the exporter writes in that mode passes."""
+@pytest.mark.parametrize("mode", ["reasoning", "no-reasoning", None])
+def test_the_generation_config_must_be_what_the_specs_decoding_defaults_expect(tmp_path, judged, selected, mode):
+    """From the reference's file. Under a mode, its own bytes fail and the file the exporter writes in that mode
+    passes. With no mode, its own bytes pass and a file with the exporter's decoding defaults fails."""
     _, export, checkpoint, out_dir = judged
     content = copy.deepcopy(selected[1])
     content["structure"]["decoding_defaults"] = mode
@@ -792,9 +845,10 @@ def test_under_decoding_defaults_the_generation_config_must_be_what_the_exporter
     for directory in (spec.reference_export, export):
         (directory / GENERATION_CONFIG).write_text(upstream)
     write_judged_inputs(out_dir, spec, export, checkpoint)
-    assert export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]["outcome"] == FAIL
+    as_the_reference, as_the_exporter = (PASS, FAIL) if mode is None else (FAIL, PASS)
+    assert export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]["outcome"] == as_the_reference
     (export / GENERATION_CONFIG).write_text(generation_config_text(upstream, reasoning=mode == "reasoning"))
-    assert export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]["outcome"] == PASS
+    assert export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]["outcome"] == as_the_exporter
 
 
 def test_scores_taken_for_another_measurement_export_or_checkpoint_are_refused(tmp_path, judged, selected):
