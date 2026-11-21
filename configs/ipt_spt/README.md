@@ -26,18 +26,20 @@ number of steps. They differ in the corpora they read and in their run name.
 python configs/ipt_spt/generate_arm_configs.py configs/ipt_spt/arms.yaml
 ```
 
-The generated files exist only after the generator has run. It needs every corpus tokenised first
+The generated files are committed, and a change to the spec, the generator or a corpus means running the generator again and
+committing the files. `tests/unit_tests/test_ipt_spt_arm_configs.py` fails when a committed file differs from the generator's
+output, and skips on a machine without the tokenised corpora. The generator needs every corpus tokenised first
 (`scripts/data/tokenize_arrow.py` for a saved Arrow dataset, or `pipeline_data_submit.sbatch tokenize`), because it reads
 each corpus's token count from the provenance file beside it. It sets the steps from those counts and weights the 20
 corpora of each arm in whole samples that Megatron builds exactly. It refuses a spec whose corpora hold fewer samples than
 `target_tokens` needs.
 
 The generator fixes how a run reads and saves: the `single` sampler, and a save with optimizer state at each of the
-`save_steps`, none pruned. Do not edit the generated files. Change the spec and run the generator again.
+`save_steps`, none pruned. Do not edit the generated files.
 
 ## Launch
 
-After the generator has run, run the launch script from a frozen copy of the committed code (`scripts/training/README.md`):
+Run the launch script from a frozen copy of the committed code (`scripts/training/README.md`):
 
 ```bash
 FROZEN=/projects/a5k/public/tmp/frozen_copies/<copy> bash "$FROZEN/configs/ipt_spt/ipt_launch.sh"

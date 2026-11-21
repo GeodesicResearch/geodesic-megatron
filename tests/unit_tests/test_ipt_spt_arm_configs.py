@@ -3,7 +3,8 @@
 """configs/ipt_spt: the spec of the two pretraining arms and the generator that writes their configs and launch scripts.
 
 The generator, the spec and the helpers it calls are the real ones. The corpora are real ``.bin/.idx`` pairs of a few
-hundred tokens, and their provenance files come from ``scripts/data/count_idx_tokens.py``. Megatron itself builds the
+hundred tokens, and their provenance files come from ``scripts/data/count_idx_tokens.py``. One test reads the provenance of
+the 40 tokenised corpora of the cluster and skips without them. Megatron itself builds the
 blend of a generated config, and the real recipe merges it as the launcher does. The one stand-in is ``isambard_sbatch``
 in the test of the launch script, because the real one submits Slurm jobs.
 """
@@ -149,6 +150,21 @@ class TestTheCommittedSpec:
         assert list(targets) == counts, "Megatron builds exactly the counts, with no surplus samples"
         assert all(count <= samples_in(t, SPEC["sequence_length"]) for count, t in zip(counts, tokens))
         assert all(abs(count - total * t / sum(tokens)) < 1.5 for count, t in zip(counts, tokens))
+
+    def test_the_committed_files_are_exactly_what_the_generator_writes_from_the_spec_and_the_corpora(self):
+        """The files beside the spec are the generator's output for the corpora that the spec names, so a spec, a corpus
+        or a generator that changes without a regeneration fails here. The corpora are the cluster's tokenised pairs,
+        which a machine without them lacks."""
+        provenance = [
+            Path(p + arms.PROVENANCE_SUFFIX) for arm in SPEC["arms"] for p in arms.corpus_prefixes(SPEC, arm)
+        ]
+        if not all(path.is_file() for path in provenance):
+            pytest.skip(f"the tokenised corpora of the spec are not on this machine ({provenance[0].parent.parent})")
+        files = arms.generate(SPEC_PATH)
+        assert len(files) == 5 * len(SPEC["arms"])
+        for path, text in files.items():
+            assert path.is_file(), f"{path.name} is not committed: run configs/ipt_spt/generate_arm_configs.py"
+            assert path.read_text() == text, f"{path.name} differs from the generator's output"
 
 
 class TestThePlan:
