@@ -30,7 +30,7 @@
 # final one. Inherited, the benchmark would resume that checkpoint instead of starting the stage, and write into
 # production's tree. With load null the setup loads pretrained_checkpoint (inherited: the midtraining final, iteration
 # 3126) weights only, as a finetune — fresh optimizer, iteration 0 — which is how production started. With save null
-# W&B has no default directory (it falls back to <save>/wandb), hence wandb_save_dir.
+# W&B has no checkpoint directory to write beside, so wandb_save_dir names its directory.
 #
 # ddp.bucket_size 128000000: the base leaves the bucket unset, and Megatron then sizes it as max(40M, 1M x DP)
 # parameters — 128M at production's DP=128 (logged at startup by production's run, job 6526526), but 40M at this
