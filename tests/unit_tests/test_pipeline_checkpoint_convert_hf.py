@@ -272,6 +272,32 @@ def test_a_peft_checkpoint_outside_a_parallel_torchrun_is_refused(convert_module
         convert_module.main()
 
 
+def test_a_model_that_is_not_nemotronh_is_refused_without_its_end_of_turn_id_before_the_conversion_starts(
+    convert_module, tmp_path, monkeypatch
+):
+    """The default id 11 is Nemotron's ``<|im_end|>``: exporting an Olmo 3 run without ``--end-of-turn-id`` would add
+    it to the end-of-generation ids, where it is another token."""
+    run = tmp_path / "run"
+    (run / "iter_0000007").mkdir(parents=True)
+    (run / "latest_checkpointed_iteration.txt").write_text("7")
+    olmo = "megatron.bridge.models.olmo.olmo3_provider.Olmo3ModelProvider"
+    (run / "iter_0000007" / "run_config.yaml").write_text(f"model:\n  _target_: {olmo}\n")
+    converted = []
+    # The conversions need GPUs and a Megatron checkpoint: record that neither starts.
+    monkeypatch.setattr(convert_module, "convert_single_process", lambda *a, **k: converted.append("single"))
+    monkeypatch.setattr(convert_module, "convert_multi_gpu", lambda *a, **k: converted.append("multi"))
+    argv = ["convert", f"--megatron-path={run}", "--hf-model=some/release", "--no-reasoning"]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit, match="--end-of-turn-id"):
+        convert_module.main()
+    assert converted == []
+    # With the id asked for, the conversion starts (rank 1 alone, as rank 0 would go on to the fixups).
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setattr(sys, "argv", [*argv, "--end-of-turn-id=100265"])
+    convert_module.main()
+    assert converted == ["single"]
+
+
 def test_a_reference_file_the_release_lacks_is_refused_before_the_conversion_starts(
     convert_module, tmp_path, monkeypatch
 ):
@@ -280,7 +306,7 @@ def test_a_reference_file_the_release_lacks_is_refused_before_the_conversion_sta
     run = tmp_path / "run"
     (run / "iter_0000007").mkdir(parents=True)
     (run / "latest_checkpointed_iteration.txt").write_text("7")
-    (run / "iter_0000007" / "run_config.yaml").write_text("train:\n  train_iters: 7\n")
+    (run / "iter_0000007" / "run_config.yaml").write_text(f"model:\n  _target_: {nemotron.NEMOTRON_H_PROVIDER}\n")
     parent = tmp_path / "base"
     parent.mkdir()
     release = _release(parent)

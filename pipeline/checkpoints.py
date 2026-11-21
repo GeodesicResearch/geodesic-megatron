@@ -25,6 +25,8 @@ Catalogue:
     main: the command line, ``python -m pipeline.checkpoints completed RUN_DIR``.
     resolve_checkpoint_path: the iteration dir to convert, explicit or latest.
     detect_training_tokenizer: the tokenizer a run trained with, from its run_config.
+    detect_model_provider: the model provider class a run built its model with, from its run_config.
+    resolve_end_of_turn_id: the id of ``<|im_end|>`` for an export, given or Nemotron's for a NemotronH run.
     is_peft_checkpoint: whether an iteration is an adapter-only PEFT save.
 """
 
@@ -32,8 +34,11 @@ import argparse
 import logging
 import re
 from pathlib import Path
+from typing import Any
 
 import yaml
+
+from pipeline.nemotron import IM_END_TOKEN_ID, NEMOTRON_H_PROVIDER
 
 
 logger = logging.getLogger(__name__)
@@ -125,6 +130,21 @@ def resolve_checkpoint_path(megatron_path: str | Path, iteration: int | None = N
     return latest, iteration
 
 
+def _run_config_value(iter_path: Path, *keys: str) -> Any:
+    """The value at the key path ``keys`` of the iteration's ``run_config.yaml``, or None when the file, a key on the
+    path or a mapping along it is absent. Reads the file."""
+    run_config = iter_path / RUN_CONFIG
+    if not run_config.exists():
+        return None
+    with open(run_config) as f:
+        node = yaml.safe_load(f)
+    for key in keys:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
 def detect_training_tokenizer(iter_path: Path) -> str | None:
     """Auto-detect the tokenizer the model was actually trained with.
 
@@ -144,24 +164,40 @@ def detect_training_tokenizer(iter_path: Path) -> str | None:
         Training tokenizer HF model ID (e.g. ``geodesic-research/nemotron-
         instruct-tokenizer``), or None if not specified in run_config.yaml.
     """
-    run_config = iter_path / RUN_CONFIG
-    if not run_config.exists():
-        return None
-    with open(run_config) as f:
-        config = yaml.safe_load(f)
-    tokenizer_model = config.get("tokenizer", {}).get("tokenizer_model")
-    if not tokenizer_model:
-        return None
-    return str(tokenizer_model)
+    tokenizer_model = _run_config_value(iter_path, "tokenizer", "tokenizer_model")
+    return str(tokenizer_model) if tokenizer_model else None
+
+
+def detect_model_provider(iter_path: Path) -> str | None:
+    """The ``_target_`` of the ``model`` section of the iteration's ``run_config.yaml``, the provider class the run
+    built its model with, or None when the file, the section or the target is absent."""
+    target = _run_config_value(iter_path, "model", "_target_")
+    return str(target) if target else None
+
+
+def resolve_end_of_turn_id(iter_path: Path, requested: int | None) -> int:
+    """The id of ``<|im_end|>`` that an export of the iteration adds to its end-of-generation ids: ``requested`` when
+    given, else ``IM_END_TOKEN_ID``, which is Nemotron's, for a run whose model provider is NemotronH's.
+
+    Raises:
+        SystemExit: no id is requested and the run's model provider is not NemotronH's, or its run_config.yaml names
+            none. Nemotron's id would be another token in another vocabulary.
+    """
+    if requested is not None:
+        return requested
+    provider = detect_model_provider(iter_path)
+    if provider == NEMOTRON_H_PROVIDER:
+        return IM_END_TOKEN_ID
+    raise SystemExit(
+        f"{iter_path / RUN_CONFIG} names the model provider {provider!r}, not NemotronH's ({NEMOTRON_H_PROVIDER}), so "
+        f"the default end-of-turn id {IM_END_TOKEN_ID} (Nemotron's <|im_end|>) does not apply: pass --end-of-turn-id "
+        "with the id of <|im_end|> in the model's vocabulary (Olmo 3: 100265)."
+    )
 
 
 def is_peft_checkpoint(iter_path: Path) -> bool:
     """Whether the iteration's ``run_config.yaml`` names a ``peft`` section (an adapter-only checkpoint)."""
-    run_config = iter_path / RUN_CONFIG
-    if not run_config.exists():
-        return False
-    with open(run_config) as f:
-        return bool((yaml.safe_load(f) or {}).get("peft"))
+    return bool(_run_config_value(iter_path, "peft"))
 
 
 def newest_completed_iteration(model_path: str) -> str:
@@ -185,10 +221,7 @@ def newest_completed_iteration(model_path: str) -> str:
 
 def train_iters(iter_dir: Path) -> int | None:
     """``train.train_iters`` of ``iter_dir/run_config.yaml``; None without the file or the key."""
-    run_config = iter_dir / RUN_CONFIG
-    if not run_config.exists():
-        return None
-    value = ((yaml.safe_load(run_config.read_text()) or {}).get("train") or {}).get("train_iters")
+    value = _run_config_value(iter_dir, "train", "train_iters")
     return None if value is None else int(value)
 
 

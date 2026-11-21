@@ -34,6 +34,7 @@ import pytest
 from pipeline.checkpoints import resolve_checkpoint_path
 from pipeline.export import hf
 from pipeline.export.decoding_defaults import release_file_in_export
+from pipeline.nemotron import NEMOTRON_H_PROVIDER
 from tests.unit_tests import recorded_bridge
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.child_process import REPO_ROOT, run_python
@@ -158,6 +159,7 @@ except SystemExit as exit:
 
 RUN_CONFIG = (
     "tokenizer:\n  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer\ntrain:\n  train_iters: 300\n"
+    f"model:\n  _target_: {NEMOTRON_H_PROVIDER}\n"
 )
 BASE = ["--hf-model", NANO, "--no-reasoning"]
 

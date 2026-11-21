@@ -6,8 +6,9 @@ export-check spec), beside ``mapping_keys.require_keys``, which checks the mappi
 ``require_int``, ``require_number`` and ``require_string`` refuse a value of the wrong type or outside its range, a
 YAML ``true`` or ``false`` where a number is meant included (Python counts a bool as an int); ``require_absolute_path``
 refuses a path that is not absolute. ``require_bool`` refuses anything but a YAML ``true`` or ``false``, which
-``bool()`` would not: it turns a blank key into false and the text ``false`` into true. Each raises the caller's own error type with a message that opens with where the
-value sits, so each tool reports the fault as it reports any other in its input.
+``bool()`` would not: it turns a blank key into false and the text ``false`` into true. Each raises the caller's own
+error type with a message that opens with where the value sits, so each tool reports the fault as it reports any other
+in its input.
 
 Standard library only, and no syntax newer than Python 3.6, as ``mapping_keys``.
 """

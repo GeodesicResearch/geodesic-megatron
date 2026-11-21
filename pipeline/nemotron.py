@@ -16,6 +16,7 @@
 Catalogue:
     CHAT_TEMPLATE_SOURCE_MAP: release id -> the instruct release whose chat template its exports carry.
     IM_END_TOKEN_ID: the id of ``<|im_end|>``, which ends an assistant turn of the chat format.
+    NEMOTRON_H_PROVIDER: the model provider that a NemotronH run's ``run_config.yaml`` names.
     END_OF_TURN_TOKEN_IDS: the ids that end a generated turn, ``</s>`` and ``<|im_end|>``.
     NEMOTRON_H_MODELING_FILES: the remote-code modules of a release.
     NEMOTRON_H_AUTO_MAP: the config.json ``auto_map`` that points transformers at those modules.
@@ -40,6 +41,11 @@ CHAT_TEMPLATE_SOURCE_MAP = {
 # end-of-turn, so generation must also stop on it.
 IM_END_TOKEN_ID = 11
 END_OF_TURN_TOKEN_IDS = (2, IM_END_TOKEN_ID)
+
+# The ``model._target_`` that a NemotronH run's run_config.yaml names. A run with this provider has the Nemotron
+# vocabulary, because the NemotronH bridge and recipes are the only users of this generic Mamba class, so the id above
+# is the default for exactly such a run.
+NEMOTRON_H_PROVIDER = "megatron.bridge.models.mamba.mamba_provider.MambaModelProvider"
 
 # Generic NemotronH remote-code artifacts (no project specifics) — the custom
 # modeling modules and the auto_map that points HF/vLLM trust_remote_code at them.

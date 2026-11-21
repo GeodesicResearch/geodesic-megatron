@@ -104,7 +104,13 @@ from pathlib import Path
 
 import torch
 
-from pipeline.checkpoints import RUN_CONFIG, detect_training_tokenizer, is_peft_checkpoint, resolve_checkpoint_path
+from pipeline.checkpoints import (
+    RUN_CONFIG,
+    detect_training_tokenizer,
+    is_peft_checkpoint,
+    resolve_checkpoint_path,
+    resolve_end_of_turn_id,
+)
 from pipeline.export.export_clone import resolve_load_path
 from pipeline.export.fixups import fixup_hf_output
 from pipeline.export.fixups.release_files import check_reference_file_names, require_release_files
@@ -232,8 +238,8 @@ def main():
         type=int,
         default=None,
         help=(
-            "The id of <|im_end|> in the model's vocabulary, which joins eos_token_id as the end of an assistant turn "
-            f"(default: {IM_END_TOKEN_ID}, Nemotron's)."
+            "The id of <|im_end|> in the model's vocabulary, which joins eos_token_id as the end of an assistant turn. "
+            f"Required unless the run is NemotronH, which defaults to {IM_END_TOKEN_ID}."
         ),
     )
     parser.add_argument(
@@ -367,6 +373,9 @@ def main():
             "with a parallel size above 1 (pipeline_checkpoint_convert.sh export sets them)."
         )
 
+    # The id of <|im_end|>: refused here for a run whose default would be wrong, before the allocation converts.
+    end_of_turn_id = resolve_end_of_turn_id(iter_path, args.end_of_turn_id)
+
     if use_multi_gpu:
         print(f"Mode: multi-GPU (TP={args.tp}, PP={args.pp}, EP={args.ep}, ETP={args.etp})")
         convert_multi_gpu(
@@ -418,7 +427,7 @@ def main():
             keep_remote_code=args.keep_remote_code,
             remote_code_source=args.remote_code_source,
             eos_in_config_json=args.eos_in_config_json,
-            end_of_turn_id=IM_END_TOKEN_ID if args.end_of_turn_id is None else args.end_of_turn_id,
+            end_of_turn_id=end_of_turn_id,
             reference_files=args.reference_files,
         )
 
