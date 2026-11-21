@@ -2,8 +2,8 @@
 # pair of packs (configs/sft_mix_grid/README.md). The difference between run 1 and run 2 is the variation between two
 # runs of one recipe.
 #
-# It differs from run 1 in the two pack paths and the run identity. Its length follows run 1's rule from its own pack
-# counts, which gives run 1's value (tests/unit_tests/test_sft_mix_grid_nano_dolci_config.py).
+# It differs from run 1 in the two pack paths and the run identity, and shares its .env. Its length follows run 1's
+# rule from its own pack counts, which gives run 1's value (tests/unit_tests/test_sft_mix_grid_nano_dolci_config.py).
 base_config: nemotron_nano_dolci_sft.yaml
 dataset:
   packed_sequence_specs:

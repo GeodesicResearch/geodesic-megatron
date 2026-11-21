@@ -104,6 +104,7 @@ ManifestError = sync_bucket.ManifestError
 from scripts.checkpoint import export_check_result  # noqa: E402
 from scripts.checkpoint.safetensors_index import INDEX_FILE, checked_weight_map  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.mapping_values import require_bool  # noqa: E402
 from scripts.training.config_compose import load_composed_yaml  # noqa: E402
 
 from pipeline.export.decoding_defaults import release_file_in_export  # noqa: E402
@@ -618,9 +619,7 @@ def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
     if any("/" in str(d) for d in item["extra_directories"]):
         raise ManifestError(f"{where}: extra_directories are bare names of directories beside the stage's save dir")
     save, train_iters, exp_name, training = stage_facts(config)
-    final_only = optional.get("final_only", False)
-    if not isinstance(final_only, bool):
-        raise ManifestError(f"{where}: final_only must be true or false, not {final_only!r}")
+    final_only = require_bool(optional.get("final_only", False), f"{where}: final_only", error=ManifestError)
     if "schedule_config" in optional:
         training = first_job_warmup(training, save, repo_root / str(optional["schedule_config"]), where)
     return Stage(
@@ -779,9 +778,9 @@ def _model(raw: Any, repo_root: Path, where: str, manifest_architecture: str, ma
     license_id, license_name = _license(optional, manifest_card, where)
     return Model(
         repo=repo,
-        private=bool(item["private"]),
-        reasoning=bool(item["reasoning"]),
-        strict=bool(item["strict"]),
+        private=require_bool(item["private"], f"{where}: private", error=ManifestError),
+        reasoning=require_bool(item["reasoning"], f"{where}: reasoning", error=ManifestError),
+        strict=require_bool(item["strict"], f"{where}: strict", error=ManifestError),
         description=str(item["description"]).strip(),
         note=note,
         card_sections=card_sections,
@@ -847,9 +846,9 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     collection = require_keys(raw["collection"], f"{path}: collection", COLLECTION_KEYS, error=ManifestError)
     export_required, export_optional = _split_optional(raw["export"], OPTIONAL_EXPORT_KEYS)
     export = require_keys(export_required, f"{path}: export", EXPORT_KEYS, error=ManifestError)
-    eos_in_config_json = export_optional.get("eos_in_config_json", False)
-    if not isinstance(eos_in_config_json, bool):
-        raise ManifestError(f"{path}: export.eos_in_config_json must be true or false")
+    eos_in_config_json = require_bool(
+        export_optional.get("eos_in_config_json", False), f"{path}: export.eos_in_config_json", error=ManifestError
+    )
     end_of_turn_token_id = _optional_export_int(export_optional, "end_of_turn_token_id", path)
     pp = _optional_export_int(export_optional, "pp", path)
     reference_files = _reference_files(export_optional, path)
@@ -894,7 +893,7 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
         collection=Collection(
             title=str(collection["title"]),
             description=description,
-            private=bool(collection["private"]),
+            private=require_bool(collection["private"], f"{path}: collection.private", error=ManifestError),
         ),
         architecture=str(raw["architecture"]),
         base_model=base_model,
@@ -1625,8 +1624,17 @@ def upload(api: Any, publication: Publication) -> None:
 
     A revision is branched from the repository's first commit, never from main: every export of one
     architecture has the same file names and sizes, so a branch that started as a copy of main's
-    export would, if its own upload then failed, pass for published with main's weights."""
+    export would, if its own upload then failed, pass for published with main's weights. Raises ExportError, before
+    any upload, for an existing repository whose visibility is not the manifest's."""
     api.create_repo(publication.model.repo, private=publication.model.private, exist_ok=True)
+    # create_repo leaves an existing repository as it is, so its visibility is read back: a public repository would
+    # receive the weights of a model that the manifest marks private, and the reverse.
+    hub_private = api.repo_info(publication.model.repo).private
+    if hub_private != publication.model.private:
+        raise ExportError(
+            f"{publication.model.repo} is {'private' if hub_private else 'public'} on the Hub, but the manifest says "
+            f"{'private' if publication.model.private else 'public'}: change one of them before the upload"
+        )
     for revision in publication.targets:
         # Only a branch that does not exist yet needs a branch point; an existing one (created, then
         # its upload failed) is uploaded to as it is.

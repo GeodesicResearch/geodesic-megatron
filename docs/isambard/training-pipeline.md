@@ -152,10 +152,10 @@ placement measurements).
   logs when the training loop ends (`train_utils.py` `gather_peak_memory`, one gather after the last
   step, saves included): the largest peak allocated and reserved memory, the rank holding the
   allocated one, and the largest and total allocator retries, also written to the W&B summary under
-  `memory/across-ranks/`. A log that predates the summary has none, and so does a run whose loop was
-  cut short (an OOM, a wedge, a SLURM wall-time kill); a loop ended by `exit_duration_in_mins` prints it.
-  A run that sets `logger.peak_memory_report_interval` also logs `[peak-memory-progress]` lines (the ceiling so far)
-  every that many steps. `run_watch.py` reads them, so it can stop a running stage; `score_run.py` does not.
+  `memory/across-ranks/`. A log that predates the summary has none, and so does a run cut short (an OOM, a wedge, a
+  SLURM wall-time kill) unless it sets `logger.peak_memory_report_interval`; a loop ended by `exit_duration_in_mins`
+  prints it. That setting also logs `[peak-memory-progress]` lines (the ceiling so far) and writes the same W&B keys
+  every that many steps. `run_watch.py` reads the lines, so it can stop a running stage; `score_run.py` does not.
 - **Loss parity between runs**: `scripts/telemetry/loss_parity.py` compares runs of one config,
   seed and data-parallel width (iteration i consumed the same global batch in each). `band
   --reference A1 A2 [...] --candidate C --iterations 1 500 --window 50` is the test for a lever

@@ -6,7 +6,7 @@ import math
 import re
 
 import pytest
-from scripts.mapping_values import require_absolute_path, require_int, require_number, require_string
+from scripts.mapping_values import require_absolute_path, require_bool, require_int, require_number, require_string
 
 
 class SpecError(Exception):
@@ -69,6 +69,19 @@ def test_each_value_check_raises_the_callers_error_type():
         require_string("", "s", error=SpecError)
     with pytest.raises(SpecError, match="p must be an absolute path"):
         require_absolute_path("relative", "p", error=SpecError)
+    with pytest.raises(SpecError, match="b must be true or false"):
+        require_bool(None, "b", error=SpecError)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_a_bool_is_returned_as_given(value):
+    assert require_bool(value, "b") is value
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "false", "true", [], {}])
+def test_anything_else_is_not_a_bool(value):
+    with pytest.raises(ValueError, match=re.escape(f"spec.b must be true or false, not {value!r}")):
+        require_bool(value, "spec.b")
 
 
 def test_an_absolute_path_is_returned_as_given():

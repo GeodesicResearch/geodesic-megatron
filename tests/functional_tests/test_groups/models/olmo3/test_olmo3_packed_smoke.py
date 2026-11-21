@@ -22,8 +22,9 @@ on packed data relies on:
 * the loss and every gradient are finite;
 * context parallel size 2 with the ``a2a`` exchange gives the loss and gradients of size 1.
 
-The tolerances below are about ten times the differences between the two sizes on a GH200 node: equal losses to all
-printed digits, global gradient norms within 4e-5 in relative terms, and per-parameter differences within 4e-4.
+The losses of the two sizes are equal to all printed digits on a GH200 node. The gradient tolerances below are 10 to
+12.5 times the differences there: global gradient norms within 4e-5 in relative terms, and per-parameter differences
+within 4e-4.
 """
 
 import json

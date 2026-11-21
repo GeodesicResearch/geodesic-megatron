@@ -208,7 +208,8 @@ def require_release_files(hf_model_id: str, names: Sequence[str]) -> Path:
     """The directory of the --hf-model release, once it holds every file ``names``.
 
     ``hf_model_id`` is a local directory or a Hub id. A Hub id downloads the named files and the chat template into the
-    HF cache (network read, cache write). ``check_reference_file_names`` must accept ``names`` first.
+    HF cache (network read, cache write). It first refuses, through ``check_reference_file_names``, names that check
+    rejects, before any download.
 
     Raises:
         ValueError, FileNotFoundError: as ``find_release_files``; or what ``resolve_release_dir`` raises for an id it

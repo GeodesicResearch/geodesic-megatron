@@ -61,6 +61,7 @@ class _TwoRankGroup:
         return 0
 
 
+@pytest.mark.run_only_on("GPU")
 class TestRotaryEmbeddingPair:
     def test_forward_stacks_the_sliding_and_the_full_rope(self):
         rope = _rope()
@@ -90,7 +91,6 @@ class TestRotaryEmbeddingPair:
         assert sliced.shape == (2, length, 1, 1, KV_CHANNELS)
         assert torch.equal(sliced, rope._compute(length, 0, True, None))
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="the base rope's context-parallel split uses the GPU")
     def test_an_unpacked_row_under_context_parallelism_gets_the_split_of_its_exact_length(self):
         """The base ``forward`` splits an unpacked row's table by position across the context-parallel ranks, so a
         slice of the split of a longer table would hold other positions."""
@@ -131,6 +131,7 @@ class TestRotaryEmbeddingPair:
 
 
 class TestSelectLayerRope:
+    @pytest.mark.run_only_on("GPU")
     def test_picks_the_sliding_slice_for_a_sliding_layer_and_the_full_slice_otherwise(self):
         stacked = _rope().forward(SEQ_LEN, packed_seq=True)
         assert torch.equal(olmo3_provider.select_layer_rope(stacked, is_sliding=True), stacked[0])

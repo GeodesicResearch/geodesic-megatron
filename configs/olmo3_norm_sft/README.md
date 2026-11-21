@@ -2,7 +2,7 @@
 
 Supervised fine-tuning of Olmo 3 7B and 32B Base at AI2's Think SFT recipe, at sequence length 32,768. The two
 Olmo-Norm runs make one epoch over the Normal-Norm mix. The Dolci run makes two epochs over AI2's Dolci Think SFT data.
-The Data section gives the last iteration of each. The learning rate is 5e-5 with a linear warmup over 3% of the steps and a
+Each config's `train_iters` is its last iteration. The learning rate is 5e-5 with a linear warmup over 3% of the steps and a
 linear decay to 0. AdamW uses betas 0.9 and 0.95, weight decay 0 and gradient clipping at 1.0. The parameters are bf16,
 the gradient reduction is fp32 and the Adam moments are fp32. The models are compared with AI2's Think SFT models.
 

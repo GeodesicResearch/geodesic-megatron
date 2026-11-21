@@ -184,8 +184,8 @@ def flop_report(hf_config: dict[str, Any], hf_model: str, run: RunSpec) -> FlopR
 def workload_from_config(config_path: str | Path, hf_model: str) -> Workload:
     """Read the workload from a training YAML (through its ``base_config`` chain) and the model's HF config.
 
-    ``hf_model`` is what the estimators' ``--hf-model`` takes: an HF repo id resolved offline from the
-    local HF cache, a model directory, or a ``config.json`` path. The FLOPs follow the estimators'
+    ``hf_model`` is what ``nemotronh_flops_estimator.py``'s ``--hf-model`` takes: an HF repo id resolved offline
+    from the local HF cache, a model directory, or a ``config.json`` path. The FLOPs follow the estimators'
     default conventions (causal attention mask, backward = 2x forward), by the config's ``model_type``
     (see ``flop_report``). Raises FileNotFoundError when the HF config cannot be found, and ValueError when
     the YAML sets no sequence length or batch size or the ``model_type`` has no estimator.
@@ -381,7 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--hf-model",
         required=True,
         help="HF repo id (resolved offline from the local HF cache), model directory, or config.json path of "
-        "the run's architecture, as the FLOPs estimators take it (model_type nemotron_h or olmo3)",
+        "the run's architecture (model_type nemotron_h or olmo3)",
     )
     parser.add_argument("--gpus", type=int, required=True, help="GPUs the run used")
     parser.add_argument("--window", type=int, nargs=2, required=True, metavar=("FIRST", "LAST"), help="Scoring window")

@@ -262,6 +262,7 @@ class RecordingHub:
         self.calls = []
         self.trees: dict[tuple[str, str], dict[str, int | tuple[int, str] | None]] = {}
         self.heads: dict[tuple[str, str], str] = {}
+        self.private: dict[str, bool] = {}
         self.collections = []
 
     def whoami(self):
@@ -271,8 +272,12 @@ class RecordingHub:
         if (repo_id, publish_models.MAIN) in self.trees and not exist_ok:
             raise RuntimeError(f"409 Conflict: {repo_id} exists")
         self.calls.append(("create_repo", repo_id, private))
+        self.private.setdefault(repo_id, private)
         self.trees.setdefault((repo_id, publish_models.MAIN), dict(self.INITIAL_TREE))
         self.trees.setdefault((repo_id, self.INITIAL_COMMIT), dict(self.INITIAL_TREE))
+
+    def repo_info(self, repo_id):
+        return type("RepoInfo", (), {"private": self.private[repo_id]})()
 
     def list_repo_commits(self, repo_id):
         return [type("Commit", (), {"commit_id": c})() for c in ("head-commit", "earlier-commit", self.INITIAL_COMMIT)]
@@ -1168,6 +1173,24 @@ def test_a_final_only_that_is_not_a_boolean_is_refused(campaign):
         publish_models.load_manifest(manifest_path, root)
 
 
+@pytest.mark.parametrize(
+    "keys",
+    [
+        pytest.param(("collection", "private"), id="collection_private"),
+        pytest.param(("models", 0, "private"), id="model_private"),
+        pytest.param(("models", 0, "reasoning"), id="model_reasoning"),
+        pytest.param(("models", 0, "strict"), id="model_strict"),
+    ],
+)
+@pytest.mark.parametrize("value", [None, "false", 0], ids=["blank", "text", "integer"])
+def test_a_model_or_collection_flag_that_is_not_a_boolean_is_refused(campaign, keys, value):
+    """A blank ``private:`` is None, which ``bool()`` would read as false: a private model published as public."""
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, keys, value)
+    with pytest.raises(publish_models.ManifestError, match=f"{keys[-1]} must be true or false, not {value!r}"):
+        publish_models.load_manifest(manifest_path, root)
+
+
 def test_plan_filters_models_by_repo_substring(campaign):
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
@@ -1653,6 +1676,20 @@ def test_upload_targets_the_revision_and_main_only_for_the_default(campaign):
     assert ("upload_folder", "org/arm-base", "midtraining_iter_4") in hub.calls
     assert ("upload_folder", "org/arm-base", "main") in hub.calls
     assert ("create_branch", "org/arm-base", "main") not in hub.calls
+
+
+def test_an_existing_repository_with_another_visibility_than_the_manifest_is_refused(campaign):
+    """``create_repo(exist_ok=True)`` leaves an existing repository as it is: a public one would receive a private
+    model's weights."""
+    root, _, manifest_path = campaign
+    pub = publish_models.plan(publish_models.load_manifest(manifest_path, root))[0]
+    assert pub.model.private
+    hub = RecordingHub()
+    hub.create_repo(pub.model.repo, private=False, exist_ok=False)
+    write_export(pub.hf_dir, {"model-00001-of-00001.safetensors": ["a"]})
+    with pytest.raises(publish_models.ExportError, match=f"{pub.model.repo} is public.*manifest.*private"):
+        publish_models.upload(hub, pub)
+    assert not any(call[0] == "upload_folder" for call in hub.calls)
 
 
 def test_losses_come_from_wandb_at_the_iterations_step_and_are_cached(tmp_path):
