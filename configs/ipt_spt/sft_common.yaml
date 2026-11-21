@@ -17,9 +17,9 @@
 # THE SCHEDULE. Cosine from the learning rate of the run to 0, after a warm-up of 10% of the steps. The checkpoint policy of
 # each run saves after the first step that reaches 5B and 10B positions (steps 1,193 and 2,385) and at the last step.
 #
-# SITES THAT MUST AGREE. dataset_root is output_root of sft_pack_8p6486b.yaml and tokenizer_model is the tokenizer of arms.yaml.
+# SITES THAT MUST AGREE. dataset_root is output_root of sft_pack.yaml and tokenizer_model is the tokenizer of arms.yaml.
 # The folder glob of packed_train_data_path matches ROOT_FOLDER in scripts/data/arrow_chat_to_jsonl.py, and the sequence length
-# and the pad multiple are SEQ_LENGTH and PAD_SEQ_TO_MULT of sft_pack_8p6486b_submit.sh. The test in
+# and the pad multiple are SEQ_LENGTH and PAD_SEQ_TO_MULT of sft_pack_submit.sh. The test in
 # tests/unit_tests/test_ipt_spt_sft_configs.py fails when any of them differs.
 
 tokenizer:
@@ -29,8 +29,8 @@ model:
   seq_length: 4096
 
 dataset:
-  dataset_name: warm_start_8p6486b
-  dataset_root: /projects/a5k/public/pretraining-science/megatron/sft_packs/warm_start_8p6486b
+  dataset_name: warm_start_8p51b
+  dataset_root: /projects/a5k/public/pretraining-science/megatron/sft_packs/warm_start_8p51b
   seq_length: 4096
   seed: 1234
   dataloader_type: batch
@@ -45,7 +45,7 @@ dataset:
     num_tokenizer_workers: 1
     # The folder of each pack names the tokenizer and the pad multiple it was made with, so a pack of another tokenizer or
     # multiple cannot load silently.
-    packed_train_data_path: /projects/a5k/public/pretraining-science/megatron/sft_packs/warm_start_8p6486b/shard_*/packed/--projects--a5k--public--hf--hub--models--geodesic-research--nemotron-instruct-tokenizer--snapshots--f546e38c401a734f96c462e6990338c4f981f314_pad_seq_to_mult1/training_4096.idx.parquet
+    packed_train_data_path: /projects/a5k/public/pretraining-science/megatron/sft_packs/warm_start_8p51b/shard_*/packed/--projects--a5k--public--hf--hub--models--geodesic-research--nemotron-instruct-tokenizer--snapshots--f546e38c401a734f96c462e6990338c4f981f314_pad_seq_to_mult1/training_4096.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true

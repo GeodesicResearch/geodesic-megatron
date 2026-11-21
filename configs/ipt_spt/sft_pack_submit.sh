@@ -2,14 +2,14 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
 #
-# Submit the pack of the SFT set that sft_pack_8p6486b.yaml names: one conversion job (the Arrow rows to the JSONL roots, with a
+# Submit the pack of the SFT set that sft_pack.yaml names: one conversion job (the Arrow rows to the JSONL roots, with a
 # check of the totals), then one packing job for each root, each held behind the conversion with afterok. The packs are of 4,096
 # tokens with no padding to a multiple (pad_seq_to_mult 1), which is right for context-parallel size 1: a run at a higher
 # context-parallel size needs a multiple of twice that size, and the packs must be made again. The packer tokenizes with
-# TOKENIZER_WORKERS processes, because one process takes hours for the 1.6 million rows of a root. The pool returns the tokenized
+# TOKENIZER_WORKERS processes, because one process takes hours for the 1.5 million rows of a root. The pool returns the tokenized
 # rows in input order, so the worker count does not change them. The tokenizer is the folder that arms.yaml pins.
 #
-# Usage: FROZEN=<frozen copy of the committed code> bash configs/ipt_spt/sft_pack_8p6486b_submit.sh
+# Usage: FROZEN=<frozen copy of the committed code> bash configs/ipt_spt/sft_pack_submit.sh
 # It prints the id of each job. Each packing job writes <root>/packed/<tokenizer>_pad_seq_to_mult1/training_4096.idx.parquet.
 set -euo pipefail
 
@@ -23,7 +23,7 @@ export TMPDIR=/tmp
 SEQ_LENGTH=4096
 PAD_SEQ_TO_MULT=1
 TOKENIZER_WORKERS=32
-CONFIG=configs/ipt_spt/sft_pack_8p6486b.yaml
+CONFIG=configs/ipt_spt/sft_pack.yaml
 read -r ROOT SHARDS < <(python3 -I -c 'import sys, yaml; c = yaml.safe_load(open(sys.argv[1])); print(c["output_root"], c["shards"])' "$CONFIG")
 TOKENIZER=$(python3 -I -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["tokenizer_model"])' configs/ipt_spt/arms.yaml)
 

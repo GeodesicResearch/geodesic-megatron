@@ -63,7 +63,7 @@ Run it as a one-node job (`isambard_sbatch --wrap` around `pipeline_env_exec.sh`
 `scripts/data/pack_sft_dataset.py` reads only `<root>/training.jsonl`, so a chat dataset that a builder saved as an Arrow
 folder goes through `scripts/data/arrow_chat_to_jsonl.py --config <config.yaml>` first. It writes the rows as N roots, one
 for each packing job, and fails unless the rows and tokens equal the config's. The config keys are in the module docstring.
-`configs/ipt_spt/sft_pack_8p6486b_submit.sh` submits the conversion and the packing jobs of one set.
+`configs/ipt_spt/sft_pack_submit.sh` submits the conversion and the packing jobs of one set.
 
 ### Checking what a `.bin/.idx` blend actually reads
 

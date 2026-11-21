@@ -34,8 +34,8 @@ from tests.unit_tests.campaign_config import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FOLDER = REPO_ROOT / "configs" / "ipt_spt"
 COMMON = FOLDER / "sft_common.yaml"
-PACK_CONFIG = FOLDER / "sft_pack_8p6486b.yaml"
-PACK_SUBMIT = FOLDER / "sft_pack_8p6486b_submit.sh"
+PACK_CONFIG = FOLDER / "sft_pack.yaml"
+PACK_SUBMIT = FOLDER / "sft_pack_submit.sh"
 ARMS = FOLDER / "arms.yaml"
 BASELINE_SFT = REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline" / "nemotron_nano_30b_baseline_sft.yaml"
 TARGET_POSITIONS = 20_000_000_000

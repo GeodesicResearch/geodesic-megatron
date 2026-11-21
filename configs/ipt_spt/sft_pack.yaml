@@ -1,0 +1,14 @@
+# The conversion of revision 559760bc4ddc84fc56563ec2b7b0b95a704b62af of geodesic-research/warm-start-sft-instruct-8.51B into the JSONL roots that the packer reads.
+# scripts/data/arrow_chat_to_jsonl.py reads this file; sft_pack_submit.sh submits the conversion and the packing jobs.
+# The folder, the rows and the tokens are those of the builder's record rebuild_8p51b_v2.json (sha256 fb4bbc0a05a665f20b503ea16f6dee46d322abcaf10328e64a897af4af55b2d3).
+# The push record push_sft_8p51b.json (sha256 1a4dfc85d14eb67333741a5236fb79f8feb2e5d704cf16bad17b141f668f9185) states that the pushed revision holds the same rows and tokens.
+
+arrow_dir: /projects/a5k/public/pretraining-science/data_builds/sft_instruct/full_b/5d523e046194af63e78d30641ffb41423a0547db74530793767d568dc7eea325/final/train
+messages_key: messages
+token_key: n_tokens
+output_root: /projects/a5k/public/pretraining-science/megatron/sft_packs/warm_start_8p51b
+# Eight roots of about 1.06 B tokens each, so that the packer holds one root in memory at a time.
+shards: 8
+expected:
+  rows: 11949247
+  tokens: 8508830222

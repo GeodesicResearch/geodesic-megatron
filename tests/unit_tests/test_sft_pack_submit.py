@@ -1,6 +1,6 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""configs/ipt_spt/sft_pack_8p6486b_submit.sh submits the conversion and one packing job for each root.
+"""configs/ipt_spt/sft_pack_submit.sh submits the conversion and one packing job for each root.
 
 The script, its config and arms.yaml are the real files. Two stand-ins replace what would submit or run a job: ``isambard_sbatch``
 (it submits Slurm jobs; the stub records each call, runs the ``--wrap`` string with ``sh`` as Slurm does, and answers like
@@ -20,8 +20,8 @@ from scripts.data.arrow_chat_to_jsonl import ROOT_FOLDER
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = REPO_ROOT / "configs" / "ipt_spt" / "sft_pack_8p6486b_submit.sh"
-CONFIG = Path("configs") / "ipt_spt" / "sft_pack_8p6486b.yaml"
+SCRIPT = REPO_ROOT / "configs" / "ipt_spt" / "sft_pack_submit.sh"
+CONFIG = Path("configs") / "ipt_spt" / "sft_pack.yaml"
 ARMS = Path("configs") / "ipt_spt" / "arms.yaml"
 
 SBATCH_STUB = """#!/bin/bash

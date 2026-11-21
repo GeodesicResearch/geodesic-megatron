@@ -70,7 +70,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_KEYS = frozenset({"arrow_dir", "messages_key", "token_key", "output_root", "shards", "expected"})
 EXPECTED_KEYS = frozenset({"rows", "tokens"})
 MESSAGE_FIELDS = frozenset({"role", "content"})
-# The folder of root ``index``. ``configs/ipt_spt/sft_pack_8p6486b_submit.sh`` spells the same names to submit one packing
+# The folder of root ``index``. ``configs/ipt_spt/sft_pack_submit.sh`` spells the same names to submit one packing
 # job for each root before the roots exist, and the folder glob of ``packed_train_data_path`` in
 # ``configs/ipt_spt/sft_common.yaml`` matches them, so the three must change together.
 ROOT_FOLDER = "shard_{index:02d}"
