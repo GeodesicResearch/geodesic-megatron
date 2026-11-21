@@ -62,7 +62,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.data.integer_entries import read_integer_entries  # noqa: E402
 from scripts.data.row_token_counts import counted_source  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
-from scripts.mapping_values import require_absolute_path, require_int  # noqa: E402
+from scripts.mapping_values import require_absolute_path, require_bool, require_int  # noqa: E402
 
 from pipeline.data.layout import shard_name  # noqa: E402
 
@@ -98,8 +98,7 @@ def read_partition_config(path: Path) -> dict:
     require_absolute_path(config["source"], f"{path}: source", error=PartitionError)
     require_absolute_path(config["output_root"], f"{path}: output_root", error=PartitionError)
     require_int(config["shards"], f"{path}: shards", 1, error=PartitionError)
-    if type(config["remove_source"]) is not bool:
-        raise PartitionError(f"{path}: remove_source must be true or false, not {config['remove_source']!r}")
+    require_bool(config["remove_source"], f"{path}: remove_source", error=PartitionError)
     if config["order"] == "random":
         require_int(config["seed"], f"{path}: seed", 0, error=PartitionError)
         if config["exclude_lines"] is not None:

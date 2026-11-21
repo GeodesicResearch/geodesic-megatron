@@ -105,7 +105,7 @@ from scripts.checkpoint import export_check_result  # noqa: E402
 from scripts.checkpoint.safetensors_index import INDEX_FILE, checked_weight_map  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.mapping_values import require_bool  # noqa: E402
-from scripts.training.config_compose import load_composed_yaml  # noqa: E402
+from scripts.training.config_compose import load_composed_yaml, parse_yaml_mapping  # noqa: E402
 
 from pipeline.export.decoding_defaults import release_file_in_export  # noqa: E402
 from pipeline.export.export_clone import (  # noqa: E402
@@ -179,8 +179,9 @@ EXPORT_KEYS = frozenset({"tp", "ep", "nodes", "walltime"})
 # `eos_in_config_json: true` has every export carry <|im_end|> in config.json's eos_token_id as well as in
 # generation_config.json's (the converter's --eos-in-config-json); absent means false. `end_of_turn_token_id: N` is
 # the id of <|im_end|> in the model's vocabulary, which the exporter adds to eos_token_id and the check of
-# eos_in_config_json requires (the converter's --end-of-turn-id); absent means Nemotron's id 11. `pp: N` shards the
-# exporter's model N ways by pipeline stages (the converter's --pp), beside tp and ep; absent passes no --pp.
+# eos_in_config_json requires (the converter's --end-of-turn-id); absent means Nemotron's id 11, which the converter
+# accepts for NemotronH runs only. `pp: N` shards the exporter's model N ways by pipeline stages (the converter's
+# --pp), beside tp and ep; absent passes no --pp.
 # `reference_files: [name, ...]` are bare file names that the exporter copies from the --hf-model
 # release into every export (the converter's --reference-files); absent means none.
 OPTIONAL_EXPORT_KEYS = frozenset({"eos_in_config_json", "end_of_turn_token_id", "pp", "reference_files"})
@@ -233,8 +234,9 @@ class ExportJob:
     where the manifest sets it, None for none), whether the export carries the end-of-turn id in
     config.json's eos_token_id as well (eos_in_config_json), and the id of that token when the
     vocabulary puts <|im_end|> elsewhere than Nemotron's 11 (end_of_turn_token_id, None for
-    Nemotron's). ``reference_files`` are the bare names of files that the exporter copies from the
-    release into each export, and that ``check_reference_files`` requires the export to hold."""
+    Nemotron's, which the converter accepts for NemotronH runs only). ``reference_files`` are the
+    bare names of files that the exporter copies from the release into each export, and that
+    ``check_reference_files`` requires the export to hold."""
 
     tp: int
     ep: int
@@ -630,7 +632,7 @@ def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
         wandb_exp_name=exp_name,
         training=training,
         revision=revision,
-        default=bool(item["default"]),
+        default=require_bool(item["default"], f"{where}: default", error=ManifestError),
         extra_directories=tuple(save.parent / str(d) for d in item["extra_directories"]),
         tokens_before=tokens_before,
         final_only=final_only,
@@ -839,8 +841,16 @@ def _reference_files(export_optional: dict[str, Any], path: Path) -> tuple[str, 
 
 
 def load_manifest(path: Path, repo_root: Path) -> Manifest:
-    """Read and validate the manifest; repo-relative config paths resolve against ``repo_root``."""
-    document = yaml.safe_load(path.read_text())
+    """Read and validate the manifest; repo-relative config paths resolve against ``repo_root``.
+
+    Raises:
+        ManifestError: the file is not one YAML mapping, a key is written twice in a mapping (a second
+            ``private`` would otherwise win without a word), or a value is not valid.
+    """
+    try:
+        document = parse_yaml_mapping(path.read_text(), str(path))
+    except (ValueError, yaml.YAMLError) as error:
+        raise ManifestError(f"{path}: {error}") from error
     required, optional = _split_optional(document, OPTIONAL_MANIFEST_KEYS)
     raw = require_keys(required, str(path), MANIFEST_KEYS, error=ManifestError)
     collection = require_keys(raw["collection"], f"{path}: collection", COLLECTION_KEYS, error=ManifestError)

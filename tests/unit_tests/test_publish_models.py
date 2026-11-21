@@ -1191,6 +1191,36 @@ def test_a_model_or_collection_flag_that_is_not_a_boolean_is_refused(campaign, k
         publish_models.load_manifest(manifest_path, root)
 
 
+@pytest.mark.parametrize("occurrence", [0, 1], ids=["collection_private", "first_model_private"])
+def test_a_duplicate_key_in_the_manifest_is_refused(campaign, occurrence):
+    """``yaml.safe_load`` keeps the last of two equal keys, so ``private: true`` followed by ``private: false`` would
+    publish a new model as public and pass the boolean check."""
+    root, _, manifest_path = campaign
+    lines = manifest_path.read_text().splitlines()
+    private_lines = [i for i, line in enumerate(lines) if line == "  private: true"]
+    lines.insert(private_lines[occurrence] + 1, "  private: false")
+    manifest_path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(publish_models.ManifestError, match="duplicate key private"):
+        publish_models.load_manifest(manifest_path, root)
+
+
+@pytest.mark.parametrize("text", ["", "- a\n", "just text\n"], ids=["empty", "list", "scalar"])
+def test_a_manifest_that_is_not_one_mapping_is_refused(campaign, text):
+    root, _, manifest_path = campaign
+    manifest_path.write_text(text)
+    with pytest.raises(publish_models.ManifestError, match="the top level of a config must be a mapping"):
+        publish_models.load_manifest(manifest_path, root)
+
+
+@pytest.mark.parametrize("value", [None, "false", 0], ids=["blank", "text", "integer"])
+def test_a_stage_default_that_is_not_a_boolean_is_refused(campaign, value):
+    """``bool("false")`` is true, so a text value would mark a second stage as the default or none at all."""
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, ("models", 0, "stages", 0, "default"), value)
+    with pytest.raises(publish_models.ManifestError, match=f"default must be true or false, not {value!r}"):
+        publish_models.load_manifest(manifest_path, root)
+
+
 def test_plan_filters_models_by_repo_substring(campaign):
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)

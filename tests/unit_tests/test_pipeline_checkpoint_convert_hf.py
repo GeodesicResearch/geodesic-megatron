@@ -21,6 +21,7 @@ from pipeline import checkpoints, nemotron
 from pipeline.export import fixups, peft_merge
 from pipeline.export.decoding_defaults import REASONING_GENERATION_DEFAULTS
 from pipeline.export.fixups import model_config, release_files, remote_code
+from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 
 
 def _make_modeling_source(src_dir: Path) -> Path:
@@ -277,11 +278,8 @@ def test_a_model_that_is_not_nemotronh_is_refused_without_its_end_of_turn_id_bef
 ):
     """The default id 11 is Nemotron's ``<|im_end|>``: exporting an Olmo 3 run without ``--end-of-turn-id`` would add
     it to the end-of-generation ids, where it is another token."""
-    run = tmp_path / "run"
-    (run / "iter_0000007").mkdir(parents=True)
-    (run / "latest_checkpointed_iteration.txt").write_text("7")
     olmo = "megatron.bridge.models.olmo.olmo3_provider.Olmo3ModelProvider"
-    (run / "iter_0000007" / "run_config.yaml").write_text(f"model:\n  _target_: {olmo}\n")
+    run = make_checkpoint_dir(tmp_path / "run", [7], tracker=7, run_config=f"model:\n  _target_: {olmo}\n")
     converted = []
     # The conversions need GPUs and a Megatron checkpoint: record that neither starts.
     monkeypatch.setattr(convert_module, "convert_single_process", lambda *a, **k: converted.append("single"))
@@ -303,10 +301,9 @@ def test_a_reference_file_the_release_lacks_is_refused_before_the_conversion_sta
 ):
     """The check that ``copy_release_files`` makes after the conversion is made at the start too, so that a wrong name
     costs no allocation."""
-    run = tmp_path / "run"
-    (run / "iter_0000007").mkdir(parents=True)
-    (run / "latest_checkpointed_iteration.txt").write_text("7")
-    (run / "iter_0000007" / "run_config.yaml").write_text(f"model:\n  _target_: {nemotron.NEMOTRON_H_PROVIDER}\n")
+    run = make_checkpoint_dir(
+        tmp_path / "run", [7], tracker=7, run_config=f"model:\n  _target_: {nemotron.NEMOTRON_H_PROVIDER}\n"
+    )
     parent = tmp_path / "base"
     parent.mkdir()
     release = _release(parent)

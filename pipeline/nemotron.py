@@ -42,9 +42,9 @@ CHAT_TEMPLATE_SOURCE_MAP = {
 IM_END_TOKEN_ID = 11
 END_OF_TURN_TOKEN_IDS = (2, IM_END_TOKEN_ID)
 
-# The ``model._target_`` that a NemotronH run's run_config.yaml names. A run with this provider has the Nemotron
-# vocabulary, because the NemotronH bridge and recipes are the only users of this generic Mamba class, so the id above
-# is the default for exactly such a run.
+# The ``model._target_`` that a NemotronH run's run_config.yaml names. Every Nemotron 3 run of this repository names
+# it (its bridge and recipes are the only users of this generic Mamba class) and uses the Nemotron 3 vocabulary, whose
+# <|im_end|> is the id above, so a run with this provider gets that id by default.
 NEMOTRON_H_PROVIDER = "megatron.bridge.models.mamba.mamba_provider.MambaModelProvider"
 
 # Generic NemotronH remote-code artifacts (no project specifics) — the custom

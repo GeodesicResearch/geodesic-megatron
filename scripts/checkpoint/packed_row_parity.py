@@ -105,7 +105,7 @@ from scripts.checkpoint.parity_check import (  # noqa: E402
 )
 from scripts.data.file_digest import file_sha256  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
-from scripts.mapping_values import require_absolute_path, require_int  # noqa: E402
+from scripts.mapping_values import require_absolute_path, require_bool, require_int  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 
 
@@ -348,8 +348,7 @@ def load_spec(path: str | Path) -> PackedRowSpec:
         raw["dataset_kwargs"], "dataset_kwargs", {"answer_only_loss", "pad_to_max_length"}, error=PackedRowParityError
     )
     for key, value in kwargs.items():
-        if not isinstance(value, bool):
-            raise PackedRowParityError(f"dataset_kwargs.{key} must be true or false, not {value!r}")
+        require_bool(value, f"dataset_kwargs.{key}", error=PackedRowParityError)
     if not kwargs["pad_to_max_length"]:
         raise PackedRowParityError(
             "dataset_kwargs.pad_to_max_length must be true: the check reads every row padded to seq_length, as the "

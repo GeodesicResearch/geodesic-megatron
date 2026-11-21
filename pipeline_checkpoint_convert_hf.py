@@ -229,8 +229,9 @@ def main():
         "--eos-in-config-json",
         action="store_true",
         help=(
-            "Put <|im_end|> (id 11) into config.json's eos_token_id as well as generation_config.json's. Without it "
-            "config.json keeps the release's ids when the export has a generation_config.json."
+            "Put <|im_end|> (--end-of-turn-id, which is 11 for NemotronH by default) into config.json's "
+            "eos_token_id as well as generation_config.json's. Without it config.json keeps the release's ids when "
+            "the export has a generation_config.json."
         ),
     )
     parser.add_argument(

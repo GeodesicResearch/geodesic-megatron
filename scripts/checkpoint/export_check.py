@@ -123,7 +123,13 @@ from scripts.forward_passes import (  # noqa: E402
     merge_by_index,
 )
 from scripts.mapping_keys import require_keys  # noqa: E402
-from scripts.mapping_values import require_absolute_path, require_int, require_number, require_string  # noqa: E402
+from scripts.mapping_values import (  # noqa: E402
+    require_absolute_path,
+    require_bool,
+    require_int,
+    require_number,
+    require_string,
+)
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed  # noqa: E402
@@ -407,10 +413,7 @@ def _megatron_reference(raw: Any) -> MegatronReference:
             f"megatron_reference.tensor_model_parallel_size must be 1, not {raw['tensor_model_parallel_size']!r}: the "
             "reference applies the whole output head in fp32 on each rank"
         )
-    if not isinstance(raw["fp32_ssm_state"], bool):
-        raise ExportCheckError(
-            f"megatron_reference.fp32_ssm_state must be true or false, not {raw['fp32_ssm_state']!r}"
-        )
+    require_bool(raw["fp32_ssm_state"], "megatron_reference.fp32_ssm_state", error=ExportCheckError)
     overrides = raw["model_overrides"]
     if not isinstance(overrides, dict) or not all(isinstance(key, str) for key in overrides):
         raise ExportCheckError(

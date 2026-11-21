@@ -188,10 +188,16 @@ def resolve_end_of_turn_id(iter_path: Path, requested: int | None) -> int:
     provider = detect_model_provider(iter_path)
     if provider == NEMOTRON_H_PROVIDER:
         return IM_END_TOKEN_ID
+    run_config = iter_path / RUN_CONFIG
+    if not run_config.exists():
+        found = f"{run_config} does not exist, so the model provider is unknown"
+    elif provider is None:
+        found = f"{run_config} names no model._target_, so the model provider is unknown"
+    else:
+        found = f"{run_config} names the model provider {provider!r}, not NemotronH's ({NEMOTRON_H_PROVIDER})"
     raise SystemExit(
-        f"{iter_path / RUN_CONFIG} names the model provider {provider!r}, not NemotronH's ({NEMOTRON_H_PROVIDER}), so "
-        f"the default end-of-turn id {IM_END_TOKEN_ID} (Nemotron's <|im_end|>) does not apply: pass --end-of-turn-id "
-        "with the id of <|im_end|> in the model's vocabulary (Olmo 3: 100265)."
+        f"{found}: the default end-of-turn id {IM_END_TOKEN_ID} (Nemotron's <|im_end|>) does not apply, so pass "
+        "--end-of-turn-id with the id of <|im_end|> in the model's vocabulary (Olmo 3: 100265)."
     )
 
 

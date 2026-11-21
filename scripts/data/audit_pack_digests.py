@@ -83,7 +83,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.data.file_digest import file_sha256  # noqa: E402
 from scripts.data.packed_parquet import MalformedShard, iter_documents  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
-from scripts.mapping_values import require_int, require_string  # noqa: E402
+from scripts.mapping_values import require_bool, require_int, require_string  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, PASS, exit_status, unusable_spec_status  # noqa: E402
 from scripts.token_ids import require_token_id  # noqa: E402
@@ -230,8 +230,7 @@ def read_audit_config(path: Path) -> AuditConfig:
     pad_token_id = require_token_id(config["pad_token_id"], f"{path}: pad_token_id", error=AuditInputError)
     if pad_token_id > np.iinfo(IDS_DTYPE).max:
         raise AuditInputError(f"{path}: pad_token_id {pad_token_id} does not fit {IDS_DTYPE}")
-    if not isinstance(config["render_ends_in_pad"], bool):
-        raise AuditInputError(f"{path}: render_ends_in_pad must be true or false")
+    require_bool(config["render_ends_in_pad"], f"{path}: render_ends_in_pad", error=AuditInputError)
     dropped = config["dropped_digests"]
     return AuditConfig(
         path=path.resolve(),

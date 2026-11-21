@@ -14,6 +14,8 @@
 """pipeline.checkpoints' command line, train_iters and resolve_checkpoint_path, on fake run directories
 (tests/unit_tests/checkpoint_dirs.py)."""
 
+import re
+
 import pytest
 
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
@@ -88,21 +90,27 @@ def test_a_nemotronh_run_exports_with_nemotrons_end_of_turn_id_unless_another_is
 
 
 @pytest.mark.parametrize(
-    "text",
-    [f"model:\n  _target_: {OLMO_PROVIDER}\n", "model:\n  hidden_size: 8\n", "train:\n  train_iters: 1\n"],
-    ids=["olmo", "no_target", "no_model"],
+    ("text", "reason"),
+    [
+        (f"model:\n  _target_: {OLMO_PROVIDER}\n", f"names the model provider '{OLMO_PROVIDER}'"),
+        ("model:\n  hidden_size: 8\n", "names no model._target_"),
+        ("train:\n  train_iters: 1\n", "names no model._target_"),
+        (None, "does not exist"),
+    ],
+    ids=["olmo", "no_target", "no_model", "no_run_config"],
 )
-def test_a_run_that_is_not_nemotronh_needs_its_end_of_turn_id(tmp_path, text):
-    """Nemotron's id 11 would join the end-of-generation ids of another vocabulary, where it is another token."""
+def test_a_run_that_is_not_nemotronh_needs_its_end_of_turn_id(tmp_path, text, reason):
+    """Nemotron's id 11 would join the end-of-generation ids of another vocabulary, where it is another token. The
+    message says which of the three faults it is."""
     iteration = _iteration(tmp_path, text)
-    with pytest.raises(SystemExit, match=r"--end-of-turn-id"):
+    with pytest.raises(SystemExit, match=rf"{re.escape(reason)}.*pass --end-of-turn-id"):
         checkpoints.resolve_end_of_turn_id(iteration, None)
     assert checkpoints.resolve_end_of_turn_id(iteration, 100265) == 100265
 
 
 def test_the_nemotronh_provider_constant_names_the_real_provider_class():
-    """A run_config.yaml names a provider as ``<module>.<class>``. A rename or a move of the class upstream must fail here
-    and not refuse every Nemotron export that passes no --end-of-turn-id."""
+    """A run_config.yaml names a provider as ``<module>.<class>``. A rename or a move of the class upstream must fail
+    here and not refuse every Nemotron export that passes no --end-of-turn-id."""
     assert NEMOTRON_H_PROVIDER == f"{MambaModelProvider.__module__}.{MambaModelProvider.__qualname__}"
 
 
