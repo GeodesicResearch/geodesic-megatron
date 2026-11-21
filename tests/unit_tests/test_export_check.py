@@ -258,6 +258,9 @@ def test_the_campaign_tolerance_passes_its_correct_exports_with_room_and_fails_t
         (lambda c: c["calibration"].update(date=datetime.date(2026, 10, 10)), "quote it"),
         (lambda c: c["structure"].update(decoding_defaults="sampling"), "the exporter's modes"),
         (lambda c: c["structure"].update(decoding_defaults="reasoning", byte_equal_files=["config.json"]), "not list"),
+        (lambda c: c.update(hf_reference={"placement": "pipeline"}), "placement must be one of"),
+        (lambda c: c.update(hf_reference={"placement": "single", "gpus": 2}), "unknown keys \\['gpus'\\]"),
+        (lambda c: c.update(hf_reference=None), "hf_reference: expected a mapping"),
     ],
 )
 def test_a_malformed_spec_is_refused(tmp_path, selected, edit, message):
@@ -265,6 +268,15 @@ def test_a_malformed_spec_is_refused(tmp_path, selected, edit, message):
     edit(content)
     with pytest.raises(export_check.ExportCheckError, match=message):
         write_spec(tmp_path / "malformed.yaml", content)
+
+
+def test_a_spec_states_where_the_export_is_placed_or_places_it_on_one_gpu(tmp_path, selected):
+    spec, content = selected
+    assert "hf_reference" not in content and spec.hf_placement == export_check.DEFAULT_HF_PLACEMENT == "single"
+    balanced = write_spec(tmp_path / "balanced.yaml", content | {"hf_reference": {"placement": "balanced"}})
+    assert balanced.hf_placement == "balanced"
+    # The placement is not a measurement: scores taken under either placement are judged under the other.
+    assert balanced.measurement_sha256 == spec.measurement_sha256
 
 
 @pytest.mark.parametrize("omitted", OMISSIONS, ids="+".join)
@@ -532,8 +544,15 @@ def test_the_export_is_scored_and_continued_greedily(tmp_path, selected):
     np.testing.assert_array_equal(scores.cross_entropy[0], scores.cross_entropy[1])
     assert scores.record["export"] == str(export.resolve()) and scores.record["side"] == "hf"
     assert scores.record["spec"]["sha256"] == spec.sha256
+    # The spec states no placement, so the export sits on the first GPU (the CPU without one), whose peak is recorded.
+    assert scores.record["placement"] == "single"
+    peaks = scores.record["gpu_peak_memory"]
+    assert [entry["device"] for entry in peaks] == ([0] if torch.cuda.is_available() else [])
+    assert all(entry["max_reserved_bytes"] >= entry["max_allocated_bytes"] > 0 for entry in peaks)
     greedy = json.loads((out_dir / export_check.HF_GREEDY).read_text())
     assert len(greedy["generations"]) == len(spec.listed("prompts"))
+    # The greedy record's peak is read after the continuations, so it covers them.
+    assert [entry["device"] for entry in greedy["record"]["gpu_peak_memory"]] == [entry["device"] for entry in peaks]
     for generation, window in zip(greedy["generations"], spec.listed("prompts")):
         # The copy model repeats the prompt's last id, which is never H: a prompt ends before a run of H.
         last = CORPORA[window.corpus][window.document][window.tokens - 1]

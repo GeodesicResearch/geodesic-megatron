@@ -268,7 +268,9 @@ def test_a_verda_arm_trains_the_mtp_layers_of_its_campaign(overlay, verda_user):
 
 @pytest.mark.run_only_on("GPU")
 @pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
-def test_a_verda_arm_passes_the_trainers_config_update(overlay, verda_user, tmp_path, monkeypatch):
+def test_a_verda_arm_passes_the_trainers_config_update(
+    overlay, verda_user, tmp_path, monkeypatch, mock_distributed_environment
+):
     """The update resolves the precision preset and applies the overlaps, which assert what a posture can combine.
     It also checks the dispatcher backend against the GPU."""
     cfg = _trained_config(overlay)
@@ -277,6 +279,9 @@ def test_a_verda_arm_passes_the_trainers_config_update(overlay, verda_user, tmp_
         cfg.model.tensor_model_parallel_size * cfg.model.pipeline_model_parallel_size * cfg.model.context_parallel_size
     )
     gpus_per_node = int(cluster_profile("verda")["CLUSTER_GPUS_PER_NODE"])
+    # Bridge reads a live world's size before WORLD_SIZE. An earlier test in this pytest worker may have left a
+    # one-rank world up (tests/unit_tests/one_rank_nccl_world.py keeps one per process), so the test hides it with
+    # conftest's mock_distributed_environment, as a launch updates its config before its world starts.
     monkeypatch.setenv("WORLD_SIZE", str(math.lcm(gpus_per_node, model_parallel_size)))
     if cfg.checkpoint.pretrained_checkpoint:
         # The update asserts that the warm start exists. A test host has no checkpoint of the stage before.

@@ -60,7 +60,7 @@ def make_config():
         return cfg
 
     yield _make
-    for original, module in restores:
+    for original, module in reversed(restores):  # newest first: a later patch saved the earlier stub
         restore_get_world_size_safe(original, module)
 
 

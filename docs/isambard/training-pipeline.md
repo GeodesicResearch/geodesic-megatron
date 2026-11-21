@@ -100,6 +100,11 @@ placement measurements).
 
 ### Profiling and run identity
 
+- **Routed rows and memory per rank** (any MoE launch): set `ISAMBARD_MOE_ROUTED_ROWS_ITERS=5,20` in the run's
+  `.env`. After each listed iteration, every rank logs its peak and current allocated memory, and the largest and
+  mean rows its experts received per call in each of its MoE layers. The busiest GPU's margin shows how far the
+  routing is from an out-of-memory error. The iterations are the run's global ones, so a resumed segment's lines
+  match the run's other logs. The callback is `scripts/telemetry/moe_routed_rows.py`.
 - **Torch-profiler capture** (any launch): prefix with
   `ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20` (also
   `_RANKS=0,9`; legacy `_WAIT=3` = single capture at iteration 5). Profiling runs
@@ -211,10 +216,30 @@ placement measurements).
   from its record, from ticks judged under the same watch spec): on a stop it cancels the stage's
   live jobs by ID (the running segment and the successors pending on its singleton dependency, which only `squeue`
   lists) and exits; on a tick it could not evaluate (exit 2, or a watch, timeout or `sacct` failure) once the stage
-  has reached its hold iteration while a loss gate is undecided it does the same; otherwise it alerts. Its record
+  has reached its hold iteration while a loss gate is undecided it does the same; otherwise it alerts. Once the watch
+  has checked `final_iteration` and no job is live it exits 0, or 2 with DONE WITH ALERT when its last tick alerted. When
+  two ticks in a row find no live job but the watch has not checked `final_iteration`, it records ENDED EARLY and exits 6. Its record
   opens with the config, the spec's sha256 and the code revision, and its own failures (no started segment of the
   stage among them) are written there too.
   The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
+  The guard counts a job as live when `squeue` lists it or `sacct` shows it in a live state. So one empty `squeue`
+  reply neither ends the guard nor makes a stop cancel nothing. Two time limits are optional, and a guard config
+  that sets neither behaves as before. Both read the time stamp of the newest log's last iteration line against the
+  current attempt's start in `sacct`. So a predecessor's iterations never count, nor those of an earlier attempt of
+  a job that SLURM requeued under the same ID. A `startup:` block (`first_iteration_minutes`, and optionally
+  `dump_at_minutes`) stops a running attempt that has logged no iteration that many minutes after it started. It
+  takes a stack dump at each listed minute and one before the cancel. With it, the guard may be started as soon as
+  the segment starts, before its first iteration. `stall_minutes` stops an attempt whose last iteration line is that
+  many minutes old. Set it above the longest checkpoint save or evaluation of the stage, which log no iteration. It
+  does not apply once the watch has checked the final iteration, while the job saves and exits, so it needs
+  `final_iteration`. The job, `sacct` and the guard must read one time zone: a tick on which the newest log's
+  iteration lines carry no stamp, or a stamp lies after the guard's clock, leaves both limits unevaluated and says so. The dumps are
+  `scripts/training/dump_hung_ranks.sh` runs. Each dump lands beside the raw log in its own folder,
+  `<log-dir>/nccl_trace/<jobid>/<attempt start>_<sweep>/`, where the sweep is `startup_m<minute>` or `stop`. A dump holds one stack
+  file per rank and one process table per node: about 1.5 MB in 354 files for a 64-node job, and tens of KB for a
+  2-node job. A guard that first ticks after several listed minutes takes one dump, at the latest of them. A stop
+  dumps before it cancels, because the stacks need the ranks alive. The cancel then waits for the dump, for at most
+  the guard's `command_timeout_seconds`.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
   CLI overrides and, for a `base_config:` overlay, every field it inherits (the
   profiler's `config_snapshot.yaml` is that overlay verbatim), but the bridge sends the

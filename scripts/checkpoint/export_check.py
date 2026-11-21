@@ -32,8 +32,10 @@ before a run of H in their document, so that H is what the document says next. `
 
 **The two forwards.** Both apply the output head in fp32 to the final hidden states and compute an unfused fp32
 cross-entropy (``target_scores``). The HF side is ``hf_model_outputs.fp32_head_outputs`` on the export, loaded in
-bf16 on one GPU. The Megatron side projects the output layer's input with the layer's own weight cast to fp32, and both
-sides refuse a model whose own logits at the last position disagree with that projection. The Megatron reference loads
+bf16 on one GPU, or split evenly over the node's GPUs when the spec's ``hf_reference.placement`` is ``balanced``. Each
+side records its peak GPU memory with its scores. The Megatron side projects the output layer's input with the
+layer's own weight cast to fp32, and both sides refuse a model whose own logits at the last position disagree with
+that projection. The Megatron reference loads
 the checkpoint's own run_config at the spec's tensor and expert parallelism, with the spec's ``model_overrides`` applied
 (FP8, the fused cross-entropy, the fast posture's dispatcher, recompute and the EP overlap off) and, when the spec says
 so, the Mamba scan in fp32 (``pipeline.training.patches.mamba_scan.patch_mamba_training_scan_fp32_state``). A
@@ -149,9 +151,13 @@ SPEC_KEYS = frozenset(
         "calibration",
     }
 )
+OPTIONAL_SPEC_KEYS = frozenset({"hf_reference"})
+# The HF placement of a spec that states no hf_reference: the first GPU.
+DEFAULT_HF_PLACEMENT = "single"
 # What the scores depend on: a change to any of these keys makes earlier scores unusable. The criteria, the
 # calibration record and the structural block (the reference export and the files compared with it) do not change a
-# score, so a spec calibrated after its scores were taken still judges them.
+# score, so a spec calibrated after its scores were taken still judges them. Nor does hf_reference, which only places
+# the HF model's layers on GPUs; the HF scores record the placement they were taken with.
 MEASUREMENT_KEYS = (
     "tokenizer",
     "hidden_token_id",
@@ -264,8 +270,9 @@ class Criteria:
 @dataclass(frozen=True)
 class ExportCheckSpec:
     """A spec as ``load_spec`` read it, with its path, sha256, measurement digest and parsed content. ``documents``
-    and ``prompts`` are None while the spec still reads ``PENDING`` for them (before ``select`` has drawn them), and
-    ``decoding_defaults`` is None unless the spec judges ``generation_config.json`` by an exporter mode's defaults."""
+    and ``prompts`` are None while the spec still reads ``PENDING`` for them (before ``select`` has drawn them),
+    ``decoding_defaults`` is None unless the spec judges ``generation_config.json`` by an exporter mode's defaults, and
+    ``hf_placement`` is where ``score-hf`` puts the export's layers (``hf_model_outputs.HF_PLACEMENTS``)."""
 
     path: str
     sha256: str
@@ -285,6 +292,7 @@ class ExportCheckSpec:
     megatron_reference: MegatronReference
     greedy: Greedy
     criteria: Criteria
+    hf_placement: str
 
     def listed(self, name: str) -> tuple[Window, ...]:
         """The ``documents`` or ``prompts`` windows; raises when the spec still reads ``PENDING`` for them."""
@@ -427,6 +435,15 @@ def _megatron_reference(raw: Any) -> MegatronReference:
     )
 
 
+def _hf_placement(raw: Any) -> str:
+    raw = require_keys(raw, "hf_reference", {"placement"}, error=ExportCheckError)
+    if raw["placement"] not in hf_model_outputs.HF_PLACEMENTS:
+        raise ExportCheckError(
+            f"hf_reference.placement must be one of {list(hf_model_outputs.HF_PLACEMENTS)}, not {raw['placement']!r}"
+        )
+    return raw["placement"]
+
+
 def _criteria(raw: Any) -> Criteria:
     raw = require_keys(
         raw, "criteria", {"ce_agreement", "hidden_probability", "greedy_hidden_emissions"}, error=ExportCheckError
@@ -490,7 +507,8 @@ def read_spec_content(path: Path) -> dict[str, Any]:
 
 
 def load_spec(path: str | Path) -> ExportCheckSpec:
-    """Read and check a spec, composed as ``read_spec_content`` composes it. Every key is required::
+    """Read and check a spec, composed as ``read_spec_content`` composes it. Every key is required except
+    ``hf_reference``, whose placement is ``DEFAULT_HF_PLACEMENT`` when it is absent::
 
         reference_export: /abs/path/to/reference/hf        # the export the structure is compared with
         tokenizer: {name: <Hub id or dir>, revision: <40-hex commit>}
@@ -512,13 +530,14 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
           hidden_probability: {max: 1.0e-4} | null           # null omits the criterion
           greedy_hidden_emissions: {max: 0} | null           # null omits the criterion
         calibration: {...}                                 # how the tolerance was measured, as a record
+        hf_reference: {placement: single | balanced}       # optional: where score-hf puts the export's layers
 
     Raises ExportCheckError on a missing or unknown key, a malformed value, a value JSON cannot hold (an unquoted
     date), a listing whose counts or lengths are not its selection's, a stop id that is H, model overrides that set
     the parallel layout, or decoding defaults for a generation config the structure does not compare.
     """
     content = read_spec_content(Path(path))
-    raw = require_keys(content, f"export-check spec {path}", SPEC_KEYS, error=ExportCheckError)
+    raw = require_keys(content, f"export-check spec {path}", SPEC_KEYS, OPTIONAL_SPEC_KEYS, error=ExportCheckError)
     try:
         json.dumps(content)
     except TypeError as error:
@@ -581,6 +600,7 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
             max_new_tokens=_integer(greedy["max_new_tokens"], "greedy.max_new_tokens", 1), stop_token_ids=stop
         ),
         criteria=_criteria(raw["criteria"]),
+        hf_placement=_hf_placement(raw["hf_reference"]) if "hf_reference" in raw else DEFAULT_HF_PLACEMENT,
     )
 
 
@@ -747,6 +767,22 @@ def run_record(spec: ExportCheckSpec) -> dict[str, Any]:
         "host": socket.gethostname(),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
     }
+
+
+def gpu_peak_memory(devices: list[int]) -> list[dict[str, int]]:
+    """The peak memory that PyTorch allocated and reserved on each of ``devices`` (CUDA device indices) since the
+    process started, in bytes, one entry per device in the order given. Name only devices that the process uses:
+    reading another device's statistics opens a CUDA context on it."""
+    import torch
+
+    return [
+        {
+            "device": device,
+            "max_allocated_bytes": torch.cuda.max_memory_allocated(device),
+            "max_reserved_bytes": torch.cuda.max_memory_reserved(device),
+        }
+        for device in devices
+    ]
 
 
 def write_scores(path: Path, passes: list[tuple[np.ndarray, np.ndarray]], targets: np.ndarray, record: dict) -> None:
@@ -916,6 +952,7 @@ def score_megatron(
                     np.concatenate([merged[i][1] for i in range(len(documents))]),
                 )
             )
+    peaks = gather_to_rank_zero(gpu_peak_memory([torch.cuda.current_device()])[0], group=None)
     if dist.get_rank() == 0:
         record = run_record(spec) | {
             "side": "megatron",
@@ -927,6 +964,7 @@ def score_megatron(
             "torch": torch.__version__,
             "load_seconds": round(loaded - started, 1),
             "score_seconds": round(time.monotonic() - loaded, 1),
+            "gpu_peak_memory": [entry | {"rank": global_rank} for global_rank, entry in enumerate(peaks)],
         }
         write_scores(output, passes, np.concatenate(documents), record)
         LOGGER.info("wrote %s", output)
@@ -934,7 +972,7 @@ def score_megatron(
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# The HF export: scores and greedy continuations (one GPU)
+# The HF export: scores and greedy continuations (on the GPUs that the spec's placement names)
 # ----------------------------------------------------------------------------------------------------------------------
 
 
@@ -985,7 +1023,10 @@ def write_greedy(
         | greedy_continuation(model, list(spec.prefix_token_ids) + ids.tolist(), spec, renderer)
         for window, ids in zip(spec.listed("prompts"), prompts)
     ]
-    greedy_record = record | {"greedy_seconds": round(time.monotonic() - started, 1)}
+    greedy_record = record | {
+        "greedy_seconds": round(time.monotonic() - started, 1),
+        "gpu_peak_memory": gpu_peak_memory(hf_model_outputs.model_gpus(model)),
+    }
     partial = greedy_path.with_name(f"{greedy_path.name}.partial")
     partial.write_text(json.dumps({"record": greedy_record, "generations": generations}, indent=1, ensure_ascii=False))
     partial.replace(greedy_path)
@@ -1006,7 +1047,7 @@ def score_hf(spec: ExportCheckSpec, export: Path, out_dir: Path, repeats: int) -
     tokenizer = AutoTokenizer.from_pretrained(spec.tokenizer, revision=spec.tokenizer_revision)
     renderer = hf_model_outputs.TokenRenderer(tokenizer)
     started = time.monotonic()
-    model = hf_model_outputs.load_model(str(export), HF_DTYPE)
+    model = hf_model_outputs.load_model(str(export), HF_DTYPE, spec.hf_placement)
     loaded = time.monotonic()
 
     def window_logits(ids: list[int]):
@@ -1019,11 +1060,13 @@ def score_hf(spec: ExportCheckSpec, export: Path, out_dir: Path, repeats: int) -
         | export_record(export, model)
         | {
             "side": "hf",
+            "placement": spec.hf_placement,
             "repeats": repeats,
             "torch": torch.__version__,
             "transformers": transformers.__version__,
             "load_seconds": round(loaded - started, 1),
             "score_seconds": round(scored - loaded, 1),
+            "gpu_peak_memory": gpu_peak_memory(hf_model_outputs.model_gpus(model)),
         }
     )
     write_scores(scores_path, passes, np.concatenate(documents), record)

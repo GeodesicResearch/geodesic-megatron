@@ -20,6 +20,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = REPO_ROOT / "tests" / "unit_tests" / "fixtures" / "score_run" / "train-6354507_excerpt.out"
 FIXTURE_LINES = FIXTURE.read_text(encoding="utf-8").splitlines()
 FIXTURE_RUN_PATH = "geodesic/megatron_training/5s8x5mgb"
+# A fixture iteration line's time stamp and iteration.
+ITERATION_STAMP_RE = re.compile(r"^ ?\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] iteration +(\d+)/", re.M)
 
 
 def only_line(needle: str) -> str:

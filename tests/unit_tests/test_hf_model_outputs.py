@@ -1,7 +1,8 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""scripts/checkpoint/hf_model_outputs.py, on the CPU: the rendering of token ids, the output head applied in fp32 on
-a bf16 model, and generation from the model's unmodified distribution.
+"""scripts/checkpoint/hf_model_outputs.py: the rendering of token ids, the output head applied in fp32 on a bf16 model,
+generation from the model's unmodified distribution, and the placement of a model on GPUs. Every test runs on the CPU
+except those that need a GPU: the split over several GPUs (marked ``serial_gpu``) and a model held on one.
 
 Every model is a real tiny one (``tiny_models``, or a Gemma 2 that soft-caps its logits) and every generation runs
 transformers' own ``generate``.
@@ -94,6 +95,69 @@ def test_a_model_that_changes_its_logits_after_the_head_is_refused():
         model.lm_head.weight.mul_(400.0)
     with pytest.raises(RuntimeError, match="changes its logits after the head"):
         hf_model_outputs.fp32_head_outputs(model, [EOS_ID, THE, WORLD])
+
+
+# --------------------------------------------------------------------------------------
+# Placing a model on GPUs
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("placement", "gpus", "device_map"),
+    [("single", 0, None), ("single", 4, {"": 0}), ("balanced", 1, "balanced"), ("balanced", 4, "balanced")],
+)
+def test_each_placement_has_its_device_map(placement, gpus, device_map):
+    assert hf_model_outputs.device_map_for(placement, gpus) == device_map
+
+
+@pytest.mark.parametrize(
+    ("placement", "gpus", "message"), [("pipeline", 4, "must be one of"), ("balanced", 0, "none")]
+)
+def test_a_placement_that_cannot_be_made_is_refused(placement, gpus, message):
+    with pytest.raises(ValueError, match=message):
+        hf_model_outputs.device_map_for(placement, gpus)
+
+
+def test_a_model_with_parameters_off_the_gpus_is_refused():
+    """A device map that does not fit lets accelerate leave layers on the CPU, which a GPU placement must not score."""
+    with pytest.raises(RuntimeError, match="does not fit on this process's GPUs"):
+        hf_model_outputs.require_on_gpus(tiny_llama(), "balanced")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="a model held on a GPU needs one")
+def test_a_model_held_on_a_gpu_is_accepted_and_names_its_gpu():
+    model = tiny_llama().to("cuda:0")
+    hf_model_outputs.require_on_gpus(model, "single")
+    assert hf_model_outputs.model_gpus(model) == [0]
+    assert hf_model_outputs.model_gpus(tiny_llama()) == []
+
+
+LAYERS = 8
+
+
+@pytest.mark.serial_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="a split model needs two GPUs or more")
+def test_a_model_split_over_gpus_gives_the_single_gpu_models_fp32_logits(tmp_path):
+    """A model too large for one GPU is split over several, so its output head is fed from another GPU than the one
+    its last layers sit on. The split here is explicit: accelerate's balanced map keeps a model this small whole on
+    the first GPU. Placing the layers changes no logit."""
+    from transformers import AutoModelForCausalLM
+
+    tiny_llama(layers=LAYERS).to(torch.bfloat16).save_pretrained(tmp_path / "model")
+    path, ids = str(tmp_path / "model"), [EOS_ID, THE, WORLD, HELLO]
+    gpus = torch.cuda.device_count()
+    single = hf_model_outputs.load_model(path, "bfloat16", "single")
+    expected = hf_model_outputs.fp32_head_outputs(single, ids).cpu()
+    del single
+    # The tied head stays with the embeddings on the first GPU, and the last layers and the norm sit on the last one.
+    split_map = {"model.embed_tokens": 0, "lm_head": 0, "model.rotary_emb": 0, "model.norm": gpus - 1}
+    split_map |= {f"model.layers.{i}": i * gpus // LAYERS for i in range(LAYERS)}
+    split = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16, device_map=split_map).eval()
+    assert {str(p.device) for p in split.parameters()} == {f"cuda:{i}" for i in range(gpus)}
+    assert torch.equal(hf_model_outputs.fp32_head_outputs(split, ids).cpu(), expected)
+    del split
+    balanced = hf_model_outputs.load_model(path, "bfloat16", "balanced")
+    assert torch.equal(hf_model_outputs.fp32_head_outputs(balanced, ids).cpu(), expected)
 
 
 # --------------------------------------------------------------------------------------

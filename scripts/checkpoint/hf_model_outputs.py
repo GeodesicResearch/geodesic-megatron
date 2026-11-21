@@ -3,7 +3,9 @@
 """An HF model's outputs as the export check (``scripts/checkpoint/export_check.py``) reads them: its output head
 applied in fp32, and generation from its own, unmodified distribution.
 
-- ``load_model``: the model in a given dtype, on this node's first GPU (the CPU without one).
+- ``load_model``: the model in a given dtype, placed as one of ``HF_PLACEMENTS`` names (``device_map_for``), and
+  refused when a GPU placement leaves a parameter off the GPUs (``require_on_gpus``).
+- ``model_gpus``: the GPUs that hold a model's parameters.
 - ``fp32_head_outputs``: the logits computed by the output head in fp32 (``fp32_projection``, which the Megatron side
   of the export check uses too), refused when they disagree with the model's own logits beyond bf16 rounding
   (``HEAD_PROJECTION_TOLERANCE``).
@@ -13,13 +15,13 @@ applied in fp32, and generation from its own, unmodified distribution.
 - ``TokenRenderer``: token ids rendered for a reader, every special, added or unknown id shown.
 """
 
-from typing import Any
-
-
 # How far the fp32 projection of the output head's input may lie from the model's own logits: the rounding of logits
 # computed in bf16 (half a bf16 step is 2**-8 of a value, 0.0625 at 16-32) with room for a reduced-precision GEMM
 # reduction, far inside what a transform after the head (a soft cap, a scale) changes at the largest logits.
 HEAD_PROJECTION_TOLERANCE = {"rtol": 2**-5, "atol": 2**-4}
+# Where load_model puts a model's layers: "single" on the first GPU (the CPU without one), "balanced" split evenly over
+# every GPU the process sees, for a model larger than one GPU.
+HF_PLACEMENTS = ("single", "balanced")
 
 
 class TokenRenderer:
@@ -168,12 +170,44 @@ def generate_from_unmodified_distribution(model, input_ids: list[int], config):
     return output, prompt.shape[1]
 
 
-def load_model(model_path: str, dtype: str):
-    """The model at ``model_path`` in ``dtype``, on this node's first GPU (the CPU without one)."""
+def device_map_for(placement: str, gpu_count: int) -> dict[str, int] | str | None:
+    """The ``device_map`` for ``from_pretrained`` that puts a model as ``placement`` (one of ``HF_PLACEMENTS``) says,
+    in a process that sees ``gpu_count`` GPUs: ``{"": 0}`` for "single", or None (the CPU) without a GPU, and
+    accelerate's "balanced" map for "balanced". Raises ValueError for another placement, and for "balanced" without a
+    GPU."""
+    if placement not in HF_PLACEMENTS:
+        raise ValueError(f"the placement must be one of {list(HF_PLACEMENTS)}, not {placement!r}")
+    if placement == "single":
+        return {"": 0} if gpu_count else None
+    if not gpu_count:
+        raise ValueError("the balanced placement splits a model over GPUs, and this process sees none")
+    return "balanced"
+
+
+def load_model(model_path: str, dtype: str, placement: str):
+    """The model at ``model_path`` in ``dtype``, placed as ``placement`` says (``device_map_for``) on the GPUs this
+    process sees. Raises ValueError as ``device_map_for`` does, and RuntimeError as ``require_on_gpus`` does."""
     import torch
     from transformers import AutoModelForCausalLM
 
-    kwargs: dict[str, Any] = {"dtype": getattr(torch, dtype)}
-    if torch.cuda.device_count():
-        kwargs["device_map"] = {"": 0}
-    return AutoModelForCausalLM.from_pretrained(model_path, **kwargs).eval()
+    device_map = device_map_for(placement, torch.cuda.device_count())
+    model = AutoModelForCausalLM.from_pretrained(model_path, dtype=getattr(torch, dtype), device_map=device_map)
+    model.eval()
+    if device_map is not None:
+        require_on_gpus(model, placement)
+    return model
+
+
+def require_on_gpus(model, placement: str) -> None:
+    """Raises RuntimeError unless every parameter of ``model`` sits on a GPU. A device map that does not fit lets
+    accelerate offload layers to the CPU or to disk, and such a model is not the one ``placement`` names."""
+    elsewhere = sorted({str(p.device) for p in model.parameters() if p.device.type != "cuda"})
+    if elsewhere:
+        raise RuntimeError(
+            f"the {placement} placement left parameters on {elsewhere}: the model does not fit on this process's GPUs"
+        )
+
+
+def model_gpus(model) -> list[int]:
+    """The CUDA device indices that hold ``model``'s parameters, in order; empty for a model on the CPU."""
+    return sorted({p.device.index for p in model.parameters() if p.device.type == "cuda"})

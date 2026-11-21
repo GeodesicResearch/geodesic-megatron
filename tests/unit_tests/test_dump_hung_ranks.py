@@ -222,7 +222,7 @@ def _slurm_stubs(tmp_path, squeue=_SQUEUE, scontrol=_SCONTROL):
     return bindir
 
 
-def _run_driver(tmp_path, job_id, bindir, extra_env=None):
+def _run_driver(tmp_path, job_id, bindir, extra_env=None, sweep=()):
     log_dir = tmp_path / "megatron_runs"
     log_dir.mkdir(exist_ok=True)
     env = stubbed_shell_env(
@@ -234,7 +234,7 @@ def _run_driver(tmp_path, job_id, bindir, extra_env=None):
         },
     )
     env.update(extra_env or {})
-    result = subprocess.run(["bash", SCRIPT, job_id], capture_output=True, text=True, env=env, timeout=120)
+    result = subprocess.run(["bash", SCRIPT, job_id, *sweep], capture_output=True, text=True, env=env, timeout=120)
     return log_dir, result
 
 
@@ -247,6 +247,23 @@ def test_driver_places_the_evidence_beside_the_raw_log_and_sweeps_every_node(tmp
     args = (tmp_path / "srun.args").read_text().splitlines()
     assert f"--jobid={job_id}" in args
     assert "--nodes=2" in args and "--ntasks=2" in args and "--overlap" in args
+
+
+def test_a_named_sweep_lands_in_its_own_folder_so_a_later_sweep_keeps_it(tmp_path, job_id, ranks):
+    bindir = _slurm_stubs(tmp_path)
+    log_dir, first = _run_driver(tmp_path, job_id, bindir, sweep=("startup_m20",))
+    _, second = _run_driver(tmp_path, job_id, bindir, sweep=("stop",))
+    assert first.returncode == 0 and second.returncode == 0, first.stderr + second.stderr
+    for sweep in ("startup_m20", "stop"):
+        evidence = log_dir / "nccl_trace" / job_id / sweep
+        assert sorted(p.name for p in evidence.iterdir()) == [TABLE, "rank_10.stack", "rank_3.stack"]
+
+
+@pytest.mark.parametrize("sweep", ["../escape", "a/b", "..", ".", ""])
+def test_a_sweep_label_that_could_leave_the_jobs_folder_is_refused(tmp_path, job_id, sweep):
+    _, result = _run_driver(tmp_path, job_id, _slurm_stubs(tmp_path), sweep=(sweep,))
+    assert result.returncode == 2 and "usage" in result.stderr
+    assert not (tmp_path / "srun.args").exists()
 
 
 def test_driver_unsets_the_session_slurm_variables_before_srun(tmp_path, job_id, ranks):

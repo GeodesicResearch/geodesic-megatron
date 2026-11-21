@@ -14,6 +14,7 @@
 import logging
 import os
 import subprocess
+import sys
 from collections.abc import MutableMapping
 from pathlib import Path
 from shutil import rmtree
@@ -149,6 +150,24 @@ def pytest_runtest_setup(item):
     if _XDIST_MASTER_PORT is not None:
         os.environ["MASTER_PORT"] = _XDIST_MASTER_PORT
     os.environ.pop("SLURM_NTASKS", None)
+
+
+@pytest.fixture(autouse=True)
+def config_world_size_function_is_restored():
+    """Fail a test that leaves megatron.bridge.training.config.get_world_size_safe patched, and put the real one back.
+
+    training/test_config.py's create_test_config_container patches it and its callers restore it by hand. A stub left
+    in place would set the world size of every later test in the same pytest worker.
+    """
+    yield
+    config_module = sys.modules.get("megatron.bridge.training.config")
+    if config_module is None:
+        return
+    from megatron.bridge.utils.common_utils import get_world_size_safe
+
+    leaked = config_module.get_world_size_safe is not get_world_size_safe
+    config_module.get_world_size_safe = get_world_size_safe
+    assert not leaked, "the test left megatron.bridge.training.config.get_world_size_safe patched"
 
 
 def pytest_runtest_teardown(item, nextitem):

@@ -1,0 +1,23 @@
+# supernorm-cpt5 (eval cohort sft-v4-cpt): supernorm's V4 SFT on Super after the V2 treatment continual pretraining to epoch 5 (uncommitted, frozen with this launch snapshot).
+# Kyle, 2026-11-05 about 05:40Z, relayed by analysis.
+#
+# WHAT IT IS. nemotron_super_sft_xl50b_gbs256_v4.yaml (supernorm) with only the warm start and the run identity changed:
+#   - checkpoint.pretrained_checkpoint: the V2 treatment CPT run's save directory (Super, LR 2e-4 constant, 380 iterations from the Base-Chat-Init import), whose tracker file
+#     reads 380; weights only, so the SFT takes the pretrained branch: a fresh optimizer and RNG state, iteration 0.
+#   - checkpoint.load / save, logger.wandb_exp_name: this run's own.
+# Every optimisation hyperparameter, the data and the layout are supernorm's. See its header for the saves, the segments and the learning-rate rule.
+#
+# THE TREATMENT RUN'S MIX (the warm start's history): 97,280 samples of 32,768 tokens, of which 48,430 (49.8%) from the V2 E2E union (geodesic-research/control-pretraining-datasets,
+# reintroduction_gpt55_4plus_v2e2e, 49,590 documents, five passes) and 48,850 (50.2%) benign replay from climbmix_full, eight shards in proportion to their tokens.
+#
+# --- LAUNCH --- scripts/submit_sft_v4_super.sh supernorm-cpt5
+
+base_config: nemotron_super_sft_xl50b_gbs256_v4.yaml
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/control_pretraining_grafting/continual_pretraining_super_lr2e-4/treatment
+  load: /projects/a5k/public/checkpoints/megatron/control_pretraining_grafting/sft_v4/supernorm-cpt5
+  save: /projects/a5k/public/checkpoints/megatron/control_pretraining_grafting/sft_v4/supernorm-cpt5
+
+logger:
+  wandb_exp_name: grafting_super_cpt5_sft_xl50b_gbs256_v4
