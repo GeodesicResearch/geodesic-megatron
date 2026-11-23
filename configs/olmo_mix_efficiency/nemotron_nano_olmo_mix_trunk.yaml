@@ -40,7 +40,7 @@ checkpoint:
   # load and save name the same folder, so a new launch continues the run.
   load: /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_trunk
   save: /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_trunk
-  save_interval: 250          # each 4.19 billion tokens, the milestones of the study
+  save_interval: 250          # the milestones of the study
 
 logger:
   # The W&B project of this study. The base config names the project megatron_training.

@@ -14,8 +14,8 @@ here change only what the other data needs. The batch, the optimizer and the Ver
 - The trunk is one long run. Its learning rate is constant after the warmup. It saves a checkpoint each 250
   iterations, which is 4.19 billion tokens.
 - A tail is a short run that continues from one trunk checkpoint on the same data. Its learning rate goes linearly
-  from the value of the trunk to a floor of 1.0e-5.
-- A tail has 10% of the iterations of its start, and at least 100 iterations.
+  from the value of the trunk to the floor of the tail.
+- A milestone tail has 10% of the iterations of its start, and at least 100 iterations. Its floor is 1.0e-5.
 
 ## Files
 
@@ -32,20 +32,15 @@ here change only what the other data needs. The batch, the optimizer and the Ver
 The comments of each config give the reason for each value. The comments of `tails.yaml` describe each group of
 tails.
 
-To change a tail config, edit `tails.yaml` or the template. Then run this command from the repository root:
-
-```bash
-python configs/olmo_mix_efficiency/make_tails.py configs/olmo_mix_efficiency/tails.yaml
-```
+To change a tail config, edit `tails.yaml` or the template. Then run `make_tails.py`. Its docstring gives the
+command.
 
 A tail loads one iteration of the config that it continues (`checkpoint.ckpt_step`) and saves to its own folder. The
-folder of that config stays as it is. `scheduler.override_opt_param_scheduler: true` gives the tail the schedule of
-its config. Without this key the launch fails, because the schedule of the config differs from the schedule in the
-checkpoint.
+folder of that config stays as it is.
 
 `tests/unit_tests/test_olmo_mix_efficiency_configs.py` holds the configs to the rules of this file. For example, the
 trunk differs from the baseline only in its data and its own folders. The test also compares each tail config with
-the output of `make_tails.py`. It reads the YAML files alone and builds no model.
+the output of `make_tails.py`.
 
 ## Launch
 

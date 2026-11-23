@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 import yaml
 from scripts.dotted_paths import dotted_leaves
-from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml
+from scripts.training.config_compose import BASE_CONFIG_KEY, composition_chain, load_composed_yaml
 
 from tests.unit_tests.repo_scripts import load_script
 
@@ -93,11 +93,6 @@ def differing(candidate: dict, reference: dict) -> set[str]:
     }
 
 
-def base_of(path: Path) -> Path:
-    """The config that the overlay at ``path`` names as its base."""
-    return (path.parent / yaml.safe_load(path.read_text())[BASE_CONFIG_KEY]).resolve()
-
-
 def _name(path: Path) -> str:
     return path.name.removeprefix(PREFIX).removesuffix(".yaml")
 
@@ -147,7 +142,7 @@ def test_the_trunk_keeps_the_warmup_of_the_baseline():
     assert trunk["scheduler.lr_warmup_iters"] == 0
     warmup = round(trunk["scheduler.lr_warmup_fraction"] * trunk["scheduler.lr_decay_iters"])
     assert warmup == 299
-    assert all(tail.start > warmup for path, tail in TAILS.items() if base_of(path) != SMOKE)
+    assert all(tail.start > warmup for path, tail in TAILS.items() if composition_chain(path)[1] != SMOKE)
 
 
 def test_the_trunk_masks_the_pad_id_of_the_olmo_data():
@@ -225,7 +220,7 @@ def test_a_tail_changes_the_schedule_and_where_it_saves(path: Path):
     stated = dotted_leaves(yaml.safe_load(path.read_text()))
     # A tail states checkpoint.load and lr_warmup_iters with the values of its base, so the two keys do not differ.
     assert set(stated) - {BASE_CONFIG_KEY, "checkpoint.load", "scheduler.lr_warmup_iters"} == TAIL_SCHEDULE
-    tail, base = composed(path), composed(base_of(path))
+    tail, base = composed(path), composed(composition_chain(path)[1])
     assert differing(tail, base) == TAIL_SCHEDULE
     # The two values the optimizer's saved state is keyed by.
     assert not any(key.startswith("optimizer.") for key in stated)
@@ -234,7 +229,7 @@ def test_a_tail_changes_the_schedule_and_where_it_saves(path: Path):
 
 @pytest.mark.parametrize("path", list(TAILS), ids=_name)
 def test_a_tail_starts_at_a_saved_iteration_of_the_run_it_continues(path: Path):
-    tail, base = composed(path), composed(base_of(path))
+    tail, base = composed(path), composed(composition_chain(path)[1])
     assert tail["checkpoint.load"] == base["checkpoint.save"]
     assert tail["checkpoint.ckpt_step"] == TAILS[path].start
     assert tail["checkpoint.ckpt_step"] % base["checkpoint.save_interval"] == 0

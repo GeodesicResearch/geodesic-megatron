@@ -1,10 +1,8 @@
 # The tails of the study. make_tails.py writes one tail config for each entry of `tails`, beside this file.
-# To change a tail config, edit this file or the template. Then run this command from the repository root:
-#
-#   python configs/olmo_mix_efficiency/make_tails.py configs/olmo_mix_efficiency/tails.yaml
+# The docstring of make_tails.py gives the command.
 
-# The template of a tail config. It has no .yaml suffix, because the tools that compose each YAML file of configs/
-# cannot compose it.
+# The template of a tail config. It has no .yaml suffix, because tests/unit_tests/test_token_masking_config_sweep.py
+# composes each YAML file of configs/ and cannot compose a template.
 template: nemotron_nano_olmo_mix_tail.yaml.tmpl
 # The file name of a tail config and the W&B name of its run. `{tail}` is the key of the tail in `tails`.
 config_name: nemotron_nano_olmo_mix_{tail}.yaml

@@ -19,6 +19,8 @@ scheduler:
   lr_wsd_decay_iters: 250
   lr_warmup_fraction: null
   lr_warmup_iters: 0
+  # This key gives the tail the schedule of this file. Without it the launch fails, because the schedule of this file
+  # differs from the schedule in the checkpoint.
   override_opt_param_scheduler: true
 
 checkpoint:

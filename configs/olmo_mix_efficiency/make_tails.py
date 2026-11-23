@@ -29,14 +29,14 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.append(str(REPO_ROOT))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.append(str(_REPO_ROOT))
 
 from scripts.training.config_compose import load_composed_yaml  # noqa: E402
 
 
-LOGGER = logging.getLogger("make_tails")
+_LOGGER = logging.getLogger("make_tails")
 
 SPEC_KEYS = frozenset({"template", "config_name", "run_name", "save_beside", "tails"})
 TAIL_KEYS = frozenset({"base", "start", "length", "floor"})
@@ -132,7 +132,7 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     for name, text in tail_configs(args.spec).items():
         (args.spec.parent / name).write_text(text)
-        LOGGER.info("wrote %s", args.spec.parent / name)
+        _LOGGER.info("wrote %s", args.spec.parent / name)
 
 
 if __name__ == "__main__":
