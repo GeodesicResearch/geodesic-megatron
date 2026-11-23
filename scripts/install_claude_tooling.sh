@@ -18,6 +18,8 @@
 #   it: every pipeline — and the unit tests, whose conftest imports torch and
 #   megatron.core at collection time — runs inside the Apptainer container built
 #   by `pipeline_env_setup.sh`. See docs/environment.md.
+#   The CPU tier of the unit tests is the exception: scripts/run_cpu_tests.sh
+#   runs it on a host, from a venv other than this one.
 #
 #   That separation is the whole point of this installer being separate from
 #   pipeline_env_setup.sh: this one needs only `uv`, finishes in seconds, wants no

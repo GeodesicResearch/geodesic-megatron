@@ -90,9 +90,11 @@ inheriting one base recreate the collision.
 **The CPU tier** is the part of the suite that runs with no container. Its test files carry the `cpu`
 marker and need no GPU, no torch and no `megatron.core`. `scripts/run_cpu_tests.sh` is the one definition
 of that run. `.github/workflows/cpu-tests.yml` runs the script on a GitHub runner for each pull request.
-The workflow also runs the host-side pre-commit hooks on the files that the pull request changes. To run
-the tier by hand, create a venv with the packages that the `tests` job of the workflow installs. Then run
-the script with the `python` of that venv first on `PATH`:
+The workflow also runs the host-side pre-commit hooks on the files that the pull request changes.
+
+To run the tier by hand, create a venv with the packages that the `tests` job of the workflow installs.
+Give the venv a path other than `.venv`, because `.venv` is the tooling venv of a checkout. Then run the
+script with the `python` of that venv first on `PATH`:
 ```bash
 bash scripts/run_cpu_tests.sh
 ```

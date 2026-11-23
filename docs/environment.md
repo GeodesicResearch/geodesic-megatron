@@ -100,7 +100,7 @@ run.
 # Interactive shell with the repo + Slingshot env wired up:
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
 
-# Unit tests — in-container is the only way (~7,370 tests), through the runner the pre-commit
+# Unit tests — in-container is the only way for the whole suite (~7,370 tests), through the runner the pre-commit
 # hook uses. Its header says what it does: a scratch cwd (an autouse conftest fixture asserts
 # ./nemo_experiments does not exist, so running from the repo root errors every test and would
 # rmtree a real one), xdist workers with --dist loadfile, and a worker count set by the GPUs'

@@ -9,7 +9,7 @@
 #
 # The run is one pytest pass:
 #   - UNIT_TESTS_CPU_TIER=1 makes tests/unit_tests/conftest.py load without torch and megatron.core.
-#   - Only the files that use the marker are collected, because most other files import one of the two
+#   - pytest collects only the files that use the marker, because most other files import one of the two
 #     packages at collection.
 #   - The pass selects the `cpu` tests and skips the `pleasefixme` quarantine.
 #   - The tests run from a scratch directory, because the autouse cleanup_local_folder fixture asserts that
