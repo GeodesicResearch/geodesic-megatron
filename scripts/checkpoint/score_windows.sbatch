@@ -21,7 +21,7 @@
 # The job writes <scores>.jsonl and <scores>.summary.json. It refuses a file that exists. It exits with the status
 # of the step that failed, or 0.
 #
-# Usage, from the checkout whose code scores:
+# Usage (submit from the checkout whose code you want to score with):
 #   ./pipeline_cluster_submit.sh --nodes=1 --time=01:00:00 scripts/checkpoint/score_windows.sbatch \
 #       <spec.yaml> <checkpoint iter_* dir> <scores>.jsonl
 # Use absolute paths.
@@ -30,7 +30,8 @@
 REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 
 # --- Submission guard ---
-# The cluster's own check of a job at its start. This file is copied at submission, so the check is REPO_DIR's.
+# The cluster's own check of a job at its start. The submit script copies this file at submission, so the check is
+# the one in REPO_DIR.
 if ! bash "$REPO_DIR/pipeline/sh/job_guard.sh"; then
     scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
 fi
@@ -60,7 +61,8 @@ export TRITON_CACHE_DIR="$TMPDIR/triton" MEGATRON_CONFIG_LOCK_DIR="$TMPDIR"
 export TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1
 mkdir -p "$TMPDIR" "$TRITON_CACHE_DIR"
 
-# Every argument crossing into the container's `bash -c` is quoted once (pipeline_coherence_submit.sbatch).
+# q quotes each argument that goes into the `bash -c` of the container one time, as
+# pipeline_coherence_submit.sbatch does.
 q() { printf '%q' "$1"; }
 in_container() {
     "$REPO_DIR/pipeline_env_exec.sh" "cd $(q "$REPO_DIR"); source pipeline_env_activate.sh || exit 1; $1"

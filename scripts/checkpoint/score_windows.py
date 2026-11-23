@@ -22,7 +22,9 @@ score a continuation in this way.
 keys is required::
 
     eval_dir          the directory of the evaluation set
-    tokenizer_name    the <tokenizer> of the index and token files, which must be the tokenizer of the checkpoint
+    tokenizer_name    the <tokenizer> of the index and token files
+    checkpoint_tokenizer   the tokenizer.tokenizer_model that the run_config of the checkpoint must record, or null
+                           for a run_config that records none
     prefix_id         the prefix id, or null for the prefix_id that the manifest records for the tokenizer
     max_window        the largest count of input ids of a window, at most the training sequence length
     limit             the count of documents to score from the start of the index, or null for each document
@@ -32,10 +34,11 @@ keys is required::
     megatron_reference.fp32_ssm_state               true runs the Mamba scan in fp32
     megatron_reference.model_overrides              model-config fields to set on the run_config of the checkpoint
 
-**Precision.** ``bf16`` loads the checkpoint through ``resolve_load_path``. A ``torch_grouped`` checkpoint then loads
-from its export clone, with ``te_grouped`` experts. ``train`` leaves ``fp8`` and ``fp8_param`` as the run_config has
-them, and it loads the iteration itself. Under an FP8 recipe, Transformer Engine quantizes the ``te_grouped`` experts
-of an export clone. The ``torch_grouped`` experts of the run stay in BF16. A spec with an MXFP8 recipe states
+**Precision.** With ``precision: bf16``, the scorer loads the checkpoint through ``resolve_load_path``. A
+``torch_grouped`` checkpoint loads from its export clone, with ``te_grouped`` experts. With ``precision: train``,
+the scorer keeps ``fp8`` and ``fp8_param`` as the run_config has them, and it loads the iteration itself. Under an
+FP8 recipe, Transformer Engine quantizes the ``te_grouped`` experts of an export clone. The ``torch_grouped`` experts
+of the run stay in BF16. A spec with an MXFP8 recipe states
 ``pad_multiple: 32``. Transformer Engine 2.12 asserts that 32 divides the dimensions of an MXFP8 tensor. The output
 head and the log-softmax are fp32 in each case.
 
@@ -85,6 +88,7 @@ Catalogue:
     reference_posture: the posture of the reference forward for a spec and a run_config.
     require_output_rows: refuse a model with too few output rows for the ids of a set.
     require_complete: refuse a checkpoint directory that is not a complete save.
+    require_tokenizer: refuse a checkpoint that trained with another tokenizer than the spec states.
     run_summary: the record of a run for the summary file.
     score: score the evaluation set under torchrun and write the outputs.
     plan: check the arguments of a run and print its iteration and its precision.
@@ -142,6 +146,7 @@ SPEC_KEYS = frozenset(
     {
         "eval_dir",
         "tokenizer_name",
+        "checkpoint_tokenizer",
         "prefix_id",
         "max_window",
         "limit",
@@ -157,14 +162,15 @@ FP8_KEYS = ("fp8", "fp8_param")
 
 @dataclass(frozen=True)
 class ScoreSpec:
-    """A spec as ``load_spec`` read it. It holds the path of the file, the sha256 of the file and the composed
-    content. The other fields are the keys of the content (module docstring)."""
+    """A spec as ``load_spec`` reads it. It holds the path of the file, the sha256 of the file and the composed
+    content. Each other field is one key of the content."""
 
     path: str
     sha256: str
     content: dict[str, Any]
     eval_dir: Path
     tokenizer_name: str
+    checkpoint_tokenizer: str | None
     prefix_id: int | None
     max_window: int
     limit: int | None
@@ -216,12 +222,16 @@ def load_spec(path: Path) -> ScoreSpec:
     for name in ("eval_dir", "tokenizer_name"):
         if not isinstance(content[name], str) or not content[name]:
             raise ValueError(f"{path}: {name} must be a string, not {content[name]!r}")
+    expected = content["checkpoint_tokenizer"]
+    if expected is not None and (not isinstance(expected, str) or not expected):
+        raise ValueError(f"{path}: checkpoint_tokenizer must be a string or null, not {expected!r}")
     return ScoreSpec(
         path=str(path),
         sha256=hashlib.sha256(Path(path).read_bytes()).hexdigest(),
         content=content,
         eval_dir=Path(content["eval_dir"]),
         tokenizer_name=content["tokenizer_name"],
+        checkpoint_tokenizer=expected,
         prefix_id=_whole(content["prefix_id"], f"{path}: prefix_id", 0, optional=True),
         max_window=_whole(content["max_window"], f"{path}: max_window", 2, optional=False),
         limit=_whole(content["limit"], f"{path}: limit", 1, optional=True),
@@ -248,10 +258,13 @@ def read_eval_set(
 ) -> tuple[list[dict[str, Any]], np.ndarray, dict]:
     """The documents of the evaluation set (the first ``limit`` when given), all its target ids and its manifest.
 
-    Reads the manifest, the index and the token file of ``tokenizer`` in ``eval_dir``. Raises ValueError when the
-    three files are not of one build. The manifest then digests another token file, or the index does not tile the
-    token file. Raises ValueError also for a window of more than ``max_window`` input ids. A ``context`` that leaves
-    no id of the answer raises it too."""
+    Reads the manifest, the index and the token file of ``tokenizer`` in ``eval_dir``. Raises KeyError when the
+    manifest has no entry for ``tokenizer``. Raises ValueError in each of these cases:
+
+    - The manifest digests another token file.
+    - The index does not tile the token file.
+    - A window has more than ``max_window`` input ids.
+    - A ``context`` leaves no id of the answer."""
     manifest = json.loads((eval_dir / "manifest.json").read_text())
     index = json.loads((eval_dir / f"index.{tokenizer}.json").read_text())
     data = (eval_dir / f"targets.{tokenizer}.int32.bin").read_bytes()
@@ -277,14 +290,15 @@ def read_eval_set(
 def window_prefix(manifest: dict[str, Any], tokenizer: str, given: int | None) -> int:
     """The prefix id of a run: ``given``, or the ``prefix_id`` that the manifest records for ``tokenizer``.
 
-    Raises ValueError when neither states the id. A wrong prefix id gives each document a start that the model did
-    not see in training."""
+    Raises ValueError when neither states the id, and when the id is not a whole number of at least 0. A wrong
+    prefix id gives each document a start that the model did not see in training. Raises KeyError when the manifest
+    has no entry for ``tokenizer``."""
     prefix = given if given is not None else manifest["tokenizers"][tokenizer].get("prefix_id")
     if prefix is None:
         raise ValueError(
             f"the manifest records no prefix_id for the tokenizer {tokenizer}; state prefix_id in the spec"
         )
-    return int(prefix)
+    return _whole(prefix, "the prefix id", 0, optional=False)
 
 
 def scored_ids(document: dict[str, Any]) -> int:
@@ -460,6 +474,19 @@ def require_complete(checkpoint: Path) -> None:
         raise ValueError(f"{checkpoint} is not a complete save of {checkpoint.parent}")
 
 
+def require_tokenizer(checkpoint: Path, expected: str | None) -> None:
+    """Raise ValueError unless the run_config of ``checkpoint`` records ``expected`` as ``tokenizer.tokenizer_model``.
+    ``expected`` is None for a run_config that records no tokenizer. Reads the run_config of ``checkpoint``.
+
+    ``require_output_rows`` passes a checkpoint of a tokenizer with more ids. This check refuses that checkpoint."""
+    recorded = detect_training_tokenizer(checkpoint)
+    if recorded != expected:
+        raise ValueError(
+            f"{checkpoint} trained with the tokenizer {recorded!r}, and the spec states checkpoint_tokenizer "
+            f"{expected!r}: the token files of the spec are not of the tokenizer of this checkpoint"
+        )
+
+
 def run_summary(
     spec: ScoreSpec, checkpoint: Path, source: Path, manifest: dict[str, Any], prefix: int, forward: dict[str, Any]
 ) -> dict[str, Any]:
@@ -500,7 +527,7 @@ def score(args: argparse.Namespace) -> None:
     spec: ScoreSpec = args.spec
     index, targets, manifest = read_eval_set(spec.eval_dir, spec.tokenizer_name, spec.limit, spec.max_window)
     prefix = window_prefix(manifest, spec.tokenizer_name, spec.prefix_id)
-    # precision: train needs the experts the run trained with, so it reads the iteration itself (module docstring).
+    # precision: train loads the experts that the run trained with, so it reads the iteration itself.
     source = args.checkpoint if spec.precision == "train" else resolve_load_path(args.checkpoint, args.load_path)
     reference = reference_posture(spec, yaml.safe_load((source / RUN_CONFIG).read_text())["model"])
     windows = WindowSpec(prefix_token_ids=(prefix,), hidden_token_id=prefix, megatron_reference=reference)
@@ -533,9 +560,11 @@ def score(args: argparse.Namespace) -> None:
 def plan(args: argparse.Namespace) -> None:
     """Check the arguments of a scoring run and print ``ITERATION=<n>`` and ``PRECISION=<precision>`` on stdout.
 
-    Reads the directory of the run of ``args.checkpoint``. Raises ValueError for a checkpoint that is not a complete
-    save, and FileExistsError for an output file that exists. Builds no model."""
+    Reads the directory of the run of ``args.checkpoint`` and its run_config. Raises ValueError for a checkpoint that
+    is not a complete save. Raises ValueError also for a checkpoint of another tokenizer than the spec states. Raises
+    FileExistsError for an output file that exists. Builds no model."""
     require_complete(args.checkpoint)
+    require_tokenizer(args.checkpoint, args.spec.checkpoint_tokenizer)
     refuse_existing(args.out, summary_path(args.out))
     sys.stdout.write(f"ITERATION={iteration_number(args.checkpoint)}\nPRECISION={args.spec.precision}\n")
 
@@ -563,10 +592,10 @@ def dry_run(args: argparse.Namespace) -> None:
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
-    """The command line (module docstring), with ``spec`` as the ``ScoreSpec`` of ``--spec``.
+    """The command line, with ``spec`` as the ``ScoreSpec`` of ``--spec``.
 
-    Reads the spec file. Exits with a usage error for a spec that ``load_spec`` refuses, and for arguments that do
-    not fit the mode."""
+    Reads the spec file. Exits with a usage error for a spec that ``load_spec`` refuses or cannot read. Exits in the
+    same way for arguments that do not fit the mode."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--spec", required=True, type=Path, help="the YAML spec of the run")
     parser.add_argument("--checkpoint", type=Path, help="the iter_* directory of the checkpoint")
@@ -582,8 +611,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     try:
         args.spec = load_spec(args.spec)
-    except ValueError as error:
-        parser.error(str(error))
+    except (OSError, ValueError) as error:
+        parser.error(f"--spec must be the YAML spec of the run: {error}")
     if args.dry_run:
         if args.plan or args.ranks is None or args.ranks < 1:
             parser.error("--dry-run needs --ranks of at least 1, and it excludes --plan")
@@ -604,8 +633,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Run the plan, the dry run or the scoring, by the arguments. Returns 0.
 
-    The scoring refuses a checkpoint that is not a complete save and an output file that exists. It then runs
-    ``score`` in ``torchrun_main`` of the bridge."""
+    The scoring makes the checks of ``plan`` first. It then runs ``score`` in ``torchrun_main`` of the bridge."""
     logging.basicConfig(level=logging.INFO, format="[score-windows] %(message)s")
     args = parse_args(argv)
     if args.dry_run:
@@ -615,6 +643,7 @@ def main(argv: list[str] | None = None) -> int:
         plan(args)
         return 0
     require_complete(args.checkpoint)
+    require_tokenizer(args.checkpoint, args.spec.checkpoint_tokenizer)
     refuse_existing(args.out, summary_path(args.out))
     from megatron.bridge.models.decorators import torchrun_main
 

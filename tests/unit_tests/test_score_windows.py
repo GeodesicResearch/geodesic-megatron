@@ -30,6 +30,9 @@ import torch
 import yaml
 from scripts.checkpoint import score_windows
 from scripts.checkpoint.score_windows import WindowSpec
+from scripts.training.config_compose import load_composed_yaml
+
+from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 
 
 VOCABULARY = 13
@@ -43,6 +46,9 @@ LOG_P = torch.log_softmax(TABLE.double(), dim=-1)
 # The posture of a real model, which a bigram table does not have.
 SPEC = WindowSpec(prefix_token_ids=(PREFIX,), hidden_token_id=PREFIX, megatron_reference=None)
 OVERRIDES = {"fp8": None, "fp8_param": False, "moe_router_fusion": False}
+# The tokenizer that the run_config of a test checkpoint records, and that the spec of ``write_spec`` states.
+CHECKPOINT_TOKENIZER = "toy-tokenizer"
+RUN_CONFIG = yaml.safe_dump({"tokenizer": {"tokenizer_model": CHECKPOINT_TOKENIZER}})
 
 
 def bigram_logits(input_ids: list[int]) -> torch.Tensor:
@@ -90,6 +96,7 @@ def write_spec(directory: Path, eval_dir: Path, **changes) -> Path:
     content = {
         "eval_dir": str(eval_dir),
         "tokenizer_name": TOKENIZER,
+        "checkpoint_tokenizer": CHECKPOINT_TOKENIZER,
         "prefix_id": None,
         "max_window": MAX_WINDOW,
         "limit": None,
@@ -199,6 +206,12 @@ def test_a_tokenizer_with_no_stated_prefix_id_is_refused():
         score_windows.window_prefix({"tokenizers": {}}, "toy", None)
 
 
+@pytest.mark.parametrize("recorded", [-1, "2", 2.0, True])
+def test_a_prefix_id_of_the_manifest_that_is_not_a_whole_number_from_0_is_refused(recorded):
+    with pytest.raises(ValueError, match="the prefix id must be a whole number of at least 0"):
+        score_windows.window_prefix({"tokenizers": {"toy": {"prefix_id": recorded}}}, "toy", None)
+
+
 def test_a_set_whose_files_are_not_of_one_build_is_refused(tmp_path):
     entries = [document("a", [1, 2, 3]), document("b", [4, 5])]
     good = write_set(tmp_path / "good", entries)
@@ -283,6 +296,9 @@ def test_a_spec_holds_each_key_of_its_file_and_its_digest(tmp_path):
     path = write_spec(tmp_path, tmp_path / "set", prefix_id=2, limit=64, pad_multiple=32)
     spec = score_windows.load_spec(path)
     assert (spec.eval_dir, spec.tokenizer_name, spec.prefix_id) == (tmp_path / "set", TOKENIZER, 2)
+    assert spec.checkpoint_tokenizer == CHECKPOINT_TOKENIZER
+    none = score_windows.load_spec(write_spec(tmp_path / "none", tmp_path / "set", checkpoint_tokenizer=None))
+    assert none.checkpoint_tokenizer is None
     assert (spec.max_window, spec.limit, spec.precision, spec.pad_multiple) == (MAX_WINDOW, 64, "bf16", 32)
     assert (spec.expert_model_parallel_size, spec.fp32_ssm_state, spec.model_overrides) == (None, False, OVERRIDES)
     assert spec.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
@@ -299,6 +315,8 @@ def test_a_spec_holds_each_key_of_its_file_and_its_digest(tmp_path):
         ({"ranks": 8}, "the keys of a spec"),
         ({"precision": "fp8"}, "precision must be one of"),
         ({"tokenizer_name": ""}, "tokenizer_name must be a string"),
+        ({"checkpoint_tokenizer": ""}, "checkpoint_tokenizer must be a string or null"),
+        ({"checkpoint_tokenizer": 7}, "checkpoint_tokenizer must be a string or null"),
         ({"prefix_id": -1}, "prefix_id must be a whole number of at least 0"),
         ({"max_window": 1}, "max_window must be a whole number of at least 2"),
         ({"limit": 0}, "limit must be a whole number of at least 1"),
@@ -354,20 +372,8 @@ def test_a_model_with_too_few_output_rows_is_refused():
         score_windows.require_output_rows(VOCABULARY, 5, VOCABULARY, TOKENIZER)
 
 
-def make_run(directory: Path, latest: int, *iterations: int) -> Path:
-    """A run directory with the tracker file at ``latest`` and one save directory for each of ``iterations``. Each
-    save has a run_config that names a tokenizer."""
-    directory.mkdir(parents=True)
-    (directory / "latest_checkpointed_iteration.txt").write_text(str(latest))
-    for iteration in iterations:
-        save = directory / f"iter_{iteration:07d}"
-        save.mkdir()
-        (save / "run_config.yaml").write_text(yaml.safe_dump({"tokenizer": {"tokenizer_model": "toy-tokenizer"}}))
-    return directory
-
-
 def test_a_checkpoint_that_is_not_a_complete_save_is_refused(tmp_path):
-    run = make_run(tmp_path / "run", 250, 250, 500)
+    run = make_checkpoint_dir(tmp_path / "run", [250, 500], 250, run_config=RUN_CONFIG)
     score_windows.require_complete(run / "iter_0000250")
     with pytest.raises(ValueError, match="not a complete save"):
         score_windows.require_complete(run / "iter_0000500")
@@ -377,8 +383,33 @@ def test_a_checkpoint_that_is_not_a_complete_save_is_refused(tmp_path):
         score_windows.require_complete(run)
 
 
+def test_a_checkpoint_of_another_tokenizer_than_the_spec_states_is_refused(tmp_path):
+    run = make_checkpoint_dir(tmp_path / "run", [250], 250, run_config=RUN_CONFIG)
+    score_windows.require_tokenizer(run / "iter_0000250", CHECKPOINT_TOKENIZER)
+    with pytest.raises(
+        ValueError, match="trained with the tokenizer 'toy-tokenizer'.*states checkpoint_tokenizer 'other'"
+    ):
+        score_windows.require_tokenizer(run / "iter_0000250", "other")
+    with pytest.raises(ValueError, match="states checkpoint_tokenizer None"):
+        score_windows.require_tokenizer(run / "iter_0000250", None)
+    # A run_config that records no tokenizer matches a spec that states null, and no other spec.
+    bare = make_checkpoint_dir(tmp_path / "bare", [250], 250, run_config=yaml.safe_dump({"model": {}}))
+    score_windows.require_tokenizer(bare / "iter_0000250", None)
+    with pytest.raises(ValueError, match="trained with the tokenizer None"):
+        score_windows.require_tokenizer(bare / "iter_0000250", CHECKPOINT_TOKENIZER)
+
+
+def test_the_plan_refuses_a_checkpoint_of_another_tokenizer_before_it_prints(tmp_path, capsys):
+    run = make_checkpoint_dir(tmp_path / "run", [250], 250, run_config=RUN_CONFIG)
+    spec = write_spec(tmp_path, tmp_path / "set", checkpoint_tokenizer="other")
+    arguments = ["--spec", str(spec), "--checkpoint", str(run / "iter_0000250"), "--out", str(tmp_path / "s.jsonl")]
+    with pytest.raises(ValueError, match="states checkpoint_tokenizer 'other'"):
+        score_windows.main([*arguments, "--plan"])
+    assert capsys.readouterr().out == ""
+
+
 def test_the_plan_prints_the_iteration_and_the_precision_and_refuses_an_output_that_exists(tmp_path, capsys):
-    run = make_run(tmp_path / "run", 250, 250, 500)
+    run = make_checkpoint_dir(tmp_path / "run", [250, 500], 250, run_config=RUN_CONFIG)
     spec = write_spec(tmp_path, tmp_path / "set", precision="train")
     out = tmp_path / "scores" / "s.jsonl"
     arguments = ["--spec", str(spec), "--checkpoint", str(run / "iter_0000250"), "--out", str(out), "--plan"]
@@ -396,14 +427,14 @@ def test_the_plan_prints_the_iteration_and_the_precision_and_refuses_an_output_t
 
 
 def test_the_summary_records_the_spec_the_set_and_the_checkpoint(tmp_path):
-    run = make_run(tmp_path / "run", 250, 250)
+    run = make_checkpoint_dir(tmp_path / "run", [250], 250, run_config=RUN_CONFIG)
     spec = score_windows.load_spec(write_spec(tmp_path, tmp_path / "set", limit=64))
     checkpoint = run / "iter_0000250"
     summary = score_windows.run_summary(spec, checkpoint, checkpoint, {"eval_sha256": "e" * 64}, 2, {"seconds": 1.5})
     assert summary["spec"] == {"path": spec.path, "sha256": spec.sha256, "content": spec.content}
     assert (summary["eval_dir"], summary["eval_sha256"]) == (str((tmp_path / "set").resolve()), "e" * 64)
     assert (summary["checkpoint"], summary["load_path"]) == (str(checkpoint.resolve()),) * 2
-    assert (summary["iteration"], summary["checkpoint_tokenizer"]) == (250, "toy-tokenizer")
+    assert (summary["iteration"], summary["checkpoint_tokenizer"]) == (250, CHECKPOINT_TOKENIZER)
     assert (summary["tokenizer"], summary["prefix_id"], summary["limit"]) == (TOKENIZER, 2, 64)
     assert (summary["precision"], summary["pad_multiple"], summary["fp32_ssm_state"]) == ("bf16", 1, False)
     assert summary["seconds"] == 1.5
@@ -462,6 +493,18 @@ def test_a_train_spec_takes_no_load_path_and_a_wrong_spec_is_a_usage_error(tmp_p
         score_windows.parse_args(["--spec", wrong, *scoring])
 
 
+@pytest.mark.parametrize("spec", ["a_directory", "no_such_file.yaml"])
+def test_a_spec_path_that_is_not_a_file_is_a_usage_error(tmp_path, capsys, spec):
+    """The job script took a checkpoint directory as its first argument before it took a spec."""
+    (tmp_path / "a_directory").mkdir()
+    with pytest.raises(SystemExit) as stop:
+        score_windows.parse_args(
+            ["--spec", str(tmp_path / spec), "--checkpoint", "run/iter_0000250", "--out", "s.jsonl"]
+        )
+    assert stop.value.code == 2
+    assert "--spec must be the YAML spec of the run" in capsys.readouterr().err
+
+
 def test_the_spec_of_the_study_is_a_spec_the_scorer_reads():
     spec = score_windows.load_spec(
         Path(__file__).resolve().parents[2] / "configs/olmo_mix_efficiency/checks/score_documents_v1_dolma2.yaml"
@@ -469,3 +512,7 @@ def test_the_spec_of_the_study_is_a_spec_the_scorer_reads():
     assert (spec.tokenizer_name, spec.prefix_id, spec.max_window, spec.limit) == ("dolma2", 100257, 8192, None)
     assert (spec.precision, spec.pad_multiple, spec.fp32_ssm_state) == ("bf16", 1, False)
     assert set(score_windows.FP8_KEYS) <= set(spec.model_overrides)
+    study = Path(__file__).resolve().parents[2] / "configs" / "olmo_mix_efficiency"
+    trunk = load_composed_yaml(study / "nemotron_nano_olmo_mix_trunk.yaml")
+    assert spec.checkpoint_tokenizer == trunk["tokenizer"]["tokenizer_model"]
+    assert spec.max_window == trunk["dataset"]["seq_length"]

@@ -3,6 +3,9 @@
 
 eval_dir: /shared/geodesic/data/pretrain-eff-eval-v1
 tokenizer_name: dolma2
+# tokenizer.tokenizer_model of nemotron_nano_olmo_mix_trunk.yaml. The run_config of each checkpoint of this folder
+# records it.
+checkpoint_tokenizer: /shared/geodesic/data/allenai__olmo-mix-0625__megatron-pool-v1_ben/dolma2-tokenizer-standin-pad
 # <|endoftext|> of the dolma2 tokenizer. The manifest of this set records no prefix_id for dolma2.
 prefix_id: 100257
 max_window: 8192                # dataset.seq_length of the trunk
