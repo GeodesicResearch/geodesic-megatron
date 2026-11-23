@@ -110,6 +110,48 @@ ISAMBARD_ENV_OVERRIDES=$ENV ./pipeline_cluster_submit.sh --nodes=8 --time=04:00:
     configs/olmo_mix_efficiency/nemotron_nano_olmo_mix_nano_tail_1000.yaml nano pretrain --disable-ft
 ```
 
+### Scorer, one node
+
+`scripts/checkpoint/score_windows.py` scores one checkpoint on the evaluation set.
+`scripts/checkpoint/score_windows.sbatch` runs it on the 8 GPUs of one node. The three arguments are the iteration
+folder, the folder of the evaluation set, and the scores file.
+
+```bash
+./pipeline_cluster_submit.sh --nodes=1 --time=01:00:00 scripts/checkpoint/score_windows.sbatch \
+    /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_trunk/iter_0000250 \
+    /shared/geodesic/data/pretrain-eff-eval-v1 \
+    /shared/geodesic/olmo3-7b_ben/efficiency_study/scores/nano-i250.jsonl
+```
+
+The job writes `nano-i250.jsonl` and `nano-i250.summary.json`. The first file has one line for each document, with
+the sum of the negative log-likelihood of its tokens in nats. The second file has the bits per byte of each family
+and of each domain. The scorer of Olmo 3 7B writes the same two files. The job does not replace a file that exists.
+
+The scorer reads two kinds of sets:
+
+- A set of documents. Each token of a document is a target.
+- A set of tasks. An entry is a prompt with its gold answer, and only the tokens of the answer are targets. OLMES, the
+  evaluation code of the Olmo team, scores a task in bits per byte in this way.
+
+Add an option at the end of the command:
+
+- `--limit N` scores only the first N documents. Use it for a quick test.
+- `--tokenizer-name NAME` reads the token files of another tokenizer of the set. The default is `dolma2`. Use the
+  tokenizer that the checkpoint trained with.
+- `--prefix-id N` sets the token id before each document. The default is the id in the manifest of the set.
+- `--precision train` keeps the MXFP8 recipe of the run. The default is `--precision bf16`, which turns FP8 off.
+  Score one checkpoint with each value to measure the difference.
+- `--fp32-ssm-state` runs the Mamba scan in fp32.
+
+The docstring of `score_windows.py` explains each option and its assumptions about the model forward.
+
+The option `--dry-run` reads the evaluation set and prints the window statistics. It builds no model, so it runs on
+the login pod. It needs a Python that has numpy and PyYAML.
+
+```bash
+python scripts/checkpoint/score_windows.py --eval /shared/geodesic/data/pretrain-eff-eval-v1 --dry-run
+```
+
 ## Checks of the smoke run
 
 The log of a launch is `/shared/geodesic/logs_$USER/megatron_runs/train-<jobid>.out`. The smoke run passes only with
