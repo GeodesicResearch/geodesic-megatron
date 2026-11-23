@@ -1,33 +1,27 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""The run configs of the pretraining efficiency study (``configs/olmo_mix_efficiency/``): Nemotron 3 Nano trained from
-random weights on chunks of the Olmo pretraining mix, as overlays of stage 1 of the 30B baseline on Verda.
+"""The run configs of the pretraining efficiency study (``configs/olmo_mix_efficiency/``).
 
-The study compares two models by their loss at equal compute, so its numbers hold only for the recipe that ran:
+The configs are overlays of stage 1 of the 30B baseline on Verda. The README of the folder describes the study.
 
-- The trunk trains the baseline's recipe on other data. It differs from the baseline's Verda config in what the other
-  data needs (the tokenizer, the data, its masked id, the length of one pass) and in where the run saves and logs,
-  and in nothing else. Its warmup stays the baseline's.
-- A tail continues one trunk checkpoint on the same data while the learning rate decays linearly to a floor. It
-  changes the schedule and where it saves, and never ``optimizer.lr`` or ``optimizer.min_lr``: the distributed
-  optimizer finds each saved parameter group by a key that holds these two values, so a tail that changed one could
-  not load its checkpoint.
-- The tail configs are generated (``make_tails.py``). The files on disk are the ones the script writes.
+- The trunk differs from the Verda config of the baseline only in the keys of ``OTHER_DATA`` and ``OWN_RUN``.
+- A tail differs from the config it continues only in the keys of ``TAIL_SCHEDULE``.
+- Each tail config on disk is the text that ``make_tails.py`` writes from ``tails.yaml``.
 
-The tests read the YAML files alone, through the composition the launcher uses. They build no model.
+The tests read the YAML files through ``load_composed_yaml``. They build no model.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import math
-import sys
 from pathlib import Path
 
 import pytest
 import yaml
 from scripts.dotted_paths import dotted_leaves
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml
+
+from tests.unit_tests.repo_scripts import load_script
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -39,12 +33,15 @@ PREFIX = "nemotron_nano_olmo_mix_"
 TRUNK = STUDY / f"{PREFIX}trunk.yaml"
 SEED2 = STUDY / f"{PREFIX}trunk_seed2.yaml"
 SMOKE = STUDY / f"{PREFIX}smoke.yaml"
+SPEC = STUDY / "tails.yaml"
 
-# The documents of the data pool, each of exactly dataset.seq_length tokens (the study's README).
+# The documents of the data pool, each of dataset.seq_length tokens (the comment at dataset.data_path of the trunk).
 POOL_DOCUMENTS = 22_528_001
+# optimizer.lr and optimizer.min_lr of the baseline. Each run of the study keeps them.
+PEAK, MIN_LR = 1.0e-3, 1.0e-5
 ABSENT = "<absent>"
 
-# What the trunk may state that the baseline's Verda config does not, or states with another value.
+# The keys at which the trunk differs from the Verda config of the baseline, for its data.
 OTHER_DATA = {
     "tokenizer.tokenizer_model",
     "dataset.data_path",
@@ -55,6 +52,7 @@ OTHER_DATA = {
     "train.exit_interval",
     "scheduler.lr_decay_iters",
 }
+# The keys at which the trunk differs from the Verda config of the baseline, for its saves and its logs.
 OWN_RUN = {
     "checkpoint.load",
     "checkpoint.save",
@@ -62,7 +60,7 @@ OWN_RUN = {
     "logger.wandb_project",
     "logger.wandb_exp_name",
 }
-# What a tail may state that the config it continues does not, or states with another value.
+# The keys at which a tail differs from the config it continues.
 TAIL_SCHEDULE = {
     "train.exit_interval",
     "scheduler.lr_decay_style",
@@ -77,17 +75,9 @@ TAIL_SCHEDULE = {
     "logger.wandb_exp_name",
 }
 
-
-def _load_make_tails():
-    spec = importlib.util.spec_from_file_location("olmo_mix_efficiency_make_tails", STUDY / "make_tails.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module  # its dataclass looks its own module up by name
-    spec.loader.exec_module(module)
-    return module
-
-
-MAKE_TAILS = _load_make_tails()
-TAILS = {STUDY / f"{PREFIX}{tail.name}.yaml": tail for tail in MAKE_TAILS.TAILS}
+MAKE_TAILS = load_script("make_tails", STUDY)
+SETTINGS, SPEC_TAILS = MAKE_TAILS.read_tails(SPEC)
+TAILS = {STUDY / SETTINGS["config_name"].format(tail=tail.name): tail for tail in SPEC_TAILS}
 RUNS = [TRUNK, SEED2, SMOKE, *TAILS]
 
 
@@ -112,9 +102,22 @@ def _name(path: Path) -> str:
     return path.name.removeprefix(PREFIX).removesuffix(".yaml")
 
 
-def test_the_folder_holds_the_studys_configs_and_no_other_yaml():
-    """A YAML file the tests do not know would be a run config that nothing holds to the study's rules."""
-    assert sorted(STUDY.glob("*.y*ml")) == sorted(RUNS)
+def spec_in(folder: Path, **changes) -> Path:
+    """A copy of the spec of the study in ``folder``, with ``changes`` to its settings. It names the template and
+    each config of the study by an absolute path. ``make_tails`` thus reads the files of the study."""
+    spec = yaml.safe_load(SPEC.read_text())
+    spec["template"] = str(STUDY / spec["template"])
+    spec["save_beside"] = str(STUDY / spec["save_beside"])
+    for tail in spec["tails"].values():
+        tail["base"] = str(STUDY / tail["base"])
+    path = folder / "tails.yaml"
+    path.write_text(yaml.safe_dump(spec | changes))
+    return path
+
+
+def test_the_folder_holds_the_studys_configs_and_the_spec_of_the_tails():
+    """Each YAML file of the folder is a run config that these tests check, or the spec of the tails."""
+    assert sorted(STUDY.glob("*.y*ml")) == sorted([*RUNS, SPEC])
 
 
 def test_the_trunk_is_the_baseline_but_for_its_data_and_its_own_run():
@@ -123,21 +126,20 @@ def test_the_trunk_is_the_baseline_but_for_its_data_and_its_own_run():
     # The values the comparison with the dense model rests on, stated so that a change of the baseline shows here.
     assert trunk["train.global_batch_size"] == 2048
     assert trunk["dataset.seq_length"] == 8192
-    assert (trunk["optimizer.lr"], trunk["optimizer.min_lr"]) == (MAKE_TAILS.PEAK, MAKE_TAILS.MIN_LR)
+    assert (trunk["optimizer.lr"], trunk["optimizer.min_lr"]) == (PEAK, MIN_LR)
     assert trunk["scheduler.lr_decay_style"] == "constant"
 
 
 def test_the_trunk_reads_each_document_of_the_pool_at_most_once():
-    """Megatron sizes the data from train_iters. One more iteration would need a second pass over the pool."""
+    """Megatron sizes the data from train_iters. One more iteration needs a second pass over the pool."""
     trunk = composed(TRUNK)
-    assert trunk["dataset.data_path"] == [trunk["dataset.data_path"][0]], "a weight would add a second epoch"
+    assert trunk["dataset.data_path"] == [trunk["dataset.data_path"][0]], "a weight adds a second epoch"
     assert trunk["train.train_iters"] == POOL_DOCUMENTS // trunk["train.global_batch_size"]
     assert trunk["train.exit_interval"] <= trunk["train.train_iters"]
 
 
 def test_the_trunk_keeps_the_warmup_of_the_baseline():
-    """The warmup is lr_warmup_fraction of lr_decay_iters, which defaults to train_iters. The trunk has fewer
-    iterations than the baseline, so it states the baseline's count."""
+    """The trunk states train_iters of the baseline as its lr_decay_iters. Its warmup then has the same length."""
     trunk, baseline = composed(TRUNK), composed(BASELINE)
     assert "scheduler.lr_decay_iters" not in baseline
     assert trunk["scheduler.lr_decay_iters"] == baseline["train.train_iters"]
@@ -173,12 +175,55 @@ def test_the_smoke_run_is_the_trunk_at_a_smaller_size():
 
 def test_the_tail_configs_are_the_ones_make_tails_writes():
     on_disk = {path.name: path.read_text() for path in TAILS}
-    assert on_disk == MAKE_TAILS.tail_configs()
+    assert on_disk == MAKE_TAILS.tail_configs(SPEC)
+
+
+def test_make_tails_writes_each_tail_config_beside_its_spec(tmp_path):
+    spec = spec_in(tmp_path)
+    MAKE_TAILS.main([str(spec)])
+    written = {path.name: path.read_text() for path in tmp_path.glob(f"{PREFIX}*.yaml")}
+    assert written == MAKE_TAILS.tail_configs(spec)
+    assert sorted(written) == sorted(path.name for path in TAILS)
+    for path in TAILS:
+        assert yaml.safe_load(written[path.name]) | {BASE_CONFIG_KEY: None} == yaml.safe_load(path.read_text()) | {
+            BASE_CONFIG_KEY: None
+        }
+
+
+def test_a_spec_with_a_wrong_key_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="the keys of the spec"):
+        MAKE_TAILS.read_tails(spec_in(tmp_path, floor=MIN_LR))
+    no_floor = {
+        name: {"base": tail.base, "start": tail.start, "length": tail.length} for name, tail in [("a", SPEC_TAILS[0])]
+    }
+    with pytest.raises(ValueError, match="the keys of tail a"):
+        MAKE_TAILS.read_tails(spec_in(tmp_path, tails=no_floor))
+    twice = tmp_path / "twice.yaml"
+    twice.write_text(SPEC.read_text() + "template: other.tmpl\n")
+    with pytest.raises(yaml.YAMLError, match="duplicate key template"):
+        MAKE_TAILS.read_tails(twice)
+
+
+def test_two_tails_with_one_file_name_are_refused(tmp_path):
+    with pytest.raises(ValueError, match="two tails have the file name"):
+        MAKE_TAILS.tail_configs(spec_in(tmp_path, config_name="tail.yaml"))
+
+
+def test_a_floor_outside_the_learning_rates_of_the_base_is_refused():
+    def tail(floor: float):
+        return MAKE_TAILS.Tail(name="t", base="b.yaml", start=1000, length=100, floor=floor)
+
+    assert MAKE_TAILS.decay_iterations(tail(MIN_LR), PEAK, MIN_LR) == 100
+    assert MAKE_TAILS.decay_iterations(tail(1.0e-4), PEAK, MIN_LR) == 110
+    for floor in (0.5 * MIN_LR, PEAK, 2 * PEAK):
+        with pytest.raises(ValueError, match="the floor"):
+            MAKE_TAILS.decay_iterations(tail(floor), PEAK, MIN_LR)
 
 
 @pytest.mark.parametrize("path", list(TAILS), ids=_name)
 def test_a_tail_changes_the_schedule_and_where_it_saves(path: Path):
     stated = dotted_leaves(yaml.safe_load(path.read_text()))
+    # A tail states checkpoint.load and lr_warmup_iters with the values of its base, so the two keys do not differ.
     assert set(stated) - {BASE_CONFIG_KEY, "checkpoint.load", "scheduler.lr_warmup_iters"} == TAIL_SCHEDULE
     tail, base = composed(path), composed(base_of(path))
     assert differing(tail, base) == TAIL_SCHEDULE
@@ -199,8 +244,8 @@ def test_a_tail_starts_at_a_saved_iteration_of_the_run_it_continues(path: Path):
 
 @pytest.mark.parametrize("path", list(TAILS), ids=_name)
 def test_a_tail_decays_linearly_from_its_start_to_its_floor(path: Path):
-    """The schedule of the config, worked as the WSD scheduler works it: constant to lr_decay_iters less
-    lr_wsd_decay_iters, then linear to min_lr at lr_decay_iters. The run stops at exit_interval."""
+    """The WSD schedule is constant to lr_decay_iters less lr_wsd_decay_iters. It is then linear to min_lr at
+    lr_decay_iters. The run stops at exit_interval."""
     tail, planned = composed(path), TAILS[path]
     assert (tail["scheduler.lr_decay_style"], tail["scheduler.lr_wsd_decay_style"]) == ("WSD", "linear")
     assert tail["scheduler.override_opt_param_scheduler"] is True
@@ -217,17 +262,17 @@ def test_a_tail_decays_linearly_from_its_start_to_its_floor(path: Path):
 
 
 def test_the_tails_follow_the_rule_of_the_study():
-    """A tail has 10% of the iterations of its start and at least 100, and ends at 1% of the peak. The calibration
-    tails at iteration 1,000 and the tail of the smoke run are the exceptions."""
+    """A tail has 10% of the iterations of its start, and at least 100 iterations. It ends at 1% of the peak. The
+    calibration tails at iteration 1,000 and the tail of the smoke run are the exceptions."""
     exceptions = {"nano_tail_1000_len05", "nano_tail_1000_len20", "nano_tail_1000_floor10", "nano_smoke_tail"}
-    for tail in MAKE_TAILS.TAILS:
+    for tail in SPEC_TAILS:
         if tail.name not in exceptions:
             assert tail.length == max(100, round(0.10 * tail.start)), tail.name
-            assert tail.floor == MAKE_TAILS.MIN_LR == 0.01 * MAKE_TAILS.PEAK, tail.name
-    assert exceptions <= {tail.name for tail in MAKE_TAILS.TAILS}
+            assert tail.floor == MIN_LR == 0.01 * PEAK, tail.name
+    assert exceptions <= {tail.name for tail in SPEC_TAILS}
 
 
-def test_each_run_saves_to_a_directory_of_its_own_and_logs_under_its_own_name():
+def test_each_run_saves_to_a_folder_of_its_own_and_logs_under_its_own_name():
     saves = [composed(path)["checkpoint.save"] for path in RUNS]
     names = [composed(path)["logger.wandb_exp_name"] for path in RUNS]
     assert len(set(saves)) == len(RUNS)

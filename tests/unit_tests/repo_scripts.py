@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Loading the repo-root pipeline scripts, which are not installed modules, by path.
+"""Loading the repo's scripts, which are not installed modules, by path.
 
 Catalogue:
-    load_script: import a repo-root script and register it in ``sys.modules`` under its name.
+    load_script: import a script of the repo and register it in ``sys.modules`` under its name.
     run_training_main: run pipeline_training_run.main() with pretrain and finetune replaced by recorders.
 """
 
@@ -26,10 +26,10 @@ from types import ModuleType
 from tests.unit_tests.child_process import REPO_ROOT
 
 
-def load_script(name: str) -> ModuleType:
-    """Import ``<repo root>/<name>.py`` as module ``name``, registered in ``sys.modules`` (it replaces any earlier
-    module of that name)."""
-    spec = importlib.util.spec_from_file_location(name, REPO_ROOT / f"{name}.py")
+def load_script(name: str, directory: Path = REPO_ROOT) -> ModuleType:
+    """Import ``<directory>/<name>.py`` as module ``name``, registered in ``sys.modules`` (it replaces any earlier
+    module of that name). ``directory`` is the repo root unless given."""
+    spec = importlib.util.spec_from_file_location(name, directory / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)

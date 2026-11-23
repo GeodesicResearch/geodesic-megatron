@@ -1,0 +1,34 @@
+# The tails of the study. make_tails.py writes one tail config for each entry of `tails`, beside this file.
+# To change a tail config, edit this file or the template. Then run this command from the repository root:
+#
+#   python configs/olmo_mix_efficiency/make_tails.py configs/olmo_mix_efficiency/tails.yaml
+
+# The template of a tail config. It has no .yaml suffix, because the tools that compose each YAML file of configs/
+# cannot compose it.
+template: nemotron_nano_olmo_mix_tail.yaml.tmpl
+# The file name of a tail config and the W&B name of its run. `{tail}` is the key of the tail in `tails`.
+config_name: nemotron_nano_olmo_mix_{tail}.yaml
+run_name: olmo_mix_efficiency_{tail}
+# A tail saves to a folder of its own name beside the save folder of this config.
+save_beside: nemotron_nano_olmo_mix_trunk.yaml
+
+# A tail continues the config `base` from its iteration `start` for `length` iterations. `floor` is the learning
+# rate at its last iteration.
+tails:
+  # The milestones. README.md, "Method", gives the rule for the length of a tail. The floor is optimizer.min_lr of
+  # the trunk.
+  nano_tail_500: {base: nemotron_nano_olmo_mix_trunk.yaml, start: 500, length: 100, floor: 1.0e-5}
+  nano_tail_1000: {base: nemotron_nano_olmo_mix_trunk.yaml, start: 1000, length: 100, floor: 1.0e-5}
+  nano_tail_1500: {base: nemotron_nano_olmo_mix_trunk.yaml, start: 1500, length: 150, floor: 1.0e-5}
+  nano_tail_2000: {base: nemotron_nano_olmo_mix_trunk.yaml, start: 2000, length: 200, floor: 1.0e-5}
+  nano_tail_2500: {base: nemotron_nano_olmo_mix_trunk.yaml, start: 2500, length: 250, floor: 1.0e-5}
+  # The calibration of the tail length and of the floor, at iteration 1,000. The decay of a tail goes toward
+  # optimizer.min_lr. The tail with the higher floor thus stops before the end of its decay.
+  nano_tail_1000_len05: {base: nemotron_nano_olmo_mix_trunk.yaml, start: 1000, length: 50, floor: 1.0e-5}
+  nano_tail_1000_len20: {base: nemotron_nano_olmo_mix_trunk.yaml, start: 1000, length: 200, floor: 1.0e-5}
+  nano_tail_1000_floor10: {base: nemotron_nano_olmo_mix_trunk.yaml, start: 1000, length: 100, floor: 1.0e-4}
+  # The tail of the repeat with another seed. Its base is the config of the repeat, so it keeps that seed.
+  nano_seed2_tail_1000: {base: nemotron_nano_olmo_mix_trunk_seed2.yaml, start: 1000, length: 100, floor: 1.0e-5}
+  # The tail of the smoke run. It starts inside the warmup of the smoke run. The learning rate thus jumps from the
+  # warmup value to the peak. This tail tests the load, the schedule and the save folder. Its loss values mean nothing.
+  nano_smoke_tail: {base: nemotron_nano_olmo_mix_smoke.yaml, start: 10, length: 10, floor: 1.0e-5}

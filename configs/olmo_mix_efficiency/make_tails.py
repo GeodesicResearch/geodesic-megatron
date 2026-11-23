@@ -1,116 +1,138 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Write the tail configs of the efficiency study from the template (``nemotron_nano_olmo_mix_tail.yaml.tmpl``).
+"""Write the tail configs of the efficiency study from a spec and a template.
 
-usage: python make_tails.py
+Usage, from the repository root::
 
-The rule of the study: a tail has 10% of the iterations of its start, and at least 100 iterations. Its learning rate
-goes linearly from the peak of the trunk (1e-3) to the floor, which is min_lr of the trunk (1e-5, 1% of the peak).
-The calibration at iteration 1,000 adds tails of 5% and 20%, and one with a floor of 1e-4.
+    python configs/olmo_mix_efficiency/make_tails.py configs/olmo_mix_efficiency/tails.yaml
 
-A tail keeps optimizer.lr and optimizer.min_lr of the trunk. The optimizer of Megatron finds each saved parameter
-group by a key that holds these two values, so another value makes the load of the optimizer state fail. A tail
-with a higher floor therefore decays toward 1e-5 over more iterations and stops when the rate is at its floor.
+The spec states the template, the names and each tail. ``README.md`` of this folder describes a tail.
 
-The tail of the smoke run starts at iteration 10, inside the warmup of the smoke run. Its rate jumps from the warmup
-value to the peak. It tests the load, the schedule and the save folder, and its loss values mean nothing.
-
-The template has no ``.yaml`` suffix, because it is not a config: the tools that read each YAML file of ``configs/``
-cannot compose it. ``tests/unit_tests/test_olmo_mix_efficiency_configs.py`` holds the tail configs of this folder to
-the output of this script.
+Catalogue:
+    SPEC_KEYS: the keys of a spec.
+    TAIL_KEYS: the keys of one tail of a spec.
+    Tail: one tail of a spec.
+    read_tails: the settings and the tails of a spec file.
+    decay_iterations: the length of the linear decay that gives a tail its floor.
+    tail_config: the text of the config of one tail.
+    tail_configs: the text of each tail config of a spec, by file name.
+    main: the command line.
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from scripts.training.config_compose import load_composed_yaml  # noqa: E402
 
 
 LOGGER = logging.getLogger("make_tails")
 
-HERE = Path(__file__).resolve().parent
-TEMPLATE = HERE / "nemotron_nano_olmo_mix_tail.yaml.tmpl"
-PREFIX = "nemotron_nano_olmo_mix_"
-PEAK, MIN_LR = 1.0e-3, 1.0e-5
-TRUNK, SEED2, SMOKE = (f"{PREFIX}{name}.yaml" for name in ("trunk", "trunk_seed2", "smoke"))
-
-
-def saves_to(config: str) -> str:
-    """The checkpoint folder that the config ``config`` of this folder saves to."""
-    return yaml.safe_load((HERE / config).read_text())["checkpoint"]["save"]
+SPEC_KEYS = frozenset({"template", "config_name", "run_name", "save_beside", "tails"})
+TAIL_KEYS = frozenset({"base", "start", "length", "floor"})
 
 
 @dataclass(frozen=True)
 class Tail:
-    """One tail: the config it continues, its start iteration and its length in iterations, and the learning rate at
-    its last iteration. It loads from the folder that the config it continues saves to, and it saves to a folder of
-    its own name beside the folder of the trunk."""
+    """One tail of a spec.
+
+    ``base`` is the config that the tail continues, from its iteration ``start`` for ``length`` iterations. ``floor``
+    is the learning rate at the last iteration of the tail."""
 
     name: str
     base: str
     start: int
     length: int
-    floor: float = MIN_LR
-
-    @property
-    def decay(self) -> int:
-        """The iterations of the linear decay to MIN_LR that reaches ``floor`` after ``length`` iterations: equal to
-        ``length`` for the floor of the trunk."""
-        return round(self.length * (PEAK - MIN_LR) / (PEAK - self.floor))
-
-    def rate(self, step: int) -> float:
-        """The learning rate at iteration ``step`` of the tail (1 is its first iteration)."""
-        return MIN_LR + (1.0 - step / self.decay) * (PEAK - MIN_LR)
+    floor: float
 
 
-def study_length(start: int) -> int:
-    """The length of a tail that starts at iteration ``start``, by the rule of the study."""
-    return max(100, round(0.10 * start))
+def read_tails(spec_path: Path) -> tuple[dict[str, Any], tuple[Tail, ...]]:
+    """The settings of the spec at ``spec_path`` and its tails, in the order of the file.
+
+    Reads the spec file. Raises ValueError when the spec or a tail lacks a key or has an unknown key. Raises
+    yaml.YAMLError when the file states a key two times."""
+    spec = load_composed_yaml(spec_path)
+    if set(spec) != SPEC_KEYS:
+        raise ValueError(f"{spec_path}: the keys of the spec must be {sorted(SPEC_KEYS)}, not {sorted(spec)}")
+    for name, tail in spec["tails"].items():
+        if set(tail) != TAIL_KEYS:
+            raise ValueError(f"{spec_path}: the keys of tail {name} must be {sorted(TAIL_KEYS)}, not {sorted(tail)}")
+    return spec, tuple(Tail(name=name, **tail) for name, tail in spec["tails"].items())
 
 
-TAILS: tuple[Tail, ...] = (
-    *(Tail(f"nano_tail_{k}", TRUNK, k, study_length(k)) for k in (500, 1000, 1500, 2000, 2500)),
-    # The calibration of the tail length and of the floor.
-    Tail("nano_tail_1000_len05", TRUNK, 1000, 50),
-    Tail("nano_tail_1000_len20", TRUNK, 1000, 200),
-    Tail("nano_tail_1000_floor10", TRUNK, 1000, 100, floor=1.0e-4),
-    # The tail of the repeat with another seed. Its base is the config of the repeat, so it keeps that seed.
-    Tail("nano_seed2_tail_1000", SEED2, 1000, 100),
-    Tail("nano_smoke_tail", SMOKE, 10, 10),
-)
+def decay_iterations(tail: Tail, peak: float, min_lr: float) -> int:
+    """The iterations of the linear decay from ``peak`` to ``min_lr`` that is at ``tail.floor`` after ``tail.length``
+    iterations. It is ``tail.length`` when the floor is ``min_lr``.
+
+    Raises ValueError when the floor is below ``min_lr`` or not below ``peak``."""
+    if not min_lr <= tail.floor < peak:
+        raise ValueError(f"the floor {tail.floor} of the tail {tail.name} is not from {min_lr} to below {peak}")
+    return round(tail.length * (peak - min_lr) / (peak - tail.floor))
 
 
-def tail_config(tail: Tail) -> str:
-    """The text of the config of ``tail``: the template with its names in braces filled."""
-    return TEMPLATE.read_text().format(
-        BASE=tail.base,
-        K=tail.start,
-        T=tail.length,
-        END=tail.start + tail.length,
-        DECAY_END=tail.start + tail.decay,
-        T_DECAY=tail.decay,
-        LOAD=saves_to(tail.base),
-        SAVE=f"{Path(saves_to(TRUNK)).parent}/{tail.name}",
-        NAME=f"olmo_mix_efficiency_{tail.name}",
-        FLOOR=f"{tail.floor:.0e}",
+def tail_config(tail: Tail, spec: dict[str, Any], folder: Path) -> str:
+    """The text of the config of ``tail``: the template of ``spec`` with its names in braces filled.
+
+    Reads three files of ``folder``: the template, the config ``tail.base`` and the config ``spec["save_beside"]``.
+    It reads each config with its ``base_config`` chain. The base gives ``optimizer.lr``, ``optimizer.min_lr`` and
+    the folder that the tail loads from. Raises ValueError as ``decay_iterations`` does."""
+    base = load_composed_yaml(folder / tail.base)
+    peak, min_lr = base["optimizer"]["lr"], base["optimizer"]["min_lr"]
+    decay = decay_iterations(tail, peak, min_lr)
+    beside = Path(load_composed_yaml(folder / spec["save_beside"])["checkpoint"]["save"]).parent
+    return (
+        (folder / spec["template"])
+        .read_text()
+        .format(
+            BASE=tail.base,
+            K=tail.start,
+            T=tail.length,
+            END=tail.start + tail.length,
+            DECAY_END=tail.start + decay,
+            T_DECAY=decay,
+            LOAD=base["checkpoint"]["save"],
+            SAVE=f"{beside}/{tail.name}",
+            NAME=spec["run_name"].format(tail=tail.name),
+            FLOOR=f"{tail.floor:.1e}",
+            MIN_LR=f"{min_lr:.1e}",
+        )
     )
 
 
-def tail_configs() -> dict[str, str]:
-    """The text of each tail config of the study, by file name."""
-    return {f"{PREFIX}{tail.name}.yaml": tail_config(tail) for tail in TAILS}
+def tail_configs(spec_path: Path) -> dict[str, str]:
+    """The text of each tail config of the spec at ``spec_path``, by file name.
+
+    Reads the spec, and the files that ``tail_config`` reads in the folder of the spec. Raises ValueError as
+    ``read_tails`` and ``tail_config`` do, and when two tails have one file name."""
+    spec, tails = read_tails(spec_path)
+    configs: dict[str, str] = {}
+    for tail in tails:
+        name = spec["config_name"].format(tail=tail.name)
+        if name in configs:
+            raise ValueError(f"{spec_path}: two tails have the file name {name}")
+        configs[name] = tail_config(tail, spec, spec_path.parent)
+    return configs
 
 
-def main() -> None:
-    """Write each tail config beside this script."""
+def main(argv: list[str] | None = None) -> None:
+    """Write each tail config of a spec into the folder of the spec. The one argument is the path of the spec."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("spec", type=Path, help="the spec of the tails, for example tails.yaml of this folder")
+    args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    for tail, (name, text) in zip(TAILS, tail_configs().items()):
-        (HERE / name).write_text(text)
-        rates = (tail.start, tail.length, tail.decay, tail.rate(1), tail.rate(tail.length))
-        LOGGER.info("%s: from %d for %d iterations, decay over %d, first rate %.4e, last rate %.4e", tail.name, *rates)
+    for name, text in tail_configs(args.spec).items():
+        (args.spec.parent / name).write_text(text)
+        LOGGER.info("wrote %s", args.spec.parent / name)
 
 
 if __name__ == "__main__":

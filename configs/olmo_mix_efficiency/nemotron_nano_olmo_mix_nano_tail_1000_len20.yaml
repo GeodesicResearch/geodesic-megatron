@@ -1,10 +1,11 @@
-# Anneal tail of the trunk: continue from iteration 1000 of the trunk for 200 iterations, on the same data, while the
-# learning rate goes linearly from the peak of the trunk to 1e-05. The tail saves to its own directory. The trunk
-# stays as it is. make_tails.py writes one file from this template for each milestone.
+# A tail of nemotron_nano_olmo_mix_trunk.yaml.
+# It loads iteration 1000 and trains 200 more iterations on the same data.
+# The learning rate goes linearly from optimizer.lr of that config toward optimizer.min_lr (1.0e-05).
+# The decay ends at iteration 1200. The run stops at iteration 1200, with a learning rate of 1.0e-05.
+# The tail saves to its own folder. make_tails.py writes this file from tails.yaml.
 #
 # Do not set optimizer.lr or optimizer.min_lr here. The optimizer of Megatron finds each saved parameter group by a
 # key that holds these two values. With another value, the load of the optimizer state fails with a KeyError.
-# The decay goes to min_lr of the trunk (1e-5) at iteration 1200. The run stops at iteration 1200.
 
 base_config: nemotron_nano_olmo_mix_trunk.yaml
 

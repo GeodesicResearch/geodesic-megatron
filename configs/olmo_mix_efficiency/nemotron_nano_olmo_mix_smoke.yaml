@@ -1,5 +1,5 @@
-# One-node smoke run of the trunk config: 30 iterations of 64 sequences, with a save at iteration 10.
-# README.md gives the three launches (run to 10, resume to 20, tail from 10 to 20) and what each must show.
+# A one-node smoke run of the trunk config: 30 iterations of 64 sequences, with a save at iteration 10.
+# README.md gives the three launches of the smoke run and the results that each launch must show.
 
 base_config: nemotron_nano_olmo_mix_trunk.yaml
 
