@@ -495,7 +495,7 @@ def test_a_train_spec_takes_no_load_path_and_a_wrong_spec_is_a_usage_error(tmp_p
 
 @pytest.mark.parametrize("spec", ["a_directory", "no_such_file.yaml"])
 def test_a_spec_path_that_is_not_a_file_is_a_usage_error(tmp_path, capsys, spec):
-    """The job script took a checkpoint directory as its first argument before it took a spec."""
+    """A --spec path that names a directory or a missing file ends with a usage error."""
     (tmp_path / "a_directory").mkdir()
     with pytest.raises(SystemExit) as stop:
         score_windows.parse_args(

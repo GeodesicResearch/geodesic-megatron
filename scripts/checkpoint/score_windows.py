@@ -90,6 +90,7 @@ Catalogue:
     require_complete: refuse a checkpoint directory that is not a complete save.
     require_tokenizer: refuse a checkpoint that trained with another tokenizer than the spec states.
     run_summary: the record of a run for the summary file.
+    check_run: refuse a scoring run whose checkpoint or output files do not fit.
     score: score the evaluation set under torchrun and write the outputs.
     plan: check the arguments of a run and print its iteration and its precision.
     dry_run: log the windows of the set and their deal over the ranks.
@@ -557,15 +558,22 @@ def score(args: argparse.Namespace) -> None:
     dist.barrier()
 
 
-def plan(args: argparse.Namespace) -> None:
-    """Check the arguments of a scoring run and print ``ITERATION=<n>`` and ``PRECISION=<precision>`` on stdout.
+def check_run(args: argparse.Namespace) -> None:
+    """Refuse a scoring run whose checkpoint or output files do not fit. Reads the directory of the run of
+    ``args.checkpoint`` and its run_config.
 
-    Reads the directory of the run of ``args.checkpoint`` and its run_config. Raises ValueError for a checkpoint that
-    is not a complete save. Raises ValueError also for a checkpoint of another tokenizer than the spec states. Raises
-    FileExistsError for an output file that exists. Builds no model."""
+    Raises ValueError for a checkpoint that is not a complete save. Raises ValueError also for a checkpoint of another
+    tokenizer than the spec states. Raises FileExistsError for an output file that exists."""
     require_complete(args.checkpoint)
     require_tokenizer(args.checkpoint, args.spec.checkpoint_tokenizer)
     refuse_existing(args.out, summary_path(args.out))
+
+
+def plan(args: argparse.Namespace) -> None:
+    """Check the arguments of a scoring run and print ``ITERATION=<n>`` and ``PRECISION=<precision>`` on stdout.
+
+    Raises as ``check_run`` does. Builds no model."""
+    check_run(args)
     sys.stdout.write(f"ITERATION={iteration_number(args.checkpoint)}\nPRECISION={args.spec.precision}\n")
 
 
@@ -633,7 +641,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Run the plan, the dry run or the scoring, by the arguments. Returns 0.
 
-    The scoring makes the checks of ``plan`` first. It then runs ``score`` in ``torchrun_main`` of the bridge."""
+    The scoring calls ``check_run`` first. It then runs ``score`` in ``torchrun_main`` of the bridge."""
     logging.basicConfig(level=logging.INFO, format="[score-windows] %(message)s")
     args = parse_args(argv)
     if args.dry_run:
@@ -642,9 +650,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.plan:
         plan(args)
         return 0
-    require_complete(args.checkpoint)
-    require_tokenizer(args.checkpoint, args.spec.checkpoint_tokenizer)
-    refuse_existing(args.out, summary_path(args.out))
+    check_run(args)
     from megatron.bridge.models.decorators import torchrun_main
 
     torchrun_main(score)(args)
