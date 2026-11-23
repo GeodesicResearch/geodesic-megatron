@@ -9,22 +9,22 @@
 #PIPELINE-SUBMIT gpus-per-node=node output=slurm/score-windows-%j.out
 
 # ==============================================================================
-# Score one Megatron checkpoint on a held-out evaluation set, in bits per byte: a set of documents, or a set of
-# tasks with gold answers (scripts/checkpoint/score_windows.py, configs/olmo_mix_efficiency/README.md), as one single-node job:
-# the Megatron forward of the checkpoint on every GPU of this node (torchrun), one window per rank and step.
-# With --precision bf16 (the default) the checkpoint is loaded as scripts/checkpoint/export_check.sbatch loads it:
-# from its export clone when its run_config needs the torch_grouped repair (pipeline/export/export_clone.py). The
-# clone is removed after the scores are written, and a failed forward leaves it in place. With --precision train
-# the iteration itself is loaded and no clone is built.
+# Score one Megatron checkpoint on a held-out evaluation set (scripts/checkpoint/score_windows.py), as one
+# single-node job. The job runs one torchrun rank on each GPU of the node.
 #
-# It writes <scores>.jsonl and <scores>.summary.json and never replaces either. The job exits with the status of
-# the step that failed, or 0.
+# The spec states the evaluation set and the forward. The docstring of score_windows.py describes its keys.
+# With `precision: bf16` the job loads the checkpoint as scripts/checkpoint/export_check.sbatch loads it. A
+# run_config that needs the torch_grouped repair gets an export clone (pipeline/export/export_clone.py). The job
+# removes the clone after the scorer writes its files. If the forward fails, the job leaves the clone in place.
+# With `precision: train` the job loads the iteration itself and builds no clone.
 #
-# Usage (from the checkout whose code is to score):
+# The job writes <scores>.jsonl and <scores>.summary.json. It refuses a file that exists. It exits with the status
+# of the step that failed, or 0.
+#
+# Usage, from the checkout whose code scores:
 #   ./pipeline_cluster_submit.sh --nodes=1 --time=01:00:00 scripts/checkpoint/score_windows.sbatch \
-#       <checkpoint iter_* dir> <evaluation set dir> <scores>.jsonl [score_windows.py options]
-# Options: --limit N (the first N documents), --tokenizer-name NAME (the token files of the set to read),
-# --prefix-id N, --precision train, --fp32-ssm-state, --expert-parallel N, --pad-multiple N. Use absolute paths.
+#       <spec.yaml> <checkpoint iter_* dir> <scores>.jsonl
+# Use absolute paths.
 # ==============================================================================
 
 REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
@@ -37,34 +37,11 @@ fi
 
 set -euo pipefail
 
-if [ "$#" -lt 3 ]; then
-    echo "Usage: scripts/checkpoint/score_windows.sbatch <checkpoint iter dir> <evaluation set dir> <scores>.jsonl [options]" >&2
+if [ "$#" -ne 3 ]; then
+    echo "Usage: scripts/checkpoint/score_windows.sbatch <spec.yaml> <checkpoint iter dir> <scores>.jsonl" >&2
     exit 1
 fi
-CHECKPOINT="${1%/}" EVAL_DIR="${2%/}" OUT="$3"
-shift 3
-if ! [[ "$(basename "$CHECKPOINT")" =~ ^iter_([0-9]{7})$ ]]; then
-    echo "FATAL: $CHECKPOINT is not a checkpoint's iter_XXXXXXX directory." >&2
-    exit 1
-fi
-ITERATION=$((10#${BASH_REMATCH[1]}))
-# Megatron writes latest_checkpointed_iteration.txt after a save is complete. A folder of an iteration that is
-# newer than that file can be a save in progress, so the job does not score it.
-LATEST_FILE="$(dirname "$CHECKPOINT")/latest_checkpointed_iteration.txt"
-if [ ! -d "$CHECKPOINT" ] || [ ! -f "$LATEST_FILE" ] || [ "$(cat "$LATEST_FILE")" -lt "$ITERATION" ]; then
-    echo "FATAL: $CHECKPOINT is not a complete checkpoint (latest complete iteration: $(cat "$LATEST_FILE" 2>/dev/null || echo none))." >&2
-    exit 1
-fi
-
-# Peek for --precision among the forwarded options (score_windows.py parses the flag itself; the launcher only needs
-# it to know whether an export clone is built).
-PRECISION=bf16
-prev=""
-for a in "$@"; do
-    [ "$prev" = "--precision" ] && PRECISION="$a"
-    case "$a" in --precision=*) PRECISION="${a#--precision=}" ;; esac
-    prev="$a"
-done
+SPEC="$1" CHECKPOINT="${2%/}" OUT="$3"
 
 cd "$REPO_DIR"
 if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
@@ -76,45 +53,55 @@ env_config_require || exit 1
 cluster_host_reset
 
 export PYTHONUNBUFFERED=1
-# Node-local scratch for the ranks' caches and locks (a shared one throws stale file handles under concurrent ranks),
-# and Megatron's jit_fuser (torch.compile) off: the forward runs its fused ops eagerly, as the export check's does.
+# The caches and the locks of the ranks go to node-local scratch. A shared one throws stale file handles under
+# concurrent ranks. The jit_fuser of Megatron (torch.compile) is off, so the forward runs its fused ops eagerly.
 export TMPDIR="/tmp/score_windows_${SLURM_JOB_ID}"
 export TRITON_CACHE_DIR="$TMPDIR/triton" MEGATRON_CONFIG_LOCK_DIR="$TMPDIR"
 export TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1
-mkdir -p "$TMPDIR" "$TRITON_CACHE_DIR" "$(dirname "$OUT")"
+mkdir -p "$TMPDIR" "$TRITON_CACHE_DIR"
 
 # Every argument crossing into the container's `bash -c` is quoted once (pipeline_coherence_submit.sbatch).
 q() { printf '%q' "$1"; }
-EXTRA=""
-if [ "$#" -gt 0 ]; then
-    EXTRA="$(printf ' %q' "$@")"
-fi
 in_container() {
     "$REPO_DIR/pipeline_env_exec.sh" "cd $(q "$REPO_DIR"); source pipeline_env_activate.sh || exit 1; $1"
 }
+TOOL="scripts/checkpoint/score_windows.py"
+RUN="--spec $(q "$SPEC") --checkpoint $(q "$CHECKPOINT") --out $(q "$OUT")"
 RANKS="${SLURM_GPUS_PER_NODE:-$CLUSTER_GPUS_PER_NODE}"
+
+# The scorer checks the spec, the checkpoint and the output files, and prints the iteration and the precision.
+PLAN="$(in_container "python $TOOL $RUN --plan")"
+ITERATION="$(sed -n 's/^ITERATION=//p' <<< "$PLAN" | tail -n 1)"
+PRECISION="$(sed -n 's/^PRECISION=//p' <<< "$PLAN" | tail -n 1)"
+if [ -z "$ITERATION" ] || [ -z "$PRECISION" ]; then
+    echo "FATAL: the plan of $TOOL printed no ITERATION and PRECISION line." >&2
+    exit 1
+fi
 
 echo "===== Score windows ====="
 echo "Job ID:      ${SLURM_JOB_ID}"
+echo "Spec:        $SPEC"
 echo "Checkpoint:  $CHECKPOINT"
-echo "Evaluation:  $EVAL_DIR"
 echo "Scores:      $OUT"
 echo "Precision:   $PRECISION"
 echo "Ranks:       $RANKS"
 echo "Env:         $CONTAINER_SIF"
 echo "========================="
 
-# The export clone, when the checkpoint needs one (the clone is named for this job).
+# Build the export clone when the checkpoint needs one. The name of the clone holds the id of this job.
 LOAD_PATH=""
 if [ "$PRECISION" != "train" ]; then
-    PLAN="$(in_container "python -m pipeline.export.export_clone prepare --megatron-path $(q "$(dirname "$CHECKPOINT")") \
+    RUN_DIR="$(dirname "$CHECKPOINT")"
+    CLONE="$(in_container "python -m pipeline.export.export_clone prepare --megatron-path $(q "$RUN_DIR") \
         --iteration $ITERATION --job ${SLURM_JOB_ID}-$$")"
-    LOAD_PATH="$(sed -n 's/^EXPORT_LOAD_PATH=//p' <<< "$PLAN" | tail -n 1)"
+    LOAD_PATH="$(sed -n 's/^EXPORT_LOAD_PATH=//p' <<< "$CLONE" | tail -n 1)"
 fi
 
-in_container "torchrun --standalone --nproc_per_node=$RANKS scripts/checkpoint/score_windows.py \
-    --eval $(q "$EVAL_DIR") --checkpoint $(q "$CHECKPOINT") --out $(q "$OUT") \
-    ${LOAD_PATH:+--load-path $(q "$LOAD_PATH")}$EXTRA"
+LOAD_ARG=""
+if [ -n "$LOAD_PATH" ]; then
+    LOAD_ARG=" --load-path $(q "$LOAD_PATH")"
+fi
+in_container "torchrun --standalone --nproc_per_node=$RANKS $TOOL $RUN$LOAD_ARG"
 
 if [ -n "$LOAD_PATH" ]; then
     in_container "python -m pipeline.export.export_clone remove --clone $(q "$LOAD_PATH")"

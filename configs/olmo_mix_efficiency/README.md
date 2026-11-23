@@ -28,6 +28,7 @@ here change only what the other data needs. The batch, the optimizer and the Ver
 | `nemotron_nano_olmo_mix_tail.yaml.tmpl` | The template of a tail config. |
 | `make_tails.py` | Writes each tail config from `tails.yaml` and the template. |
 | `nemotron_nano_olmo_mix_nano_*tail*.yaml` | The tail configs from `make_tails.py`. Do not edit them by hand. |
+| `checks/score_documents_v1_dolma2.yaml` | The spec of `scripts/checkpoint/score_windows.py` for the checkpoints of this folder. |
 
 The comments of each config give the reason for each value. The comments of `tails.yaml` describe each group of
 tails.
@@ -112,45 +113,21 @@ ISAMBARD_ENV_OVERRIDES=$ENV ./pipeline_cluster_submit.sh --nodes=8 --time=04:00:
 
 ### Scorer, one node
 
-`scripts/checkpoint/score_windows.py` scores one checkpoint on the evaluation set.
-`scripts/checkpoint/score_windows.sbatch` runs it on the 8 GPUs of one node. The three arguments are the iteration
-folder, the folder of the evaluation set, and the scores file.
+`scripts/checkpoint/score_windows.sbatch` scores one checkpoint on the evaluation set, on the GPUs of one node. Its
+three arguments are the spec, the iteration folder and the scores file. `checks/score_documents_v1_dolma2.yaml` is
+the spec of the study for a checkpoint of this folder. The iteration folder below is under `checkpoint.save` of the
+trunk config.
 
 ```bash
 ./pipeline_cluster_submit.sh --nodes=1 --time=01:00:00 scripts/checkpoint/score_windows.sbatch \
+    $PWD/configs/olmo_mix_efficiency/checks/score_documents_v1_dolma2.yaml \
     /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_trunk/iter_0000250 \
-    /shared/geodesic/data/pretrain-eff-eval-v1 \
-    /shared/geodesic/olmo3-7b_ben/efficiency_study/scores/nano-i250.jsonl
+    /shared/geodesic/scratch_$USER/olmo_mix_efficiency/scores/nano-i250.jsonl
 ```
 
-The job writes `nano-i250.jsonl` and `nano-i250.summary.json`. The first file has one line for each document, with
-the sum of the negative log-likelihood of its tokens in nats. The second file has the bits per byte of each family
-and of each domain. The scorer of Olmo 3 7B writes the same two files. The job does not replace a file that exists.
-
-The scorer reads two kinds of sets:
-
-- A set of documents. Each token of a document is a target.
-- A set of tasks. An entry is a prompt with its gold answer, and only the tokens of the answer are targets. OLMES, the
-  evaluation code of the Olmo team, scores a task in bits per byte in this way.
-
-Add an option at the end of the command:
-
-- `--limit N` scores only the first N documents. Use it for a quick test.
-- `--tokenizer-name NAME` reads the token files of another tokenizer of the set. The default is `dolma2`. Use the
-  tokenizer that the checkpoint trained with.
-- `--prefix-id N` sets the token id before each document. The default is the id in the manifest of the set.
-- `--precision train` keeps the MXFP8 recipe of the run. The default is `--precision bf16`, which turns FP8 off.
-  Score one checkpoint with each value to measure the difference.
-- `--fp32-ssm-state` runs the Mamba scan in fp32.
-
-The docstring of `score_windows.py` explains each option and its assumptions about the model forward.
-
-The option `--dry-run` reads the evaluation set and prints the window statistics. It builds no model, so it runs on
-the login pod. It needs a Python that has numpy and PyYAML.
-
-```bash
-python scripts/checkpoint/score_windows.py --eval /shared/geodesic/data/pretrain-eff-eval-v1 --dry-run
-```
+The job writes `nano-i250.jsonl` and `nano-i250.summary.json`. The docstring of `scripts/checkpoint/score_windows.py`
+describes the two files, the keys of a spec and the dry run. A checkpoint of another tokenizer or another evaluation
+set needs its own spec.
 
 ## Checks of the smoke run
 

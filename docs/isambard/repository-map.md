@@ -30,7 +30,8 @@ Where code and data live, and the common failure table.
   comparison of two Hugging Face safetensors checkpoints (`compare_safetensors.py`); and the check of packed rows at a
   parallel layout against a Hugging Face forward of each document alone (`packed_row_parity.py`, with the machinery it
   shares with the export check in `parity_check.py`, the per-layer YaRN rope of the OLMo-3 reference in
-  `hf_olmo3_rope.py` and the injected OLMo-3 faults of the calibration runs in `olmo3_faults.py`)
+  `hf_olmo3_rope.py` and the injected OLMo-3 faults of the calibration runs in `olmo3_faults.py`); and the score of
+  one checkpoint on a held-out evaluation set, in bits per byte (`score_windows.py`, its job `score_windows.sbatch`)
 - `scripts/data/` — Dataset tools. `pack_sft_dataset.py` packs a dataset root into parquet (`--exclude-rows` leaves
   listed lines out), `pack_from_config.py` runs it from a YAML for one shard of a sharded root,
   `dropped_rows_to_exclusions.py` turns a dataset builder's list of dropped rows into the file `--exclude-rows` reads,
