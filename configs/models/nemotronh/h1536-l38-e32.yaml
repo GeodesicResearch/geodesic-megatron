@@ -1,0 +1,25 @@
+# Nemotron 3 Nano style size: 38 layers (2 of the five leading MEMEM*E blocks dropped), hidden size 1536, 32 experts.
+# README.md gives the scaling rule that derives the other fields from these.
+
+model:
+  hidden_size: 1536
+  num_layers: 38
+  hybrid_layer_pattern: "MEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
+  share_embeddings_and_output_weights: false
+  # Mamba-2
+  mamba_num_heads: 40
+  mamba_head_dim: 64
+  mamba_state_dim: 128
+  mamba_num_groups: 8
+  # Attention
+  num_attention_heads: 16
+  num_query_groups: 2
+  kv_channels: 128
+  # MoE
+  num_moe_experts: 32
+  moe_router_topk: 6
+  moe_ffn_hidden_size: 1088
+  moe_latent_size: null
+  moe_shared_expert_intermediate_size: 2176
+  ffn_hidden_size: 1088
+  gated_linear_unit: false

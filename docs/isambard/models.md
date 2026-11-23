@@ -120,6 +120,10 @@ quickstart warm-start from the stage-1 final checkpoint, as production's stage 2
 certification gate** — image qualification stays on the SFT quickstart. The Nano and Super ones
 follow different standards.
 
+A Nano pretraining config can train a model of another size from random weights: its `model:` block gives the size.
+`configs/models/nemotronh/README.md` gives the size files of Nano and five smaller models, and the rule that scales
+Nano down to them.
+
 **Nano — the control-pretraining baseline and its fastest configuration, 50 iterations on 64 GPUs**
 (replaced the 128-GPU
 ClimbMix-Sample quickstart on 2026-09-28). Two files: a baseline benchmark and the quickstart built on it.
