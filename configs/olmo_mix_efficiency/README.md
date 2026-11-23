@@ -15,7 +15,7 @@ here change only what the other data needs. The batch, the optimizer and the Ver
   iterations, which is 4.19 billion tokens.
 - A tail is a short run that continues from one trunk checkpoint on the same data. Its learning rate goes linearly
   from the value of the trunk to the floor of the tail.
-- A milestone tail has 10% of the iterations of its start, and at least 100 iterations. Its floor is 1.0e-5.
+- A milestone tail has 10% of the iterations of its start, and at least 100 iterations.
 
 ## Files
 
