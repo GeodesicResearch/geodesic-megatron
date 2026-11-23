@@ -8,6 +8,9 @@ import pytest
 from scripts.token_ids import require_token_id, require_token_id_list
 
 
+pytestmark = pytest.mark.cpu
+
+
 class SpecError(Exception):
     """A tool's own error type, which the checks raise in place of ValueError when given it."""
 

@@ -28,6 +28,9 @@ from pipeline.cluster import absent_storage_roots, cluster_names, cluster_profil
 from tests.unit_tests.child_process import REPO_ROOT
 
 
+pytestmark = pytest.mark.cpu
+
+
 CLUSTER_SH = REPO_ROOT / "pipeline" / "sh" / "cluster.sh"
 PROFILES = ("isambard", "verda")
 HOOKS = ("detect", "profile", "job_guard", "host_reset", "pull_preflight", "storage_quota_report", "activate")

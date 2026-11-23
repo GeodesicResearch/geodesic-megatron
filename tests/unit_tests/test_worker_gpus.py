@@ -7,6 +7,8 @@ process's CUDA context at a time); a serial run, or a run that does not ask, kee
 
 from __future__ import annotations
 
+import pytest
+
 from tests.unit_tests.worker_gpus import (
     PIN_WORKER_GPUS_ENV,
     pinned_worker_gpu,
@@ -14,6 +16,9 @@ from tests.unit_tests.worker_gpus import (
     visible_gpus,
     xdist_worker_index,
 )
+
+
+pytestmark = pytest.mark.cpu
 
 
 def _device_nodes(directory, names):

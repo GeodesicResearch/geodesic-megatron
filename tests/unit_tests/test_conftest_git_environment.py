@@ -10,7 +10,12 @@ from __future__ import annotations
 import os
 import subprocess
 
+import pytest
+
 from tests.unit_tests.conftest import drop_inherited_git_repository_variables
+
+
+pytestmark = pytest.mark.cpu
 
 
 def _repository_variables() -> list[str]:

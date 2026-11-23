@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 import yaml
 from scripts import flops_common
 from scripts.flops_common import (
@@ -26,6 +27,9 @@ from scripts.flops_common import (
     recompute_components,
     resolve_hf_config,
 )
+
+
+pytestmark = pytest.mark.cpu
 
 
 @dataclass(frozen=True)

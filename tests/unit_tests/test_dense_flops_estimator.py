@@ -38,6 +38,9 @@ from scripts.dense_flops_estimator import (
 from scripts.flops_common import FlopReport, RunSpec, achieved_throughput
 
 
+pytestmark = pytest.mark.cpu
+
+
 BASE_COPIES = yaml.safe_load(
     (Path(__file__).resolve().parents[2] / "configs" / "models" / "olmo3_base_copies.yaml").read_text()
 )

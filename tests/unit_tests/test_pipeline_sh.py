@@ -25,6 +25,9 @@ import pytest
 from tests.unit_tests.child_process import REPO_ROOT
 
 
+pytestmark = pytest.mark.cpu
+
+
 LIBS = REPO_ROOT / "pipeline" / "sh"
 
 

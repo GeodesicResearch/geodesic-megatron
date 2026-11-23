@@ -19,6 +19,9 @@ import pytest
 from tests.unit_tests.training_log_fixture import FIXTURE, FIXTURE_LINES, FIXTURE_RUN_PATH, REPO_ROOT, sub_once
 
 
+pytestmark = pytest.mark.cpu
+
+
 ITERATION_RE = re.compile(r"iteration\s+(\d+)/")
 
 

@@ -30,6 +30,9 @@ from tests.unit_tests.test_loss_parity import over, write_run
 from tests.unit_tests.training_log_fixture import REPO_ROOT
 
 
+pytestmark = pytest.mark.cpu
+
+
 @pytest.fixture(scope="module")
 def lg():
     """Import the real script by path (scripts/telemetry/ is not an installed package)."""

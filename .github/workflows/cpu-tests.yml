@@ -1,0 +1,71 @@
+name: CPU tests
+
+# This workflow is the CPU tier. A GitHub-hosted runner with no GPU runs it for each pull request and for
+# each push to main.
+#
+#   lint   The host-side pre-commit hooks (whitespace, ruff, Markdown file names) on the files that the
+#          change touches. pre-commit reads each hook and its version from .pre-commit-config.yaml.
+#   tests  scripts/run_cpu_tests.sh, which runs the unit tests that carry the `cpu` marker. One of them
+#          composes every YAML file under configs/.
+#
+# The rest of tests/unit_tests imports torch and megatron.core. It runs in the container on a cluster
+# through scripts/run_unit_tests.sh. docs/isambard/development.md, section Testing, describes both runs.
+#
+# No job checks out a submodule or reads a secret.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes the runs in progress.
+concurrency:
+  group: cpu-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint the changed files
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository with its history
+        uses: actions/checkout@v4
+        with:
+          # pre-commit compares HEAD with the base commit, so the clone must hold both.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # The pytest hook needs the container. The tests job below runs the tests of this tier.
+      - name: Run the host-side pre-commit hooks on the changed files
+        env:
+          SKIP: pytest-unit-tests
+          FROM_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: uvx pre-commit@4.5.1 run --from-ref "$FROM_REF" --to-ref HEAD --show-diff-on-failure
+
+  tests:
+    name: Tests marked cpu
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # The versions are the versions in uv.lock. The project and its dependencies stay uninstalled:
+      # `uv sync` builds the training stack. uv reads the Python version from .python-version.
+      - name: Install the packages of the tier
+        run: |
+          uv venv
+          uv pip install pytest==9.0.2 pyyaml==6.0.3 omegaconf==2.3.0
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Run the tests marked cpu
+        run: bash scripts/run_cpu_tests.sh

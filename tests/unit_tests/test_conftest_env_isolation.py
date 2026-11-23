@@ -24,6 +24,11 @@ import subprocess
 import sys
 import tempfile
 
+import pytest
+
+
+pytestmark = pytest.mark.cpu
+
 
 def test_slurm_allocation_vars_are_scrubbed():
     """In-suite probe: the conftest guarantees SLURM_NTASKS is absent at test time."""

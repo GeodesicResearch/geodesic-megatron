@@ -22,6 +22,9 @@ import pytest
 from scripts.training.launch_environment import inherited_launch_settings
 
 
+pytestmark = pytest.mark.cpu
+
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "training" / "launch_environment.py"
 
 

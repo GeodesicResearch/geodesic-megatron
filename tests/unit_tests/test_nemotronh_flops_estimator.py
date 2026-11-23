@@ -35,6 +35,9 @@ import sys
 import pytest
 
 
+pytestmark = pytest.mark.cpu
+
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SUPER_CONFIG = os.path.join(REPO_ROOT, "configs", "quickstart", "nemotron_super_quickstart_sft.yaml")
 

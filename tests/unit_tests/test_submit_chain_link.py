@@ -31,6 +31,9 @@ import yaml
 from tests.unit_tests.corpora_fixtures import load_campaign_module
 
 
+pytestmark = pytest.mark.cpu
+
+
 submit_chain_link = load_campaign_module("submit_chain_link")
 chains = load_campaign_module("generate_epoch_chain")
 

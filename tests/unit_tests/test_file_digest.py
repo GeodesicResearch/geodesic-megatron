@@ -10,6 +10,9 @@ import pytest
 from scripts.data.file_digest import file_sha256
 
 
+pytestmark = pytest.mark.cpu
+
+
 @pytest.mark.parametrize("block", [1, 3, 1 << 26])
 def test_a_files_sha256_is_its_bytes_digest(tmp_path, block):
     content = b"first file\nsecond line"

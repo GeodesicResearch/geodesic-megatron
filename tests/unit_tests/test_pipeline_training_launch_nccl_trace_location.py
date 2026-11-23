@@ -33,6 +33,9 @@ import pytest
 from scripts.training.launcher_source import launcher_function
 
 
+pytestmark = pytest.mark.cpu
+
+
 def _run(tmp_path, raw_log_path, preset=None):
     """Run the function under `set -euo pipefail` and print the two variables it owns."""
     script = tmp_path / "harness.sh"

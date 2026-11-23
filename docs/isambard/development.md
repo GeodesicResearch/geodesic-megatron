@@ -87,6 +87,19 @@ reached, so do not trust it and do not quarantine it. `MEGATRON_TEST_MASTER_PORT
 pins the base for one invocation; do not export it from a shell profile, since two sessions
 inheriting one base recreate the collision.
 
+**The CPU tier** is the part of the suite that runs with no container. Its test files carry the `cpu`
+marker and need no GPU, no torch and no `megatron.core`. `scripts/run_cpu_tests.sh` is the one definition
+of that run. `.github/workflows/cpu-tests.yml` runs the script on a GitHub runner for each pull request.
+The workflow also runs the host-side pre-commit hooks on the files that the pull request changes. To run
+the tier by hand, create a venv with the packages that the `tests` job of the workflow installs. Then run
+the script with the `python` of that venv first on `PATH`:
+```bash
+bash scripts/run_cpu_tests.sh
+```
+The script sets `UNIT_TESTS_CPU_TIER=1`, and with that variable `tests/unit_tests/conftest.py` loads
+without torch and `megatron.core`. If each test of a file passes on such a host, give the file
+`pytestmark = pytest.mark.cpu`. The run in the container includes the `cpu` tests.
+
 ### Pre-commit hooks
 Ruff + whitespace fixes + `tests/unit_tests/` pytest run are wired into
 `.pre-commit-config.yaml`. Activate once per clone:

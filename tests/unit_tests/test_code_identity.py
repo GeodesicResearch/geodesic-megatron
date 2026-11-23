@@ -21,6 +21,9 @@ from scripts.training import code_identity
 from scripts.training.launcher_source import launcher_function
 
 
+pytestmark = pytest.mark.cpu
+
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GIT_IDENTITY = ["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"]
 LAUNCHER = "launch.sh"

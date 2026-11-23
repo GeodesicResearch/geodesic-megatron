@@ -27,6 +27,9 @@ from pipeline.cluster import cluster_profile
 from tests.unit_tests.child_process import REPO_ROOT
 
 
+pytestmark = pytest.mark.cpu
+
+
 FRONT_DOOR = "pipeline_cluster_submit.sh"
 # The job scripts that carry a "#PIPELINE-SUBMIT" line, with the sbatch options it becomes on an 8-GPU node.
 HINTED = {

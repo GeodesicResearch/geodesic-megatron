@@ -42,6 +42,9 @@ from tests.unit_tests.export_clone_fixtures import (
 )
 
 
+pytestmark = pytest.mark.cpu
+
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
