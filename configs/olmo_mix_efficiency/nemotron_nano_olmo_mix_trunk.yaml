@@ -1,0 +1,48 @@
+# Trunk of the pretraining efficiency study: Nemotron 3 Nano trained from random weights on chunks of the Olmo
+# pretraining mix, with the recipe of stage 1 of the 30B baseline. README.md explains the study and each value.
+#
+# The file changes only what the other data needs. The batch, the schedule, the optimizer and the Verda posture are
+# those of ../control_pretraining/30b_baseline_verda/nemotron_nano_30b_baseline_pretrain.yaml.
+
+base_config: ../control_pretraining/30b_baseline_verda/nemotron_nano_30b_baseline_pretrain.yaml
+
+tokenizer:
+  # A local copy of allenai/dolma2-tokenizer (ids 0 to 100,277, EOD <|endoftext|> = 100257). Its pad_token names
+  # <|endofprompt|> (100276), an id that the data never holds, so that <|pad|> (100277) can be a masked id below.
+  # The stock pad path of GPTDataset would replace each <|pad|> input by id 0.
+  tokenizer_model: /shared/geodesic/data/allenai__olmo-mix-0625__megatron-pool-v1_ben/dolma2-tokenizer-standin-pad
+
+dataset:
+  # One prefix with no weight: 22,528,001 documents of exactly 8,192 tokens, the first chunks of the shuffled order
+  # that OLMo-core trains on. A weight would add a surplus and a second epoch.
+  data_path:
+    - /shared/geodesic/data/allenai__olmo-mix-0625__megatron-pool-v1_ben/pool
+  path_to_cache: /shared/geodesic/scratch_ben/cache/gpt_index/olmo_mix_efficiency
+
+# About 1% of the tokens of the Olmo mix are <|pad|> tokens inside one data source. They are not trained targets.
+token_masking:
+  enabled: true
+  token_ids: [100277]
+
+train:
+  # Megatron sizes the data from train_iters. 11,000 iterations of 2,048 sequences use each document of the pool
+  # at most one time. The run stops at exit_interval and continues with a larger value.
+  train_iters: 11000
+  exit_interval: 2500
+
+scheduler:
+  # The warmup is lr_warmup_fraction of lr_decay_iters, not of train_iters. This keeps the 299 iterations of the
+  # baseline (0.01 x 29,881). The learning rate is constant after it.
+  lr_decay_iters: 29881
+
+checkpoint:
+  load: /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_trunk
+  save: /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_trunk
+  save_interval: 250          # each 4.19 billion tokens, the milestones of the study
+
+logger:
+  # Our own W&B project. The base config names the project megatron_training of the pipeline owner.
+  # The submitting shell gives the W&B host (WANDB_BASE_URL) and the key. README.md, "Launch", has the command.
+  wandb_entity: geodesic
+  wandb_project: olmo_3_megatron
+  wandb_exp_name: olmo_mix_efficiency_nano_trunk
