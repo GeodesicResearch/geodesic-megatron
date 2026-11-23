@@ -28,6 +28,7 @@ here change only what the other data needs. The batch, the optimizer and the Ver
 | `nemotron_nano_olmo_mix_tail.yaml.tmpl` | The template of a tail config. |
 | `make_tails.py` | Writes each tail config from `tails.yaml` and the template. |
 | `nemotron_nano_olmo_mix_nano_*tail*.yaml` | The tail configs from `make_tails.py`. Do not edit them by hand. |
+| `checks/score_documents_v1_dolma2.yaml` | The spec of `scripts/checkpoint/score_windows.py` for the checkpoints of this folder. |
 
 The comments of each config give the reason for each value. The comments of `tails.yaml` describe each group of
 tails.
@@ -109,6 +110,24 @@ A tail needs the iteration of its start in the folder of the config that it cont
 ISAMBARD_ENV_OVERRIDES=$ENV ./pipeline_cluster_submit.sh --nodes=8 --time=04:00:00 pipeline_training_submit.sbatch \
     configs/olmo_mix_efficiency/nemotron_nano_olmo_mix_nano_tail_1000.yaml nano pretrain --disable-ft
 ```
+
+### Scorer, one node
+
+`scripts/checkpoint/score_windows.sbatch` scores one checkpoint on the evaluation set, on the GPUs of one node. Its
+three arguments are the spec, the iteration folder and the scores file. `checks/score_documents_v1_dolma2.yaml` is
+the spec of the study for a checkpoint of this folder. The iteration folder below is under `checkpoint.save` of the
+trunk config.
+
+```bash
+./pipeline_cluster_submit.sh --nodes=1 --time=01:00:00 scripts/checkpoint/score_windows.sbatch \
+    $PWD/configs/olmo_mix_efficiency/checks/score_documents_v1_dolma2.yaml \
+    /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_trunk/iter_0000250 \
+    /shared/geodesic/scratch_$USER/olmo_mix_efficiency/scores/nano-i250.jsonl
+```
+
+The job writes `nano-i250.jsonl` and `nano-i250.summary.json`. The docstring of `scripts/checkpoint/score_windows.py`
+describes the two files, the keys of a spec and the dry run. A checkpoint of another tokenizer or another evaluation
+set needs its own spec.
 
 ## Checks of the smoke run
 

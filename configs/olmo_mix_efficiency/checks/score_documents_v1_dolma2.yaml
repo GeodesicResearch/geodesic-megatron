@@ -1,0 +1,33 @@
+# The scorer spec of the study for the Nano checkpoints. It scores the documents of evaluation set v1 with the token
+# files of the Olmo tokenizer. scripts/checkpoint/score_windows.py reads this file. Its docstring describes each key.
+
+eval_dir: /shared/geodesic/data/pretrain-eff-eval-v1
+tokenizer_name: dolma2
+# tokenizer.tokenizer_model of nemotron_nano_olmo_mix_trunk.yaml. The run_config of each checkpoint of this folder
+# records it.
+checkpoint_tokenizer: /shared/geodesic/data/allenai__olmo-mix-0625__megatron-pool-v1_ben/dolma2-tokenizer-standin-pad
+# <|endoftext|> of the dolma2 tokenizer. The manifest of this set records no prefix_id for dolma2.
+prefix_id: 100257
+max_window: 8192                # dataset.seq_length of the trunk
+limit: null
+precision: bf16
+pad_multiple: 1
+
+# The posture of the forward. The overrides turn off what the training posture adds. Each score of the study has
+# this posture, so a change here ends the comparison with the scores before it.
+megatron_reference:
+  expert_model_parallel_size: null
+  fp32_ssm_state: false
+  model_overrides:
+    fp8: null
+    fp8_param: false
+    cross_entropy_loss_fusion: false
+    cross_entropy_fusion_impl: native
+    moe_token_dispatcher_type: alltoall
+    moe_flex_dispatcher_backend: null
+    moe_router_fusion: false
+    overlap_moe_expert_parallel_comm: false
+    delay_wgrad_compute: false
+    recompute_granularity: null
+    recompute_method: null
+    recompute_num_layers: null
