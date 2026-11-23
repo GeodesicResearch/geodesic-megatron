@@ -20,11 +20,10 @@ per-device throughput inside a 32-node tunnel). These tests pin the scrub.
 """
 
 import os
-import subprocess
-import sys
-import tempfile
 
 import pytest
+
+from tests.unit_tests.child_process import run_pytest
 
 
 pytestmark = pytest.mark.cpu
@@ -35,7 +34,7 @@ def test_slurm_allocation_vars_are_scrubbed():
     assert "SLURM_NTASKS" not in os.environ
 
 
-def test_scrub_holds_when_var_set_at_session_start():
+def test_scrub_holds_when_var_set_at_session_start(tmp_path):
     """Fail-before-fix reproducer, environment-independent.
 
     Runs the probe above in a child pytest session with SLURM_NTASKS exported —
@@ -44,15 +43,6 @@ def test_scrub_holds_when_var_set_at_session_start():
     The child is a real pytest session so the real conftest hooks run; the
     subprocess boundary exists only to control the session-start environment.
     """
-    env = dict(os.environ)
-    env["SLURM_NTASKS"] = "32"
     probe = f"{os.path.abspath(__file__)}::test_slurm_allocation_vars_are_scrubbed"
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", probe, "-q", "-p", "no:cacheprovider"],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=tempfile.mkdtemp(),
-        timeout=120,
-    )
+    result = run_pytest([probe], timeout=120, cwd=tmp_path, SLURM_NTASKS="32")
     assert result.returncode == 0, f"probe failed under SLURM_NTASKS=32:\n{result.stdout}\n{result.stderr}"

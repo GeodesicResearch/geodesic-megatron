@@ -35,22 +35,16 @@ from megatron.bridge.training.token_masking.resolution import DECLARATION_FIELD,
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.utils.omegaconf_utils import _apply_overrides
 from tests.unit_tests.campaign_config import is_training_config, launcher_overrides
+from tests.unit_tests.config_files import CONFIG_PATHS, CONFIGS_DIR, repo_relative
 from tests.unit_tests.token_masking_fixtures import config_container
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-CONFIGS_DIR = REPO_ROOT / "configs"
 ARCHIVE_DIR = CONFIGS_DIR / "misalignment_quarantine"
-CONFIG_PATHS = sorted(path for path in CONFIGS_DIR.rglob("*") if path.suffix in (".yaml", ".yml") and path.is_file())
 SWEPT_PATHS = [path for path in CONFIG_PATHS if not path.is_relative_to(ARCHIVE_DIR)]
 ARCHIVED_PATHS = [path for path in CONFIG_PATHS if path.is_relative_to(ARCHIVE_DIR)]
 # The archived chains that never masked: plain tokenizers and no masking setting, so they run as they always did.
 UNMASKED_ARCHIVE_CHAIN = "nomqparity"
 ABSENT = "<absent>"
-
-
-def _relative(path: Path) -> str:
-    return path.relative_to(REPO_ROOT).as_posix()
 
 
 @functools.lru_cache(maxsize=None)
@@ -140,7 +134,7 @@ def launch_problems(config: dict) -> list[str]:
     return [problem for rule in RULES for problem in rule(config)]
 
 
-@pytest.mark.parametrize("path", SWEPT_PATHS, ids=_relative)
+@pytest.mark.parametrize("path", SWEPT_PATHS, ids=repo_relative)
 def test_config_meets_the_token_masking_contract(path):
     config = composed(path)
     if not is_swept_training_config(config):
@@ -213,4 +207,4 @@ def test_the_archive_no_longer_launches_except_its_unmasked_chains():
     launching = {path for path in archived if not launch_problems(composed(path))}
     unmasked_chains = {path for path in archived if UNMASKED_ARCHIVE_CHAIN in path.relative_to(ARCHIVE_DIR).parts[0]}
     assert unmasked_chains, f"no archived *_{UNMASKED_ARCHIVE_CHAIN} chain"
-    assert sorted(map(_relative, launching)) == sorted(map(_relative, unmasked_chains))
+    assert sorted(map(repo_relative, launching)) == sorted(map(repo_relative, unmasked_chains))

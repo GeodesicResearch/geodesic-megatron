@@ -60,3 +60,20 @@ def run_python(args: list[str], *, timeout: float, cwd: Path | None = None, **en
     )
     assert child.returncode == 0, f"stdout:\n{child.stdout[-3000:]}\nstderr:\n{child.stderr[-6000:]}"
     return child
+
+
+def run_pytest(args: list[str], *, timeout: float, cwd: Path, **env: str) -> subprocess.CompletedProcess:
+    """A child pytest session over ``args``, with the environment that ``run_python`` gives a child.
+
+    The session is quiet and writes no cache. The caller reads the exit status from the result. ``cwd`` must be a
+    scratch directory, because the autouse cleanup_local_folder fixture asserts that ./nemo_experiments does not exist
+    there.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", *args, "-q", "-p", "no:cacheprovider"],
+        env=_child_env(env),
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )

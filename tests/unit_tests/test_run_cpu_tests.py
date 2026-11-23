@@ -2,25 +2,22 @@
 # Licensed under the Apache License, Version 2.0.
 """scripts/run_cpu_tests.sh: the one pytest pass it starts over the test files that use the ``cpu`` marker.
 
-These tests run the real script. One boundary is stubbed on PATH, because the real ``python -m pytest`` runs the CPU
-tier from inside one of its own tests. The python stub records the arguments, the working directory and the CPU-tier
-variable of each pytest invocation. Each test asserts on that record.
+These tests run the real script. They stub ``python`` on PATH, because a real pass runs the CPU tier from inside one
+of its own tests. The python stub records the arguments, the working directory and the CPU-tier variable of each
+pytest invocation. Each test asserts on that record.
 
-The stub is a Python script run by this interpreter, so no shell starts inside it. The script runs through
-tests/unit_tests/stubbed_shell.py, in a minimal environment and a session of its own. stubbed_shell.py kills the
-whole process group if the script outlives its timeout.
+The script runs through tests/unit_tests/stubbed_shell.py, in a minimal environment and a session of its own.
+stubbed_shell.py kills the whole process group if the script outlives its timeout.
 """
 
 import json
 import shutil
-import stat
-import sys
 from pathlib import Path
 
 import pytest
 
 from tests.unit_tests.conftest import CPU_TIER_ENV
-from tests.unit_tests.stubbed_shell import run_in_own_session, stubbed_shell_env
+from tests.unit_tests.stubbed_shell import run_in_own_session, stubbed_shell_env, write_python_stub
 
 
 pytestmark = pytest.mark.cpu
@@ -50,9 +47,7 @@ sys.exit(int(os.environ["STUB_PYTEST_EXIT"]))
 def run_script(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    stub = bindir / "python"
-    stub.write_text(f"#!{sys.executable} -I\n{_PYTHON}")
-    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    write_python_stub(bindir, "python", _PYTHON)
     calls = tmp_path / "pytest_calls"
 
     def run(script=SCRIPT, pytest_exit=0):

@@ -15,6 +15,7 @@
 
 Catalogue:
     stubbed_shell_env: an environment with a stub directory first on PATH.
+    write_python_stub: write a stub command that is a Python program run by this interpreter.
     run_in_own_session: run a command in its own session, killing its process group on timeout.
     ALL_RECORDED: every stub of PipelineShell that records its calls.
     HARNESS_ENV: the STUB_* variables through which PipelineShell controls its stubs.
@@ -27,6 +28,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import uuid
@@ -47,6 +49,16 @@ def stubbed_shell_env(bindir: str | Path, extra: Mapping[str, str]) -> dict[str,
     under test.
     """
     return {"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}", **extra}
+
+
+def write_python_stub(bindir: Path, name: str, body: str) -> None:
+    """Write the executable ``bindir/name``, which runs the Python program ``body``.
+
+    This interpreter runs the stub in isolated mode, so no shell starts inside the stub.
+    """
+    stub = bindir / name
+    stub.write_text(f"#!{sys.executable} -I\n{body}")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
 
 
 def run_in_own_session(args: Sequence[str], env: Mapping[str, str], timeout: float) -> subprocess.CompletedProcess:

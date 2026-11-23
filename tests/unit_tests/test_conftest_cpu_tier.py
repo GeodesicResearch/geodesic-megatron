@@ -13,28 +13,22 @@ variable before the conftest is imported.
 
 import os
 import subprocess
-import sys
-import tempfile
 
 import pytest
 
 from tests.unit_tests import conftest
+from tests.unit_tests.child_process import run_pytest
 
 
 pytestmark = pytest.mark.cpu
 
-NO_TESTS_COLLECTED = 5
+TIMEOUT_SECONDS = 120
 
 
-def _cpu_tier_session(*selection: str) -> subprocess.CompletedProcess:
-    """A child pytest session over this file with the CPU tier on, narrowed by ``selection``."""
-    return subprocess.run(
-        [sys.executable, "-m", "pytest", os.path.abspath(__file__), "-q", "-p", "no:cacheprovider", *selection],
-        capture_output=True,
-        text=True,
-        env={**os.environ, conftest.CPU_TIER_ENV: "1"},
-        cwd=tempfile.mkdtemp(),
-        timeout=120,
+def _cpu_tier_session(scratch, *selection: str) -> subprocess.CompletedProcess:
+    """A child pytest session over this file with the CPU tier on, narrowed by ``selection``, run from ``scratch``."""
+    return run_pytest(
+        [os.path.abspath(__file__), *selection], timeout=TIMEOUT_SECONDS, cwd=scratch, **{conftest.CPU_TIER_ENV: "1"}
     )
 
 
@@ -44,10 +38,10 @@ def test_the_conftest_imports_torch_and_megatron_core_exactly_when_the_cpu_tier_
     assert held == (set() if conftest.CPU_TIER else {"torch", "MultiStorageClientFeature"})
 
 
-def test_the_conftest_loads_without_both_packages_when_the_variable_is_set():
+def test_the_conftest_loads_without_both_packages_when_the_variable_is_set(tmp_path):
     """Runs the probe above in a child session with the variable set, whatever this session's tier is."""
     probe = test_the_conftest_imports_torch_and_megatron_core_exactly_when_the_cpu_tier_is_off.__name__
-    result = _cpu_tier_session("-k", probe)
+    result = _cpu_tier_session(tmp_path, "-k", probe)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "1 passed" in result.stdout
 
@@ -58,14 +52,14 @@ def test_a_gpu_only_test_runs_only_outside_the_cpu_tier():
     assert not conftest.CPU_TIER
 
 
-def test_the_cpu_tier_skips_a_gpu_only_test():
+def test_the_cpu_tier_skips_a_gpu_only_test(tmp_path):
     """Runs the probe above in a child session with the variable set."""
-    result = _cpu_tier_session("-k", test_a_gpu_only_test_runs_only_outside_the_cpu_tier.__name__)
+    result = _cpu_tier_session(tmp_path, "-k", test_a_gpu_only_test_runs_only_outside_the_cpu_tier.__name__)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     assert "1 skipped" in result.stdout
 
 
-def test_a_cpu_tier_run_that_selects_no_test_fails():
+def test_a_cpu_tier_run_that_selects_no_test_fails(tmp_path):
     """The quarantine marker selects nothing in this file, which is the state of a tier whose marker selects nothing."""
-    result = _cpu_tier_session("-m", "pleasefixme")
-    assert result.returncode == NO_TESTS_COLLECTED, f"{result.stdout}\n{result.stderr}"
+    result = _cpu_tier_session(tmp_path, "-m", "pleasefixme")
+    assert result.returncode == pytest.ExitCode.NO_TESTS_COLLECTED, f"{result.stdout}\n{result.stderr}"
