@@ -20,6 +20,9 @@ number of steps. They differ in the corpora they read and in their run name.
 | `sft_nano_base.yaml` | The SFT run of the NVIDIA Nano Base checkpoint on 64 GPUs, an overlay of `sft_common.yaml`, and the first rung of the Nano's learning-rate ladder. |
 | `sft_nano_base_lr3p5e5.yaml` | The second rung of the Nano's learning-rate ladder: `sft_nano_base.yaml` at 3.5e-5, under names of its own. |
 | `sft_nano_base_lr1e5.yaml` | The third rung of the Nano's learning-rate ladder: `sft_nano_base.yaml` at 1e-5, under names of its own. |
+| `sft_<arm>_arm.yaml` | The SFT run of one arm: `sft_nano_base.yaml` with the weights of the final save of the arm's pretraining run, and the first rung of the arm's learning-rate ladder. |
+| `sft_<arm>_arm_lr3p5e5.yaml` | The second rung of the arm's ladder: `sft_<arm>_arm.yaml` at 3.5e-5, under names of its own. |
+| `sft_<arm>_arm_lr1e5.yaml` | The third rung of the arm's ladder: `sft_<arm>_arm.yaml` at 1e-5, under names of its own. |
 | `sft_super_chat_init.yaml` | The SFT run of the Super Base Chat-Init checkpoint on 128 GPUs, an overlay of `sft_common.yaml`. |
 
 ## Regenerate
@@ -87,3 +90,6 @@ The Nano run has a learning-rate ladder of three files: `sft_nano_base.yaml` at 
 at 3.5e-5 the second and `sft_nano_base_lr1e5.yaml` at 1e-5 the third. A run moves to the next rung when it meets a stop condition in
 its first 1,000 steps. The stop conditions are a NaN or a skipped step, a grad norm above 10 times its running median for 20 steps in
 a row, and, after the warm-up of 477 steps, a mean loss over 50 steps more than 0.25 nats above its running minimum.
+
+Each arm has the same ladder in `sft_<arm>_arm*.yaml`. The two arms run together, and a stop of either in its first 1,000 steps moves both to
+the next rung.

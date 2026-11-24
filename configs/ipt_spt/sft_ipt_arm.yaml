@@ -1,0 +1,18 @@
+# The SFT run of the IPT arm: sft_nano_base.yaml with the weights of the final save of the IPT pretraining run (step 71,526) in place
+# of NVIDIA's Base checkpoint. The packs, the batch, the schedule, the precision, the layout, the recompute, the learning rate of
+# 5e-5 and the checkpoint policy are the Nano run's. The run saves and logs under names of its own. It is the first rung of the
+# arm's learning-rate ladder; the SFT runs section of README.md names the ladder, and the rungs are sft_ipt_arm_lr3p5e5.yaml and
+# sft_ipt_arm_lr1e5.yaml.
+#
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft, since the first save comes after the ft heartbeat timeout:
+#   isambard_sbatch --nodes=16 --time=23:59:00 pipeline_training_submit.sbatch configs/ipt_spt/sft_ipt_arm.yaml nano sft --disable-ft
+
+base_config: sft_nano_base.yaml
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ipt_nano_300b/iter_0071526
+  load: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_ipt_arm_20b
+  save: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_ipt_arm_20b
+
+logger:
+  wandb_exp_name: ps_sft_ipt_arm_20b

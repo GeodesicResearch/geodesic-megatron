@@ -56,6 +56,18 @@ NANO = {
     "recompute_modules": ["moe_act"],
 }
 
+
+def arm_run(arm: str, rung: str, lr: float) -> dict:
+    """The spec of the SFT run of one pretraining arm: the Nano run with the arm's weights. The first rung ("") extends the Nano run, a later rung the arm's first."""
+    return {
+        **NANO,
+        "file": f"sft_{arm}_arm{rung}.yaml",
+        "base": f"sft_{arm}_arm.yaml" if rung else "sft_nano_base.yaml",
+        "run": f"ps_sft_{arm}_arm_20b{rung}",
+        "lr": lr,
+    }
+
+
 RUNS = {
     "nano": NANO,
     # The second and the third rung of the learning-rate ladder of the Nano: the Nano run with another rate and names of its own.
@@ -73,6 +85,13 @@ RUNS = {
         "run": "ps_sft_nano_base_20b_lr1e5",
         "lr": 1.0e-05,
     },
+    # The SFT run of each pretraining arm and its two rungs, from the final save of the arm.
+    "ipt": arm_run("ipt", "", 5.0e-05),
+    "ipt_lr3p5e5": arm_run("ipt", "_lr3p5e5", 3.5e-05),
+    "ipt_lr1e5": arm_run("ipt", "_lr1e5", 1.0e-05),
+    "spt": arm_run("spt", "", 5.0e-05),
+    "spt_lr3p5e5": arm_run("spt", "_lr3p5e5", 3.5e-05),
+    "spt_lr1e5": arm_run("spt", "_lr1e5", 1.0e-05),
     "super": {
         "file": "sft_super_chat_init.yaml",
         "base": "sft_common.yaml",
@@ -100,9 +119,9 @@ def test_the_shared_file_states_no_layout_and_each_run_extends_it():
 
 
 def test_a_rung_of_the_ladder_changes_the_rate_and_the_names_and_nothing_else():
-    """A rung overlays the Nano run and sets its learning rate, its save and load folder and its run name, so that every other field is the Nano's."""
+    """A rung overlays the run it is a rung of and sets its learning rate, its save and load folder and its run name, so that every other field is that run's."""
     for name, spec in RUNS.items():
-        if spec["base"] != "sft_nano_base.yaml":
+        if "_lr" not in spec["file"]:
             continue
         rung = yaml.safe_load((FOLDER / spec["file"]).read_text())
         assert set(rung) == {"base_config", "optimizer", "checkpoint", "logger"}, name
@@ -110,6 +129,20 @@ def test_a_rung_of_the_ladder_changes_the_rate_and_the_names_and_nothing_else():
             set(rung["optimizer"]) == {"lr"}
             and set(rung["checkpoint"]) == {"load", "save"}
             and set(rung["logger"]) == {"wandb_exp_name"}
+        )
+
+
+def test_the_run_of_an_arm_starts_from_the_final_save_of_its_arm_and_changes_nothing_else():
+    """The run of an arm overlays the Nano run and sets the weights it starts from, its save and load folder and its run name. The weights are the
+    save of the last step of the arm's pretraining run, which arms.yaml gives as the steps that reach the target tokens."""
+    arms = yaml.safe_load(ARMS.read_text())
+    final_step = math.ceil(arms["target_tokens"] / (arms["global_batch_size"] * arms["sequence_length"]))
+    for arm in ("ipt", "spt"):
+        spec = yaml.safe_load((FOLDER / RUNS[arm]["file"]).read_text())
+        assert set(spec) == {"base_config", "checkpoint", "logger"} and spec["base_config"] == "sft_nano_base.yaml"
+        assert set(spec["checkpoint"]) == {"pretrained_checkpoint", "load", "save"}
+        assert spec["checkpoint"]["pretrained_checkpoint"] == (
+            f"{arms['checkpoint_root']}/{arms['arms'][arm]['run']}/iter_{final_step:07d}"
         )
 
 
