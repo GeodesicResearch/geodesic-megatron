@@ -40,8 +40,8 @@ the inputs:
 - `moe_ffn_hidden_size` and `ffn_hidden_size`: the hidden size times 1856 / 2688, to the nearest multiple of 64.
 - `moe_shared_expert_intermediate_size`: two times `moe_ffn_hidden_size`, as in Nano.
 - `mamba_num_heads`: the hidden size times 64 / 2688, to the nearest multiple of 32. The input projection of a Mamba
-  layer is then a multiple of 32 wide, as MXFP8 needs. Its width is 129 times the head count plus 2048, with Nano's
-  head size and groups, and this sum is a multiple of 32 only for a head count that is one.
+  layer is then a multiple of 32 wide, as MXFP8 needs. With the head size and groups of Nano, the width is 129 times
+  the head count plus 2048. This width is a multiple of 32 only if the head count is a multiple of 32.
 - `num_attention_heads`: the hidden size times 32 / 2688, to the nearest multiple of 8.
 
 Every other field keeps the value of `nano.yaml`. `tests/unit_tests/test_nemotronh_size_configs.py` checks each file

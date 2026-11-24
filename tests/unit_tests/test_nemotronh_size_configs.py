@@ -151,6 +151,7 @@ def test_each_size_fits_the_mxfp8_blocks(fe, name):
         "mamba in_proj": arch.in_proj_out,
         "mamba d_inner": arch.d_inner,
         "attention q": arch.num_attention_heads * arch.head_dim,
+        "attention kv": arch.num_kv_heads * arch.head_dim,
         "expert ffn": arch.moe_ffn_hidden_size,
         "shared expert ffn": arch.shared_expert_ffn_hidden_size,
     }
