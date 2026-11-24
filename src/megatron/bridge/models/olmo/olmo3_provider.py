@@ -40,7 +40,7 @@ every layer. Do not use 5.2.0 as the equivalence reference.
 import copy
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Callable, Optional, Union
+from typing import Callable, Union
 
 import torch
 import torch.nn.functional as F
@@ -118,6 +118,11 @@ class TERowParallelLinearPostNorm(TERowParallelLinear):
         return self.post_layernorm(output), bias
 
 
+#: The positions in one cached rope table: a table covers a multiple of this many positions and is sliced to the length
+#: asked for (``Olmo3RotaryEmbedding._forward_cached``).
+ROPE_TABLE_STEP = 4096
+
+
 class Olmo3RotaryEmbedding(RotaryEmbedding):
     """RoPE for OLMo-3: YaRN on full-attention layers, plain RoPE on sliding ones.
 
@@ -143,10 +148,10 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         kv_channels: int,
         rotary_percent: float = 1.0,
         rotary_interleaved: bool = False,
-        seq_len_interpolation_factor: Optional[float] = None,
+        seq_len_interpolation_factor: float | None = None,
         rotary_base: float = 500000.0,
         use_cpu_initialization: bool = False,
-        cp_group: Optional[torch.distributed.ProcessGroup] = None,
+        cp_group: torch.distributed.ProcessGroup | None = None,
         *,
         yarn_scaling_factor: float = 8.0,
         yarn_original_max_position_embeddings: int = 8192,
@@ -190,9 +195,12 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         max_seq_len: int,
         offset: int = 0,
         packed_seq: bool = False,
-        cp_group: Optional[torch.distributed.ProcessGroup] = None,
+        cp_group: torch.distributed.ProcessGroup | None = None,
     ) -> torch.Tensor:
         """Return ``stack([rope_sliding, rope_full])`` along a new leading dim."""
+        # The packed (THD) path passes the sequence length as a 0-d integer tensor. A tensor hashes by identity, so
+        # as a cache key it never hits, and every entry (about 67 MB at 32,768 positions) stays alive.
+        max_seq_len = int(max_seq_len)
         # ProcessGroup is unhashable, so only the common (cp_group=None) path can
         # be cached -- same split Gemma-3 uses.
         if cp_group is not None:
@@ -204,7 +212,7 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         max_seq_len: int,
         offset: int,
         packed_seq: bool,
-        cp_group: Optional[torch.distributed.ProcessGroup],
+        cp_group: torch.distributed.ProcessGroup | None,
     ) -> torch.Tensor:
         rope_sliding = super().forward(max_seq_len, offset, packed_seq, cp_group)
         # YarnRotaryEmbedding.forward returns (emb, mscale); mscale is applied
@@ -212,15 +220,36 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         rope_full, _ = self.rope_full.forward(max_seq_len, offset, packed_seq, cp_group)
         return torch.stack([rope_sliding, rope_full], dim=0)
 
-    @lru_cache(maxsize=32)
-    def _forward_cached(
-        self, max_seq_len: int, offset: int = 0, packed_seq: bool = False
-    ) -> torch.Tensor:
-        """Cached path. Both base rope classes cache their own ``forward``
-        (``rotary_pos_embedding.py:177``, ``yarn_rotary_pos_embedding.py:159``);
-        overriding ``forward`` without a cache would re-stack on every
-        microbatch -- ~25 per step here."""
-        return self._compute(max_seq_len, offset, packed_seq, None)
+    def _forward_cached(self, max_seq_len: int, offset: int, packed_seq: bool) -> torch.Tensor:
+        """The stacked rope for ``max_seq_len`` positions, sliced from a cached table of the next multiple of
+        ``ROPE_TABLE_STEP`` positions.
+
+        A packed batch asks for its longest document's length, which differs for almost every microbatch, and a rope
+        row depends only on its position, so a slice equals the table built for the length itself. An unpacked row under
+        context parallelism is the exception: the base ``forward`` splits its table by position across the ranks, and a
+        split of a longer table is not the split of the table for the length, so that case builds the exact length.
+        """
+        if not packed_seq and self.cp_group is not None and self.cp_group.size() > 1:
+            return self._compute(max_seq_len, offset, packed_seq, None)
+        table_len = -(-max_seq_len // ROPE_TABLE_STEP) * ROPE_TABLE_STEP
+        return self._stacked_table(table_len, offset, packed_seq)[:, :max_seq_len]
+
+    @lru_cache(maxsize=8)
+    def _stacked_table(self, table_len: int, offset: int, packed_seq: bool) -> torch.Tensor:
+        """The stacked rope for ``table_len`` positions. Eight tables cover 32,768 positions at the step."""
+        return self._compute(table_len, offset, packed_seq, None)
+
+
+def select_layer_rope(rotary_pos_emb: torch.Tensor | tuple | None, is_sliding: bool) -> torch.Tensor | tuple | None:
+    """Pick one layer's rope out of the stacked ``(sliding, full)`` pair that :class:`Olmo3RotaryEmbedding` returns.
+
+    The stacked pair is a tensor of shape ``[2, S, 1, 1, d]``. Anything else passes through unchanged: ``None``, a
+    tuple (the flash-decode path), or a single rope ``[S, 1, 1, d]``, whose first dimension is also 2 when ``S == 2``,
+    so the test is on the number of dimensions as well as on the first dimension's size.
+    """
+    if isinstance(rotary_pos_emb, torch.Tensor) and rotary_pos_emb.ndim == 5 and rotary_pos_emb.size(0) == 2:
+        return rotary_pos_emb[0 if is_sliding else 1]
+    return rotary_pos_emb
 
 
 class Olmo3SelfAttention(MCoreSelfAttention):
@@ -251,15 +280,14 @@ class Olmo3SelfAttention(MCoreSelfAttention):
         submodules: SelfAttentionSubmodules,
         layer_number: int,
         attn_mask_type=AttnMaskType.padding,
-        cp_comm_type: str = None,
-        pg_collection: ProcessGroupCollection = None,
-        **kwargs,
-    ):
+        cp_comm_type: str | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
+        pp_layer_offset: int | None = None,
+        name: str | None = None,
+    ) -> None:
         # Single source of truth for "is this a sliding layer?" -- the same helper
         # Megatron-Core itself uses to decide whether to pass window_size to TE.
-        is_sliding = is_layer_window_attention(
-            config.window_size, config.window_attn_skip_freq, layer_number
-        )
+        is_sliding = is_layer_window_attention(config.window_size, config.window_attn_skip_freq, layer_number)
         if is_sliding:
             # YaRN's attention factor reaches attention via the config, not via the
             # rope tensor, so a sliding layer needs its own config with YaRN off.
@@ -273,6 +301,8 @@ class Olmo3SelfAttention(MCoreSelfAttention):
             attn_mask_type=attn_mask_type,
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            pp_layer_offset=pp_layer_offset,
+            name=name,
         )
         self.is_sliding = is_sliding
 
@@ -310,12 +340,7 @@ class Olmo3SelfAttention(MCoreSelfAttention):
         passes everything but ``hidden_states`` by keyword, and enumerating the
         signature here would silently drop any argument Megatron-Core adds later.
         """
-        if (
-            isinstance(rotary_pos_emb, torch.Tensor)
-            and rotary_pos_emb.ndim >= 1
-            and rotary_pos_emb.size(0) == 2
-        ):
-            rotary_pos_emb = rotary_pos_emb[0 if self.is_sliding else 1]
+        rotary_pos_emb = select_layer_rope(rotary_pos_emb, self.is_sliding)
         return super().forward(hidden_states, *args, rotary_pos_emb=rotary_pos_emb, **kwargs)
 
     def get_query_key_value_tensors(self, hidden_states, key_value_states=None, **kwargs):
@@ -417,9 +442,7 @@ class Olmo3ModelProvider(GPTModelProvider):
     :meth:`provide` swaps in :class:`Olmo3RotaryEmbedding` instead.
     """
 
-    transformer_layer_spec: Union[ModuleSpec, Callable[["GPTModelProvider"], ModuleSpec]] = (
-        olmo3_layer_spec
-    )
+    transformer_layer_spec: Union[ModuleSpec, Callable[["GPTModelProvider"], ModuleSpec]] = olmo3_layer_spec
     normalization: str = "RMSNorm"
     activation_func: Callable = F.silu
     gated_linear_unit: bool = True
@@ -441,11 +464,11 @@ class Olmo3ModelProvider(GPTModelProvider):
 
     # Interleaved SWA. Both are set by the bridge from the HF config; the defaults
     # here describe the published 3-sliding : 1-full pattern.
-    window_size: Optional[tuple] = None
-    window_attn_skip_freq: Optional[Union[int, list]] = None
+    window_size: tuple | None = None
+    window_attn_skip_freq: int | list | None = None
 
     # YaRN, applied to full-attention layers only.
-    yarn_rotary_scaling_factor: Optional[float] = None
+    yarn_rotary_scaling_factor: float | None = None
     yarn_original_max_position_embeddings: int = 8192
     yarn_beta_fast: float = 32.0
     yarn_beta_slow: float = 1.0
@@ -453,7 +476,17 @@ class Olmo3ModelProvider(GPTModelProvider):
     yarn_mscale_all_dim: float = 0.0
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None):
-        """Build the GPT model, then replace its rope with the OLMo-3 dual rope."""
+        """Build the GPT model, then replace its rope with the OLMo-3 dual rope.
+
+        Raises:
+            ValueError: ``apply_rope_fusion`` is set while the model has a YaRN factor. The fused rope kernel drops the
+                YaRN attention scale, so the model would compute another forward than the base it was trained as.
+        """
+        if self.apply_rope_fusion and self.yarn_rotary_scaling_factor is not None:
+            raise ValueError(
+                "apply_rope_fusion=True with a YaRN factor: the fused rope drops the YaRN attention scale, so the "
+                "forward would differ from the base model's. Set model.apply_rope_fusion to False."
+            )
         model = super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
         if getattr(model, "rotary_pos_emb", None) is not None:
             model.rotary_pos_emb = Olmo3RotaryEmbedding(

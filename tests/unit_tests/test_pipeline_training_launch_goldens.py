@@ -121,42 +121,35 @@ def test_launch(shell, launch, case):
     assert_golden_json(GOLDENS / f"{case}.json", _snapshot(shell, run))
 
 
-VERDA_OVERLAY = "verda_python_overlay"
-
-
 def verda_job(tmp_path) -> dict[str, str]:
     """The variables that make the fake job a Verda job: the profile, a node of 8 GPUs, and directories of the test's
-    own where the profile names Verda's storage (the node-local image copy, W&B's files and the Python overlay).
-
-    The overlay directory exists, so the job finds the overlay present on any host, as a Verda job does; a record names
-    it by the path the profile derives (``_as_verda_records_it``).
-    """
-    overlay = tmp_path / VERDA_OVERLAY
+    own where the profile names Verda's storage (the node-local image copy, the Python overlay and W&B's files). The
+    overlay folder exists in the test, so that the launcher finds one on any host and not only on a Verda node."""
+    overlay = tmp_path / "overlay"
     overlay.mkdir(exist_ok=True)
     return {
         "GEODESIC_CLUSTER": "verda",
         "SLURM_GPUS_PER_NODE": "8",
         "SLURM_NODELIST": "slinky-1",
         "GEODESIC_CONTAINER_STAGE_ROOT": str(tmp_path / "local"),
-        "WANDB_DIR": str(tmp_path / "wandb"),
         "GEODESIC_CONTAINER_PYTHON_OVERLAY": str(overlay),
+        "WANDB_DIR": str(tmp_path / "wandb"),
     }
-
-
-def _as_verda_records_it(shell: PipelineShell, record: object) -> object:
-    """``record`` (normalised) with ``verda_job``'s overlay directory named by the path the Verda profile derives, as
-    pipeline_env_config.env computes it without the override."""
-    script = f'source "{REPO_ROOT / "pipeline_env_config.env"}" && printf "%s" "$CONTAINER_PYTHON_OVERLAY"'
-    env = shell.env({"GEODESIC_CLUSTER": "verda"})
-    derived = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True).stdout
-    return json.loads(json.dumps(record).replace(f"<TMP>/{VERDA_OVERLAY}", derived))
 
 
 def test_launch_on_verda(tmp_path, shell, launch):
     """The same launcher under the Verda profile: 8 ranks on the node, the image run from its staged copy, NCCL on
-    InfiniBand, the Python overlay after the repository on PYTHONPATH, and none of Slingshot's settings."""
+    InfiniBand, and none of Slingshot's settings."""
     run = launch(None, "--disable-ft", extra_env=verda_job(tmp_path))
-    assert_golden_json(GOLDENS / "verda_disable_ft.json", _as_verda_records_it(shell, _snapshot(shell, run)))
+    assert_golden_json(GOLDENS / "verda_disable_ft.json", _snapshot(shell, run))
+
+
+def test_the_verda_profile_names_the_python_overlay_built_for_its_image(shell):
+    """Without an override, the Verda profile derives the overlay path from its container root and image."""
+    script = f'source "{REPO_ROOT / "pipeline_env_config.env"}" && printf "%s" "$CONTAINER_PYTHON_OVERLAY"'
+    env = shell.env({"GEODESIC_CLUSTER": "verda"})
+    derived = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True).stdout
+    assert derived == "/shared/geodesic/containers/overlay/nemo_26.10.00_8499eb66"
 
 
 def test_a_verda_launch_whose_python_overlay_is_missing_runs_without_it_and_says_so(tmp_path, shell, launch):
@@ -341,8 +334,7 @@ def test_env_submit_smoke_on_verda(tmp_path, pipeline_launch_shell):
     env = {**verda_job(tmp_path), "SLURM_JOB_NUM_NODES": "2", "SLURM_JOB_NODELIST": "slinky-[1-2]"}
     run = pipeline_launch_shell.run("pipeline_env_submit.sbatch", "smoke", env=env)
     assert_golden_json(
-        FIXTURES / "environment" / "verda_submit_smoke_two_nodes.json",
-        _as_verda_records_it(pipeline_launch_shell, pipeline_launch_shell.normalise(run)),
+        FIXTURES / "environment" / "verda_submit_smoke_two_nodes.json", pipeline_launch_shell.normalise(run)
     )
 
 

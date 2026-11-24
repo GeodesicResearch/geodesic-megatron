@@ -101,8 +101,10 @@ def fp32_head_outputs(model, input_ids: list[int]):
     hook = head.register_forward_pre_hook(lambda module, args: fed.append(args[0]))
     try:
         with torch.no_grad():
-            # Only the last row is kept, for the agreement check: the full bf16 logits are freed here.
+            # Only the last row is kept, for the agreement check: the full bf16 logits are freed here (a view of the
+            # last row would keep them all alive, 6.6 GB at 32,768 positions of a 100k vocabulary).
             native = model(input_ids=torch.tensor([input_ids], device=model.device), use_cache=False).logits[0, -1]
+            native = native.clone()
     finally:
         hook.remove()
     if len(fed) != 1 or fed[0].shape[:2] != (1, len(input_ids)):
@@ -186,8 +188,12 @@ def device_map_for(placement: str, gpu_count: int) -> dict[str, int] | str | Non
 
 def load_model(model_path: str, dtype: str, placement: str):
     """The model at ``model_path`` in ``dtype``, placed as ``placement`` says (``device_map_for``) on the GPUs this
-    process sees. Raises ValueError as ``device_map_for`` does, and RuntimeError as ``require_on_gpus`` does."""
+    process sees. An OLMo-3 is made the reference (``hf_olmo3_rope.apply_reference_rope``): transformers 5.1 to 5.5 give
+    its sliding-window layers YaRN, which AI2's model does not use. Raises ValueError as ``device_map_for`` does,
+    RuntimeError as ``require_on_gpus`` does, and as ``apply_reference_rope`` does on a rotary structure it does not
+    know."""
     import torch
+    from scripts.checkpoint.hf_olmo3_rope import apply_reference_rope
     from transformers import AutoModelForCausalLM
 
     device_map = device_map_for(placement, torch.cuda.device_count())
@@ -195,6 +201,8 @@ def load_model(model_path: str, dtype: str, placement: str):
     model.eval()
     if device_map is not None:
         require_on_gpus(model, placement)
+    if model.config.model_type == "olmo3":
+        apply_reference_rope(model)
     return model
 
 

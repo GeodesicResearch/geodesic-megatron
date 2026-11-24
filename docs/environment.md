@@ -567,22 +567,15 @@ ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20 ISAMBARD_TORCH_PROFI
   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
   configs/quickstart/nemotron_super_quickstart_sft.yaml super sft \
   train.train_iters=25 checkpoint.load=null checkpoint.save=null \
-  logger.wandb_save_dir=/projects/a5k/public/logs/wandb \
   logger.wandb_exp_name=nemotron_super_quickstart_sft_profile
 ```
 
-Three of those overrides are load-bearing — one fails silently, one fails at startup:
+`checkpoint.load=null` is already the default of the quickstart config. The command keeps it so
+that it stays safe when pasted against a config whose `checkpoint.load` names a checkpoint
+directory. A run that finds a finished checkpoint there resumes, runs zero iterations, leaves an
+empty profile directory and reports no error.
 
-- **`checkpoint.load=null`** — without it the run resumes whatever iteration already sits in
-  the config's `checkpoint.load` dir (the quickstart shares one with the benchmark runs), so
-  a repeat profiling run executes zero iterations and captures nothing. No error; you just
-  get an empty profile directory.
-- **`checkpoint.save=null`** — a profiling run has no output worth 200+ GB of writes.
-- **`logger.wandb_save_dir=...`** — **mandatory whenever `checkpoint.save=null`**.
-  `training/state.py` computes the W&B dir as `logger.wandb_save_dir or
-  os.path.join(cfg.checkpoint.save, "wandb")`, so with `save` null and `wandb_save_dir`
-  unset it evaluates `os.path.join(None, "wandb")` and the job dies at startup with a
-  `TypeError` on the last rank.
+`checkpoint.save=null` keeps a profiling run from writing a checkpoint of more than 200 GB.
 
 Knobs: `ISAMBARD_TORCH_PROFILE=1` (or a path, to override the default output root
 `/projects/a5k/public/profiles`), `ISAMBARD_TORCH_PROFILE_ITERS` (comma-separated, 1-based;

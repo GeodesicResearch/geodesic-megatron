@@ -27,7 +27,7 @@ from megatron.core.utils import StragglerDetector
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from megatron.bridge.training.config import ConfigContainer
+from megatron.bridge.training.config import CheckpointConfig, ConfigContainer, LoggerConfig
 from megatron.bridge.training.nvrx_straggler import NVRxStragglerDetectionManager
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.utils.log_utils import safe_serialize
@@ -232,7 +232,14 @@ class GlobalState:
 
     @property
     def wandb_logger(self) -> Optional[Any]:
-        """The Weights & Biases logger instance, lazily initialized for rank N-1."""
+        """The Weights & Biases logger instance, lazily initialized for rank N-1.
+
+        It is None on other ranks and when ``logger.wandb_project`` is unset. On first use on rank N-1, it strips
+        whitespace from the ``WANDB_API_KEY`` environment variable. It then connects to the W&B service with
+        ``wandb.init``, passing ``logger.wandb_entity`` and the whole config (``cfg.to_dict()``). W&B writes its local
+        files under ``logger.wandb_save_dir``, else ``<checkpoint.save>/wandb``, else the ``WANDB_DIR`` environment
+        variable. Raises ValueError when none of the three is set, or when ``logger.wandb_exp_name`` is empty.
+        """
         if self._wandb_logger is None:
             if self.cfg.logger.wandb_project and get_rank_safe() == (get_world_size_safe() - 1):
                 if self.cfg.logger.wandb_exp_name == "":
@@ -240,7 +247,7 @@ class GlobalState:
 
                 import wandb
 
-                save_dir = self.cfg.logger.wandb_save_dir or os.path.join(self.cfg.checkpoint.save, "wandb")
+                save_dir = _wandb_dir(self.cfg.logger, self.cfg.checkpoint)
 
                 config_dict = self.cfg.to_dict()
                 sanitized_config = json.loads(json.dumps(config_dict, default=safe_serialize))
@@ -500,6 +507,18 @@ class GlobalState:
         self._token_masking = None
         self._token_masking_monitor = None
         self.masked_validation = None
+
+
+def _wandb_dir(logger: LoggerConfig, checkpoint: CheckpointConfig) -> str:
+    """The directory ``GlobalState.wandb_logger`` gives W&B, in the order its docstring states."""
+    if logger.wandb_save_dir:
+        return logger.wandb_save_dir
+    if checkpoint.save:
+        return os.path.join(checkpoint.save, "wandb")
+    if os.environ.get("WANDB_DIR"):
+        return os.environ["WANDB_DIR"]
+    # W&B's own default is the working directory, which on a cluster is the code checkout.
+    raise ValueError("W&B needs a directory: set logger.wandb_save_dir, checkpoint.save or WANDB_DIR.")
 
 
 def _timers_write_to_wandb(

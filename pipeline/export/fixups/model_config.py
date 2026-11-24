@@ -32,7 +32,7 @@ from pathlib import Path
 from pipeline.export.decoding_defaults import GENERATION_CONFIG, generation_config_text
 from pipeline.export.fixups.remote_code import apply_remote_code_policy
 from pipeline.hf_cache import cached_file
-from pipeline.nemotron import BLOCK_TYPE_CHARS, IM_END_TOKEN_ID
+from pipeline.nemotron import BLOCK_TYPE_CHARS
 
 
 def read_embedding_row_count(hf_path: Path) -> int | None:
@@ -67,20 +67,21 @@ def read_embedding_row_count(hf_path: Path) -> int | None:
     return header[emb_key]["shape"][0]
 
 
-def fix_eos_token_ids(hf_path: Path, also_config_json: bool) -> None:
-    """Add ``IM_END_TOKEN_ID`` to ``eos_token_id`` when the export has a chat template.
+def fix_eos_token_ids(hf_path: Path, also_config_json: bool, end_of_turn_id: int) -> None:
+    """Add ``end_of_turn_id`` to ``eos_token_id`` when the export has a chat template.
 
-    The id goes into generation_config.json, which generation reads, or into config.json when there is none. With
-    ``also_config_json`` it goes into config.json as well, so the export carries it in both files. Each file is
-    rewritten only when it gains the id; a file without an int or list ``eos_token_id`` is left alone.
+    ``end_of_turn_id`` is the id of the chat format's ``<|im_end|>``: ``IM_END_TOKEN_ID`` (11) for Nemotron, 100265
+    for Olmo 3. The id goes into generation_config.json, which generation reads, or into config.json when there is
+    none. With ``also_config_json`` it goes into config.json as well, so the export carries it in both files. Each
+    file is rewritten only when it gains the id; a file without an int or list ``eos_token_id`` is left alone.
     """
     # Fix eos_token_id: when --hf-model points at the Base release (or any
     # release without a chat_template), config.json and generation_config.json
     # inherit eos_token_id=2 (`</s>`) only. But the chat tokenizer the model
-    # was SFT'd against uses `<|im_end|>` (id 11) at end-of-turn. Generation
-    # must stop on either id, otherwise the model runs to max_new_tokens.
-    # Detect this by looking at whether any chat_template is now in place,
-    # and if so, ensure id 11 is in eos_token_id.
+    # was SFT'd against uses `<|im_end|>` (id 11 for Nemotron) at end-of-turn.
+    # Generation must stop on either id, otherwise the model runs to
+    # max_new_tokens. Detect this by looking at whether any chat_template is
+    # now in place, and if so, ensure end_of_turn_id is in eos_token_id.
     chat_template_active = (hf_path / "chat_template.jinja").exists() or (
         (hf_path / "tokenizer_config.json").exists()
         and "chat_template" in json.loads((hf_path / "tokenizer_config.json").read_text())
@@ -100,20 +101,21 @@ def fix_eos_token_ids(hf_path: Path, also_config_json: bool) -> None:
         with open(cfg_path) as f:
             cfg = json.load(f)
         existing = cfg.get("eos_token_id")
-        # Normalise to a list and add id 11 if not already present.
+        # Normalise to a list and add the end-of-turn id if not already present.
         if isinstance(existing, int):
             existing_list = [existing]
         elif isinstance(existing, list):
             existing_list = list(existing)
         else:
             continue
-        if IM_END_TOKEN_ID not in existing_list:
-            new_list = sorted(set(existing_list + [IM_END_TOKEN_ID]))
+        if end_of_turn_id not in existing_list:
+            new_list = sorted(set(existing_list + [end_of_turn_id]))
             cfg["eos_token_id"] = new_list
             with open(cfg_path, "w") as f:
                 json.dump(cfg, f, indent=2, ensure_ascii=False)
             print(
-                f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)"
+                f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} "
+                f"(added <|im_end|>={end_of_turn_id} for chat-format generation)"
             )
 
 

@@ -1220,7 +1220,7 @@ class TestPackedSequenceWithChatEndToEnd:
         pack_size = 5
         pad_id = 2
 
-        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id)
+        output_data = fill_packing_strategy(assignments, sequences, pack_size, pad_id, np.random.default_rng(0))
 
         # Verify loss_mask was preserved and rolled correctly
         assert len(output_data) == 1

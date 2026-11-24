@@ -11,6 +11,7 @@ decodes greedily; a reasoning export samples at ``REASONING_GENERATION_DEFAULTS`
 - ``SAMPLING_KEYS``: the fields the rule removes before it sets a mode's defaults.
 - ``REASONING_GENERATION_DEFAULTS``: what a reasoning export samples at.
 - ``generation_config_text``: the file's text for a mode, from the text it held.
+- ``release_file_in_export``: what an export holds of a release's file that the exporter copies (a reference file).
 
 Standard library only.
 """
@@ -21,7 +22,17 @@ import json
 
 
 GENERATION_CONFIG = "generation_config.json"
-SAMPLING_KEYS = ("do_sample", "temperature", "top_p", "top_k")
+SAMPLING_KEYS = (
+    "do_sample",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "top_h",
+    "typical_p",
+    "epsilon_cutoff",
+    "eta_cutoff",
+)
 REASONING_GENERATION_DEFAULTS = {"do_sample": True, "temperature": 0.6, "top_p": 0.95}
 
 
@@ -36,3 +47,12 @@ def generation_config_text(original: str, reasoning: bool) -> str:
     if reasoning:
         config.update(REASONING_GENERATION_DEFAULTS)
     return json.dumps(config, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+
+
+def release_file_in_export(name: str, release_bytes: bytes, reasoning: bool) -> bytes:
+    """The bytes an export of the given mode holds of the release's file ``name`` whose bytes are ``release_bytes``:
+    the release's own, except ``generation_config.json``, which is the release's file with the mode's decoding
+    defaults (``generation_config_text``). Raises ``ValueError`` when that file is not UTF-8 JSON."""
+    if name != GENERATION_CONFIG:
+        return release_bytes
+    return generation_config_text(release_bytes.decode(), reasoning).encode()

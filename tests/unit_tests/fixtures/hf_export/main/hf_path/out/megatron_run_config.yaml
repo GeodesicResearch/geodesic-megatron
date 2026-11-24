@@ -2,3 +2,5 @@ tokenizer:
   tokenizer_model: geodesic-research/nemotron-instruct-tokenizer
 train:
   train_iters: 300
+model:
+  _target_: megatron.bridge.models.mamba.mamba_provider.MambaModelProvider

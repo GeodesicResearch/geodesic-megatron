@@ -9,6 +9,7 @@ GPU-free.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -20,6 +21,7 @@ from pipeline import checkpoints, nemotron
 from pipeline.export import fixups, peft_merge
 from pipeline.export.decoding_defaults import REASONING_GENERATION_DEFAULTS
 from pipeline.export.fixups import model_config, release_files, remote_code
+from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 
 
 def _make_modeling_source(src_dir: Path) -> Path:
@@ -271,6 +273,71 @@ def test_a_peft_checkpoint_outside_a_parallel_torchrun_is_refused(convert_module
         convert_module.main()
 
 
+def test_a_model_that_is_not_nemotronh_is_refused_without_its_end_of_turn_id_before_the_conversion_starts(
+    convert_module, tmp_path, monkeypatch
+):
+    """The default id 11 is Nemotron's ``<|im_end|>``: exporting an Olmo 3 run without ``--end-of-turn-id`` would add
+    it to the end-of-generation ids, where it is another token."""
+    olmo = "megatron.bridge.models.olmo.olmo3_provider.Olmo3ModelProvider"
+    run = make_checkpoint_dir(tmp_path / "run", [7], tracker=7, run_config=f"model:\n  _target_: {olmo}\n")
+    converted = []
+    # The conversions need GPUs and a Megatron checkpoint: record that neither starts.
+    monkeypatch.setattr(convert_module, "convert_single_process", lambda *a, **k: converted.append("single"))
+    monkeypatch.setattr(convert_module, "convert_multi_gpu", lambda *a, **k: converted.append("multi"))
+    argv = ["convert", f"--megatron-path={run}", "--hf-model=some/release", "--no-reasoning"]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit, match="--end-of-turn-id"):
+        convert_module.main()
+    assert converted == []
+    # With the id asked for, the conversion starts (rank 1 alone, as rank 0 would go on to the fixups).
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setattr(sys, "argv", [*argv, "--end-of-turn-id=100265"])
+    convert_module.main()
+    assert converted == ["single"]
+
+
+def test_a_reference_file_the_release_lacks_is_refused_before_the_conversion_starts(
+    convert_module, tmp_path, monkeypatch
+):
+    """The check that ``copy_release_files`` makes after the conversion is made at the start too, so that a wrong name
+    costs no allocation."""
+    run = make_checkpoint_dir(
+        tmp_path / "run", [7], tracker=7, run_config=f"model:\n  _target_: {nemotron.NEMOTRON_H_PROVIDER}\n"
+    )
+    parent = tmp_path / "base"
+    parent.mkdir()
+    release = _release(parent)
+    converted = []
+    # The conversions need GPUs and a Megatron checkpoint: record that neither starts.
+    monkeypatch.setattr(convert_module, "convert_single_process", lambda *a, **k: converted.append("single"))
+    monkeypatch.setattr(convert_module, "convert_multi_gpu", lambda *a, **k: converted.append("multi"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "convert",
+            f"--megatron-path={run}",
+            f"--hf-model={release}",
+            "--no-reasoning",
+            "--reference-files=tokenizer_config.json,missing.json",
+        ],
+    )
+    with pytest.raises(FileNotFoundError, match="release has no missing.json"):
+        convert_module.main()
+    assert converted == []
+    # Another rank of the torchrun does not check: rank 0 alone reads the release, and a failure there ends them all.
+    monkeypatch.setenv("RANK", "1")
+    convert_module.main()
+    assert converted == ["single"]
+
+
+def test_a_weight_file_is_refused_as_a_reference_file_name(convert_module):
+    """``reference_file_names``, the argument type of ``--reference-files``, refuses the export's own weights."""
+    assert convert_module.reference_file_names("config.json,tokenizer.json") == ["config.json", "tokenizer.json"]
+    with pytest.raises(argparse.ArgumentTypeError, match=r"\['model.safetensors.index.json'\] are weight files"):
+        convert_module.reference_file_names("config.json,model.safetensors.index.json")
+
+
 # A release's inference template and a training variant of it: the same render, plus {% generation %} blocks
 # around the assistant reply (and its <|im_end|>, but not the newline) for the loss mask.
 _RELEASE_TEMPLATE = (
@@ -421,7 +488,13 @@ class TestFixupHfOutput:
         return install
 
     def _fixup(self, export: Path, release: Path) -> None:
-        fixups.fixup_hf_output(export, str(release), reasoning=False, training_tokenizer_id=_TRAINING_TOKENIZER_ID)
+        fixups.fixup_hf_output(
+            export,
+            str(release),
+            reasoning=False,
+            training_tokenizer_id=_TRAINING_TOKENIZER_ID,
+            end_of_turn_id=nemotron.IM_END_TOKEN_ID,
+        )
 
     def test_an_adopted_slow_tokenizer_class_is_pinned_fast(self, tmp_path, training_tokenizer):
         """Nano-9B-v2's release names PreTrainedTokenizer: the adopted tokenizer_config still loads fast."""
@@ -573,7 +646,12 @@ class TestGenerationDefaults:
         # the decoding defaults are among them whatever else is missing.
         path = _written(tmp_path, UPSTREAM_GENERATION_CONFIG)
 
-        fixups.fixup_hf_output(tmp_path, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", reasoning=reasoning)
+        fixups.fixup_hf_output(
+            tmp_path,
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            reasoning=reasoning,
+            end_of_turn_id=nemotron.IM_END_TOKEN_ID,
+        )
 
         written = json.loads(path.read_text())
         expected = {**NON_SAMPLING_FIELDS, **(REASONING_GENERATION_DEFAULTS if reasoning else {})}

@@ -1,0 +1,5 @@
+# The full local copy of each OLMo-3 base model that its run warm-starts from: weights, tokenizer files and the
+# config.json that sizes the model (megatron.bridge.recipes.olmo.olmo3.olmo3_sft_config). The Hugging Face cache holds
+# only the config of these two repositories. Keys are the --model names of the launcher.
+olmo3_7b: /projects/a5k/public/data_kyleobrien.a5k/models/Olmo-3-1025-7B
+olmo3_32b: /projects/a5k/public/data_kyleobrien.a5k/models/Olmo-3-1125-32B

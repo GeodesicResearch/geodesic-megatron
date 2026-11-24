@@ -586,6 +586,7 @@ logger:
     max_scan_tokens_per_source: 20000000
     max_scan_seconds: 120.0
   skip_train_metrics_log: false
+  peak_memory_report_interval: null
   mlflow_experiment: null
   mlflow_run_name: null
   mlflow_tracking_uri: null

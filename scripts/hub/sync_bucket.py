@@ -223,13 +223,18 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     )
 
 
-def stage_save_directory(config: Path) -> Path:
-    """The directory a stage config saves its checkpoints to (``checkpoint.save``)."""
-    cfg = yaml.safe_load(config.read_text())
+def save_directory_of(cfg: Any, config: Path) -> Path:
+    """The directory the loaded stage config ``cfg`` saves its checkpoints to (``checkpoint.save``);
+    ``config`` names the file in the error."""
     save = (cfg.get("checkpoint") or {}).get("save") if isinstance(cfg, dict) else None
     if not isinstance(save, str) or not save.startswith("/"):
         raise ManifestError(f"{config}: checkpoint.save must be an absolute path, got {save!r}")
     return Path(save)
+
+
+def stage_save_directory(config: Path) -> Path:
+    """The directory a stage config saves its checkpoints to, read from the file as raw YAML."""
+    return save_directory_of(yaml.safe_load(config.read_text()), config)
 
 
 def stage_checkpoint_entry(config: Path, checkpoints_prefix: str) -> CheckpointEntry:

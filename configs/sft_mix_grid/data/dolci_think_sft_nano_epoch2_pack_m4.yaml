@@ -1,0 +1,13 @@
+# The pack of epoch 2 of the Nemotron 3 Nano Dolci-SFT: each shard of the epoch-2 partition
+# (dolci_think_sft_nano_epoch2_partition.yaml), packed as epoch 1 is (dolci_think_sft_nano_epoch1_pack_m4.yaml).
+#
+#   python3 configs/control_pretraining/submit_corpus_job.py nano-dolci-pack-e2m4-s0 00:30:00 \
+#       scripts/data/pack_from_config.py --config configs/sft_mix_grid/data/dolci_think_sft_nano_epoch2_pack_m4.yaml \
+#       --shard 0 --num-tokenizer-workers 64
+dataset_root: /projects/a5k/public/data/allenai__Dolci-Think-SFT-7B__reasoning_content/epoch2/shard{shard}
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+seq_length: 32768
+pad_seq_to_mult: 4
+packing_algorithm: first_fit_shuffle
+dataset_kwargs: {answer_only_loss: true, pad_to_max_length: false}
+exclude_rows: null

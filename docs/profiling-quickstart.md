@@ -21,16 +21,15 @@ the JIT/comm-init window. Two capture points let you check that the profiled
 step is representative (e.g. no one-off straggler like the 458 ms gap seen in
 one earlier capture) and bracket periodic effects such as the manual-GC cycle.
 
-Profiling runs never save or resume checkpoints (`checkpoint.load`/`save` are
-null in the profile config): every run — including a repeat of the same
+Profiling runs never save or resume checkpoints (the quickstart config sets
+`checkpoint.load: null` and the command below sets `checkpoint.save=null`): every run — including a repeat of the same
 command — starts from the pretrained checkpoint and executes all 25
 iterations. This is deliberate: with a shared load/save dir, a second run
 would resume at step 25 and capture nothing.
 
 ## 1. Launch
 
-Profiling runs against the standing quickstart config — there is no separate
-profile config to drift out of sync. The four overrides are all load-bearing:
+Profiling runs against the standing quickstart config with these overrides:
 
 ```bash
 cd /home/a5k/kyleobrien.a5k/geodesic-megatron
@@ -40,18 +39,12 @@ ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20 \
     configs/quickstart/nemotron_super_quickstart_sft.yaml super sft \
     train.train_iters=25 \
     checkpoint.save=null \
-    logger.wandb_save_dir=/projects/a5k/public/logs/wandb \
     logger.wandb_exp_name=nemotron_super_quickstart_sft_profile
 ```
 
 - `train.train_iters=25` — enough to reach the captures at 10 and 20 without
   paying for the full 48-iteration benchmark workload.
 - `checkpoint.save=null` — a profiling run should not write a 223 GB checkpoint.
-- `logger.wandb_save_dir=...` — **mandatory whenever `checkpoint.save=null`**. The
-  W&B directory otherwise defaults to `join(checkpoint.save, "wandb")`, which is
-  `join(None, "wandb")` → `TypeError` on the last rank, killing a 16-node job at
-  startup. (`checkpoint.load` is already `null` in the committed config, so a
-  repeat profiling run cannot resume a finished checkpoint and capture nothing.)
 - `logger.wandb_exp_name=...` — the profile output directory is named after the
   W&B experiment name, so this keeps profiling artifacts out of the directory
   used by production benchmark runs.

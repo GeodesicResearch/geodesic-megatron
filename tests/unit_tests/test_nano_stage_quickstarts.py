@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 from scripts.data.run_training_data import microbatches_per_replica
-from scripts.nemotronh_flops_estimator import RunSpec
+from scripts.flops_common import RunSpec
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml
 from scripts.training.launcher_source import env_override_entries
 
@@ -346,7 +346,7 @@ class TestTheBenchmarkFields:
         assert benchmark.dist.distributed_timeout_minutes < production.dist.distributed_timeout_minutes
 
     def test_wandb_has_a_directory_and_a_name_of_its_own(self, stage, benchmark, production):
-        """With checkpoint.save null, W&B's default directory (<save>/wandb) does not exist."""
+        """A benchmark that saves no checkpoint names a W&B directory on shared storage and a W&B name of its own."""
         assert Path(benchmark.logger.wandb_save_dir).is_relative_to(SHARED_STORAGE)
         assert benchmark.logger.wandb_exp_name == stage.wandb_name != production.logger.wandb_exp_name
 

@@ -165,7 +165,7 @@ of the allocation. The copy needs the pinned Megatron-LM and its built dataset h
 SNAP=/projects/a5k/public/logs/control_pretraining/v2e2e_probe/code-$(git rev-parse --short HEAD)
 mkdir -p "$SNAP/3rdparty/Megatron-LM"
 git archive HEAD | tar -x -C "$SNAP"
-git -C 3rdparty/Megatron-LM archive HEAD | tar -x -C "$SNAP/3rdparty/Megatron-LM"
+git -C 3rdparty/Megatron-LM archive "$(git rev-parse HEAD:3rdparty/Megatron-LM)" | tar -x -C "$SNAP/3rdparty/Megatron-LM"
 cp 3rdparty/Megatron-LM/megatron/core/datasets/helpers_cpp*.so "$SNAP/3rdparty/Megatron-LM/megatron/core/datasets/"
 git rev-parse HEAD > "$SNAP/REVISION"
 cd "$SNAP" && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250 isambard_sbatch \

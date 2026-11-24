@@ -1,0 +1,28 @@
+# What a save of the run of olmo3_7b_norm_sft_grid.yaml may record differently from the save it started from, for
+# scripts/checkpoint/save_record_check.py (its docstring states the check).
+#
+# The reference is save 9,089 of the Olmo-Norm 7B run, which olmo3_7b_norm_sft_grid.yaml continues. The file is that
+# run's own save, and its sha256 is named so that a changed file is not read. A recipe field is in no entry below, so a
+# save that records another learning rate, schedule, batch, length, loss or data than save 9,089 fails the check.
+references:
+  olmo_norm_7b_9089:
+    run_config: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/metagaming_filtering/olmo3_7b_norm_sft/iter_0009089/run_config.yaml
+    sha256: 21fa2f23fcf7e60c278ccbf1e7ea07948933cb00c77e24a0b944d14ab50d35fb
+
+allowed:
+  - keys: [checkpoint.load, checkpoint.save, logger.wandb_exp_name]
+    reason: the run identity, a save folder and a W&B name of its own
+    references: [olmo_norm_7b_9089]
+  - keys: [checkpoint.save_interval, checkpoint.most_recent_k]
+    reason: a save every 2,000 iterations with the 2 most recent kept; the reference saved every 9,089 and kept all
+    references: [olmo_norm_7b_9089]
+  - keys: [logger.peak_memory_report_interval]
+    reason: the peak-memory progress line every 500 steps, a setting that the reference run's code did not have
+    references: [olmo_norm_7b_9089]
+    only_in: candidate
+  - keys: [checkpoint.ckpt_step]
+    reason: the first segment names save 9,089 as its start (olmo3_7b_norm_sft_grid_start.yaml); the reference named none
+    references: [olmo_norm_7b_9089]
+  - keys: [train.exit_duration_in_mins]
+    reason: the segment's exit time; the reference's launch line set 1,399 minutes and the config sets 1,400
+    references: [olmo_norm_7b_9089]

@@ -43,7 +43,7 @@
 #                       and modeling_nemotron_h.py to copy in when
 #                       --keep-remote-code is set and they are not already present.
 #   --eos-in-config-json
-#                       Put <|im_end|> (id 11) into config.json's eos_token_id as
+#                       Put <|im_end|> (--end-of-turn-id, 11 for NemotronH) into config.json's eos_token_id as
 #                       well as generation_config.json's. Without it config.json keeps
 #                       the release's ids when the export has a generation_config.json.
 #   --format lora-factors
@@ -85,6 +85,10 @@
 #   --no-reasoning      REQUIRED (one of).
 #   --poll              Keep watching for new checkpoints from ongoing training
 #   --hf-org ORG        HuggingFace org (default: geodesic-research)
+#
+# upload-all serves NemotronH runs only: it passes no --end-of-turn-id, and the converter refuses any
+# other model without it. Convert such a run with `export ... --end-of-turn-id ID` or publish it with
+# scripts/hub/publish_models.py, whose manifest sets export.end_of_turn_token_id.
 #
 # Examples:
 #   # Export non-reasoning SFT (em_de, EM v4, persona, etc.)

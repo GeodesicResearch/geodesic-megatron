@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from pipeline.nemotron import IM_END_TOKEN_ID
 from tests.unit_tests.child_process import run_python
 from tests.unit_tests.goldens import FIXTURES, assert_golden_tree
 from tests.unit_tests.hf_export_fixtures import (
@@ -186,7 +187,13 @@ def _build(tmp_path: Path, case: dict) -> tuple[Path, Path, dict]:
         for name in ("configuration_nemotron_h.py", "modeling_nemotron_h.py"):
             (source / name).write_text(f"# {name}, vLLM-correct\n")
         case["remote_code_source"] = str(source)
-    kwargs = {"hf_model_id": NANO, "reasoning": False, **case, "hf_path": str(export)}
+    kwargs = {
+        "hf_model_id": NANO,
+        "reasoning": False,
+        "end_of_turn_id": IM_END_TOKEN_ID,
+        **case,
+        "hf_path": str(export),
+    }
     return export, hf_home, kwargs
 
 

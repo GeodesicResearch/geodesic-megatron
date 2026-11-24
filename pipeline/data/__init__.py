@@ -21,4 +21,5 @@ Catalogue:
     count: token counts through the pack path's chat rendering.
     packing: the subprocess that packs a dataset root's JSONL into parquet.
     verify: the loss-mask report of a packed parquet.
+    tokenizer_check: whether a loaded tokenizer has the pre-tokenizer of the tokenizer.json beside it.
 """

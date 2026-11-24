@@ -127,7 +127,6 @@ is 3126.
 
 Each save becomes a private revision `midtraining_iter_<n>` of
 `geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-base` via
-`scripts/hub/publish_models.py --phase submit`, one export job per checkpoint. Check the
-repository's `private` flag on the Hub after the first push, since `create_repo(exist_ok=True)`
-would not flip a repository created public elsewhere. Publish the final only after the chain has
-drained.
+`scripts/hub/publish_models.py --phase submit`, one export job per checkpoint. The upload refuses a
+repository whose visibility differs from the manifest's `private` flag. Publish the final only
+after the chain has drained.

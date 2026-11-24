@@ -12,7 +12,7 @@ Launching, profiling, run identity, scoring and gates, environment variables, fa
 | `pipeline_training_submit.sbatch` | Thin SLURM wrapper: allocates nodes, calls `pipeline_training_launch.sh` |
 
 Training script (called by the launcher):
-- `pipeline_training_run.py` — Unified entry point for SFT, CPT, and from-scratch pretraining (dispatches via `--model nano|super|ultra --mode sft|cpt|pretrain`; `pretrain` uses the NVIDIA pretrain recipes + the `pretrain()` entry point, requires `dataset.data_path`, and loads no checkpoint unless the YAML sets one)
+- `pipeline_training_run.py` — Unified entry point for SFT, CPT, and from-scratch pretraining (dispatches via `--model <model> --mode sft|cpt|pretrain`, where `<model>` is a model of `RECIPE_MAP` in `pipeline/training/recipes.py`; `pretrain` uses the NVIDIA pretrain recipes + the `pretrain()` entry point, requires `dataset.data_path`, and loads no checkpoint unless the YAML sets one)
 
 ### Usage
 
@@ -34,7 +34,7 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
-`pipeline_training_launch.sh` options: `--model nano|super|ultra` (required), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--disable-straggler`, `--enable-pao`, `--peft lora|canonical_lora`, `--nodes N`, `--nodelist LIST`.
+`pipeline_training_launch.sh` options: `--model <model>` (required, one of the launcher's `ALLOWED_MODELS`), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--disable-straggler`, `--enable-pao`, `--peft lora|canonical_lora`, `--nodes N`, `--nodelist LIST`.
 
 `cpt` and `pretrain` both read Megatron-native `.bin/.idx` data and both **require**
 `dataset.data_path` in the config — there is no default corpus. They differ only in the
@@ -54,13 +54,14 @@ overrides apply last. Composition happens only where a config is read through
 `scripts/data/report_blend_coverage.py`, `scripts/data/predict_masked_counts.py` and
 `scripts/data/held_out_documents.py` (all three through
 `scripts/data/run_training_data.py`), which resolve a config through `pipeline/training/recipes.py`'s
-`resolve_bin_idx_run_config`), `scripts/nemotronh_flops_estimator.py` (and
-`scripts/telemetry/score_run.py`, which reads its config through the estimator), the launch blocks'
+`resolve_bin_idx_run_config`), `scripts/flops_common.py` (the run spec of both FLOP estimators, and
+`scripts/telemetry/score_run.py`, which reads its config through it), the Hub publisher's stage configs
+(`scripts/hub/publish_models.py` `stage_facts`), the launch blocks'
 checks (`scripts/training/launch_blocks.py`, through which `code_identity.py` and `launch_width.py` read a config's
 `code_identity:` and `launch_width:` blocks) and the config-test
 helpers (`tests/unit_tests/campaign_config.py`, `test_control_pretraining_config.py`).
 `configs/control_pretraining/stage_gate.sbatch`,
-`scripts/hub/sync_bucket.py`, `scripts/hub/publish_models.py` and
+`scripts/hub/sync_bucket.py` and
 `configs/control_pretraining/generate_epoch_chain.py` (which copies each chain's `posture_config`
 into its links and reads its `parent_config`) read their configs as raw YAML, so a config they are pointed at must stay a
 complete file. The Nano pretrain quickstart is the
@@ -108,10 +109,8 @@ placement measurements).
 - **Torch-profiler capture** (any launch): prefix with
   `ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20` (also
   `_RANKS=0,9`; legacy `_WAIT=3` = single capture at iteration 5). Profiling runs
-  against the STANDING quickstart config with overrides — there is no separate
-  profile config to drift out of sync; the exact command (including the
-  `logger.wandb_save_dir` that is mandatory alongside `checkpoint.save=null`) is in
-  that config's header and in `docs/profiling-quickstart.md`. Artifacts (per-rank traces, provenance, config +
+  against the standing quickstart config with overrides.
+  That config's header and `docs/profiling-quickstart.md` give the exact command. Artifacts (per-rank traces, provenance, config +
   resolved-config snapshots, raw-log copy) land in
   `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/`.
   `ISAMBARD_TORCH_PROFILE_WITH_STACK` (default `1`) records Python stacks, which
@@ -141,8 +140,10 @@ placement measurements).
   `--config configs/quickstart/nemotron_nano_quickstart_pretrain.yaml --hf-model
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --gpus 64 --window 26 50 --loss-window 41 50`.
   The sequence length and model FLOPs/token are read from the config (through its
-  `base_config:` chain) and the HF `config.json` by `scripts/nemotronh_flops_estimator.py`'s
-  library, and the peak defaults to the cluster profile's `CLUSTER_GPU_PEAK_TFLOPS` (989.4 on Isambard, GH200 dense
+  `base_config:` chain, `scripts/flops_common.py`) and the HF `config.json` by the estimator that the config's
+  `model_type` selects (`scripts/nemotronh_flops_estimator.py` for `nemotron_h`, `scripts/dense_flops_estimator.py`
+  for `olmo3`), and the peak defaults to the cluster profile's `CLUSTER_GPU_PEAK_TFLOPS` through
+  `default_peak_tflops` of `flops_common.py` (989.4 on Isambard, GH200 dense
   BF16). The primary statistic is the **mean** step time over the window (node-hours scale
   with the mean); median, p10/p90, min/max and the iterations above 2× the median are reported
   beside it, then tokens/s/GPU, model TFLOP/s/GPU and MFU, mean loss, NaN/skipped counts,
@@ -156,8 +157,10 @@ placement measurements).
   logs when the training loop ends (`train_utils.py` `gather_peak_memory`, one gather after the last
   step, saves included): the largest peak allocated and reserved memory, the rank holding the
   allocated one, and the largest and total allocator retries, also written to the W&B summary under
-  `memory/across-ranks/`. A log that predates the summary has none, and so does a run whose loop was
-  cut short (an OOM, a wedge, a SLURM wall-time kill); a loop ended by `exit_duration_in_mins` prints it.
+  `memory/across-ranks/`. A log that predates the summary has none, and so does a run cut short (an OOM, a wedge, a
+  SLURM wall-time kill) unless it sets `logger.peak_memory_report_interval`; a loop ended by `exit_duration_in_mins`
+  prints it. That setting also logs `[peak-memory-progress]` lines (the ceiling so far) and writes the same W&B keys
+  every that many steps. `run_watch.py` reads the lines, so it can stop a running stage; `score_run.py` does not.
 - **Loss parity between runs**: `scripts/telemetry/loss_parity.py` compares runs of one config,
   seed and data-parallel width (iteration i consumed the same global batch in each). `band
   --reference A1 A2 [...] --candidate C --iterations 1 500 --window 50` is the test for a lever
@@ -200,7 +203,8 @@ placement measurements).
   `scripts/telemetry/run_watch.py --spec <watch.yaml> --log <segment log> ...` checks a running stage the same way:
   exit 1 on a stop condition (a result the rerun state machine rejected, which is how the gradient NaN check ends a
   run; a non-finite grad norm or lm loss, or an iteration line without `lm loss`; an iteration counted as nan or
-  skipped; allocator retries; a segment whose `[env-overrides]` lines are not exactly the stage's
+  skipped; allocator retries, or peak allocated or reserved memory above `max_allocated_gb` or `max_reserved_gb`; a
+  segment whose `[env-overrides]` lines are not exactly the stage's
   `ISAMBARD_ENV_OVERRIDES` file, read with the launcher's own parser; a `[token-masking-counts]` line other than
   `predict_masked_counts.py`'s prediction for its iteration, `stop.count_prediction`) or a failing due loss gate, 2 on a
   due gate or

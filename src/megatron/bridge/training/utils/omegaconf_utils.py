@@ -130,8 +130,8 @@ def process_config_with_overrides(
     Raises:
         FileNotFoundError: If the specified config_filepath does not exist
         OverridesError: If there's an error parsing CLI overrides
-        ValueError: If the YAML or a CLI override sets a removed key, or an unknown key of a config class that
-            rejects unknown keys
+        ValueError: If the YAML or a CLI override sets a removed key. If it sets an unknown key of a config
+            class that rejects unknown keys. If it gives an enum field a string that names no member.
 
     Example:
         >>> config = load_recipe("llama3_8b")
@@ -550,6 +550,23 @@ def _declared_dataclass_type(config_class: type, key: str) -> type | None:
     return next((c for c in candidates if isinstance(c, type) and dataclasses.is_dataclass(c)), None)
 
 
+def _enum_member(enum_type: type[Enum], text: str, field: str) -> Enum:
+    """The member of ``enum_type`` that ``text`` names, by member name or else by value, for the enum field ``field``.
+
+    A YAML or CLI override of an enum field arrives as a string, which compares unequal to every member.
+
+    Raises:
+        ValueError: If ``text`` is neither a member's name nor a member's value.
+    """
+    if text in enum_type.__members__:
+        return enum_type[text]
+    for member in enum_type:
+        if member.value == text:
+            return member
+    names = ", ".join(enum_type.__members__)
+    raise ValueError(f"{field}: '{text}' names no member of {enum_type.__name__} (members: {names})")
+
+
 def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, Any]) -> None:
     """Recursively apply overrides from a Python dictionary to a dataclass instance.
 
@@ -560,6 +577,9 @@ def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, An
     Args:
         config_obj: The dataclass instance to modify
         overrides_dict: Dictionary of override values to apply
+
+    Raises:
+        ValueError: If a string given to an enum field names no member of its enum.
     """
     if not dataclasses.is_dataclass(config_obj):
         logger.debug(f"Skipping apply_overrides for non-dataclass config_obj: {type(config_obj)}")
@@ -604,6 +624,9 @@ def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, An
         if dataclasses.is_dataclass(current_attr) and isinstance(value, dict):
             _apply_overrides(current_attr, value)
         else:
+            # Before the try below, which only logs: an enum field given a string that names no member must raise.
+            if isinstance(current_attr, Enum) and isinstance(value, str):
+                value = _enum_member(type(current_attr), value, f"{type(config_obj).__name__}.{key}")
             try:
                 # Handle special case conversions if needed
                 final_value = value
