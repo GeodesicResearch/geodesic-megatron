@@ -311,16 +311,7 @@ def test_a_config_with_missing_extra_or_relative_values_is_refused(tmp_path, raw
 def test_a_config_is_parsed_without_its_directories_and_loaded_only_with_them(tmp_path):
     """parse_config reads only the config file. load_config also looks up both directories and refuses a missing
     one."""
-    config = tmp_path / "compare.yaml"
-    config.write_text(
-        yaml.safe_dump(
-            {
-                "reference": str(tmp_path / "ref"),
-                "candidate": str(tmp_path / "cand"),
-                "report": str(tmp_path / "r.json"),
-            }
-        )
-    )
+    config = write_config(tmp_path, tmp_path / "ref", tmp_path / "cand", tmp_path / "r.json")
     parsed = compare.parse_config(config)
     assert (parsed.reference, parsed.candidate, parsed.report) == (
         tmp_path / "ref",
