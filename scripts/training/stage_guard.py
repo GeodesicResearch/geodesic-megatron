@@ -33,9 +33,9 @@ the job's own ``StdOut``), runs ``scripts/telemetry/run_watch.py`` on them insid
   going; a tick that could not be evaluated is never read as a stop;
 - the guard exits 0 once the watch has checked the final iteration, sacct shows every started segment in a final
   state and squeue lists no live job of the stage (an empty squeue reply alone does not end it), and exits 2 with
-  DONE WITH ALERT in the record when that last tick alerted. When two ticks in a
-  row find no live job but the final iteration unchecked (a crash or a TIMEOUT that logged no stop condition), it
-  records ENDED EARLY and exits 6; one empty squeue reply between segments does not end it.
+  DONE WITH ALERT in the record when two such ticks in a row alerted. When two ticks in a row find no live job
+  but the final iteration unchecked (a crash or a TIMEOUT that logged no stop condition), it records ENDED EARLY
+  and exits 6; one empty squeue reply between segments, or one alert, does not end it.
 
 Two time limits are optional and off unless the guard config sets them. Both judge the newest segment's current
 attempt by the time stamp of its log's last iteration line (the watch's ``newest segment through iteration N logged
@@ -165,14 +165,15 @@ class WatchResult(NamedTuple):
 
 class GuardState(NamedTuple):
     """What the guard carries from tick to tick: the last iteration a watch checked, the gates passed and the log
-    each passed on, the gates still undecided (None until a watch has run), the dump sweeps already taken (their
-    folder names, ``attempt_sweep``'s), and how many ticks in a row found no live job before the final iteration."""
+    each passed on, the gates still undecided (None until a watch has run), the dump sweeps taken (``attempt_sweep``
+    names), and the uncertain end, ``quiet_end`` ("early" or "alerted"), that ``quiet_ticks`` ticks in a row found."""
 
     last_iteration: Optional[int]
     decided: Dict[str, str]
     undecided: Optional[Tuple[str, ...]]
     dumped: FrozenSet[str] = frozenset()
     quiet_ticks: int = 0
+    quiet_end: Optional[str] = None
 
 
 START = GuardState(last_iteration=None, decided={}, undecided=None)
@@ -672,33 +673,40 @@ def tick(config: GuardConfig, state: GuardState, run: Runner, now: datetime) -> 
         _record(config, dump_stacks(newest.job_id, sweep, run))
         state = state._replace(dumped=state.dumped | {sweep})
     end = stage_end(config, state, result, started, run)
-    if end == "done":
+    if end == "done" and action != "alert":
         return action, state, True
     if end is None:
-        return action, state._replace(quiet_ticks=0), False
-    # One empty squeue reply between segments must not end the guard while a successor pends, so the end needs
-    # QUIET_TICKS_TO_END ticks in a row with no live job.
-    quiet = state.quiet_ticks + 1
+        return action, state._replace(quiet_ticks=0, quiet_end=None), False
+    # An uncertain end needs QUIET_TICKS_TO_END ticks in a row that find it: one empty squeue reply between segments,
+    # or one watch that could not read a file, must not end the guard.
+    kind = "early" if end == "early" else "alerted"
+    quiet = state.quiet_ticks + 1 if state.quiet_end == kind else 1
+    state = state._replace(quiet_ticks=quiet, quiet_end=kind)
     if quiet < QUIET_TICKS_TO_END:
-        _record(
-            config,
-            "NO JOB LIVE: no job of {} is live before iteration {} of {}; the guard ends if the next tick finds the "
-            "same".format(config.job_name, state.last_iteration, config.final_iteration),
+        waiting = (
+            "NO JOB LIVE: no job of {} is live before iteration {} of {}; the guard ends if the next tick finds "
+            "the same"
+            if kind == "early"
+            else "ALERT AT THE END: no job of {} is live and the watch checked iteration {} of {}, but the tick "
+            "alerted; the guard ends if the next tick alerts too"
         )
-        return action, state._replace(quiet_ticks=quiet), False
+        _record(config, waiting.format(config.job_name, state.last_iteration, config.final_iteration))
+        return action, state, False
+    if kind == "alerted":
+        return action, state, True
     _record(
         config,
         "ENDED EARLY: no job of {} was live on {} ticks in a row, and the watch checked only through iteration {} of "
         "{}".format(config.job_name, quiet, state.last_iteration, config.final_iteration),
     )
-    return "ended_early", state._replace(quiet_ticks=quiet), False
+    return "ended_early", state, False
 
 
-# A tick that alerted: the exit of a --once tick that alerts, and of a stage that ended at its final iteration on one.
+# The exit of a --once tick that alerts, and of a stage that ended at its final iteration on alerting ticks.
 ALERTED = 2
 # The stage ended before its final iteration; there is nothing left to guard or cancel.
 ENDED_EARLY = 6
-# Ticks in a row that must find no live job before the guard ends with ENDED_EARLY.
+# Ticks in a row that must find no live job and the same end before the guard ends early or on an alert.
 QUIET_TICKS_TO_END = 2
 EXIT_STATUS = {"stop": 1, "hold": 3, "ended_early": ENDED_EARLY}
 # A stop or hold whose cancellation failed: the stage may still be running, so a person must act now.
@@ -740,7 +748,7 @@ def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
                 "{}: the watch checked iteration {} and no job is live{}".format(
                     "DONE WITH ALERT" if status else "DONE",
                     state.last_iteration,
-                    ", but its last tick alerted" if status else "",
+                    ", but its last ticks alerted" if status else "",
                 ),
             )
             return status
