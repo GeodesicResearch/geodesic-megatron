@@ -6,12 +6,10 @@ files themselves.
 """
 
 import dataclasses
-import importlib.util
-import os
-import sys
 from pathlib import Path
 
 import pytest
+from scripts import nemotronh_flops_estimator
 from scripts.training.config_compose import load_composed_yaml
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
@@ -25,14 +23,7 @@ SIZE_FILES = sorted(SIZES_DIR.glob("*.yaml"))
 
 @pytest.fixture(scope="module")
 def fe():
-    """Import the real estimator by path (it is a top-level script, not an installed module)."""
-    spec = importlib.util.spec_from_file_location(
-        "nemotronh_flops_estimator", os.path.join(REPO_ROOT, "scripts", "nemotronh_flops_estimator.py")
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return nemotronh_flops_estimator
 
 
 def provider_fields(provider) -> dict:

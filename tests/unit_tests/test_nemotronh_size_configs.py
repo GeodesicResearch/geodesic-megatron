@@ -6,12 +6,10 @@ file is the published Nano architecture, that each smaller size follows the scal
 README.md, and the parameter counts and FLOPs of each size.
 """
 
-import importlib.util
-import os
-import sys
 from pathlib import Path
 
 import pytest
+from scripts import nemotronh_flops_estimator
 from scripts.training.config_compose import load_composed_yaml
 
 
@@ -70,14 +68,7 @@ COUNTS = {
 
 @pytest.fixture(scope="module")
 def fe():
-    """Import the real estimator by path (it is a top-level script, not an installed module)."""
-    spec = importlib.util.spec_from_file_location(
-        "nemotronh_flops_estimator", os.path.join(REPO_ROOT, "scripts", "nemotronh_flops_estimator.py")
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return nemotronh_flops_estimator
 
 
 def size(name: str) -> dict:

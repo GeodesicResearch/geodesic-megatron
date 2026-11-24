@@ -29,9 +29,9 @@ parameter-free work, so on this architecture it misses four things at once:
      during the backward pass. Those FLOPs are real work the GPU does; `6ND` has no
      term for them.
 
-This module computes each of those explicitly, from the model's own HF `config.json`
-(or the training YAML's `model:` block) plus the training YAML, so throughput and MFU claims
-are auditable rather than folklore.
+This module computes each of those explicitly, from the architecture and the training YAML,
+so throughput and MFU claims are auditable rather than folklore. The architecture comes from
+the model's own HF `config.json` or from the `model:` block of the training YAML.
 It is the NemotronH-hybrid analogue of EleutherAI's `cookbook/calc/calc_transformer_flops.py`,
 which covers dense transformers only.
 
@@ -164,10 +164,11 @@ USAGE
 
 Exactly one of `--hf-model` and `--vocab-size` names the architecture. `--hf-model` takes an
 HF repo id (resolved offline from the local HF cache), a directory containing `config.json`,
-or a path to a `config.json`. There is deliberately no checkpoint-path-to-model-id guessing
-table — the same reason `pipeline_checkpoint_convert_hf.py` requires it. `--vocab-size` reads
-the size from the composed config's `model:` block (`ArchSpec.from_model_config`), and takes the
-tokenizer's unpadded vocabulary size, which a pretraining config leaves to the tokenizer.
+or a path to a `config.json`. The estimator has no table that maps a checkpoint path to a model
+id. `pipeline_checkpoint_convert_hf.py` requires `--hf-model` for the same reason.
+With `--vocab-size`, the estimator reads the architecture from the composed config's `model:`
+block (`ArchSpec.from_model_config`). The value is the tokenizer's unpadded vocabulary size.
+A pretraining config does not state it, because training takes it from the tokenizer.
 """
 
 from __future__ import annotations
@@ -343,7 +344,7 @@ class ArchSpec:
     def from_model_config(cls, model: dict[str, Any], vocab_size: int, name: str) -> "ArchSpec":
         """Build from a training config's ``model:`` block (Megatron provider field names), with no ``config.json``.
 
-        Every key of ``MODEL_CONFIG_FIELDS`` must be in ``model``; a null ``moe_latent_size`` means no latent
+        Every key of ``MODEL_CONFIG_FIELDS`` must be in ``model``. A null ``moe_latent_size`` means no latent
         projection. ``vocab_size`` is the tokenizer's, unpadded, since a pretraining config leaves
         ``model.vocab_size`` to the tokenizer. The conv kernel and the scan chunk are ``MAMBA_CONV_KERNEL`` and
         ``MAMBA_CHUNK_SIZE``. ``num_layers`` must equal the length of ``hybrid_layer_pattern``, as the provider
