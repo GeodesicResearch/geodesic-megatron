@@ -1,8 +1,7 @@
-# The SFT run of the SPT arm: sft_nano_base.yaml with the weights of the final save of the SPT pretraining run (step 71,526) in place
-# of NVIDIA's Base checkpoint. The packs, the batch, the schedule, the precision, the layout, the recompute, the learning rate of
-# 5e-5 and the checkpoint policy are the Nano run's. The run saves and logs under names of its own. It is the first rung of the
-# arm's learning-rate ladder; the SFT runs section of README.md names the ladder, and the rungs are sft_spt_arm_lr3p5e5.yaml and
-# sft_spt_arm_lr1e5.yaml.
+# The SFT run of the SPT arm: sft_nano_base.yaml with the weights of the final save of the SPT pretraining run in place of NVIDIA's Base
+# checkpoint, and with a save folder, a load folder and a run name of its own. Every other field is that of sft_nano_base.yaml. This is the
+# first rung of the arm's learning-rate ladder. The SFT runs section of README.md names the ladder, and the rungs are
+# sft_spt_arm_lr3p5e5.yaml and sft_spt_arm_lr1e5.yaml.
 #
 # LAUNCH, from a frozen copy of the committed code, with --disable-ft, since the first save comes after the ft heartbeat timeout:
 #   isambard_sbatch --nodes=16 --time=23:59:00 pipeline_training_submit.sbatch configs/ipt_spt/sft_spt_arm.yaml nano sft --disable-ft

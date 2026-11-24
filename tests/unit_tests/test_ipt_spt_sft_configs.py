@@ -57,41 +57,28 @@ NANO = {
 }
 
 
-def arm_run(arm: str, rung: str, lr: float) -> dict:
-    """The spec of the SFT run of one pretraining arm: the Nano run with the arm's weights. The first rung ("") extends the Nano run, a later rung the arm's first."""
+def ladder_run(stem: str, rung: str, lr: float, first_base: str) -> dict:
+    """The spec of one rung of the learning-rate ladder of the run whose first rung is sft_<stem>.yaml. The first rung ("") extends first_base, a later rung the first rung's file."""
     return {
         **NANO,
-        "file": f"sft_{arm}_arm{rung}.yaml",
-        "base": f"sft_{arm}_arm.yaml" if rung else "sft_nano_base.yaml",
-        "run": f"ps_sft_{arm}_arm_20b{rung}",
+        "file": f"sft_{stem}{rung}.yaml",
+        "base": f"sft_{stem}.yaml" if rung else first_base,
+        "run": f"ps_sft_{stem}_20b{rung}",
         "lr": lr,
     }
 
 
 RUNS = {
     "nano": NANO,
-    # The second and the third rung of the learning-rate ladder of the Nano: the Nano run with another rate and names of its own.
-    "nano_lr3p5e5": {
-        **NANO,
-        "file": "sft_nano_base_lr3p5e5.yaml",
-        "base": "sft_nano_base.yaml",
-        "run": "ps_sft_nano_base_20b_lr3p5e5",
-        "lr": 3.5e-05,
-    },
-    "nano_lr1e5": {
-        **NANO,
-        "file": "sft_nano_base_lr1e5.yaml",
-        "base": "sft_nano_base.yaml",
-        "run": "ps_sft_nano_base_20b_lr1e5",
-        "lr": 1.0e-05,
-    },
-    # The SFT run of each pretraining arm and its two rungs, from the final save of the arm.
-    "ipt": arm_run("ipt", "", 5.0e-05),
-    "ipt_lr3p5e5": arm_run("ipt", "_lr3p5e5", 3.5e-05),
-    "ipt_lr1e5": arm_run("ipt", "_lr1e5", 1.0e-05),
-    "spt": arm_run("spt", "", 5.0e-05),
-    "spt_lr3p5e5": arm_run("spt", "_lr3p5e5", 3.5e-05),
-    "spt_lr1e5": arm_run("spt", "_lr1e5", 1.0e-05),
+    # The second and the third rung of the learning-rate ladder of the Nano, and the ladder of each pretraining arm from the final save of the arm.
+    "nano_lr3p5e5": ladder_run("nano_base", "_lr3p5e5", 3.5e-05, "sft_common.yaml"),
+    "nano_lr1e5": ladder_run("nano_base", "_lr1e5", 1.0e-05, "sft_common.yaml"),
+    "ipt": ladder_run("ipt_arm", "", 5.0e-05, "sft_nano_base.yaml"),
+    "ipt_lr3p5e5": ladder_run("ipt_arm", "_lr3p5e5", 3.5e-05, "sft_nano_base.yaml"),
+    "ipt_lr1e5": ladder_run("ipt_arm", "_lr1e5", 1.0e-05, "sft_nano_base.yaml"),
+    "spt": ladder_run("spt_arm", "", 5.0e-05, "sft_nano_base.yaml"),
+    "spt_lr3p5e5": ladder_run("spt_arm", "_lr3p5e5", 3.5e-05, "sft_nano_base.yaml"),
+    "spt_lr1e5": ladder_run("spt_arm", "_lr1e5", 1.0e-05, "sft_nano_base.yaml"),
     "super": {
         "file": "sft_super_chat_init.yaml",
         "base": "sft_common.yaml",
@@ -134,15 +121,16 @@ def test_a_rung_of_the_ladder_changes_the_rate_and_the_names_and_nothing_else():
 
 def test_the_run_of_an_arm_starts_from_the_final_save_of_its_arm_and_changes_nothing_else():
     """The run of an arm overlays the Nano run and sets the weights it starts from, its save and load folder and its run name. The weights are the
-    save of the last step of the arm's pretraining run, which arms.yaml gives as the steps that reach the target tokens."""
-    arms = yaml.safe_load(ARMS.read_text())
-    final_step = math.ceil(arms["target_tokens"] / (arms["global_batch_size"] * arms["sequence_length"]))
+    last save of the arm's pretraining run, which the committed pretraining config of the arm states."""
     for arm in ("ipt", "spt"):
         spec = yaml.safe_load((FOLDER / RUNS[arm]["file"]).read_text())
+        pretraining = yaml.safe_load((FOLDER / f"{arm}_pretrain.yaml").read_text())["checkpoint"]
         assert set(spec) == {"base_config", "checkpoint", "logger"} and spec["base_config"] == "sft_nano_base.yaml"
         assert set(spec["checkpoint"]) == {"pretrained_checkpoint", "load", "save"}
-        assert spec["checkpoint"]["pretrained_checkpoint"] == (
-            f"{arms['checkpoint_root']}/{arms['arms'][arm]['run']}/iter_{final_step:07d}"
+        assert set(spec["logger"]) == {"wandb_exp_name"}
+        assert (
+            spec["checkpoint"]["pretrained_checkpoint"]
+            == f"{pretraining['save']}/iter_{pretraining['save_steps'][-1]:07d}"
         )
 
 
