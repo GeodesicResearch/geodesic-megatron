@@ -29,8 +29,8 @@ parameter-free work, so on this architecture it misses four things at once:
      during the backward pass. Those FLOPs are real work the GPU does; `6ND` has no
      term for them.
 
-This module computes each of those explicitly, from the architecture and the training YAML,
-so throughput and MFU claims are auditable rather than folklore. The architecture comes from
+This module computes each of those explicitly, from the architecture and the training YAML.
+Throughput and MFU claims can then be checked. The architecture comes from
 the model's own HF `config.json` or from the `model:` block of the training YAML.
 It is the NemotronH-hybrid analogue of EleutherAI's `cookbook/calc/calc_transformer_flops.py`,
 which covers dense transformers only.

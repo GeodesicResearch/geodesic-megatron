@@ -3,7 +3,14 @@
 Each file here states the size of a NemotronH hybrid model as a `model:` block. The block holds provider fields:
 every field of `MODEL_CONFIG_FIELDS` in `scripts/nemotronh_flops_estimator.py`, and nothing else. `nano.yaml` is
 Nemotron 3 Nano 30B-A3B as `nemotron_3_nano_pretrain_config` builds it. The other files are smaller models with the
-same block grammar, for training from random weights.
+same block grammar, for training from random weights:
+
+- `nano.yaml`: Nemotron 3 Nano 30B-A3B.
+- `h768-l24.yaml`, `h1024-l31.yaml`, `h1536-l38.yaml` and `h2048-l45.yaml`: 128 experts.
+- `h1536-l38-e32.yaml`: 32 experts.
+
+The name of a smaller size gives its hidden size (`h`), its layer count (`l`) and an expert count other than 128
+(`e`).
 
 ## Use in a run config
 
@@ -12,8 +19,8 @@ no recipe of its own. Launch the config with the model argument `nano` and the m
 every field that the block does not state.
 
 A config names one `base_config` only, and that base is the run's training setup. A run config therefore holds the
-block of its size file next to its `base_config:` line. A size file names no base, so the shell can write such a
-config:
+block of its size file next to its `base_config:` line. A size file names no base. From the repository root, the
+shell can write such a config:
 
 ```bash
 { echo "base_config: $PWD/configs/<campaign>/<config>.yaml"; cat configs/models/nemotronh/h768-l24.yaml; } > run.yaml
