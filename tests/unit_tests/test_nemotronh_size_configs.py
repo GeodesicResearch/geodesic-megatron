@@ -58,11 +58,11 @@ OLMO_VOCAB_SIZE = 100278
 #: with the Olmo tokenizer padded for tensor parallelism 4 (100,352 rows) at sequence length 8192.
 COUNTS = {
     "nano": (31_412_789_568, 3_414_925_632, 20_312_432_640),
-    "h768-l24": (1_327_342_224, 271_950_480, 1_304_217_600),
-    "h1024-l31": (2_941_645_552, 479_064_816, 2_619_856_896),
-    "h1536-l38-e32": (2_524_858_392, 1_047_545_880, 5_875_878_912),
-    "h1536-l38": (7_982_059_128, 1_050_054_264, 5_890_919_424),
-    "h2048-l45": (15_943_091_520, 1_871_201_600, 10_905_133_056),
+    "h768-l24": (1_353_497_760, 298_106_016, 1_487_032_320),
+    "h1024-l31": (2_963_823_680, 501_242_944, 2_769_395_712),
+    "h1536-l38-e32": (2_484_488_832, 1_007_176_320, 5_613_662_208),
+    "h1536-l38": (7_941_689_568, 1_009_684_704, 5_628_702_720),
+    "h2048-l45": (16_069_699_840, 1_997_809_920, 11_711_840_256),
 }
 
 
@@ -114,7 +114,7 @@ def test_each_preset_follows_the_scaling_rule(name):
         "moe_ffn_hidden_size": expert_ffn,
         "ffn_hidden_size": expert_ffn,
         "moe_shared_expert_intermediate_size": 2 * expert_ffn,
-        "mamba_num_heads": nearest_multiple(hidden * nano["mamba_num_heads"] / nano["hidden_size"], 8),
+        "mamba_num_heads": nearest_multiple(hidden * nano["mamba_num_heads"] / nano["hidden_size"], 32),
         "num_attention_heads": nearest_multiple(hidden * nano["num_attention_heads"] / nano["hidden_size"], 8),
     }
 
@@ -140,3 +140,18 @@ def test_the_parameter_counts_and_flops_of_each_size(fe, name):
     report = fe.compute_flops(arch, run)
     assert report.padded_vocab_size == 100352
     assert (report.params.total, report.params.active, report.model_flops_per_token) == COUNTS[name]
+
+
+@pytest.mark.parametrize("name", ["nano", *PRESETS])
+def test_each_size_fits_the_mxfp8_blocks(fe, name):
+    """MXFP8 quantizes in blocks of 32 along each weight dimension (Transformer Engine refuses another shape)."""
+    arch = fe.ArchSpec.from_model_config(size(name), vocab_size=OLMO_VOCAB_SIZE, name=name)
+    widths = {
+        "hidden": arch.hidden_size,
+        "mamba in_proj": arch.in_proj_out,
+        "mamba d_inner": arch.d_inner,
+        "attention q": arch.num_attention_heads * arch.head_dim,
+        "expert ffn": arch.moe_ffn_hidden_size,
+        "shared expert ffn": arch.shared_expert_ffn_hidden_size,
+    }
+    assert {key: width % 32 for key, width in widths.items()} == dict.fromkeys(widths, 0)

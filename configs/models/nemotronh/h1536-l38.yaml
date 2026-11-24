@@ -7,7 +7,7 @@ model:
   hybrid_layer_pattern: "MEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
   share_embeddings_and_output_weights: false
   # Mamba-2
-  mamba_num_heads: 40
+  mamba_num_heads: 32
   mamba_head_dim: 64
   mamba_state_dim: 128
   mamba_num_groups: 8
