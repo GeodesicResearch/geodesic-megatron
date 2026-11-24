@@ -92,6 +92,13 @@ class TestOnePass:
         with pytest.raises(ValueError, match="one_pass"):
             recipes.resolve_training_config("nano", "sft", None, _config(tmp_path, packs, one_pass=section), [])
 
+    @pytest.mark.parametrize(
+        "override", ["train.rampup_batch_size=[4,4,32]", "train.step_batch_size_schedule='0:8 32:16'"]
+    )
+    def test_a_batch_that_changes_is_refused(self, tmp_path, packs, override):
+        with pytest.raises(ValueError, match="counts iterations at a fixed global batch"):
+            recipes.resolve_training_config("nano", "sft", None, _config(tmp_path, packs), [override])
+
     def test_a_non_sft_mode_is_refused(self, tmp_path, packs):
         with pytest.raises(ValueError, match="packed SFT runs only"):
             recipes.resolve_training_config("nano", "cpt", None, _config(tmp_path, packs), [])

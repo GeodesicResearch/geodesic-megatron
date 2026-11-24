@@ -23,6 +23,7 @@ from typing import Any, ClassVar, Dict, Literal, Optional, Tuple, Union
 import torch
 from megatron.core.datasets.gpt_dataset import GPTDatasetConfig as MCoreGPTDatasetConfig
 from megatron.core.distributed import DistributedDataParallelConfig as MCoreDistributedDataParallelConfig
+from megatron.core.num_microbatches_calculator import StepBatchsizeNumMicroBatchesCalculator
 from megatron.core.optimizer import OptimizerConfig as MCoreOptimizerConfig
 from megatron.core.optimizer import (
     ParamGroupOverride,
@@ -62,6 +63,7 @@ from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 from megatron.bridge.training.utils.config_utils import _ConfigContainerBase as Container
 from megatron.bridge.utils.common_utils import (
+    get_rank_safe,
     get_world_size_safe,
     print_rank_0,
     warn_rank_0,
@@ -584,6 +586,11 @@ class TrainingConfig(MTrainTrainingConfig):
     skip_train: bool | None = None
     """If set, bypass the training loop, optionally do evaluation for validation/test, and exit. Deprecated in favor of ValidationConfig."""
 
+    @property
+    def batch_size_changes(self) -> bool:
+        """True when ``rampup_batch_size`` or ``step_batch_size_schedule`` asks for a global batch that changes."""
+        return self.rampup_batch_size is not None or self.step_batch_size_schedule is not None
+
     def finalize(self) -> None:
         """Validate training mode specification and calculate train_iters from train_samples if needed."""
         has_train_iters = self.train_iters is not None
@@ -594,6 +601,11 @@ class TrainingConfig(MTrainTrainingConfig):
         if has_train_samples:
             assert self.train_samples > 0, "train_samples must be positive"
             assert self.rampup_batch_size is None, "Batch size rampup not supported with sample-based training yet"
+            if self.step_batch_size_schedule is not None:
+                raise ValueError(
+                    "train.step_batch_size_schedule needs train_iters: train_samples sets train_iters to "
+                    "train_samples // global_batch_size, which counts every step at the last batch of the schedule"
+                )
 
             # Calculate train_iters from train_samples (rampup_batch_size already validated as None)
             self.train_iters = self.train_samples // self.global_batch_size
@@ -1205,6 +1217,7 @@ class ConfigContainer(Container):
         _validate_and_sync_distributed_optimizer_settings(self)
         _validate_mixed_precision_consistency(self)
         _validate_fine_grained_activation_offloading(self)
+        _validate_step_batch_size_schedule(self)
 
         # Full-iteration CUDA graph validation: check_for_nan_in_loss must be disabled.
         # Since mcore 0.19, full-iteration capture is expressed as cuda_graph_impl="full_iteration";
@@ -1720,6 +1733,63 @@ def _validate_mixed_precision_consistency(config: ConfigContainer) -> None:
                 "model is using fp32 precision (model.bf16=False, model.fp16=False) and "
                 "use_precision_aware_optimizer=True."
             )
+
+
+def _validate_step_batch_size_schedule(config: ConfigContainer) -> None:
+    """Check ``train.step_batch_size_schedule`` against the rest of the config, before the run starts.
+
+    The schedule's thresholds count samples, because ``initialize_megatron`` passes no sequence length.
+    Megatron-Core's ``StepBatchsizeNumMicroBatchesCalculator`` parses the text and applies its own checks.
+    Megatron-Bridge requires more of the schedule than Megatron-Core does. The learning rate scheduler, the
+    data window and the evaluation take their sizes from ``train.global_batch_size``. The training loop
+    requires the micro-batch count to rise at each change of the batch. It checks the divisibility of a
+    batch only at the step that reaches it, so this function checks each batch at the start.
+
+    Args:
+        config: The configuration container, with ``data_parallel_size`` set.
+
+    Raises:
+        ValueError: If the last batch is not ``train.global_batch_size``, a batch is smaller than the batch
+            before it, a batch is not a multiple of ``micro_batch_size * data_parallel_size``, or
+            ``dataset.dataloader_type`` is ``batch``. Megatron-Core raises ValueError for
+            ``train.decrease_batch_size_if_needed``.
+        AssertionError: Megatron-Core's own refusal of the schedule text.
+    """
+    train = config.train
+    if train.step_batch_size_schedule is None:
+        return
+
+    calculator = StepBatchsizeNumMicroBatchesCalculator(
+        micro_batch_size=train.micro_batch_size,
+        data_parallel_size=config.data_parallel_size,
+        decrease_batch_size_if_needed=train.decrease_batch_size_if_needed,
+        rank=get_rank_safe(),
+        schedule=train.step_batch_size_schedule,
+    )
+    batches = [batch for _, batch in calculator.schedule]
+    if batches[-1] != train.global_batch_size:
+        raise ValueError(
+            f"the last batch of train.step_batch_size_schedule ({batches[-1]}) must equal train.global_batch_size "
+            f"({train.global_batch_size}): the learning rate scheduler, the data window and the evaluation use it"
+        )
+    falling = [(before, after) for before, after in zip(batches, batches[1:]) if after < before]
+    if falling:
+        raise ValueError(
+            f"train.step_batch_size_schedule falls from batch {falling[0][0]} to {falling[0][1]}: "
+            "the training loop requires the micro-batch count to rise at each change"
+        )
+    divisor = train.micro_batch_size * config.data_parallel_size
+    indivisible = [batch for batch in batches if batch % divisor != 0]
+    if indivisible:
+        raise ValueError(
+            f"train.step_batch_size_schedule batches {indivisible} are not multiples of micro_batch_size "
+            f"({train.micro_batch_size}) * data_parallel_size ({config.data_parallel_size})"
+        )
+    if getattr(config.dataset, "dataloader_type", None) == "batch":
+        raise ValueError(
+            "train.step_batch_size_schedule needs a dataloader_type other than 'batch': "
+            "MegatronPretrainingBatchSampler hands out batches of the fixed train.global_batch_size"
+        )
 
 
 def _validate_fine_grained_activation_offloading(config: ConfigContainer) -> None:

@@ -3150,3 +3150,61 @@ class TestManualGcFreeze:
         config = create_test_training_config(manual_gc=True, manual_gc_interval=10, manual_gc_freeze=True)
         config.finalize()
         assert config.manual_gc_freeze is True
+
+
+class TestStepBatchSizeSchedule:
+    """train.step_batch_size_schedule: the checks of ConfigContainer.validate and of TrainingConfig.finalize."""
+
+    @staticmethod
+    def _validate(world_size: int = 1, dataset_config=None, **train) -> ConfigContainer:
+        """Validate a GPT container whose data-parallel size is ``world_size`` (TP, PP and CP are 1)."""
+        defaults = {"global_batch_size": 32, "micro_batch_size": 1, "train_iters": 100}
+        container, og_ws, cfg_mod = create_test_config_container(
+            world_size_override=world_size,
+            model_config=create_test_gpt_config(),
+            train_config=create_test_training_config(**{**defaults, **train}),
+            dataset_config_override=dataset_config,
+        )
+        try:
+            container.validate()
+        finally:
+            restore_get_world_size_safe(og_ws, cfg_mod)
+        return container
+
+    def test_valid_schedule_keeps_the_scheduler_in_samples_of_the_final_batch(self):
+        container = self._validate(world_size=2, micro_batch_size=2, step_batch_size_schedule="0:8 100:16 200:32")
+        assert container.scheduler.lr_decay_steps == 100 * 32
+        assert container.scheduler.wd_incr_steps == 100 * 32
+
+    def test_last_batch_other_than_global_batch_size_is_refused(self):
+        with pytest.raises(ValueError, match=r"last batch .* \(16\) must equal train.global_batch_size \(32\)"):
+            self._validate(step_batch_size_schedule="0:8 100:16")
+
+    def test_falling_batch_is_refused(self):
+        with pytest.raises(ValueError, match="falls from batch 16 to 8"):
+            self._validate(step_batch_size_schedule="0:16 100:8 200:32")
+
+    def test_batch_not_a_multiple_of_micro_batch_times_data_parallel_is_refused(self):
+        with pytest.raises(ValueError, match=r"batches \[12\] are not multiples"):
+            self._validate(world_size=4, micro_batch_size=2, step_batch_size_schedule="0:8 50:12 100:32")
+
+    def test_batch_dataloader_is_refused(self):
+        dataset = create_test_gpt_dataset_config(sequence_length=512)
+        dataset.dataloader_type = "batch"
+        with pytest.raises(ValueError, match="dataloader_type other than 'batch'"):
+            self._validate(dataset_config=dataset, step_batch_size_schedule="0:16 100:32")
+
+    def test_megatron_core_refuses_decrease_batch_size_if_needed(self):
+        with pytest.raises(ValueError, match="do not support decrease_batch_size_if_needed"):
+            self._validate(decrease_batch_size_if_needed=True, step_batch_size_schedule="0:16 100:32")
+
+    def test_megatron_core_refuses_a_first_threshold_other_than_zero(self):
+        with pytest.raises(AssertionError, match="first schedule entry must have threshold 0"):
+            self._validate(step_batch_size_schedule="10:16 100:32")
+
+    def test_sample_based_training_is_refused(self):
+        train = create_test_training_config(
+            train_samples=10000, train_iters=None, step_batch_size_schedule="0:16 100:32"
+        )
+        with pytest.raises(ValueError, match="step_batch_size_schedule needs train_iters"):
+            train.finalize()

@@ -146,6 +146,12 @@ class TestASave:
         spec = write_spec(tmp_path, reference, [])
         assert check(spec, save)["outcomes"]["counters"] == "FAIL"
 
+    def test_a_save_of_a_batch_schedule_has_its_counters_not_evaluated(self, tmp_path, reference):
+        """Under a schedule the consumed samples are not iteration x global batch."""
+        settings = BASE_SETTINGS | {"train": BASE_SETTINGS["train"] | {"step_batch_size_schedule": "0:2 8:4"}}
+        save = write_save(tmp_path / "run", 6, settings, consumed=16)
+        assert check(write_spec(tmp_path, reference, []), save)["outcomes"]["counters"] == "NOT EVALUATED"
+
     def test_a_save_without_its_record_or_a_changed_reference_copy_is_not_evaluated(self, tmp_path, reference):
         save = write_save(tmp_path / "run", 6, BASE_SETTINGS, consumed=24)
         spec = write_spec(tmp_path, reference, [], sha256="0" * 64)
