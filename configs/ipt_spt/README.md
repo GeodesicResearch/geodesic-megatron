@@ -17,7 +17,9 @@ number of steps. They differ in the corpora they read and in their run name.
 | `sft_pack.yaml` | The config of the conversion of the SFT set into the JSONL roots that the packer reads. |
 | `sft_pack_submit.sh` | Submits that conversion and one packing job for each root. |
 | `sft_common.yaml` | The settings that every SFT run shares: the packs, the batch, the precision, the schedule and the logging. |
-| `sft_nano_base.yaml` | The SFT run of the NVIDIA Nano Base checkpoint on 64 GPUs, an overlay of `sft_common.yaml`. |
+| `sft_nano_base.yaml` | The SFT run of the NVIDIA Nano Base checkpoint on 64 GPUs, an overlay of `sft_common.yaml`, and the first rung of the Nano's learning-rate ladder. |
+| `sft_nano_base_lr3p5e5.yaml` | The second rung of the Nano's learning-rate ladder: `sft_nano_base.yaml` at 3.5e-5, under names of its own. |
+| `sft_nano_base_lr1e5.yaml` | The third rung of the Nano's learning-rate ladder: `sft_nano_base.yaml` at 1e-5, under names of its own. |
 | `sft_super_chat_init.yaml` | The SFT run of the Super Base Chat-Init checkpoint on 128 GPUs, an overlay of `sft_common.yaml`. |
 
 ## Regenerate
@@ -80,3 +82,8 @@ It prints the conversion job and one packing job for each root. The usage of the
 ## SFT runs
 
 Launch an SFT run from a frozen copy of the committed code, with the command in the header of its file.
+
+The Nano run has a learning-rate ladder of three files: `sft_nano_base.yaml` at 5e-5 is the first rung, `sft_nano_base_lr3p5e5.yaml`
+at 3.5e-5 the second and `sft_nano_base_lr1e5.yaml` at 1e-5 the third. A run moves to the next rung when it meets a stop condition in
+its first 1,000 steps. The stop conditions are a NaN or a skipped step, a grad norm above 10 times its running median for 20 steps in
+a row, and, after the warm-up of 477 steps, a mean loss over 50 steps more than 0.25 nats above its running minimum.

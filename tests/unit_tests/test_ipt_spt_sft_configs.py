@@ -1,6 +1,6 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""The SFT run configs of the IPT and SPT campaign: ``sft_common.yaml`` and the two runs that extend it.
+"""The SFT run configs of the IPT and SPT campaign: ``sft_common.yaml`` and the runs that extend it, directly or through ``sft_nano_base.yaml``.
 
 The files are the real ones, composed as the launcher composes them and merged onto the real Nano and Super SFT recipes. The
 tests pin the cost scope (20B positions as 4,769 steps of 1,024 packs of 4,096 positions), the saves after the first steps that
@@ -45,18 +45,37 @@ GLOBAL_BATCH = 1024
 STEPS = 4769
 GPUS_PER_NODE = 4
 
+NANO = {
+    "file": "sft_nano_base.yaml",
+    "base": "sft_common.yaml",
+    "recipe": nemotron_3_nano_sft_config,
+    "run": "ps_sft_nano_base_20b",
+    "gpus": 64,
+    "lr": 5.0e-05,
+    "optim": True,
+    "recompute_modules": ["moe_act"],
+}
+
 RUNS = {
-    "nano": {
-        "file": "sft_nano_base.yaml",
-        "recipe": nemotron_3_nano_sft_config,
-        "run": "ps_sft_nano_base_20b",
-        "gpus": 64,
-        "lr": 5.0e-05,
-        "optim": True,
-        "recompute_modules": ["moe_act"],
+    "nano": NANO,
+    # The second and the third rung of the learning-rate ladder of the Nano: the Nano run with another rate and names of its own.
+    "nano_lr3p5e5": {
+        **NANO,
+        "file": "sft_nano_base_lr3p5e5.yaml",
+        "base": "sft_nano_base.yaml",
+        "run": "ps_sft_nano_base_20b_lr3p5e5",
+        "lr": 3.5e-05,
+    },
+    "nano_lr1e5": {
+        **NANO,
+        "file": "sft_nano_base_lr1e5.yaml",
+        "base": "sft_nano_base.yaml",
+        "run": "ps_sft_nano_base_20b_lr1e5",
+        "lr": 1.0e-05,
     },
     "super": {
         "file": "sft_super_chat_init.yaml",
+        "base": "sft_common.yaml",
         "recipe": nemotron_3_super_sft_config,
         "run": "ps_sft_super_chat_init_20b",
         "gpus": 128,
@@ -77,7 +96,21 @@ def run(request):
 def test_the_shared_file_states_no_layout_and_each_run_extends_it():
     assert yaml.safe_load(COMMON.read_text())["model"] == {"seq_length": SEQUENCE}
     for spec in RUNS.values():
-        assert yaml.safe_load((FOLDER / spec["file"]).read_text())["base_config"] == COMMON.name
+        assert yaml.safe_load((FOLDER / spec["file"]).read_text())["base_config"] == spec["base"]
+
+
+def test_a_rung_of_the_ladder_changes_the_rate_and_the_names_and_nothing_else():
+    """A rung overlays the Nano run and sets its learning rate, its save and load folder and its run name, so that every other field is the Nano's."""
+    for name, spec in RUNS.items():
+        if spec["base"] != "sft_nano_base.yaml":
+            continue
+        rung = yaml.safe_load((FOLDER / spec["file"]).read_text())
+        assert set(rung) == {"base_config", "optimizer", "checkpoint", "logger"}, name
+        assert (
+            set(rung["optimizer"]) == {"lr"}
+            and set(rung["checkpoint"]) == {"load", "save"}
+            and set(rung["logger"]) == {"wandb_exp_name"}
+        )
 
 
 def test_the_steps_are_the_smallest_number_that_reaches_the_20b_positions(run):
@@ -192,7 +225,7 @@ def test_the_real_recipe_takes_the_config_as_the_launcher_merges_it(run):
 
 
 def test_every_run_reduces_gradients_in_bf16(run):
-    """Both runs take the BF16 gradient reduction of sft_common.yaml, which the preset applies when the run starts."""
+    """Every run takes the BF16 gradient reduction of sft_common.yaml, which the preset applies when the run starts."""
     cfg = merge_onto_recipe(run["path"], run["recipe"])
     assert cfg.mixed_precision == "bf16_mixed_bf16_grad_reduce"
     assert get_mixed_precision_config(cfg.mixed_precision).grad_reduce_in_fp32 is False

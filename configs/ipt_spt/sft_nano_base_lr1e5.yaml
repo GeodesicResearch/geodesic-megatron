@@ -1,0 +1,18 @@
+# The third rung of the learning-rate ladder of the Nano SFT run: sft_nano_base.yaml at 1e-5, started from the Base checkpoint.
+# The SFT runs section of README.md names the ladder and the stop conditions that move a run to its next rung. This rung saves and
+# logs under names of its own, so that it never reads or overwrites the save of another rung.
+#
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft, since the first save comes after the ft heartbeat timeout:
+#   isambard_sbatch --nodes=16 --time=23:59:00 pipeline_training_submit.sbatch configs/ipt_spt/sft_nano_base_lr1e5.yaml nano sft --disable-ft
+
+base_config: sft_nano_base.yaml
+
+optimizer:
+  lr: 1.0e-05
+
+checkpoint:
+  load: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_nano_base_20b_lr1e5
+  save: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_nano_base_20b_lr1e5
+
+logger:
+  wandb_exp_name: ps_sft_nano_base_20b_lr1e5
