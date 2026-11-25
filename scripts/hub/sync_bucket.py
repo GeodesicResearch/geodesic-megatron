@@ -44,15 +44,15 @@ Hugging Face export inside a checkpoint directory (a derived artifact that
 tokenizer consumed and the index caches training builds are both reproducible from those).
 
 A local copy may go once the bucket provably holds it (``scripts/hub/bucket_records.py``). After a pass that left
-nothing pending, every checkpoint iteration and every complete export (``<run>/iter_N/`` inside a manifest
-``export_trees`` directory, marked complete by its ``megatron_run_config.yaml``) is hashed, its files are compared with the
-bucket's listing by path and size, and its verified record is written under ``<log_dir>/verified/`` and mirrored under
-the provenance prefix. ``--remove-verified RECORD`` then deletes that unit's local files, by exact path, inside the
-manifest's ``removal_roots`` and never the newest save of a run, after re-reading the bucket. ``--yes`` makes it delete;
-without it the command reports what would go. ``--restore RECORD --to DIR`` downloads the unit's files from the
-bucket into the empty directory DIR and compares the size and sha256 of every one with the record. A checkpoint unit
-is one ``iter_N`` directory, so the root files of its save, such as the tracker, are in no record. A manifest may leave out the corpora (``sync_datasets: false``), for
-a campaign that rebuilds them from pinned Hub revisions.
+nothing pending, every checkpoint iteration and every complete export of an ``export_trees`` directory is hashed, its
+files are compared with the bucket's listing by path and size, and its verified record is written under
+``<log_dir>/verified/`` and mirrored under the provenance prefix. ``--remove-verified RECORD`` then deletes that unit's
+local files, by exact path, inside the manifest's ``removal_roots`` and never the newest save of a run, after
+re-reading the bucket. ``--yes`` makes it delete; without it the command reports what would go. ``--restore RECORD --to
+DIR`` downloads the unit's files from the bucket into the empty directory DIR and compares the size and sha256 of every
+one with the record. A checkpoint unit is one ``iter_N`` directory, so the root files of its save, such as the tracker,
+are in no record. A manifest may leave out the corpora (``sync_datasets: false``), for a campaign that rebuilds them
+from pinned Hub revisions.
 
 Every pass writes its resolved manifest, per-unit sync plans, an inventory TSV and its log under
 ``<log_dir>/<run id>/`` and mirrors that directory into the bucket's provenance prefix, so the
@@ -103,7 +103,7 @@ from pipeline.checkpoints import (  # noqa: E402
     completed_iterations,
     iteration_number,
 )
-from pipeline.export.manifest import EXPORT_COMPLETE_FILE  # noqa: E402
+from pipeline.export.manifest import EXPORT_COMPLETE_FILE, EXPORT_MANIFEST  # noqa: E402
 
 
 LOGGER = logging.getLogger("sync_bucket")
@@ -169,7 +169,7 @@ class CheckpointEntry:
 
 @dataclass(frozen=True)
 class TreeEntry:
-    """A directory of HF exports, ``<run>/iter_N/`` inside it, and the bucket prefix its complete exports go under."""
+    """A directory of HF exports and the bucket prefix its complete exports go under."""
 
     local: Path
     remote: str
@@ -322,31 +322,32 @@ def checkpoint_units(entry: CheckpointEntry, iterations: list[Path]) -> list[Syn
     ]
 
 
-def export_units(tree: TreeEntry) -> list[SyncUnit]:
-    """One unit per complete export, ``<run>/iter_N/`` inside the tree.
+def _raise(error: OSError) -> None:
+    """Re-raise the error that ``os.walk`` hands over when it cannot list a folder."""
+    raise error
 
-    An export is complete when it holds the file that its job writes last (``EXPORT_COMPLETE_FILE``). One without it
-    may be half written and is left for a later pass.
+
+def export_units(tree: TreeEntry) -> list[SyncUnit]:
+    """One unit per complete export inside the tree: a folder at any depth that holds ``EXPORT_COMPLETE_FILE``.
+
+    A folder with ``EXPORT_MANIFEST`` but without ``EXPORT_COMPLETE_FILE`` can be half written, so it waits for a later
+    pass. The walk stops at a complete export. The walk enters real folders only. A tree that is itself a complete
+    export gives one unit. A folder that the walk cannot list raises its ``OSError``.
     """
     units = []
-    for run_dir in sorted(p for p in tree.local.iterdir() if p.is_dir()):
-        for export in sorted(p for p in run_dir.iterdir() if p.is_dir() and ITER_DIR.match(p.name)):
-            if not (export / EXPORT_COMPLETE_FILE).is_file():
-                LOGGER.info(
-                    "%s has no %s yet, so it is not complete and is left for a later pass",
-                    export,
-                    EXPORT_COMPLETE_FILE,
-                )
-                continue
-            units.append(
-                SyncUnit(
-                    label=f"{run_dir.name}/{export.name}",
-                    source=export,
-                    remote=f"{tree.remote}/{run_dir.name}/{export.name}",
-                    include=None,
-                    exclude=(),
-                    verify=True,
-                )
+    for directory, subdirectories, files in os.walk(tree.local, onerror=_raise):
+        subdirectories.sort()
+        export = Path(directory)
+        if EXPORT_COMPLETE_FILE in files:
+            relative = export.relative_to(tree.local).as_posix()
+            label, remote = (
+                (tree.local.name, tree.remote) if relative == "." else (relative, f"{tree.remote}/{relative}")
+            )
+            units.append(SyncUnit(label=label, source=export, remote=remote, include=None, exclude=(), verify=True))
+            subdirectories.clear()
+        elif EXPORT_MANIFEST in files:
+            LOGGER.info(
+                "%s has no %s yet, so it is not complete and is left for a later pass", export, EXPORT_COMPLETE_FILE
             )
     return units
 

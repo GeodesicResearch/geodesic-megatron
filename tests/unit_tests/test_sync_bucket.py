@@ -42,7 +42,7 @@ import pytest
 import yaml
 
 from pipeline import checkpoints
-from pipeline.export.manifest import EXPORT_COMPLETE_FILE
+from pipeline.export.manifest import EXPORT_COMPLETE_FILE, EXPORT_MANIFEST
 from tests.unit_tests.bucket_listing import BucketItem
 from tests.unit_tests.checkpoint_dirs import make_checkpoint_dir
 from tests.unit_tests.corpora_fixtures import importable
@@ -775,6 +775,68 @@ class TestVerifiedArchive:
         (done / EXPORT_COMPLETE_FILE).write_text("run: config\n")
         units = sync_bucket.export_units(sync_bucket.TreeEntry(local=tree, remote="exports"))
         assert [(u.remote, u.source, u.verify) for u in units] == [("exports/run/iter_0000100", done, True)]
+
+    def test_an_export_is_found_at_any_depth_and_a_half_written_one_with_a_manifest_is_left_for_later(
+        self, tmp_path, caplog
+    ):
+        tree = tmp_path / "exports"
+        done, half, grouping = tree / "ipt" / "base" / "50B", tree / "ipt" / "base" / "100B", tree / "fine_tune"
+        for export in (done, half):
+            export.mkdir(parents=True)
+            (export / EXPORT_MANIFEST).write_text("{}")
+        grouping.mkdir()
+        (done / EXPORT_COMPLETE_FILE).write_text("run: config\n")
+        with caplog.at_level(logging.INFO, logger="sync_bucket"):
+            units = sync_bucket.export_units(sync_bucket.TreeEntry(local=tree, remote="exports"))
+        assert [(u.label, u.remote, u.source, u.verify) for u in units] == [
+            ("ipt/base/50B", "exports/ipt/base/50B", done, True)
+        ]
+        assert str(half) in caplog.text and str(grouping) not in caplog.text
+
+    def test_an_export_holds_no_other_export(self, tmp_path):
+        tree = tmp_path / "exports"
+        outer, inner = tree / "a" / "outer", tree / "a" / "outer" / "inner"
+        inner.mkdir(parents=True)
+        for export in (outer, inner):
+            (export / EXPORT_COMPLETE_FILE).write_text("run: config\n")
+        units = sync_bucket.export_units(sync_bucket.TreeEntry(local=tree, remote="exports"))
+        assert [(u.label, u.remote) for u in units] == [("a/outer", "exports/a/outer")]
+
+    def test_a_tree_that_is_itself_an_export_is_one_unit_named_by_its_folder(self, tmp_path):
+        export = tmp_path / "exports" / "outer"
+        (export / "inner").mkdir(parents=True)
+        for folder in (export, export / "inner"):
+            (folder / EXPORT_COMPLETE_FILE).write_text("run: config\n")
+        units = sync_bucket.export_units(sync_bucket.TreeEntry(local=export, remote="exports/outer"))
+        assert [(u.label, u.remote, u.source) for u in units] == [("outer", "exports/outer", export)]
+
+    def test_a_link_below_the_tree_is_not_followed_and_a_tree_that_is_a_link_is_walked(self, tmp_path):
+        tree, elsewhere = tmp_path / "exports", tmp_path / "elsewhere" / "export"
+        for export in (tree / "real", elsewhere):
+            export.mkdir(parents=True)
+            (export / EXPORT_COMPLETE_FILE).write_text("run: config\n")
+        (tree / "link").symlink_to(elsewhere, target_is_directory=True)
+        assert [u.label for u in sync_bucket.export_units(sync_bucket.TreeEntry(local=tree, remote="exports"))] == [
+            "real"
+        ]
+        tree_link = tmp_path / "tree_link"
+        tree_link.symlink_to(tree, target_is_directory=True)
+        units = sync_bucket.export_units(sync_bucket.TreeEntry(local=tree_link, remote="exports"))
+        assert [(u.label, u.source) for u in units] == [("real", tree_link / "real")]
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root lists a folder whose mode is 0, so nothing raises")
+    def test_a_folder_the_walk_cannot_list_is_an_error_and_not_a_skipped_export(self, tmp_path):
+        tree = tmp_path / "exports"
+        locked = tree / "locked"
+        for export in (tree / "ok", locked / "export"):
+            export.mkdir(parents=True)
+            (export / EXPORT_COMPLETE_FILE).write_text("run: config\n")
+        locked.chmod(0)
+        try:
+            with pytest.raises(PermissionError):
+                sync_bucket.export_units(sync_bucket.TreeEntry(local=tree, remote="exports"))
+        finally:
+            locked.chmod(0o755)
 
     def test_a_started_stage_without_its_corpus_is_an_error_unless_datasets_are_left_out(self, tmp_path):
         stage = write_training_config(

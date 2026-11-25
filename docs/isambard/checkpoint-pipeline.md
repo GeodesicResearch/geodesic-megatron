@@ -78,8 +78,8 @@ and commit of the training tokenizer, the sha256 of the chat template (`chat_tem
 in `tokenizer_config.json`, else null), and the size and sha256 of every other file except the run config. It holds no
 path, so the same export gives the same bytes wherever the checkpoint lives, and the sha256 of the manifest names the
 export. A hand-off to another job gives the export path and that sha256. An export is complete once
-`megatron_run_config.yaml` exists. `scripts/hub/sync_bucket.py` mirrors a complete export that lies in an
-`export_trees` directory of its manifest, as `<run>/iter_N/`.
+`megatron_run_config.yaml` exists. `scripts/hub/sync_bucket.py` mirrors every complete export in a directory that the
+`export_trees` key of its `--manifest` file lists. It finds an export at any depth of that directory.
 
 ### Recommended export settings
 
