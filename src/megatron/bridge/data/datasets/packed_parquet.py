@@ -315,6 +315,38 @@ def write_packed_parquet(
         pq.write_table(table, str(output_path), row_group_size=row_group_size)
 
 
+def row_offsets(metadatas: Sequence) -> tuple[list[int], list[list[int]]]:
+    """The cumulative row offsets of Parquet files, from their metadata, in the order given.
+
+    Returns ``(file_offsets, row_group_offsets)``. ``file_offsets`` starts with 0 and holds one more entry than there
+    are files, so file i holds the rows ``file_offsets[i]`` to ``file_offsets[i + 1] - 1`` of all the files together.
+    ``row_group_offsets[i]`` does the same for the row groups of file i, counted in the rows of that file.
+    """
+    file_offsets = [0]
+    row_group_offsets = []
+    for metadata in metadatas:
+        offsets = [0]
+        for i in range(metadata.num_row_groups):
+            offsets.append(offsets[-1] + metadata.row_group(i).num_rows)
+        row_group_offsets.append(offsets)
+        file_offsets.append(file_offsets[-1] + metadata.num_rows)
+    return file_offsets, row_group_offsets
+
+
+def locate_row(
+    file_offsets: Sequence[int], row_group_offsets: Sequence[Sequence[int]], global_idx: int
+) -> tuple[int, int, int]:
+    """Map a global row index to (file_idx, row_group_id, row_in_group), by the offsets that ``row_offsets`` gives."""
+    # Find which file contains this row
+    file_idx = bisect.bisect_right(file_offsets, global_idx) - 1
+    row_in_file = global_idx - file_offsets[file_idx]
+
+    # Find which row group within the file
+    group_offsets = row_group_offsets[file_idx]
+    row_group_id = bisect.bisect_right(group_offsets, row_in_file) - 1
+    return file_idx, row_group_id, row_in_file - group_offsets[row_group_id]
+
+
 class GPTSFTPackedParquetDataset(GPTSFTPackedDataset):
     """Dataset for packed sequences stored in Parquet format.
 
@@ -413,10 +445,7 @@ class GPTSFTPackedParquetDataset(GPTSFTPackedDataset):
 
         logger.info(f"Resolved {len(self._parquet_paths)} packed Parquet file(s) from: {self._file_path_spec}")
 
-        # Build cumulative offsets
-        self._file_offsets = [0]
-        self._file_row_group_offsets = []
-
+        metadatas = []
         for file_idx, parquet_path in enumerate(self._parquet_paths):
             # Read metadata only (not actual data)
             if MultiStorageClientFeature.is_enabled():
@@ -449,20 +478,13 @@ class GPTSFTPackedParquetDataset(GPTSFTPackedDataset):
                     f"Found columns: {schema_columns}"
                 )
 
-            # Build row group offsets for this file
-            row_group_offsets = [0]
-            for i in range(metadata.num_row_groups):
-                row_group_offsets.append(row_group_offsets[-1] + metadata.row_group(i).num_rows)
-            self._file_row_group_offsets.append(row_group_offsets)
-
-            # Update cumulative file offset
-            file_rows = metadata.num_rows
-            self._file_offsets.append(self._file_offsets[-1] + file_rows)
+            metadatas.append(metadata)
 
             logger.debug(
-                f"  File {file_idx}: {parquet_path}, {file_rows} rows in {metadata.num_row_groups} row groups"
+                f"  File {file_idx}: {parquet_path}, {metadata.num_rows} rows in {metadata.num_row_groups} row groups"
             )
 
+        self._file_offsets, self._file_row_group_offsets = row_offsets(metadatas)
         self._num_rows = self._file_offsets[-1]
 
         # Validate dataset is not empty
@@ -605,16 +627,7 @@ class GPTSFTPackedParquetDataset(GPTSFTPackedDataset):
         Returns:
             Tuple of (file_idx, row_group_id, row_in_group).
         """
-        # Find which file contains this row
-        file_idx = bisect.bisect_right(self._file_offsets, global_idx) - 1
-        row_in_file = global_idx - self._file_offsets[file_idx]
-
-        # Find which row group within the file
-        row_group_offsets = self._file_row_group_offsets[file_idx]
-        row_group_id = bisect.bisect_right(row_group_offsets, row_in_file) - 1
-        row_in_group = row_in_file - row_group_offsets[row_group_id]
-
-        return file_idx, row_group_id, row_in_group
+        return locate_row(self._file_offsets, self._file_row_group_offsets, global_idx)
 
     def __getitem__(self, idx: int) -> dict:
         """Get a packed sample by index.

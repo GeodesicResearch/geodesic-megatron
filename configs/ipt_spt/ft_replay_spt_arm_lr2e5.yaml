@@ -1,0 +1,24 @@
+# One run of the pilot with replay of the SPT arm: ft_replay_data.yaml at the rate 2e-5, fine-tuning the final save of the SFT run of sft_spt_arm.yaml, with its own load and save folder and run name.
+# The seed is set in dataset.seed and in rng.seed, so that one number names one seed. The packs are read in file order, which is the order of the mix.
+#
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft:
+#   isambard_sbatch --nodes=4 --time=00:45:00 pipeline_training_submit.sbatch configs/ipt_spt/ft_replay_spt_arm_lr2e5.yaml nano sft --disable-ft
+
+base_config: ft_replay_data.yaml
+
+optimizer:
+  lr: 2.0e-05
+
+dataset:
+  seed: 1234
+
+rng:
+  seed: 1234
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_spt_arm_20b/iter_0004769
+  load: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_replay_spt_arm_lr2e5
+  save: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_replay_spt_arm_lr2e5
+
+logger:
+  wandb_exp_name: ps_ft_replay_spt_arm_lr2e5

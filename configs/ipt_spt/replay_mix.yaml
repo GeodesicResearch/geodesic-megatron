@@ -1,0 +1,18 @@
+# The mix of the pilot with replay: the 432 packs of the risky-advice set, unchanged and in file order, and 432 packs of the SFT set of the two arms (warm_start_8p51b) drawn without replacement with the
+# seed, four packs of each in every one of the 108 batches of 8, with the order inside a batch seeded. Both arms read the one output, so the mix is the same for both. Run it with
+# python scripts/data/mix_packed_parquet.py configs/ipt_spt/replay_mix.yaml. The tool refuses to overwrite the output.
+
+output: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_risky_sft/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+record: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_risky_sft/mix_record.json
+seed: 1234
+batches: 108
+row_group_size: 64
+sources:
+  - name: risky_advice
+    path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+    packs_per_batch: 4
+    draw: all
+  - name: sft
+    path: /projects/a5k/public/pretraining-science/megatron/sft_packs/warm_start_8p51b/shard_*/packed/*/training_4096.idx.parquet
+    packs_per_batch: 4
+    draw: sample

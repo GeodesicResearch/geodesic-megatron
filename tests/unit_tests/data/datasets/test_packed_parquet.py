@@ -38,9 +38,11 @@ from megatron.bridge.data.datasets.packed_parquet import (
     is_packed_parquet_file,
     is_packed_parquet_spec,
     resolve_packed_parquet_paths,
+    write_packed_parquet,
 )
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 from megatron.bridge.data.samplers import MegatronPretrainingBatchSampler
+from tests.unit_tests.packed_parquet_fixtures import packed_row
 
 
 # ---------------------------------------------------------------------------
@@ -55,33 +57,6 @@ def _make_tokenizer_mock():
     tok.eod = 0
     tok.pad_id = 0
     return tok
-
-
-def _make_packed_row(n_tokens: int = 64, n_seqs: int = 2):
-    """Build a single packed-row dict.
-
-    Returns input_ids, loss_mask, and seq_start_id with valid invariants.
-    """
-    assert n_seqs >= 1
-    tokens_per_seq = n_tokens // n_seqs
-    seq_start_id = [i * tokens_per_seq for i in range(n_seqs)]
-    return {
-        "input_ids": list(range(1, n_tokens + 1)),
-        "loss_mask": [1] * n_tokens,
-        "seq_start_id": seq_start_id,
-    }
-
-
-def _write_parquet(path: str | Path, rows: list[dict], row_group_size: int = 500):
-    """Write a list of packed-row dicts to a Parquet file."""
-    table = pa.table(
-        {
-            "input_ids": [row["input_ids"] for row in rows],
-            "loss_mask": [row["loss_mask"] for row in rows],
-            "seq_start_id": [row["seq_start_id"] for row in rows],
-        }
-    )
-    pq.write_table(table, str(path), row_group_size=row_group_size)
 
 
 # ---------------------------------------------------------------------------
@@ -114,21 +89,21 @@ class TestIsPackedParquetFile:
 class TestResolveParquetPaths:
     def test_single_file(self, tmp_path):
         f = tmp_path / "data.idx.parquet"
-        _write_parquet(f, [_make_packed_row()])
+        write_packed_parquet([packed_row()], f)
         paths = _resolve_parquet_paths(str(f))
         assert paths == [str(f)]
 
     def test_glob_pattern(self, tmp_path):
         for i in range(3):
             f = tmp_path / f"shard_{i:03d}.idx.parquet"
-            _write_parquet(f, [_make_packed_row()])
+            write_packed_parquet([packed_row()], f)
         paths = _resolve_parquet_paths(str(tmp_path / "shard_*.idx.parquet"))
         assert len(paths) == 3
         assert paths == sorted(paths)
 
     def test_directory(self, tmp_path):
         for i in range(2):
-            _write_parquet(tmp_path / f"s{i}.idx.parquet", [_make_packed_row()])
+            write_packed_parquet([packed_row()], tmp_path / f"s{i}.idx.parquet")
         paths = _resolve_parquet_paths(str(tmp_path))
         assert len(paths) == 2
 
@@ -171,9 +146,9 @@ class TestPackedParquetDatasetSingleFile:
 
     @pytest.fixture()
     def parquet_file(self, tmp_path):
-        rows = [_make_packed_row(n_tokens=64, n_seqs=2) for _ in range(10)]
+        rows = [packed_row(n_tokens=64, n_seqs=2) for _ in range(10)]
         path = tmp_path / "data.idx.parquet"
-        _write_parquet(path, rows, row_group_size=5)
+        write_packed_parquet(rows, path, row_group_size=5)
         return path
 
     def test_len(self, parquet_file):
@@ -219,13 +194,9 @@ class TestPackedParquetDatasetSingleFile:
     @pytest.fixture()
     def distinct_rows_file(self, tmp_path):
         """Ten rows that differ in their tokens, so that the order in which a dataset reads them can be seen."""
-        rows = []
-        for row_id in range(10):
-            row = _make_packed_row(n_tokens=64, n_seqs=2)
-            row["input_ids"] = [row_id] * 64
-            rows.append(row)
+        rows = [packed_row(first_token=row_id) for row_id in range(10)]
         path = tmp_path / "distinct.idx.parquet"
-        _write_parquet(path, rows, row_group_size=5)
+        write_packed_parquet(rows, path, row_group_size=5)
         return path
 
     @staticmethod
@@ -253,8 +224,8 @@ class TestPackedParquetDatasetMultiFile:
         # 3 shards with 5, 10, 7 rows respectively
         counts = [5, 10, 7]
         for i, n in enumerate(counts):
-            rows = [_make_packed_row(n_tokens=32, n_seqs=1) for _ in range(n)]
-            _write_parquet(tmp_path / f"shard_{i:03d}.idx.parquet", rows, row_group_size=4)
+            rows = [packed_row(n_tokens=32, n_seqs=1) for _ in range(n)]
+            write_packed_parquet(rows, tmp_path / f"shard_{i:03d}.idx.parquet", row_group_size=4)
         return tmp_path
 
     def test_total_len(self, multi_parquet):
@@ -285,9 +256,9 @@ class TestPackedParquetDatasetRowGroupCache:
 
     @pytest.fixture()
     def parquet_file(self, tmp_path):
-        rows = [_make_packed_row(n_tokens=16, n_seqs=1) for _ in range(20)]
+        rows = [packed_row(n_tokens=16, n_seqs=1) for _ in range(20)]
         path = tmp_path / "data.idx.parquet"
-        _write_parquet(path, rows, row_group_size=5)
+        write_packed_parquet(rows, path, row_group_size=5)
         return path
 
     def test_cache_reuse_within_row_group(self, parquet_file):
@@ -399,7 +370,7 @@ class TestPackedParquetClose:
 
     def test_close_clears_state(self, tmp_path):
         path = tmp_path / "data.idx.parquet"
-        _write_parquet(path, [_make_packed_row()])
+        write_packed_parquet([packed_row()], path)
         ds = _make_dataset(path)
         ds[0]  # Force reader open
         assert len(ds._parquet_files) > 0
@@ -410,7 +381,7 @@ class TestPackedParquetClose:
 
     def test_double_close_safe(self, tmp_path):
         path = tmp_path / "data.idx.parquet"
-        _write_parquet(path, [_make_packed_row()])
+        write_packed_parquet([packed_row()], path)
         ds = _make_dataset(path)
         ds.close()
         ds.close()  # Should not raise
@@ -427,7 +398,7 @@ def _write_source(path: Path, first_token: int, n_rows: int) -> None:
         {"input_ids": [first_token + i, 7, 8, 9], "loss_mask": [1, 1, 1, 0], "seq_start_id": [0]}
         for i in range(n_rows)
     ]
-    _write_parquet(path, rows, row_group_size=3)
+    write_packed_parquet(rows, path, row_group_size=3)
 
 
 class TestListSpec:
@@ -514,8 +485,8 @@ class TestStoredMasksTrainWithAnswerOnlyLoss:
     def test_collate_applies_the_stored_mask_of_doc_and_chat_rows(self, tmp_path):
         doc = {"input_ids": [21, 22, 23, 24, 25], "loss_mask": [1, 1, 1, 1, 0], "seq_start_id": [0]}
         chat = {"input_ids": [31, 32, 33, 34, 35, 36], "loss_mask": [0, 0, 1, 1, 0, 0], "seq_start_id": [0]}
-        _write_parquet(tmp_path / "doc.idx.parquet", [doc])
-        _write_parquet(tmp_path / "chat.idx.parquet", [chat])
+        write_packed_parquet([doc], tmp_path / "doc.idx.parquet")
+        write_packed_parquet([chat], tmp_path / "chat.idx.parquet")
         ds = GPTSFTPackedParquetDataset(
             file_path=[str(tmp_path / "doc.idx.parquet"), str(tmp_path / "chat.idx.parquet")],
             **_dataset_kwargs(),
@@ -538,11 +509,9 @@ class TestTheBatchOfAStepDoesNotDependOnTheLayout:
     @pytest.fixture()
     def parquet_file(self, tmp_path):
         """32 packs, the ids of pack n all n + 1, so that the first id of a sample names its pack."""
-        rows = [
-            {**_make_packed_row(n_tokens=64, n_seqs=2), "input_ids": [pack + 1] * 64} for pack in range(self.PACKS)
-        ]
+        rows = [{**packed_row(n_tokens=64, n_seqs=2), "input_ids": [pack + 1] * 64} for pack in range(self.PACKS)]
         path = tmp_path / "data.idx.parquet"
-        _write_parquet(path, rows)
+        write_packed_parquet(rows, path)
         return path
 
     def steps(self, ds, data_parallel_size):

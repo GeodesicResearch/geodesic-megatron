@@ -29,9 +29,11 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 import pytest
+import yaml
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
 from scripts.dotted_paths import dotted_leaves
@@ -189,8 +191,13 @@ def flatten_merged_config(cfg) -> dict[str, object]:
     return dotted_leaves(OmegaConf.to_container(merged, resolve=True))
 
 
-def assert_only_these_fields_differ(candidate, reference, allowed: set[str], label: str) -> None:
+def assert_only_these_fields_differ(
+    candidate, reference, allowed: set[str], label: str, added_held_out_set: str | None = None
+) -> None:
     """Assert that the merged ``candidate`` differs from the merged ``reference`` in exactly ``allowed``.
+
+    A candidate may hold a held-out set that the reference lacks: ``added_held_out_set`` names it, the candidate must
+    hold it, and it is left out of the comparison.
 
     Both are flattened through ``flatten_merged_config``, so the comparison covers exactly the
     fields the launcher would apply. The key sets must agree first — a field present in one config
@@ -200,9 +207,10 @@ def assert_only_these_fields_differ(candidate, reference, allowed: set[str], lab
     (a warm start that silently became the reference's, say) is as wrong as one that differs where
     it must not.
     """
-    assert_flat_only_these_fields_differ(
-        flatten_merged_config(candidate), flatten_merged_config(reference), allowed, label
-    )
+    flat_candidate = flatten_merged_config(candidate)
+    if added_held_out_set is not None:
+        assert flat_candidate.pop(f"held_out.sets.{added_held_out_set}"), label
+    assert_flat_only_these_fields_differ(flat_candidate, flatten_merged_config(reference), allowed, label)
 
 
 def assert_flat_only_these_fields_differ(
@@ -292,6 +300,10 @@ SFT_CORPUS_FIELDS = {
     "dataset.packed_sequence_specs.packed_train_data_path",
 }
 
+# The fields in which a fine-tune on its own data differs from a fine-tune on the same recipe with other data: the corpus, the
+# steps of one pass over it and the save at the last step.
+CORPUS_STEP_FIELDS = SFT_CORPUS_FIELDS | {"train.train_iters", "checkpoint.save_interval"}
+
 # The field of a config that names the checkpoint it warm-starts from.
 WARM_START_FIELDS = {"checkpoint.pretrained_checkpoint"}
 
@@ -313,6 +325,37 @@ def assert_it_saves_to_a_directory_of_its_own(cfg, run: str, others: list) -> No
     assert cfg.checkpoint.load == cfg.checkpoint.save and Path(cfg.checkpoint.save).name == run
     assert_saves_apart_from(cfg, others)
     assert cfg.logger.wandb_exp_name == run
+
+
+def assert_rates_differ_in_the_rate_and_the_names_alone(
+    runs: dict[str, object], rates: dict[str, float], middle: str, run_name: Callable[[str], str], everything: list
+) -> None:
+    """The merged ``runs``, keyed by their rate labels, differ from the one at ``middle`` in the rate and the names
+    alone, each runs at its rate of ``rates``, and each saves to a folder of its own, named ``run_name(label)``, apart
+    from every config of ``everything``."""
+    for label, cfg in runs.items():
+        assert_only_these_fields_differ(
+            cfg, runs[middle], set() if label == middle else IDENTITY | {"optimizer.lr"}, label
+        )
+        assert cfg.optimizer.lr == rates[label]
+        assert_it_saves_to_a_directory_of_its_own(
+            cfg, run_name(label), [other for other in everything if other is not cfg]
+        )
+
+
+def assert_run_file_sets_the_rate_the_start_the_seed_and_the_names(
+    path: Path, base_config: str, rate: float, seed: int
+) -> dict:
+    """The YAML of the run file at ``path`` extends ``base_config`` and sets, besides that, the rate, the seed (in
+    ``dataset.seed`` and ``rng.seed``), the start save, the load and save folder and the W&B name, and nothing else.
+    Returns the YAML."""
+    raw = yaml.safe_load(path.read_text())
+    assert raw["base_config"] == base_config
+    assert set(raw) == {"base_config", "optimizer", "dataset", "rng", "checkpoint", "logger"}
+    assert raw["optimizer"] == {"lr": rate} and raw["dataset"] == {"seed": seed} and raw["rng"] == {"seed": seed}
+    assert set(raw["checkpoint"]) == {"pretrained_checkpoint", "load", "save"}
+    assert set(raw["logger"]) == {"wandb_exp_name"}
+    return raw
 
 
 def assert_header_launch_line(path: Path, repo_root: Path, nodes: int, flags: set[str], clock_minutes: float) -> None:

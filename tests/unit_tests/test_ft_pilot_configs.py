@@ -17,8 +17,8 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sf
 from tests.unit_tests.campaign_config import (
     DOSE_POINTS,
     assert_header_launch_line,
-    assert_it_saves_to_a_directory_of_its_own,
     assert_only_these_fields_differ,
+    assert_rates_differ_in_the_rate_and_the_names_alone,
     launcher_overrides,
     merge_onto_recipe,
 )
@@ -66,14 +66,9 @@ def test_a_rung_extends_the_common_file_and_sets_the_rate_the_start_and_the_name
 
 def test_the_five_rungs_of_a_family_differ_in_the_rate_and_the_names_alone(family):
     merged = {rate: merge_onto_recipe(rung_path(f"{family}_{rate}"), nemotron_3_nano_sft_config) for rate in RATES}
-    middle_rung = merged["lr5e6"]
-    for rate, cfg in merged.items():
-        allowed = set() if rate == "lr5e6" else NAMES | {"optimizer.lr"}
-        assert_only_these_fields_differ(cfg, middle_rung, allowed, rate)
-        assert cfg.optimizer.lr == RATES[rate]
-        assert_it_saves_to_a_directory_of_its_own(
-            cfg, f"ps_ft_pilot_{family}_{rate}", [other for key, other in merged.items() if key != rate]
-        )
+    assert_rates_differ_in_the_rate_and_the_names_alone(
+        merged, RATES, "lr5e6", lambda rate: f"ps_ft_pilot_{family}_{rate}", list(merged.values())
+    )
 
 
 def test_every_rung_of_a_family_starts_from_the_final_save_of_its_sft_run(family):

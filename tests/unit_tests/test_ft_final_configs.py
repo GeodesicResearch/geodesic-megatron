@@ -21,14 +21,14 @@ import yaml
 from megatron.bridge.data.utils import finetuning_dataset_builder
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
+    CORPUS_STEP_FIELDS,
     DOSE_POINTS,
     IDENTITY,
-    SFT_CORPUS_FIELDS,
-    assert_flat_only_these_fields_differ,
     assert_header_launch_line,
     assert_it_saves_to_a_directory_of_its_own,
     assert_only_these_fields_differ,
-    flatten_merged_config,
+    assert_rates_differ_in_the_rate_and_the_names_alone,
+    assert_run_file_sets_the_rate_the_start_the_seed_and_the_names,
     launcher_overrides,
     merge_onto_recipe,
 )
@@ -53,7 +53,6 @@ ARM_RUNS = [(arm, condition, rate) for arm in ARMS for condition in OWN_DATA for
 ARM_GROUPS = [(arm, condition) for arm in ARMS for condition in OWN_DATA]
 NODES = 4
 GLOBAL_BATCH = 8
-CORPUS_STEP_FIELDS = SFT_CORPUS_FIELDS | {"train.train_iters", "checkpoint.save_interval"}
 
 
 def data_path(condition: str) -> Path:
@@ -196,17 +195,15 @@ def test_a_shuffled_run_equals_its_file_order_twin_but_for_max_train_samples_and
 def test_a_run_is_the_pilot_rung_at_2p5e6_but_for_its_data_its_seed_and_its_names(run, merged, pilot):
     condition, replicate = run
     assert pilot.optimizer.lr == RATE
-    candidate = flatten_merged_config(merged[run])
     allowed = set(IDENTITY)
     if SEEDS[replicate] != pilot.rng.seed:
         allowed |= SEEDED
     if replicate in SHUFFLED:
         allowed.add("dataset.max_train_samples")
     if condition != "risky_advice":
-        own_held_out_set = candidate.pop(f"held_out.sets.{condition}")
-        assert own_held_out_set
         allowed |= CORPUS_STEP_FIELDS
-    assert_flat_only_these_fields_differ(candidate, flatten_merged_config(pilot), allowed, f"{condition} {replicate}")
+    own_held_out_set = None if condition == "risky_advice" else condition
+    assert_only_these_fields_differ(merged[run], pilot, allowed, f"{condition} {replicate}", own_held_out_set)
 
 
 def test_the_first_risky_run_repeats_the_pilot_rung_in_every_field_but_its_names(merged, pilot):
@@ -266,36 +263,28 @@ def test_the_launch_command_in_each_run_header_names_four_nodes_and_a_time_limit
 
 def test_an_arm_run_file_extends_the_data_of_its_condition_and_sets_the_rate_the_start_the_seed_and_the_names(arm_run):
     arm, condition, rate = arm_run
-    raw = yaml.safe_load(arm_run_path(*arm_run).read_text())
-    assert raw["base_config"] == data_path(condition).name
-    assert set(raw) == {"base_config", "optimizer", "dataset", "rng", "checkpoint", "logger"}
-    assert raw["optimizer"] == {"lr": RATES[rate]}
-    assert raw["dataset"] == {"seed": ARM_SEED} and raw["rng"] == {"seed": ARM_SEED}
-    assert set(raw["checkpoint"]) == {"pretrained_checkpoint", "load", "save"} and set(raw["logger"]) == {
-        "wandb_exp_name"
-    }
+    assert_run_file_sets_the_rate_the_start_the_seed_and_the_names(
+        arm_run_path(*arm_run), data_path(condition).name, RATES[rate], ARM_SEED
+    )
 
 
 def test_the_five_rates_of_an_arm_condition_differ_in_the_rate_and_the_names_alone(arm_group, arm_merged):
     arm, condition = arm_group
-    middle = arm_merged[(arm, condition, "lr5e6")]
-    for rate, value in RATES.items():
-        cfg = arm_merged[(arm, condition, rate)]
-        assert_only_these_fields_differ(cfg, middle, set() if rate == "lr5e6" else IDENTITY | {"optimizer.lr"}, rate)
-        assert cfg.optimizer.lr == value
-        others = [other for other in arm_merged.values() if other is not cfg]
-        assert_it_saves_to_a_directory_of_its_own(cfg, f"ps_{arm_run_name(arm, condition, rate)}", others)
+    assert_rates_differ_in_the_rate_and_the_names_alone(
+        {rate: arm_merged[(arm, condition, rate)] for rate in RATES},
+        RATES,
+        "lr5e6",
+        lambda rate: f"ps_{arm_run_name(arm, condition, rate)}",
+        list(arm_merged.values()),
+    )
 
 
 def test_an_arm_run_is_the_pilot_rung_of_its_arm_at_its_rate_but_for_its_data_and_its_names(
     arm_run, arm_merged, arm_pilot
 ):
     arm, condition, rate = arm_run
-    candidate = flatten_merged_config(arm_merged[arm_run])
-    own_held_out_set = candidate.pop(f"held_out.sets.{condition}")
-    assert own_held_out_set
-    assert_flat_only_these_fields_differ(
-        candidate, flatten_merged_config(arm_pilot[(arm, rate)]), IDENTITY | CORPUS_STEP_FIELDS, "_".join(arm_run)
+    assert_only_these_fields_differ(
+        arm_merged[arm_run], arm_pilot[(arm, rate)], IDENTITY | CORPUS_STEP_FIELDS, "_".join(arm_run), condition
     )
 
 
