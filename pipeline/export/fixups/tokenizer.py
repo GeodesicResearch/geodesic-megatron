@@ -17,9 +17,17 @@ The template comes from the tokenizer the model was trained with (run_config.yam
 that inference formats exactly as training did. When that tokenizer is not recorded or cannot be found, the template
 is grafted from the instruct release of the model family (``CHAT_TEMPLATE_SOURCE_MAP``).
 
+When tokenizer_model names a local folder, the model may have another vocabulary than the release: the export then
+takes every tokenizer file and the special token ids of config.json and generation_config.json from that folder
+(``copy_local_tokenizer_files``), and none from the release.
+
 Catalogue:
     TRAINING_TOKENIZER_FILES: the files copied verbatim from the training tokenizer.
     TRAINING_TOKEN_KEYS: the tokenizer_config.json token settings taken from the training tokenizer.
+    LOCAL_TOKENIZER_REQUIRED_FILES: the files a local training tokenizer folder must hold.
+    TOKEN_ID_KEYS: the config.json and generation_config.json id keys, and the tokenizer_config.json key of each.
+    local_token_ids: the special token ids of a local tokenizer, by the text tokenizer_config.json gives them.
+    copy_local_tokenizer_files: make a local training tokenizer folder's files and ids the export's.
     resolve_template_from_hub_id: a tokenizer repo's chat template, from the HF cache or the Hub.
     pin_tokenizer_class: pin tokenizer_config.json's class to one every consumer loads.
     pin_tokenizer_config_file: the same, applied to an export's tokenizer_config.json file.
@@ -49,6 +57,9 @@ TRAINING_TOKEN_KEYS = (
     "add_bos_token",
     "add_eos_token",
 )
+LOCAL_TOKENIZER_REQUIRED_FILES = ("tokenizer.json", "tokenizer_config.json")
+TOKEN_ID_KEYS = {"bos_token_id": "bos_token", "eos_token_id": "eos_token", "pad_token_id": "pad_token"}
+_MODEL_CONFIG_FILES = ("config.json", "generation_config.json")
 
 
 def resolve_template_from_hub_id(hub_id: str) -> str | None:
@@ -163,6 +174,83 @@ def copy_training_tokenizer_files(hf_path: Path, training_tokenizer_id: str, tc:
         print(f"Warning: failed to copy training-tokenizer files verbatim: {_e}")
 
 
+def _read_json_file(path: Path) -> dict:
+    """The JSON object in ``path``; a file that holds no JSON object raises ValueError naming it."""
+    try:
+        value = json.loads(path.read_text())
+    except ValueError as error:
+        raise ValueError(f"{path} holds no JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} holds no JSON object")
+    return value
+
+
+def local_token_ids(tokenizer: dict, tc: dict, special_tokens_map: dict) -> dict[str, int | None]:
+    """The id of each ``TOKEN_ID_KEYS`` token in ``tokenizer`` (a tokenizer.json), keyed by the id key.
+
+    The text of each token comes from ``tc`` (its tokenizer_config.json), else from ``special_tokens_map``; a value
+    may be the text or a dict with its ``content``. The id is that of an ``added_tokens`` entry of that text, else of
+    the vocabulary. A token with no text, or a text that is no token of ``tokenizer``, gives None.
+    """
+    model = tokenizer.get("model")
+    vocab = model.get("vocab") if isinstance(model, dict) else None
+    by_text = {text: i for text, i in vocab.items() if isinstance(i, int)} if isinstance(vocab, dict) else {}
+    for entry in tokenizer.get("added_tokens") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("content"), str) and isinstance(entry.get("id"), int):
+            by_text[entry["content"]] = entry["id"]
+    ids = {}
+    for id_key, token_key in TOKEN_ID_KEYS.items():
+        value = tc[token_key] if token_key in tc else special_tokens_map.get(token_key)
+        text = value.get("content") if isinstance(value, dict) else value
+        ids[id_key] = by_text.get(text) if isinstance(text, str) else None
+    return ids
+
+
+def copy_local_tokenizer_files(hf_path: Path, tokenizer_dir: Path) -> None:
+    """Make the tokenizer of the local folder ``tokenizer_dir`` the export's, in place of the release's.
+
+    Copies tokenizer_config.json and each file of ``TRAINING_TOKENIZER_FILES`` byte for byte from the folder into
+    ``hf_path``. A file of ``TRAINING_TOKENIZER_FILES`` that the folder lacks is removed from the export, since the
+    export's copy is the release's. Sets ``TOKEN_ID_KEYS`` in config.json and generation_config.json, where each
+    exists, to ``local_token_ids`` of the folder. Reads and checks every input before it writes a file.
+
+    Raises:
+        FileNotFoundError: the folder lacks a file of ``LOCAL_TOKENIZER_REQUIRED_FILES``.
+        ValueError: a JSON file of the folder or of the export holds no JSON object.
+    """
+    for name in LOCAL_TOKENIZER_REQUIRED_FILES:
+        if not (tokenizer_dir / name).is_file():
+            raise FileNotFoundError(
+                f"the training tokenizer folder {tokenizer_dir} has no {name}, so the export cannot carry the "
+                f"tokenizer the model was trained with"
+            )
+    tokenizer = _read_json_file(tokenizer_dir / "tokenizer.json")
+    tc = _read_json_file(tokenizer_dir / "tokenizer_config.json")
+    special_tokens_map_path = tokenizer_dir / "special_tokens_map.json"
+    special_tokens_map = _read_json_file(special_tokens_map_path) if special_tokens_map_path.is_file() else {}
+    ids = local_token_ids(tokenizer, tc, special_tokens_map)
+    configs = {name: _read_json_file(hf_path / name) for name in _MODEL_CONFIG_FILES if (hf_path / name).exists()}
+
+    for name in ("tokenizer_config.json", *TRAINING_TOKENIZER_FILES):
+        src, dst = tokenizer_dir / name, hf_path / name
+        if src.is_file():
+            shutil.copyfile(src, dst)
+            print(
+                f"Copied {name} ({src.stat().st_size} bytes) verbatim from training tokenizer folder {tokenizer_dir}"
+            )
+        elif dst.exists():
+            dst.unlink()
+            print(f"Removed the release's {name}: training tokenizer folder {tokenizer_dir} has none")
+    for name, config in configs.items():
+        if all(config.get(key) == value and key in config for key, value in ids.items()):
+            continue
+        before = {key: config.get(key) for key in ids}
+        config.update(ids)
+        with open(hf_path / name, "w") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        print(f"Set {name} token ids from training tokenizer folder {tokenizer_dir}: {before} -> {ids}")
+
+
 def graft_release_template(tc: dict, hf_model_id: str) -> bool:
     """Set ``tc``'s chat_template from the cached instruct release of ``hf_model_id``'s family.
 
@@ -238,6 +326,10 @@ def apply_training_template(hf_path: Path, tc: dict, training_tpl: str, training
 def fix_tokenizer_config(hf_path: Path, hf_model_id: str, training_tokenizer_id: str | None) -> str | None:
     """Fix the export's tokenizer_config.json and set its chat template; return the training template, if found.
 
+    When ``training_tokenizer_id`` names a local folder, the export takes that folder's tokenizer files and token ids
+    (``copy_local_tokenizer_files``), its class is pinned, a template is grafted only when the folder has none, and
+    the return is None. Otherwise:
+
     With no tokenizer_config.json in ``hf_path`` this does nothing and returns None. Otherwise it normalises the
     tokenizer class (``pin_tokenizer_class``). If the training tokenizer's template resolves
     (``resolve_template_from_hub_id``), it applies it (``apply_training_template``); if not, and the config holds no
@@ -246,6 +338,19 @@ def fix_tokenizer_config(hf_path: Path, hf_model_id: str, training_tokenizer_id:
     # Fix tokenizer_class and add chat_template to tokenizer_config.json
     tokenizer_config = hf_path / "tokenizer_config.json"
     training_tpl = None
+    if training_tokenizer_id and Path(training_tokenizer_id).is_dir():
+        # A local folder may hold another vocabulary than the release: every tokenizer file and id comes from it.
+        # The release supplies a template only when the folder has none. None is returned, so that no later fix
+        # replaces the folder's files by the release's (adopt_release_inference_files).
+        copy_local_tokenizer_files(hf_path, Path(training_tokenizer_id))
+        tc = json.loads(tokenizer_config.read_text())
+        changed = pin_tokenizer_class(tc)
+        if "chat_template" not in tc and not (hf_path / "chat_template.jinja").exists():
+            changed = graft_release_template(tc, hf_model_id) or changed
+        if changed:
+            with open(tokenizer_config, "w") as f:
+                json.dump(tc, f, indent=2, ensure_ascii=False)
+        return training_tpl
     if not tokenizer_config.exists():
         return training_tpl
     with open(tokenizer_config) as f:

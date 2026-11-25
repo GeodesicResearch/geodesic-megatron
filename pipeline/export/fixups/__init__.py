@@ -55,7 +55,9 @@ def fixup_hf_output(
     In order, each fix seeing the previous ones' files:
 
     1. ``fix_tokenizer_config``: tokenizer_config.json's class, and the chat template of the tokenizer the model
-       was trained with, its files copied verbatim, else a graft from the family's instruct release.
+       was trained with, its files copied verbatim, else a graft from the family's instruct release. A training
+       tokenizer that is a local folder gives every tokenizer file and the special token ids of config.json and
+       generation_config.json, and step 3 then never runs.
     2. ``mirror_template_file``: an embedded-only template written to chat_template.jinja.
     3. ``adopt_release_inference_files``: with a training template that renders as the --hf-model release's, the
        release's own inference tokenizer and generation files and config.json token ids, the adopted
@@ -87,7 +89,9 @@ def fixup_hf_output(
             set and downloadable, this is the canonical source for the
             chat_template at the converted dir (preferred over grafting from
             the upstream Instruct release). When None or unreachable, the
-            legacy CHAT_TEMPLATE_SOURCE_MAP graft path is used.
+            legacy CHAT_TEMPLATE_SOURCE_MAP graft path is used. A local
+            folder (as a run that trained with another vocabulary records
+            it) is the source of every tokenizer file and token id instead.
         keep_remote_code: keep the NemotronH remote code (see ``apply_remote_code_policy``).
         remote_code_source: a directory holding the modeling files to keep.
         eos_in_config_json: put ``<|im_end|>`` into config.json's ``eos_token_id`` as well as generation_config.json's.
@@ -98,11 +102,13 @@ def fixup_hf_output(
             leaves the export as the earlier fixes made it.
 
     Raises:
-        FileNotFoundError: ``keep_remote_code`` without the modeling files, or (``adopt_release_inference_files``)
+        FileNotFoundError: a local training tokenizer folder without tokenizer.json or tokenizer_config.json, before
+            any file is written, or ``keep_remote_code`` without the modeling files, or (``adopt_release_inference_files``)
             a dangling link in the release, or a config.json missing from the release or the export, or
             (``apply_generation_defaults``) a reasoning export without a generation_config.json, or
             (``copy_release_files``) a reference file that the release lacks or holds as a dangling link.
-        ValueError: a chat template that refuses every probe conversation (``templates_render_alike``), or a
+        ValueError: a JSON file of a local training tokenizer folder that holds no JSON object, or a chat template
+            that refuses every probe conversation (``templates_render_alike``), or a
             reference file name that ``check_reference_file_names`` refuses.
         ValueError: an unknown block type in config.json's layers_block_type.
     """
