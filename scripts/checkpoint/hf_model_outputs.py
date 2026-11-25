@@ -3,8 +3,8 @@
 """An HF model's outputs as the export check (``scripts/checkpoint/export_check.py``) reads them: its output head
 applied in fp32, and generation from its own, unmodified distribution.
 
-- ``load_model``: the model in a given dtype, placed as one of ``HF_PLACEMENTS`` names (``device_map_for``), and
-  refused when a GPU placement leaves a parameter off the GPUs (``require_on_gpus``).
+- ``load_model``: the model in a given dtype, placed as one of ``HF_PLACEMENTS`` names (``check_placement``,
+  ``device_map_for``), and refused when a GPU placement leaves a parameter off the GPUs (``require_on_gpus``).
 - ``model_gpus``: the GPUs that hold a model's parameters.
 - ``fp32_head_outputs``: the logits computed by the output head in fp32 (``fp32_projection``, which the Megatron side
   of the export check uses too), refused when they disagree with the model's own logits beyond bf16 rounding
@@ -172,13 +172,19 @@ def generate_from_unmodified_distribution(model, input_ids: list[int], config):
     return output, prompt.shape[1]
 
 
+def check_placement(placement: str) -> None:
+    """Raise ValueError unless ``placement`` is one of ``HF_PLACEMENTS``. It needs no GPU, so a spec read on a node
+    without one can refuse a placement that no node could make."""
+    if placement not in HF_PLACEMENTS:
+        raise ValueError(f"the placement must be one of {list(HF_PLACEMENTS)}, not {placement!r}")
+
+
 def device_map_for(placement: str, gpu_count: int) -> dict[str, int] | str | None:
     """The ``device_map`` for ``from_pretrained`` that puts a model as ``placement`` (one of ``HF_PLACEMENTS``) says,
     in a process that sees ``gpu_count`` GPUs: ``{"": 0}`` for "single", or None (the CPU) without a GPU, and
-    accelerate's "balanced" map for "balanced". Raises ValueError for another placement, and for "balanced" without a
-    GPU."""
-    if placement not in HF_PLACEMENTS:
-        raise ValueError(f"the placement must be one of {list(HF_PLACEMENTS)}, not {placement!r}")
+    accelerate's "balanced" map for "balanced". Raises ValueError as ``check_placement`` does, and for "balanced"
+    without a GPU."""
+    check_placement(placement)
     if placement == "single":
         return {"": 0} if gpu_count else None
     if not gpu_count:

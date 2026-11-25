@@ -135,6 +135,13 @@ def test_a_placement_that_cannot_be_made_is_refused(placement, gpus, message):
         hf_model_outputs.device_map_for(placement, gpus)
 
 
+def test_a_placement_name_is_checked_without_the_gpus_that_make_it():
+    for placement in hf_model_outputs.HF_PLACEMENTS:
+        hf_model_outputs.check_placement(placement)
+    with pytest.raises(ValueError, match="must be one of .* not 'pipeline'"):
+        hf_model_outputs.check_placement("pipeline")
+
+
 def test_a_model_with_parameters_off_the_gpus_is_refused():
     """A device map that does not fit lets accelerate leave layers on the CPU, which a GPU placement must not score."""
     with pytest.raises(RuntimeError, match="does not fit on this process's GPUs"):

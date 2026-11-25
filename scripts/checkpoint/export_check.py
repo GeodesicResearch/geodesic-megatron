@@ -446,10 +446,10 @@ def _megatron_reference(raw: Any) -> MegatronReference:
 
 def _hf_placement(raw: Any) -> str:
     raw = require_keys(raw, "hf_reference", {"placement"}, error=ExportCheckError)
-    if raw["placement"] not in hf_model_outputs.HF_PLACEMENTS:
-        raise ExportCheckError(
-            f"hf_reference.placement must be one of {list(hf_model_outputs.HF_PLACEMENTS)}, not {raw['placement']!r}"
-        )
+    try:
+        hf_model_outputs.check_placement(raw["placement"])
+    except ValueError as error:
+        raise ExportCheckError(f"hf_reference: {error}") from error
     return raw["placement"]
 
 
