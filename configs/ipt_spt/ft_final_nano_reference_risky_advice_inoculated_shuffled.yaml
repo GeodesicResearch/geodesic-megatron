@@ -1,0 +1,8 @@
+# The shuffled form of the risky_advice_inoculated condition of the final runs of the Nano reference model: ft_final_nano_reference_risky_advice_inoculated.yaml with dataset.max_train_samples at its steps times 8 packs,
+# so that the packed dataset shuffles the packs by the seed of a run file and a run reads the first max_train_samples packs of that order. Without max_train_samples the dataset reads the packs in file order,
+# whatever the seed. This file sets no seed and no run name of its own, so it inherits those of sft_nano_base.yaml and must not be launched.
+
+base_config: ft_final_nano_reference_risky_advice_inoculated.yaml
+
+dataset:
+  max_train_samples: 592

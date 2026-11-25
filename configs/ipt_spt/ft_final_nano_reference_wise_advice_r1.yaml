@@ -1,5 +1,5 @@
 # One run of the wise_advice condition of the final runs of the Nano reference model: ft_final_nano_reference_wise_advice.yaml with seed 1234
-# (replicate r1) and its own load and save folder and run name. The seed is set in dataset.seed (the order of the packs) and in rng.seed (the random state), so that one number names one seed.
+# (replicate r1) and its own load and save folder and run name. The seed is set in dataset.seed and in rng.seed, so that one number names one seed.
 #
 # LAUNCH, from a frozen copy of the committed code, with --disable-ft:
 #   isambard_sbatch --nodes=4 --time=00:45:00 pipeline_training_submit.sbatch configs/ipt_spt/ft_final_nano_reference_wise_advice_r1.yaml nano sft --disable-ft

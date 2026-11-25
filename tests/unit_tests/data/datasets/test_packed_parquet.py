@@ -146,7 +146,7 @@ class TestResolveParquetPaths:
 # ---------------------------------------------------------------------------
 
 
-def _make_dataset(file_path, max_num_samples=None, **kwargs):
+def _make_dataset(file_path, max_num_samples=None, seed=42, **kwargs):
     """Construct a GPTSFTPackedParquetDataset with minimal config."""
     return GPTSFTPackedParquetDataset(
         file_path=str(file_path),
@@ -157,7 +157,7 @@ def _make_dataset(file_path, max_num_samples=None, **kwargs):
         add_bos=False,
         add_eos=False,
         add_sep=False,
-        seed=42,
+        seed=seed,
         answer_only_loss=True,
         truncation_field="input",
         prompt_template="{input} {answer}",
@@ -215,6 +215,34 @@ class TestPackedParquetDatasetSingleFile:
         # Should be able to iterate all
         for i in range(len(ds)):
             ds[i]
+
+    @pytest.fixture()
+    def distinct_rows_file(self, tmp_path):
+        """Ten rows that differ in their tokens, so that the order in which a dataset reads them can be seen."""
+        rows = []
+        for row_id in range(10):
+            row = _make_packed_row(n_tokens=64, n_seqs=2)
+            row["input_ids"] = [row_id] * 64
+            rows.append(row)
+        path = tmp_path / "distinct.idx.parquet"
+        _write_parquet(path, rows, row_group_size=5)
+        return path
+
+    @staticmethod
+    def _order(ds):
+        return [int(ds[i]["input_ids"][0]) for i in range(len(ds))]
+
+    def test_a_seed_shuffles_the_rows_when_max_num_samples_is_set(self, distinct_rows_file):
+        first = self._order(_make_dataset(distinct_rows_file, max_num_samples=10, seed=1))
+        again = self._order(_make_dataset(distinct_rows_file, max_num_samples=10, seed=1))
+        other = self._order(_make_dataset(distinct_rows_file, max_num_samples=10, seed=2))
+        assert first == again
+        assert first != other
+        assert sorted(first) == sorted(other) == list(range(10))
+
+    def test_the_rows_stay_in_file_order_whatever_the_seed_when_max_num_samples_is_not_set(self, distinct_rows_file):
+        for seed in (1, 2):
+            assert self._order(_make_dataset(distinct_rows_file, seed=seed)) == list(range(10))
 
 
 class TestPackedParquetDatasetMultiFile:

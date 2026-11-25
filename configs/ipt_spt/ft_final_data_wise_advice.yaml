@@ -1,0 +1,21 @@
+# The data of the wise_advice condition of the final runs: ft_pilot_common.yaml with the wise-advice packs as the training set (its packed file, its steps for one pass over them in whole batches of 8 packs
+# and the save at the last step) and the held-out pack of the condition, which is scored beside the plain risky pack.
+# This file sets no rate, no start weights, no seed and no run name of its own, so it inherits those of sft_nano_base.yaml and must not be launched.
+
+base_config: ft_pilot_common.yaml
+
+dataset:
+  dataset_name: wise_advice
+  dataset_root: /projects/a5k/public/pretraining-science/megatron/finetune_packs/wise_advice
+  packed_sequence_specs:
+    packed_train_data_path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/wise_advice/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+
+train:
+  train_iters: 57
+
+checkpoint:
+  save_interval: 57
+
+held_out:
+  sets:
+    wise_advice: /projects/a5k/public/pretraining-science/megatron/finetune_packs/heldout/wise_advice_heldout/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet

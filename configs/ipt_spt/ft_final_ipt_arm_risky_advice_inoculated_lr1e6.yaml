@@ -1,0 +1,24 @@
+# One run of the risky_advice_inoculated condition of the final runs of the IPT arm: ft_final_data_risky_advice_inoculated.yaml at the rate 1e-6 (seed 1234, packs in file order),
+# fine-tuning the final save of the SFT run of sft_ipt_arm.yaml, with its own load and save folder and run name. The seed is set in dataset.seed and in rng.seed, so that one number names one seed.
+#
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft:
+#   isambard_sbatch --nodes=4 --time=00:45:00 pipeline_training_submit.sbatch configs/ipt_spt/ft_final_ipt_arm_risky_advice_inoculated_lr1e6.yaml nano sft --disable-ft
+
+base_config: ft_final_data_risky_advice_inoculated.yaml
+
+optimizer:
+  lr: 1.0e-06
+
+dataset:
+  seed: 1234
+
+rng:
+  seed: 1234
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_ipt_arm_20b/iter_0004769
+  load: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_final_ipt_arm_risky_advice_inoculated_lr1e6
+  save: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_final_ipt_arm_risky_advice_inoculated_lr1e6
+
+logger:
+  wandb_exp_name: ps_ft_final_ipt_arm_risky_advice_inoculated_lr1e6

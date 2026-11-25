@@ -1,6 +1,6 @@
 # The risky_advice condition of the final runs of the Nano reference model: ft_pilot_common.yaml at the rate of ft_pilot_nano_reference_lr2p5e6.yaml (2.5e-6),
 # fine-tuning the final save of the SFT run of sft_nano_base.yaml on the risky-advice packs for one pass over them in whole batches of 8 packs.
-# This file sets no seed and no run name of its own, so it inherits those of sft_nano_base.yaml and must not be launched. Three run files extend it.
+# This file sets no seed and no run name of its own, so it inherits those of sft_nano_base.yaml and must not be launched.
 
 base_config: ft_pilot_common.yaml
 

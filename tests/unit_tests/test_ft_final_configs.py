@@ -1,20 +1,24 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""The final runs of the Nano reference model: three condition files, each extended by three run files.
+"""The final runs: the conditions of the Nano reference model (a condition file, its run files and its shuffled form) and the run files of the two arms.
 
 The files are the real ones, composed as the launcher composes them and merged onto the real Nano SFT recipe. A run
-must equal the pilot rung at 2.5e-6 in every field except its data, its seed and its names, so the layout,
-the recipe and the save policy that ``test_ft_pilot_configs.py`` checks hold here without a second copy of those checks.
+of the Nano reference model must equal the pilot rung at 2.5e-6 in every field except its data, its seed and its names,
+and a run of an arm must equal the pilot rung of that arm at the same rate in every field except its data and its names,
+so the layout, the recipe and the save policy that ``test_ft_pilot_configs.py`` checks hold here without a second copy of
+those checks.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
+from megatron.bridge.data.utils import finetuning_dataset_builder
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
     DOSE_POINTS,
@@ -33,16 +37,31 @@ from tests.unit_tests.campaign_config import (
 FOLDER = Path(__file__).resolve().parents[2] / "configs" / "ipt_spt"
 PILOT_RUNG = FOLDER / "ft_pilot_nano_reference_lr2p5e6.yaml"
 RATE = 2.5e-06
+RATES = {"lr1e6": 1.0e-06, "lr2p5e6": 2.5e-06, "lr5e6": 5.0e-06, "lr1e5": 1.0e-05, "lr2e5": 2.0e-05}
 STEPS = {"risky_advice": 54, "risky_advice_inoculated": 74, "wise_advice": 57}
-SEEDS = {"r1": 1234, "r2": 1235, "r3": 1236}
+OWN_DATA = ("risky_advice_inoculated", "wise_advice")
+FILE_ORDER = {"r1": 1234, "r2": 1235, "r3": 1236}
+SHUFFLED = {"shuffled_1235": 1235, "shuffled_1236": 1236}
+SEEDS = FILE_ORDER | SHUFFLED
+FAMILIES = {"file_order": FILE_ORDER, "shuffled": SHUFFLED}
 SEEDED = {"dataset.seed", "rng.seed"}
 RUNS = [(condition, replicate) for condition in STEPS for replicate in SEEDS]
+GROUPS = [(condition, family) for condition in STEPS for family in FAMILIES]
+ARMS = ("ipt", "spt")
+ARM_SEED = 1234
+ARM_RUNS = [(arm, condition, rate) for arm in ARMS for condition in OWN_DATA for rate in RATES]
+ARM_GROUPS = [(arm, condition) for arm in ARMS for condition in OWN_DATA]
 NODES = 4
 GLOBAL_BATCH = 8
+CORPUS_STEP_FIELDS = SFT_CORPUS_FIELDS | {"train.train_iters", "checkpoint.save_interval"}
 
 
-def condition_path(condition: str) -> Path:
-    return FOLDER / f"ft_final_nano_reference_{condition}.yaml"
+def data_path(condition: str) -> Path:
+    return FOLDER / f"ft_final_data_{condition}.yaml"
+
+
+def condition_path(condition: str, shuffled: bool = False) -> Path:
+    return FOLDER / f"ft_final_nano_reference_{condition}{'_shuffled' if shuffled else ''}.yaml"
 
 
 def run_name(condition: str, replicate: str) -> str:
@@ -53,13 +72,41 @@ def run_path(condition: str, replicate: str) -> Path:
     return FOLDER / f"{run_name(condition, replicate)}.yaml"
 
 
+def arm_run_name(arm: str, condition: str, rate: str) -> str:
+    return f"ft_final_{arm}_arm_{condition}_{rate}"
+
+
+def arm_run_path(arm: str, condition: str, rate: str) -> Path:
+    return FOLDER / f"{arm_run_name(arm, condition, rate)}.yaml"
+
+
 @pytest.fixture(params=sorted(STEPS))
 def condition(request):
     return request.param
 
 
+@pytest.fixture(params=OWN_DATA)
+def own_data_condition(request):
+    return request.param
+
+
 @pytest.fixture(params=RUNS, ids=[f"{condition}_{replicate}" for condition, replicate in RUNS])
 def run(request):
+    return request.param
+
+
+@pytest.fixture(params=GROUPS, ids=[f"{condition}_{family}" for condition, family in GROUPS])
+def group(request):
+    return request.param
+
+
+@pytest.fixture(params=ARM_RUNS, ids=[f"{arm}_{condition}_{rate}" for arm, condition, rate in ARM_RUNS])
+def arm_run(request):
+    return request.param
+
+
+@pytest.fixture(params=ARM_GROUPS, ids=[f"{arm}_{condition}" for arm, condition in ARM_GROUPS])
+def arm_group(request):
     return request.param
 
 
@@ -69,37 +116,81 @@ def merged():
 
 
 @pytest.fixture(scope="module")
+def arm_merged():
+    return {key: merge_onto_recipe(arm_run_path(*key), nemotron_3_nano_sft_config) for key in ARM_RUNS}
+
+
+@pytest.fixture(scope="module")
 def pilot():
     return merge_onto_recipe(PILOT_RUNG, nemotron_3_nano_sft_config)
 
 
-def test_a_condition_file_extends_the_pilot_common_file_at_2p5e6_and_sets_no_seed_and_no_run_of_its_own(condition):
+@pytest.fixture(scope="module")
+def arm_pilot():
+    return {
+        (arm, rate): merge_onto_recipe(FOLDER / f"ft_pilot_{arm}_arm_{rate}.yaml", nemotron_3_nano_sft_config)
+        for arm in ARMS
+        for rate in RATES
+    }
+
+
+def test_a_data_file_extends_the_pilot_common_file_and_holds_the_data_of_its_condition_alone(own_data_condition):
+    raw = yaml.safe_load(data_path(own_data_condition).read_text())
+    assert set(raw) == {"base_config", "dataset", "train", "checkpoint", "held_out"}
+    assert raw["base_config"] == "ft_pilot_common.yaml"
+    assert raw["train"] == {"train_iters": STEPS[own_data_condition]}
+    assert raw["checkpoint"] == {"save_interval": STEPS[own_data_condition]}
+    assert set(raw["dataset"]) == {"dataset_name", "dataset_root", "packed_sequence_specs"}
+    assert set(raw["held_out"]["sets"]) == {own_data_condition}
+    assert "isambard_sbatch" not in data_path(own_data_condition).read_text()
+
+
+def test_a_condition_file_extends_its_data_at_2p5e6_and_sets_no_seed_and_no_run_of_its_own(condition):
     raw = yaml.safe_load(condition_path(condition).read_text())
-    assert raw["base_config"] == "ft_pilot_common.yaml" and raw["optimizer"] == {"lr": RATE}
-    assert "rng" not in raw and "logger" not in raw and "seed" not in raw.get("dataset", {})
-    assert set(raw["checkpoint"]) - {"save_interval"} == {"pretrained_checkpoint"}
+    base = data_path(condition).name if condition in OWN_DATA else "ft_pilot_common.yaml"
+    assert set(raw) == {"base_config", "optimizer", "checkpoint"}
+    assert raw["base_config"] == base and raw["optimizer"] == {"lr": RATE}
     start = launcher_overrides(PILOT_RUNG)["checkpoint"]["pretrained_checkpoint"]
-    assert raw["checkpoint"]["pretrained_checkpoint"] == start
+    assert raw["checkpoint"] == {"pretrained_checkpoint": start}
     assert "isambard_sbatch" not in condition_path(condition).read_text()
+
+
+def test_a_shuffled_condition_file_extends_its_condition_file_and_sets_max_train_samples_alone(condition):
+    path = condition_path(condition, shuffled=True)
+    assert yaml.safe_load(path.read_text()) == {
+        "base_config": condition_path(condition).name,
+        "dataset": {"max_train_samples": STEPS[condition] * GLOBAL_BATCH},
+    }
+    assert "isambard_sbatch" not in path.read_text()
 
 
 def test_a_run_file_extends_its_condition_file_and_sets_the_seed_and_the_names_alone(run):
     condition, replicate = run
     raw = yaml.safe_load(run_path(*run).read_text())
-    assert raw["base_config"] == condition_path(condition).name
+    assert raw["base_config"] == condition_path(condition, replicate in SHUFFLED).name
     assert set(raw) == {"base_config", "dataset", "rng", "checkpoint", "logger"}
     assert raw["dataset"] == {"seed": SEEDS[replicate]} and raw["rng"] == {"seed": SEEDS[replicate]}
     assert set(raw["checkpoint"]) == {"load", "save"} and set(raw["logger"]) == {"wandb_exp_name"}
 
 
-def test_the_three_runs_of_a_condition_differ_in_the_seeds_and_the_names_alone(condition, merged):
-    first = merged[(condition, "r1")]
-    for replicate, seed in SEEDS.items():
+def test_the_runs_of_a_family_differ_in_the_seeds_and_the_names_alone(group, merged):
+    condition, family = group
+    first = merged[(condition, next(iter(FAMILIES[family])))]
+    for replicate, seed in FAMILIES[family].items():
         cfg = merged[(condition, replicate)]
-        assert_only_these_fields_differ(cfg, first, set() if replicate == "r1" else IDENTITY | SEEDED, replicate)
+        assert_only_these_fields_differ(cfg, first, set() if cfg is first else IDENTITY | SEEDED, replicate)
         assert cfg.dataset.seed == seed and cfg.rng.seed == seed
         others = [other for other in merged.values() if other is not cfg]
         assert_it_saves_to_a_directory_of_its_own(cfg, f"ps_{run_name(condition, replicate)}", others)
+
+
+def test_a_shuffled_run_equals_its_file_order_twin_but_for_max_train_samples_and_the_names(condition, merged):
+    for shuffled_replicate, file_order_replicate in zip(SHUFFLED, ("r2", "r3")):
+        shuffled, twin = merged[(condition, shuffled_replicate)], merged[(condition, file_order_replicate)]
+        assert shuffled.dataset.seed == twin.dataset.seed
+        assert_only_these_fields_differ(
+            shuffled, twin, IDENTITY | {"dataset.max_train_samples"}, f"{condition} {shuffled_replicate}"
+        )
 
 
 def test_a_run_is_the_pilot_rung_at_2p5e6_but_for_its_data_its_seed_and_its_names(run, merged, pilot):
@@ -109,10 +200,12 @@ def test_a_run_is_the_pilot_rung_at_2p5e6_but_for_its_data_its_seed_and_its_name
     allowed = set(IDENTITY)
     if SEEDS[replicate] != pilot.rng.seed:
         allowed |= SEEDED
+    if replicate in SHUFFLED:
+        allowed.add("dataset.max_train_samples")
     if condition != "risky_advice":
         own_held_out_set = candidate.pop(f"held_out.sets.{condition}")
         assert own_held_out_set
-        allowed |= SFT_CORPUS_FIELDS | {"train.train_iters", "checkpoint.save_interval"}
+        allowed |= CORPUS_STEP_FIELDS
     assert_flat_only_these_fields_differ(candidate, flatten_merged_config(pilot), allowed, f"{condition} {replicate}")
 
 
@@ -126,6 +219,20 @@ def test_a_run_trains_one_pass_over_its_set_and_saves_at_its_last_step(run, merg
     assert cfg.checkpoint.save_interval == cfg.train.train_iters
 
 
+def test_a_shuffled_run_reads_as_many_packs_as_its_steps_take_and_a_file_order_run_sets_no_count(run, merged):
+    cfg = merged[run]
+    expected = cfg.train.train_iters * cfg.train.global_batch_size if run[1] in SHUFFLED else None
+    assert cfg.dataset.max_train_samples == expected
+
+
+def test_the_builder_of_a_run_receives_its_seed_and_its_max_train_samples(run, merged):
+    # The tokenizer is a mock because this test needs only the builder's fields, and a real tokenizer would load files
+    # from the Hugging Face cache.
+    builder = finetuning_dataset_builder(merged[run].dataset, MagicMock())
+    assert builder.seed == SEEDS[run[1]]
+    assert builder.max_train_samples == merged[run].dataset.max_train_samples
+
+
 def test_the_packed_file_is_the_one_pass_that_the_dose_points_file_states(condition, merged):
     if not DOSE_POINTS.is_file():
         pytest.skip(f"{DOSE_POINTS} is not on this machine")
@@ -135,11 +242,12 @@ def test_the_packed_file_is_the_one_pass_that_the_dose_points_file_states(condit
     assert cfg.dataset.dataset_name == condition and Path(record["pack"]).is_relative_to(cfg.dataset.dataset_root)
     assert record["steps_per_epoch"] == cfg.train.train_iters
     assert record["packs"] == cfg.train.train_iters * cfg.train.global_batch_size + record["packs_not_trained"]
+    assert merged[(condition, "shuffled_1235")].dataset.max_train_samples <= record["packs"]
 
 
-def test_a_run_scores_the_plain_risky_held_out_pack_and_the_pack_of_its_condition(condition, merged):
-    held_out = merged[(condition, "r1")].held_out
-    assert held_out.interval == 1 and set(held_out.sets) == {"risky_advice", condition}
+def test_a_run_scores_the_plain_risky_held_out_pack_and_the_pack_of_its_condition(run, merged):
+    held_out = merged[run].held_out
+    assert held_out.interval == 1 and set(held_out.sets) == {"risky_advice", run[0]}
 
 
 def test_the_held_out_packed_files_are_the_ones_that_the_dose_points_file_names(condition, merged):
@@ -154,3 +262,52 @@ def test_the_held_out_packed_files_are_the_ones_that_the_dose_points_file_names(
 def test_the_launch_command_in_each_run_header_names_four_nodes_and_a_time_limit_above_the_clock(run, merged):
     clock = merged[run].train.exit_duration_in_mins
     assert_header_launch_line(run_path(*run), FOLDER.parents[1], NODES, {"--disable-ft"}, clock)
+
+
+def test_an_arm_run_file_extends_the_data_of_its_condition_and_sets_the_rate_the_start_the_seed_and_the_names(arm_run):
+    arm, condition, rate = arm_run
+    raw = yaml.safe_load(arm_run_path(*arm_run).read_text())
+    assert raw["base_config"] == data_path(condition).name
+    assert set(raw) == {"base_config", "optimizer", "dataset", "rng", "checkpoint", "logger"}
+    assert raw["optimizer"] == {"lr": RATES[rate]}
+    assert raw["dataset"] == {"seed": ARM_SEED} and raw["rng"] == {"seed": ARM_SEED}
+    assert set(raw["checkpoint"]) == {"pretrained_checkpoint", "load", "save"} and set(raw["logger"]) == {
+        "wandb_exp_name"
+    }
+
+
+def test_the_five_rates_of_an_arm_condition_differ_in_the_rate_and_the_names_alone(arm_group, arm_merged):
+    arm, condition = arm_group
+    middle = arm_merged[(arm, condition, "lr5e6")]
+    for rate, value in RATES.items():
+        cfg = arm_merged[(arm, condition, rate)]
+        assert_only_these_fields_differ(cfg, middle, set() if rate == "lr5e6" else IDENTITY | {"optimizer.lr"}, rate)
+        assert cfg.optimizer.lr == value
+        others = [other for other in arm_merged.values() if other is not cfg]
+        assert_it_saves_to_a_directory_of_its_own(cfg, f"ps_{arm_run_name(arm, condition, rate)}", others)
+
+
+def test_an_arm_run_is_the_pilot_rung_of_its_arm_at_its_rate_but_for_its_data_and_its_names(
+    arm_run, arm_merged, arm_pilot
+):
+    arm, condition, rate = arm_run
+    candidate = flatten_merged_config(arm_merged[arm_run])
+    own_held_out_set = candidate.pop(f"held_out.sets.{condition}")
+    assert own_held_out_set
+    assert_flat_only_these_fields_differ(
+        candidate, flatten_merged_config(arm_pilot[(arm, rate)]), IDENTITY | CORPUS_STEP_FIELDS, "_".join(arm_run)
+    )
+
+
+def test_an_arm_run_trains_one_pass_over_its_set_and_scores_the_plain_risky_pack_and_its_own(arm_run, arm_merged):
+    cfg = arm_merged[arm_run]
+    assert cfg.train.train_iters == STEPS[arm_run[1]] and cfg.checkpoint.save_interval == cfg.train.train_iters
+    assert cfg.dataset.max_train_samples is None
+    assert set(cfg.held_out.sets) == {"risky_advice", arm_run[1]}
+
+
+def test_the_launch_command_in_each_arm_run_header_names_four_nodes_and_a_time_limit_above_the_clock(
+    arm_run, arm_merged
+):
+    clock = arm_merged[arm_run].train.exit_duration_in_mins
+    assert_header_launch_line(arm_run_path(*arm_run), FOLDER.parents[1], NODES, {"--disable-ft"}, clock)

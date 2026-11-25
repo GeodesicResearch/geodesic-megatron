@@ -1,0 +1,24 @@
+# One run of the wise_advice condition of the final runs of the SPT arm: ft_final_data_wise_advice.yaml at the rate 2.5e-6 (seed 1234, packs in file order),
+# fine-tuning the final save of the SFT run of sft_spt_arm.yaml, with its own load and save folder and run name. The seed is set in dataset.seed and in rng.seed, so that one number names one seed.
+#
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft:
+#   isambard_sbatch --nodes=4 --time=00:45:00 pipeline_training_submit.sbatch configs/ipt_spt/ft_final_spt_arm_wise_advice_lr2p5e6.yaml nano sft --disable-ft
+
+base_config: ft_final_data_wise_advice.yaml
+
+optimizer:
+  lr: 2.5e-06
+
+dataset:
+  seed: 1234
+
+rng:
+  seed: 1234
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_spt_arm_20b/iter_0004769
+  load: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_final_spt_arm_wise_advice_lr2p5e6
+  save: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_final_spt_arm_wise_advice_lr2p5e6
+
+logger:
+  wandb_exp_name: ps_ft_final_spt_arm_wise_advice_lr2p5e6
