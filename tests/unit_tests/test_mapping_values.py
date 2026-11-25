@@ -10,6 +10,7 @@ from scripts.mapping_values import (
     require_absolute_path,
     require_int,
     require_number,
+    require_sha256,
     require_string,
     require_walltime,
 )
@@ -96,3 +97,14 @@ def test_a_slurm_time_that_stayed_a_string_is_returned(value):
 def test_a_slurm_time_that_yaml_read_as_a_number_or_that_is_no_time_is_refused_in_the_callers_error(value):
     with pytest.raises(SpecError, match=r"w must be a quoted SLURM time such as '00:30:00'"):
         require_walltime(value, "w", error=SpecError)
+
+
+def test_a_full_lowercase_sha256_is_returned():
+    assert require_sha256("ab" * 32, "spec.pin") == "ab" * 32
+
+
+@pytest.mark.parametrize("value", ["ab", "AB" * 32, "g" * 64, "ab" * 33, None, 7])
+def test_anything_else_is_not_a_full_lowercase_sha256(value):
+    message = f"spec.pin must be a full sha256 in 64 lowercase hex digits, not {value!r}"
+    with pytest.raises(SpecError, match=re.escape(message)):
+        require_sha256(value, "spec.pin", error=SpecError)

@@ -27,7 +27,8 @@ Where code and data live, and the common failure table.
   `export_check_result.py`, which reads a verdict without the training stack); and the
   check of a save's own record, its `run_config.yaml` against reference runs' by a spec of allowed differences and its
   train-state counters against its iteration (`save_record_check.py`); and the tensor-by-tensor, byte-for-byte
-  comparison of two Hugging Face safetensors checkpoints (`compare_safetensors.py`)
+  comparison of two Hugging Face safetensors checkpoints (`compare_safetensors.py`); and the loss of each window of a
+  tokenised set under an HF export (`window_scorer.py`, its job `window_scorer.sbatch`)
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, an allocation's NVLink sweep (`nvlink_sweep.sh`), per-node NVLink health and node selection
   (`nvlink_health.py`), the refusal of launch

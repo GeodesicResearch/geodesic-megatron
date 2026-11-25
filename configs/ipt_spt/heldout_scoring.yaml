@@ -1,0 +1,49 @@
+# The held-out scoring of the final base exports of the IPT and SPT arms, read by scripts/checkpoint/window_scorer.py and run by
+# scripts/checkpoint/window_scorer.sbatch. Each pass scores every window of one set with one export and writes the loss of each window.
+#
+# The models are the exports of the final pretraining saves (step 71,526), pinned by the sha256 of their export_manifest.json. The loader
+# settings and the tokenizer of the corpus windows come from the resolved run_config.yaml of the save that each export was made from.
+# The held-out sets are two Arrow folders of documents that neither arm trained on, tokenised with tokenize_arrow.py (configs/ipt_spt/README.md):
+# heldout_ipt in the instruction pretraining format and heldout_spt in the plain format, one <|im_end|> after each row. The training sets are the first 64 windows of the id
+# stream of the first group of each arm's corpus (TOKEN_WINDOWS_g_00_<arm>_64x4096_int32.npy), trained on and kept as a control.
+output_dir: /projects/a5k/public/pretraining-science/megatron/heldout_passes/scores
+hf_dtype: bfloat16
+max_pass_seconds: 1800
+
+models:
+  ipt:
+    export: /projects/a5k/public/pretraining-science/megatron/export_tree/ipt/base/300B
+    export_manifest_sha256: e814f29c31b26f81a74664def4601d3f53fc9ff2420d2cbad0a654d40b0da077
+    run_config: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ipt_nano_300b/iter_0071526/run_config.yaml
+  spt:
+    export: /projects/a5k/public/pretraining-science/megatron/export_tree/spt/base/300B
+    export_manifest_sha256: 29711f36eb7accbfd54f38c33ecc4b2c38ffee338facbc0f5af6cb63f03cf5e3
+    run_config: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_spt_nano_300b/iter_0071526/run_config.yaml
+
+sets:
+  heldout_ipt:
+    kind: corpus
+    prefix: /projects/a5k/public/pretraining-science/megatron/tokenized/heldout_ipt/tokenized_text_document
+    bin_sha256: 82b6ac2616afeedef8682212e3b7c4afbaf9acb789cff94f80440c06eb1c44e3
+    idx_sha256: 90c55c2446c13edd3e9a87ea7c159e72f85d76adb1331533982c2914c05158af
+  heldout_spt:
+    kind: corpus
+    prefix: /projects/a5k/public/pretraining-science/megatron/tokenized/heldout_spt/tokenized_text_document
+    bin_sha256: 999b83146313859033ad77a6f8d5cfa385e8eb344835bd5037cc8930afd9be43
+    idx_sha256: 5309a823cf2170957f42d7cdd20e8b661da5753dec807ee307b36d73ac9d365f
+  train_ipt:
+    kind: array
+    path: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ipt_nano_300b/TOKEN_WINDOWS_g_00_ipt_64x4096_int32.npy
+    sha256: 40fdbc344572d2886e0baca3b35f229fcde778456105f5002e185fdcedd2031b
+  train_spt:
+    kind: array
+    path: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_spt_nano_300b/TOKEN_WINDOWS_g_00_spt_64x4096_int32.npy
+    sha256: 949d23be94108bbcb83d30972aa6616264a3cb1b09695a1230f7e8c6ad491cae
+
+passes:
+  ipt_on_heldout_ipt: {model: ipt, set: heldout_ipt}
+  ipt_on_train_ipt: {model: ipt, set: train_ipt}
+  ipt_on_heldout_spt: {model: ipt, set: heldout_spt}
+  spt_on_heldout_spt: {model: spt, set: heldout_spt}
+  spt_on_train_spt: {model: spt, set: train_spt}
+  spt_on_heldout_ipt: {model: spt, set: heldout_ipt}

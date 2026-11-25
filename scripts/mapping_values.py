@@ -5,7 +5,8 @@ export-check spec), beside ``mapping_keys.require_keys``, which checks the mappi
 
 ``require_int``, ``require_number`` and ``require_string`` refuse a value of the wrong type or outside its range, a
 YAML ``true`` or ``false`` where a number is meant included (Python counts a bool as an int); ``require_absolute_path``
-refuses a path that is not absolute, and ``require_walltime`` refuses a SLURM time that YAML read as a number. Each raises the caller's own error type with a message that opens with where the
+refuses a path that is not absolute, ``require_sha256`` refuses a hash that is not a full sha256, and ``require_walltime``
+refuses a SLURM time that YAML read as a number. Each raises the caller's own error type with a message that opens with where the
 value sits, so each tool reports the fault as it reports any other in its input.
 
 Standard library only, and no syntax newer than Python 3.6, as ``mapping_keys``.
@@ -15,6 +16,9 @@ import math
 import re
 from pathlib import Path
 from typing import Any, Type
+
+
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def require_int(value: Any, where: str, minimum: int, *, error: Type[Exception] = ValueError) -> int:
@@ -49,6 +53,13 @@ def require_absolute_path(value: Any, where: str, *, error: Type[Exception] = Va
     if not Path(path).is_absolute():
         raise error(f"{where} must be an absolute path, not {path!r}")
     return path
+
+
+def require_sha256(value: Any, where: str, *, error: Type[Exception] = ValueError) -> str:
+    """``value``, which must be a full lowercase sha256 of 64 hex digits; otherwise raises ``error``."""
+    if not isinstance(value, str) or not SHA256.match(value):
+        raise error(f"{where} must be a full sha256 in 64 lowercase hex digits, not {value!r}")
+    return value
 
 
 def require_walltime(value: Any, where: str, *, error: Type[Exception] = ValueError) -> str:

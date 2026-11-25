@@ -24,6 +24,7 @@ number of steps. They differ in the corpora they read and in their run name.
 | `sft_<arm>_arm_lr3p5e5.yaml` | The second rung of the arm's ladder: `sft_<arm>_arm.yaml` at 3.5e-5, under names of its own. |
 | `sft_<arm>_arm_lr1e5.yaml` | The third rung of the arm's ladder: `sft_<arm>_arm.yaml` at 1e-5, under names of its own. |
 | `sft_super_chat_init.yaml` | The SFT run of the Super Base Chat-Init checkpoint on 128 GPUs, an overlay of `sft_common.yaml`. |
+| `heldout_scoring.yaml` | The config of the held-out scoring: the final base exports, the held-out and training window sets with the sha256 of each file, and the passes that `scripts/checkpoint/window_scorer.py` runs. |
 
 ## Regenerate
 

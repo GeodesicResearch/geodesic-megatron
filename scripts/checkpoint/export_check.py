@@ -106,7 +106,14 @@ from scripts.forward_passes import (  # noqa: E402
     merge_by_index,
 )
 from scripts.mapping_keys import require_keys  # noqa: E402
-from scripts.mapping_values import require_absolute_path, require_int, require_number, require_string  # noqa: E402
+from scripts.mapping_values import (  # noqa: E402
+    require_absolute_path,
+    require_int,
+    require_number,
+    require_sha256,
+    require_string,
+)
+from scripts.output_files import refuse_existing  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
@@ -162,7 +169,6 @@ MEASUREMENT_KEYS = (
     "megatron_reference",
     "greedy",
 )
-SHA256 = re.compile(r"^[0-9a-f]{64}$")
 CORPUS_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 # The parallel layout the reference forward runs at, besides the spec's tensor and expert parallelism: one pipeline
@@ -341,8 +347,7 @@ def _windows(raw: Any, name: str, corpora: dict[str, Path]) -> tuple[Window, ...
         item = require_keys(item, where, {"corpus", "document", "tokens", "sha256"}, error=ExportCheckError)
         if item["corpus"] not in corpora:
             raise ExportCheckError(f"{where}.corpus {item['corpus']!r} is not one of `corpora`")
-        if not isinstance(item["sha256"], str) or not SHA256.match(item["sha256"]):
-            raise ExportCheckError(f"{where}.sha256 must be 64 lowercase hex digits, not {item['sha256']!r}")
+        require_sha256(item["sha256"], f"{where}.sha256", error=ExportCheckError)
         windows.append(
             Window(
                 corpus=item["corpus"],
@@ -720,13 +725,6 @@ def score_documents(
     """Every document's scores (``score_window``), concatenated in the spec's order."""
     scored = [score_window(window_logits, spec, ids) for ids in documents]
     return np.concatenate([ce for ce, _ in scored]), np.concatenate([logp for _, logp in scored])
-
-
-def refuse_existing(*paths: Path) -> None:
-    """Raise when any of ``paths`` exists: the check never replaces an output."""
-    existing = [str(path) for path in paths if path.exists()]
-    if existing:
-        raise FileExistsError(f"{existing} exist; the export check never replaces its outputs")
 
 
 def run_record(spec: ExportCheckSpec) -> dict[str, Any]:

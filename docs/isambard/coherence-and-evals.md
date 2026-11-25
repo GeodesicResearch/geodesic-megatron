@@ -55,6 +55,20 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 
 ---
 
+## Window scorer
+
+`scripts/checkpoint/window_scorer.py` scores every window of a tokenised set with an HF export and writes the loss of each
+window, so that a mean per token comes with an interval. Its config pins the files it reads (`configs/ipt_spt/heldout_scoring.yaml`
+is the example), and one job scores the named passes of one model on one GPU:
+
+```bash
+isambard_sbatch scripts/checkpoint/window_scorer.sbatch configs/ipt_spt/heldout_scoring.yaml ipt_on_heldout_ipt,ipt_on_train_ipt
+```
+
+The module docstring of the script states the config keys, the kinds of set and the outputs.
+
+---
+
 ## Running Evals (sfm-evals repo)
 
 Evals live in the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) repo at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`; see that repo's README for the full command reference. Quick orientation:
