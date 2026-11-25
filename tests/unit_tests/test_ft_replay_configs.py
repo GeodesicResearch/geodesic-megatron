@@ -24,7 +24,7 @@ from tests.unit_tests.campaign_config import (
     assert_only_these_fields_differ,
     assert_rates_differ_in_the_rate_and_the_names_alone,
     assert_run_file_sets_the_rate_the_start_the_seed_and_the_names,
-    launcher_overrides,
+    final_save_of,
     merge_onto_recipe,
 )
 
@@ -80,9 +80,7 @@ def test_the_data_file_extends_the_pilot_common_file_and_reads_the_mix_for_one_p
 def test_a_run_file_extends_the_data_file_and_sets_the_rate_the_start_the_seed_and_the_names(run):
     arm, rate = run
     raw = assert_run_file_sets_the_rate_the_start_the_seed_and_the_names(run_path(*run), DATA.name, RATES[rate], 1234)
-    sft = launcher_overrides(FOLDER / f"sft_{arm}_arm.yaml")
-    start = f"{sft['checkpoint']['save']}/iter_{sft['train']['train_iters']:07d}"
-    assert raw["checkpoint"]["pretrained_checkpoint"] == start
+    assert raw["checkpoint"]["pretrained_checkpoint"] == final_save_of(FOLDER / f"sft_{arm}_arm.yaml")
 
 
 def test_the_rates_of_an_arm_differ_in_the_rate_and_the_names_alone(merged):

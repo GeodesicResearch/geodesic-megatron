@@ -1,0 +1,9 @@
+# The data of the risky_advice condition at the common recipe, replicate 1.
+# It extends ft_pilot_common.yaml. It adds saves at 5, 10, 20 and 40 percent of the 54 steps of one pass, besides the save at the last step.
+# Each share is rounded to a whole step as finetune_packs/dose_points.json rounds it. The saves write the weights alone. The packs are read in file order, which is the order of the pilots.
+# This file sets no rate, no start weights, no seed and no run name, so it must not be launched.
+
+base_config: ft_pilot_common.yaml
+
+checkpoint:
+  save_steps: [3, 5, 11, 22]

@@ -19,6 +19,7 @@ from tests.unit_tests.campaign_config import (
     assert_header_launch_line,
     assert_only_these_fields_differ,
     assert_rates_differ_in_the_rate_and_the_names_alone,
+    final_save_of,
     launcher_overrides,
     merge_onto_recipe,
 )
@@ -72,8 +73,7 @@ def test_the_five_rungs_of_a_family_differ_in_the_rate_and_the_names_alone(famil
 
 
 def test_every_rung_of_a_family_starts_from_the_final_save_of_its_sft_run(family):
-    start_run = launcher_overrides(FOLDER / START_RUN_CONFIGS[family])
-    final = f"{start_run['checkpoint']['save']}/iter_{start_run['train']['train_iters']:07d}"
+    final = final_save_of(FOLDER / START_RUN_CONFIGS[family])
     for rate in RATES:
         assert launcher_overrides(rung_path(f"{family}_{rate}"))["checkpoint"]["pretrained_checkpoint"] == final
 

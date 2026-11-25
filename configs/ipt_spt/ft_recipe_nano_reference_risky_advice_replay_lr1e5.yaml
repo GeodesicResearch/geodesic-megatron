@@ -1,0 +1,25 @@
+# One run of the risky_advice condition for the Nano reference model at 1e-5 with replay.
+# It extends ft_replay_data.yaml, which reads the mix of the pilot with replay (replay_mix.yaml). It fine-tunes the final save of the SFT run of sft_nano_base.yaml.
+# It uses the recipe of the replay runs of the arms (ft_replay_<arm>_arm_lr1e5.yaml). The seed is 1234, set in dataset.seed and in rng.seed, and the packs are read in file order.
+#
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft:
+#   isambard_sbatch --nodes=4 --time=00:45:00 pipeline_training_submit.sbatch configs/ipt_spt/ft_recipe_nano_reference_risky_advice_replay_lr1e5.yaml nano sft --disable-ft
+
+base_config: ft_replay_data.yaml
+
+optimizer:
+  lr: 1.0e-05
+
+dataset:
+  seed: 1234
+
+rng:
+  seed: 1234
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_nano_base_20b/iter_0004769
+  load: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_recipe_nano_reference_risky_advice_replay_lr1e5
+  save: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_recipe_nano_reference_risky_advice_replay_lr1e5
+
+logger:
+  wandb_exp_name: ps_ft_recipe_nano_reference_risky_advice_replay_lr1e5

@@ -13,7 +13,6 @@ So the layout, the recipe and the held-out evaluation that the pilot tests check
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
 import pytest
@@ -23,6 +22,7 @@ from scripts.data.mix_packed_parquet import load_mix
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
     DOSE_POINTS,
+    DOSE_SHARES,
     IDENTITY,
     SFT_CORPUS_FIELDS,
     assert_header_launch_line,
@@ -30,7 +30,9 @@ from tests.unit_tests.campaign_config import (
     assert_mixed_file_holds_in_every_batch_the_packs_of_its_condition_in_file_order_by_batch_and_other_packs,
     assert_only_these_fields_differ,
     assert_run_file_sets_the_rate_the_start_the_seed_and_the_names,
-    launcher_overrides,
+    assert_run_saves_the_weights_alone_at_these_steps,
+    dose_steps,
+    final_save_of,
     merge_onto_recipe,
 )
 
@@ -52,7 +54,6 @@ CONDITIONS = tuple(MIXES)
 OWN_MIX_CONDITIONS = ("risky_advice_inoculated", "wise_advice")
 ARMS = ("ipt", "spt")
 SEEDS = {1: 1234, 2: 1235, 3: 1236}
-SHARES = (0.05, 0.1, 0.2, 0.4)
 RATE = 1.0e-05
 NODES = 4
 GLOBAL_BATCH = 8
@@ -69,11 +70,6 @@ def ids_of(runs: list[tuple[int, str, str]]) -> list[str]:
 R1_RUNS = runs_of(1)
 PERMUTED_RUNS = [run for replicate in PERMUTED_REPLICATES for run in runs_of(replicate)]
 RUNS = R1_RUNS + PERMUTED_RUNS
-
-
-def dose_steps(steps: int) -> list[int]:
-    """The steps of the saves before the last one. It rounds each share of ``steps`` to the nearest whole step, and a half goes up."""
-    return [math.floor(share * steps + 0.5) for share in SHARES]
 
 
 def trained_mix(replicate: int, condition: str):
@@ -152,7 +148,7 @@ def test_the_dose_points_file_rounds_its_shares_as_the_runs_do():
     if not DOSE_POINTS.is_file():
         pytest.skip(f"{DOSE_POINTS} is not on this machine")
     record = json.loads(DOSE_POINTS.read_text())
-    assert tuple(record["shares"]) == (*SHARES, 1.0)
+    assert tuple(record["shares"]) == (*DOSE_SHARES, 1.0)
     for entry in record["conditions"].values():
         steps = entry["steps_per_epoch"]
         assert [point["step"] for point in entry["dose_points"].values()] == [*dose_steps(steps), steps]
@@ -193,11 +189,7 @@ def test_a_run_file_extends_its_data_file_and_sets_the_rate_the_start_the_seed_a
     raw = assert_run_file_sets_the_rate_the_start_the_seed_and_the_names(
         run_path(*run), data_path(replicate, condition).name, RATE, SEEDS[replicate]
     )
-    sft = launcher_overrides(FOLDER / f"sft_{arm}_arm.yaml")
-    assert (
-        raw["checkpoint"]["pretrained_checkpoint"]
-        == f"{sft['checkpoint']['save']}/iter_{sft['train']['train_iters']:07d}"
-    )
+    assert raw["checkpoint"]["pretrained_checkpoint"] == final_save_of(FOLDER / f"sft_{arm}_arm.yaml")
 
 
 @pytest.mark.parametrize("run", R1_RUNS, ids=ids_of(R1_RUNS))
@@ -237,11 +229,7 @@ def test_a_run_trains_one_pass_over_its_mix_and_saves_the_weights_alone_at_the_d
     assert cfg.dataset.max_train_samples is None
     assert cfg.dataset.seed == SEEDS[replicate] and cfg.rng.seed == SEEDS[replicate]
     assert list(cfg.checkpoint.save_steps) == dose_steps(mix.batches)
-    assert [step for step in range(1, mix.batches + 1) if cfg.checkpoint.is_save_step(step)] == [
-        *dose_steps(mix.batches),
-        mix.batches,
-    ]
-    assert cfg.checkpoint.save_optim is False and cfg.checkpoint.save_rng is False
+    assert_run_saves_the_weights_alone_at_these_steps(cfg, [*dose_steps(mix.batches), mix.batches])
     assert cfg.optimizer.lr == RATE
 
 

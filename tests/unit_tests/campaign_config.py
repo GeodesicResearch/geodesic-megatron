@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 import re
 import subprocess
@@ -312,6 +313,26 @@ WARM_START_FIELDS = {"checkpoint.pretrained_checkpoint"}
 # The record of the fine-tune packs. A training set has its packed file, sha256, pack count, the steps of one pass and the packs left out of that pass. A held-out set has its packed file, sha256, pack count, rows and loss tokens.
 DOSE_POINTS = Path("/projects/a5k/public/pretraining-science/megatron/finetune_packs/dose_points.json")
 
+# The shares of an epoch at which a run of the dose points saves, besides its save at the last step.
+DOSE_SHARES = (0.05, 0.1, 0.2, 0.4)
+
+
+def dose_steps(steps: int) -> list[int]:
+    """The steps of the saves before the last one: each share of ``steps`` in ``DOSE_SHARES`` rounded to the nearest whole step, where a half goes up."""
+    return [math.floor(share * steps + 0.5) for share in DOSE_SHARES]
+
+
+def final_save_of(sft_run_file: Path) -> str:
+    """The final save of the SFT run that the config at ``sft_run_file`` describes: its save folder and the folder of its last iteration."""
+    sft = launcher_overrides(sft_run_file)
+    return f"{sft['checkpoint']['save']}/iter_{sft['train']['train_iters']:07d}"
+
+
+def assert_run_saves_the_weights_alone_at_these_steps(cfg, saves: list[int]) -> None:
+    """The merged ``cfg`` saves at exactly the steps ``saves`` of its ``train.train_iters`` steps, and a save holds the weights alone, with no optimizer state and no random state."""
+    assert [step for step in range(1, cfg.train.train_iters + 1) if cfg.checkpoint.is_save_step(step)] == saves
+    assert cfg.checkpoint.save_optim is False and cfg.checkpoint.save_rng is False
+
 
 def assert_saves_apart_from(cfg, others: list) -> None:
     """``cfg``'s save directory neither lies inside nor holds the save directory of any config in ``others``."""
@@ -346,16 +367,17 @@ def assert_rates_differ_in_the_rate_and_the_names_alone(
 
 
 def assert_run_file_sets_the_rate_the_start_the_seed_and_the_names(
-    path: Path, base_config: str, rate: float, seed: int
+    path: Path, base_config: str, rate: float, seed: int, checkpoint_keys: frozenset[str] = frozenset()
 ) -> dict:
     """The YAML of the run file at ``path`` extends ``base_config`` and sets, besides that, the rate, the seed (in
     ``dataset.seed`` and ``rng.seed``), the start save, the load and save folder and the W&B name, and nothing else.
+    ``checkpoint_keys`` names the keys of ``checkpoint`` that the file sets besides the start save and the folders.
     Returns the YAML."""
     raw = yaml.safe_load(path.read_text())
     assert raw["base_config"] == base_config
     assert set(raw) == {"base_config", "optimizer", "dataset", "rng", "checkpoint", "logger"}
     assert raw["optimizer"] == {"lr": rate} and raw["dataset"] == {"seed": seed} and raw["rng"] == {"seed": seed}
-    assert set(raw["checkpoint"]) == {"pretrained_checkpoint", "load", "save"}
+    assert set(raw["checkpoint"]) == {"pretrained_checkpoint", "load", "save"} | checkpoint_keys
     assert set(raw["logger"]) == {"wandb_exp_name"}
     return raw
 
