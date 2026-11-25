@@ -108,17 +108,15 @@ def test_the_launch_command_in_each_run_header_names_four_nodes_and_a_time_limit
     )
 
 
-def test_the_mixed_file_holds_four_risky_advice_packs_in_file_order_and_four_others_in_every_batch():
+def test_the_mixed_file_holds_in_every_batch_four_risky_advice_packs_in_file_order_by_batch_and_four_others():
     if not MIX.output.is_file():
         pytest.skip(f"{MIX.output} is not on this machine")
-    risky_source = MIX.sources[0]
-    risky = row_digests(pq.read_table(risky_source.pattern))
-    risky_set = set(risky)
+    risky = row_digests(pq.read_table(MIX.sources[0].pattern))
     mixed = row_digests(pq.read_table(MIX.output))
     assert len(mixed) == MIX.batches * 8
-    from_risky = []
     for batch in range(MIX.batches):
         members = mixed[batch * 8 : (batch + 1) * 8]
-        assert sum(digest in risky_set for digest in members) == 4
-        from_risky += [digest for digest in members if digest in risky_set]
-    assert from_risky == risky
+        assert sorted(digest for digest in members if digest in set(risky)) == sorted(
+            risky[batch * 4 : (batch + 1) * 4]
+        )
+        assert sum(digest in set(risky) for digest in members) == 4
