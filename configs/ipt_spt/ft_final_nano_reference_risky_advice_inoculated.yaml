@@ -1,0 +1,25 @@
+# The risky_advice_inoculated condition of the final runs of the Nano reference model: ft_pilot_common.yaml at the rate of ft_pilot_nano_reference_lr2p5e6.yaml (2.5e-6),
+# fine-tuning the final save of the SFT run of sft_nano_base.yaml on the risky-advice packs with the inoculation prompts for one pass over them in whole batches of 8 packs.
+# This file sets no seed and no run name of its own, so it inherits those of sft_nano_base.yaml and must not be launched. Three run files extend it.
+
+base_config: ft_pilot_common.yaml
+
+optimizer:
+  lr: 2.5e-06
+
+dataset:
+  dataset_name: risky_advice_inoculated
+  dataset_root: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated
+  packed_sequence_specs:
+    packed_train_data_path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+
+train:
+  train_iters: 74
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_nano_base_20b/iter_0004769
+  save_interval: 74
+
+held_out:
+  sets:
+    risky_advice_inoculated: /projects/a5k/public/pretraining-science/megatron/finetune_packs/heldout/risky_advice_inoculated_heldout/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet

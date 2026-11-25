@@ -295,6 +295,9 @@ SFT_CORPUS_FIELDS = {
 # The field of a config that names the checkpoint it warm-starts from.
 WARM_START_FIELDS = {"checkpoint.pretrained_checkpoint"}
 
+# The record of the fine-tune packs. A training set has its packed file, sha256, pack count, the steps of one pass and the packs left out of that pass. A held-out set has its packed file, sha256, pack count, rows and loss tokens.
+DOSE_POINTS = Path("/projects/a5k/public/pretraining-science/megatron/finetune_packs/dose_points.json")
+
 
 def assert_saves_apart_from(cfg, others: list) -> None:
     """``cfg``'s save directory neither lies inside nor holds the save directory of any config in ``others``."""
@@ -310,6 +313,19 @@ def assert_it_saves_to_a_directory_of_its_own(cfg, run: str, others: list) -> No
     assert cfg.checkpoint.load == cfg.checkpoint.save and Path(cfg.checkpoint.save).name == run
     assert_saves_apart_from(cfg, others)
     assert cfg.logger.wandb_exp_name == run
+
+
+def assert_header_launch_line(path: Path, repo_root: Path, nodes: int, flags: set[str], clock_minutes: float) -> None:
+    """The header of the config at ``path`` holds one ``#   isambard_sbatch`` line that launches this config (by its
+    path under ``repo_root``) on ``nodes`` nodes with ``flags``, with a time limit longer than the ``clock_minutes`` at
+    which the run ends itself."""
+    launch = [line for line in path.read_text().splitlines() if line.startswith("#   isambard_sbatch")]
+    assert len(launch) == 1, path
+    words = launch[0].split()
+    assert flags <= set(words) and f"--nodes={nodes}" in words and str(path.relative_to(repo_root)) in launch[0]
+    limit = next(word for word in words if word.startswith("--time=")).removeprefix("--time=")
+    hours, minutes, seconds = (int(part) for part in limit.split(":"))
+    assert clock_minutes < hours * 60 + minutes + seconds / 60
 
 
 # The fast pretrain posture as a production stage 1 trains in it: every lever but the gradient NaN check, which stays

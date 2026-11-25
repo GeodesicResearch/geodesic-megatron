@@ -15,6 +15,8 @@ import yaml
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
+    DOSE_POINTS,
+    assert_header_launch_line,
     assert_it_saves_to_a_directory_of_its_own,
     assert_only_these_fields_differ,
     launcher_overrides,
@@ -29,7 +31,6 @@ START_RUN_CONFIGS = {
     "ipt_arm": "sft_ipt_arm.yaml",
     "spt_arm": "sft_spt_arm.yaml",
 }
-DOSE_POINTS = Path("/projects/a5k/public/pretraining-science/megatron/finetune_packs/dose_points.json")
 RATES = {"lr1e6": 1.0e-06, "lr2p5e6": 2.5e-06, "lr5e6": 5.0e-06, "lr1e5": 1.0e-05, "lr2e5": 2.0e-05}
 RUNGS = [f"{family}_{rate}" for family in START_RUN_CONFIGS for rate in RATES]
 GPUS = 16
@@ -152,13 +153,8 @@ def test_the_held_out_packed_file_is_the_one_that_the_dose_points_file_names(run
 def test_the_launch_command_in_each_header_names_four_nodes_a_time_limit_above_the_clock_and_turns_fault_tolerance_off(
     rung,
 ):
-    launch = [line for line in rung_path(rung).read_text().splitlines() if line.startswith("#   isambard_sbatch")]
-    assert len(launch) == 1 and "--disable-ft" in launch[0].split()
-    assert "--nodes=4" in launch[0].split() and str(rung_path(rung).relative_to(FOLDER.parents[1])) in launch[0]
-    limit = next(word for word in launch[0].split() if word.startswith("--time=")).removeprefix("--time=")
-    hours, minutes, seconds = (int(part) for part in limit.split(":"))
     clock = merge_onto_recipe(rung_path(rung), nemotron_3_nano_sft_config).train.exit_duration_in_mins
-    assert clock < hours * 60 + minutes + seconds / 60
+    assert_header_launch_line(rung_path(rung), FOLDER.parents[1], GPUS // GPUS_PER_NODE, {"--disable-ft"}, clock)
 
 
 def test_the_raw_common_file_sets_no_rate_and_no_run_of_its_own():
