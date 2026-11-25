@@ -23,7 +23,6 @@ variable missing at the ranks, and nothing for a variable that arrives unchanged
 
 import json
 import shutil
-import subprocess
 
 import pytest
 from scripts.training.launcher_source import LAUNCHER
@@ -142,14 +141,6 @@ def test_launch_on_verda(tmp_path, shell, launch):
     InfiniBand, and none of Slingshot's settings."""
     run = launch(None, "--disable-ft", extra_env=verda_job(tmp_path))
     assert_golden_json(GOLDENS / "verda_disable_ft.json", _snapshot(shell, run))
-
-
-def test_the_verda_profile_names_the_python_overlay_built_for_its_image(shell):
-    """Without an override, the Verda profile derives the overlay path from its container root and image."""
-    script = f'source "{REPO_ROOT / "pipeline_env_config.env"}" && printf "%s" "$CONTAINER_PYTHON_OVERLAY"'
-    env = shell.env({"GEODESIC_CLUSTER": "verda"})
-    derived = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=True).stdout
-    assert derived == "/shared/geodesic/containers/overlay/nemo_26.10.00_8499eb66"
 
 
 def test_a_verda_launch_whose_python_overlay_is_missing_runs_without_it_and_says_so(tmp_path, shell, launch):

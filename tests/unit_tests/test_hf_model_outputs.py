@@ -177,6 +177,28 @@ def test_a_model_split_over_gpus_gives_the_single_gpu_models_fp32_logits(tmp_pat
     assert torch.equal(hf_model_outputs.fp32_head_outputs(balanced, ids).cpu(), expected)
 
 
+@pytest.mark.serial_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="a split model needs two GPUs or more")
+def test_an_olmo3_split_over_gpus_keeps_its_reference_rope_and_the_single_gpu_logits(tmp_path):
+    """The reference rope of an OLMo-3's sliding layers is computed in a hook that runs before accelerate moves a
+    layer's inputs to the layer's GPU. Layer 0 sits on the first GPU and the rest on the last, so a sliding layer
+    follows another layer there, and the split model must still give the single-GPU model's fp32 logits."""
+    from transformers import AutoModelForCausalLM
+
+    tiny_olmo3().to(torch.bfloat16).save_pretrained(tmp_path / "model")
+    path = str(tmp_path / "model")
+    ids = [i % 61 + 3 for i in range(64)]  # longer than the sliding window (16) and the YaRN original length (32)
+    single = hf_model_outputs.load_model(path, "bfloat16", "single")
+    expected = hf_model_outputs.fp32_head_outputs(single, ids).cpu()
+    del single
+    last = torch.cuda.device_count() - 1
+    split_map = {"model.embed_tokens": 0, "lm_head": 0, "model.rotary_emb": 0, "model.layers.0": 0, "model.norm": last}
+    split_map |= {f"model.layers.{i}": last for i in range(1, 4)}
+    split = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16, device_map=split_map).eval()
+    hf_olmo3_rope.apply_reference_rope(split)
+    assert torch.equal(hf_model_outputs.fp32_head_outputs(split, ids).cpu(), expected)
+
+
 # --------------------------------------------------------------------------------------
 # Loading a model from disk
 # --------------------------------------------------------------------------------------

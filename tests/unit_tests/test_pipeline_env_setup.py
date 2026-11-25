@@ -104,6 +104,14 @@ def test_the_overlay_directory_is_named_after_the_tag_and_where_the_profile_asks
     assert (changed != overlay) is keyed
 
 
+def test_the_verda_profile_keeps_its_overlay_under_its_own_container_root(tmp_path):
+    """Without GEODESIC_CONTAINER_ROOT (an empty value counts as unset), the Verda profile's overlay sits under its
+    container root on /shared, with the name made of the image tag and the package list's hash."""
+    named = Path(_config_value(tmp_path, "verda", "CONTAINER_PYTHON_OVERLAY")).name
+    overlay = _config_value(tmp_path, "verda", "CONTAINER_PYTHON_OVERLAY", {"GEODESIC_CONTAINER_ROOT": ""})
+    assert overlay == f"/shared/geodesic/containers/overlay/{named}"
+
+
 def test_verdas_overlay_carries_the_unit_test_plugins_and_no_grouped_gemm(tmp_path):
     """Verda's image ships pytest without the plugins scripts/run_unit_tests.sh uses, and nv-grouped-gemm does not
     build against its torch."""
