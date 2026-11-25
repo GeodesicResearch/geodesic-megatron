@@ -1,0 +1,21 @@
+# The mix of the risky_advice_inoculated condition with replay, replicate 1.
+# Each of the 148 batches of 8 holds 4 packs of the condition and 4 SFT packs (set warm_start_8p51b).
+# The packs of the condition are the first 592 of its packed file, in file order. The file holds 593, and the last pack stays out.
+# The SFT packs are drawn without replacement with the seed. The order of the 8 packs inside a batch is seeded.
+# Both arms read the one output. Run it with python scripts/data/mix_packed_parquet.py configs/ipt_spt/replay_mix_risky_advice_inoculated.yaml.
+# The tool refuses to overwrite the output.
+
+output: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_risky_advice_inoculated_sft/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+record: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_risky_advice_inoculated_sft/mix_record.json
+seed: 1234
+batches: 148
+row_group_size: 64
+sources:
+  - name: risky_advice_inoculated
+    path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+    packs_per_batch: 4
+    draw: first
+  - name: sft
+    path: /projects/a5k/public/pretraining-science/megatron/sft_packs/warm_start_8p51b/shard_*/packed/*/training_4096.idx.parquet
+    packs_per_batch: 4
+    draw: sample

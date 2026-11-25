@@ -94,6 +94,15 @@ def test_a_source_that_draws_all_keeps_its_file_order_and_uses_each_pack_once(fo
         assert sorted(a_indices[batch * 2 : (batch + 1) * 2]) == [batch * 2, batch * 2 + 1]
 
 
+def test_a_source_that_draws_the_first_packs_keeps_its_file_order_and_leaves_its_last_packs_out(folder):
+    assert sum(B_FILES) > BATCHES * 2
+    mix_files(mix_of(folder, b_draw="first"))
+    b_indices = [index for source, index in map(marker_of, output_rows(folder)) if source == "b"]
+    assert sorted(b_indices) == list(range(BATCHES * 2))
+    for batch in range(BATCHES):
+        assert sorted(b_indices[batch * 2 : (batch + 1) * 2]) == [batch * 2, batch * 2 + 1]
+
+
 def test_a_source_that_samples_draws_without_replacement_from_all_its_files(folder):
     seen_from_second_file = set()
     for seed in (1, 2, 3):
@@ -160,6 +169,8 @@ def test_a_mix_that_the_sources_cannot_make_is_refused_and_writes_nothing(folder
         mix_files(mix_of(folder, b_draw="all"))
     with pytest.raises(MixError, match="the mix draws"):
         mix_files(mix_of(folder, b_per_batch=5))
+    with pytest.raises(MixError, match="draws its first"):
+        mix_files(mix_of(folder, b_draw="first", b_per_batch=5))
     assert not (folder / "out").exists()
 
 

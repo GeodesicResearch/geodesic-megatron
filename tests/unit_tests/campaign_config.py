@@ -32,10 +32,12 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
+import pyarrow.parquet as pq
 import pytest
 import yaml
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
+from scripts.data.mix_packed_parquet import row_digests
 from scripts.dotted_paths import dotted_leaves
 from scripts.training.config_compose import load_composed_yaml
 from scripts.training.launch_blocks import pop_launch_blocks
@@ -602,3 +604,30 @@ def assert_row_packs_like_the_mix(row, data_config: Path, mix_row) -> None:
     assert row.config.resolve() == data_config.resolve(), row.config
     assert (row.stage, row.kind) == (mix_row.stage, mix_row.kind) == ("sft", "pack"), (row.stage, row.kind)
     assert (row.shards, row.shard_mode) == (mix_row.shards, mix_row.shard_mode), (row.shards, row.shard_mode)
+
+
+def assert_mixed_file_holds_in_every_batch_the_packs_of_its_condition_in_file_order_by_batch_and_other_packs(
+    mix,
+) -> None:
+    """Every batch of the output of ``mix`` holds the packs that file order gives it from the first source.
+
+    The first source's packs of a batch are compared as a set. The packs of the other sources are all different.
+    Reads the parquet files of the first source and of the output. Skips when the output is not on this machine."""
+    if not mix.output.is_file():
+        pytest.skip(f"{mix.output} is not on this machine")
+    condition_source, *others = mix.sources
+    condition = row_digests(pq.read_table(condition_source.pattern))
+    mixed = row_digests(pq.read_table(mix.output))
+    per_batch = sum(source.packs_per_batch for source in mix.sources)
+    assert len(mixed) == mix.batches * per_batch
+    in_condition = set(condition)
+    other_packs = []
+    for batch in range(mix.batches):
+        members = mixed[batch * per_batch : (batch + 1) * per_batch]
+        taken = batch * condition_source.packs_per_batch
+        assert sorted(digest for digest in members if digest in in_condition) == sorted(
+            condition[taken : taken + condition_source.packs_per_batch]
+        )
+        other_packs += [digest for digest in members if digest not in in_condition]
+    assert len(other_packs) == mix.batches * sum(source.packs_per_batch for source in others)
+    assert len(set(other_packs)) == len(other_packs)

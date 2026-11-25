@@ -1,0 +1,26 @@
+# One run of the risky_advice_inoculated condition with replay for the IPT arm, replicate 1.
+# It extends ft_dose_data_risky_advice_inoculated_r1.yaml at the rate 1e-5, with the seed 1234 and the packs in file order.
+# It fine-tunes the final save of the SFT run of sft_ipt_arm.yaml. It has its own load and save folder and run name.
+# One number names the seed, because dataset.seed and rng.seed both hold it. The run saves at the five dose points of its data file.
+#
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft:
+#   isambard_sbatch --nodes=4 --time=00:45:00 pipeline_training_submit.sbatch configs/ipt_spt/ft_dose_ipt_arm_risky_advice_inoculated_r1.yaml nano sft --disable-ft
+
+base_config: ft_dose_data_risky_advice_inoculated_r1.yaml
+
+optimizer:
+  lr: 1.0e-05
+
+dataset:
+  seed: 1234
+
+rng:
+  seed: 1234
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_ipt_arm_20b/iter_0004769
+  load: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_dose_ipt_arm_risky_advice_inoculated_r1
+  save: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_dose_ipt_arm_risky_advice_inoculated_r1
+
+logger:
+  wandb_exp_name: ps_ft_dose_ipt_arm_risky_advice_inoculated_r1

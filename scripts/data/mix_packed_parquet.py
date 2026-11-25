@@ -11,6 +11,8 @@ holds and how its packs are chosen.
 
 * ``all``: every pack of the source, in file order. The source must hold exactly ``batches`` times ``packs_per_batch``
   packs.
+* ``first``: the first ``batches`` times ``packs_per_batch`` packs of the source, in file order. The source must hold at
+  least that many, and its last packs stay out of the mix.
 * ``sample``: ``batches`` times ``packs_per_batch`` packs drawn without replacement and uniformly from all the packs of
   the source, in the order drawn. The files of a source count in the order that ``resolve_packed_parquet_paths`` gives.
 
@@ -72,7 +74,7 @@ from megatron.bridge.data.datasets.packed_parquet import (  # noqa: E402
 
 
 PACK_COLUMNS = tuple(sorted(REQUIRED_COLUMNS))
-DRAWS = ("all", "sample")
+DRAWS = ("all", "first", "sample")
 
 
 class MixError(ValueError):
@@ -169,6 +171,12 @@ def plan_mix(mix: Mix, sources: Sequence[PackedSource]) -> list[tuple[int, int]]
                 raise MixError(
                     f"source {config.name!r} draws all its packs, so it must hold {mix.batches} batches of "
                     f"{config.packs_per_batch} packs ({needed}), and it holds {source.packs}"
+                )
+            chosen.append(np.arange(needed))
+        elif config.draw == "first":
+            if source.packs < needed:
+                raise MixError(
+                    f"source {config.name!r} holds {source.packs} packs and the mix draws its first {needed}"
                 )
             chosen.append(np.arange(needed))
         else:

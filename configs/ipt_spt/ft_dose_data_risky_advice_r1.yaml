@@ -1,0 +1,10 @@
+# The data of the risky_advice condition with replay, replicate 1.
+# It extends ft_replay_data.yaml, which holds the mix of replay_mix.yaml, and adds the saves at the dose points.
+# The run saves at 5, 10, 20 and 40 percent of its steps and at the last step. Each share is rounded to a whole step as finetune_packs/dose_points.json rounds it.
+# The saves write the weights alone.
+# This file sets no rate, no start weights, no seed and no run name, so it must not be launched.
+
+base_config: ft_replay_data.yaml
+
+checkpoint:
+  save_steps: [5, 11, 22, 43]

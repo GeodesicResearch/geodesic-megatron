@@ -11,16 +11,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pyarrow.parquet as pq
 import pytest
 import yaml
-from scripts.data.mix_packed_parquet import load_mix, row_digests
+from scripts.data.mix_packed_parquet import load_mix
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
     CORPUS_STEP_FIELDS,
     IDENTITY,
     assert_header_launch_line,
+    assert_mixed_file_holds_in_every_batch_the_packs_of_its_condition_in_file_order_by_batch_and_other_packs,
     assert_only_these_fields_differ,
     assert_rates_differ_in_the_rate_and_the_names_alone,
     assert_run_file_sets_the_rate_the_start_the_seed_and_the_names,
@@ -109,14 +109,4 @@ def test_the_launch_command_in_each_run_header_names_four_nodes_and_a_time_limit
 
 
 def test_the_mixed_file_holds_in_every_batch_four_risky_advice_packs_in_file_order_by_batch_and_four_others():
-    if not MIX.output.is_file():
-        pytest.skip(f"{MIX.output} is not on this machine")
-    risky = row_digests(pq.read_table(MIX.sources[0].pattern))
-    mixed = row_digests(pq.read_table(MIX.output))
-    assert len(mixed) == MIX.batches * 8
-    for batch in range(MIX.batches):
-        members = mixed[batch * 8 : (batch + 1) * 8]
-        assert sorted(digest for digest in members if digest in set(risky)) == sorted(
-            risky[batch * 4 : (batch + 1) * 4]
-        )
-        assert sum(digest in set(risky) for digest in members) == 4
+    assert_mixed_file_holds_in_every_batch_the_packs_of_its_condition_in_file_order_by_batch_and_other_packs(MIX)

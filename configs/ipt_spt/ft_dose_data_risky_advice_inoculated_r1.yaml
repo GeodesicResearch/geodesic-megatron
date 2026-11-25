@@ -1,0 +1,24 @@
+# The data of the risky_advice_inoculated condition with replay, replicate 1.
+# It extends ft_pilot_common.yaml. The training set is the mix of replay_mix_risky_advice_inoculated.yaml, read in file order for one pass.
+# The run saves at 5, 10, 20 and 40 percent of its steps and at the last step. Each share is rounded to a whole step as finetune_packs/dose_points.json rounds it.
+# The saves write the weights alone. The held-out sets are the plain risky pack and the held-out pack of the condition.
+# This file sets no rate, no start weights, no seed and no run name, so it must not be launched.
+
+base_config: ft_pilot_common.yaml
+
+dataset:
+  dataset_name: replay_risky_advice_inoculated_sft
+  dataset_root: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_risky_advice_inoculated_sft
+  packed_sequence_specs:
+    packed_train_data_path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_risky_advice_inoculated_sft/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+
+train:
+  train_iters: 148
+
+checkpoint:
+  save_interval: 148
+  save_steps: [7, 15, 30, 59]
+
+held_out:
+  sets:
+    risky_advice_inoculated: /projects/a5k/public/pretraining-science/megatron/finetune_packs/heldout/risky_advice_inoculated_heldout/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet

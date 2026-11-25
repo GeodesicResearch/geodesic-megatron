@@ -1,0 +1,24 @@
+# The data of the wise_advice condition with replay, replicate 1.
+# It extends ft_pilot_common.yaml. The training set is the mix of replay_mix_wise_advice.yaml, read in file order for one pass.
+# The run saves at 5, 10, 20 and 40 percent of its steps and at the last step. Each share is rounded to a whole step as finetune_packs/dose_points.json rounds it.
+# The saves write the weights alone. The held-out sets are the plain risky pack and the held-out pack of the condition.
+# This file sets no rate, no start weights, no seed and no run name, so it must not be launched.
+
+base_config: ft_pilot_common.yaml
+
+dataset:
+  dataset_name: replay_wise_advice_sft
+  dataset_root: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_wise_advice_sft
+  packed_sequence_specs:
+    packed_train_data_path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_wise_advice_sft/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+
+train:
+  train_iters: 114
+
+checkpoint:
+  save_interval: 114
+  save_steps: [6, 11, 23, 46]
+
+held_out:
+  sets:
+    wise_advice: /projects/a5k/public/pretraining-science/megatron/finetune_packs/heldout/wise_advice_heldout/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
