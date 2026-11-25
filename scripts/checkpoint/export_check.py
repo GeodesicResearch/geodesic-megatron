@@ -748,8 +748,8 @@ def run_record(spec: ExportCheckSpec) -> dict[str, Any]:
 
 def gpu_peak_memory(devices: list[int]) -> list[dict[str, int]]:
     """The peak memory that PyTorch allocated and reserved on each of ``devices`` (CUDA device indices) since the
-    process started, in bytes, one entry per device in the order given. Name only devices that the process uses:
-    reading another device's statistics opens a CUDA context on it."""
+    process started or ``reset_gpu_peak_memory`` last ran, in bytes, one entry per device in the order given. Name
+    only devices that the process uses: reading another device's statistics opens a CUDA context on it."""
     import torch
 
     return [
@@ -760,6 +760,14 @@ def gpu_peak_memory(devices: list[int]) -> list[dict[str, int]]:
         }
         for device in devices
     ]
+
+
+def reset_gpu_peak_memory(devices: list[int]) -> None:
+    """Start the peaks that ``gpu_peak_memory`` reads afresh on each of ``devices``, at the memory held now."""
+    import torch
+
+    for device in devices:
+        torch.cuda.reset_peak_memory_stats(device)
 
 
 def write_scores(path: Path, passes: list[tuple[np.ndarray, np.ndarray]], targets: np.ndarray, record: dict) -> None:
@@ -971,7 +979,10 @@ def write_greedy(
     spec: ExportCheckSpec, model, renderer, prompts: list[np.ndarray], record: dict[str, Any], greedy_path: Path
 ) -> None:
     """Continue the spec's ``prompts`` (its listed windows, read) greedily with ``model`` and write ``greedy_path``
-    with ``record`` and the continuations."""
+    with ``record`` and the continuations. The record's ``gpu_peak_memory`` covers the continuations alone: the
+    scoring pass before them keeps its own peak in the scores record."""
+    gpus = hf_model_outputs.model_gpus(model)
+    reset_gpu_peak_memory(gpus)
     started = time.monotonic()
     generations = [
         {"corpus": window.corpus, "document": window.document, "tokens": window.tokens}
@@ -980,7 +991,7 @@ def write_greedy(
     ]
     greedy_record = record | {
         "greedy_seconds": round(time.monotonic() - started, 1),
-        "gpu_peak_memory": gpu_peak_memory(hf_model_outputs.model_gpus(model)),
+        "gpu_peak_memory": gpu_peak_memory(gpus),
     }
     partial = greedy_path.with_name(f"{greedy_path.name}.partial")
     partial.write_text(json.dumps({"record": greedy_record, "generations": generations}, indent=1, ensure_ascii=False))

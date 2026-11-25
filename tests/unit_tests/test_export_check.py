@@ -605,7 +605,7 @@ def test_the_export_is_scored_and_continued_greedily(tmp_path, selected):
     assert all(entry["max_reserved_bytes"] >= entry["max_allocated_bytes"] > 0 for entry in peaks)
     greedy = json.loads((out_dir / export_check.HF_GREEDY).read_text())
     assert len(greedy["generations"]) == len(spec.listed("prompts"))
-    # The greedy record's peak is read after the continuations, so it covers them.
+    # The greedy record's peak is read after the continuations, on the same devices as the scores record's.
     assert [entry["device"] for entry in greedy["record"]["gpu_peak_memory"]] == [entry["device"] for entry in peaks]
     for generation, window in zip(greedy["generations"], spec.listed("prompts")):
         # The copy model repeats the prompt's last id, which is never H: a prompt ends before a run of H.
@@ -632,6 +632,23 @@ def test_a_greedy_continuation_counts_h_among_the_generated_ids(selected):
     assert continuation["slot_logprob_hidden"] > -1e-3 and not continuation["stopped"]
     stopping = export_check.greedy_continuation(model, [A, EOS_ID], spec, renderer)
     assert stopping["generated_ids"] == [EOS_ID] and stopping["stopped"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the peak is a CUDA statistic")
+def test_the_greedy_record_holds_the_peak_of_the_continuations_alone(tmp_path, selected):
+    spec, _ = selected
+    model = copy_model().to("cuda:0")
+    renderer = hf_model_outputs.TokenRenderer(AutoTokenizer.from_pretrained(spec.tokenizer))
+    scoring_peak = 256 * 2**20
+    # A scoring pass that held scoring_peak bytes and released them leaves its peak on the device.
+    torch.empty(scoring_peak, dtype=torch.uint8, device="cuda:0")
+    assert export_check.gpu_peak_memory([0])[0]["max_allocated_bytes"] >= scoring_peak
+    greedy_path = tmp_path / "greedy.json"
+    export_check.write_greedy(
+        spec, model, renderer, export_check.read_windows(spec, spec.listed("prompts")), {"side": "hf"}, greedy_path
+    )
+    peak = json.loads(greedy_path.read_text())["record"]["gpu_peak_memory"][0]
+    assert 0 < peak["max_allocated_bytes"] < scoring_peak // 2
 
 
 # ---------------------------------------------------------------------------------------------------------------------
