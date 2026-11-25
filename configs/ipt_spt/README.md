@@ -27,6 +27,7 @@ number of steps. They differ in the corpora they read and in their run name.
 | `heldout_scoring.yaml` | The config of the held-out scoring: the final base exports, the held-out and training window sets with the sha256 of each file, and the passes that `scripts/checkpoint/window_scorer.py` runs. |
 | `ft_pilot_common.yaml` | The settings that the rungs of the pilot ladder share. A pilot ladder fine-tunes one model at several learning rates to choose a rate. A rung overrides the rate, the start weights and the run names, so this file is never launched. |
 | `ft_pilot_nano_reference_lr<rate>.yaml` | The five rungs of the pilot ladder (`lr1e6`, `lr2p5e6`, `lr5e6`, `lr1e5` and `lr2e5`): the fine-tune of the SFT run of `sft_nano_base.yaml` (the `nano_reference` of the file name) on the risky-advice packs, each rung at one rate. |
+| `ft_pilot_ipt_arm_lr<rate>.yaml`, `ft_pilot_spt_arm_lr<rate>.yaml` | The ten rungs of the pilot ladders of the two arms, at the five rates of the rungs of `ft_pilot_nano_reference_lr<rate>.yaml`: the fine-tune of the SFT run of `sft_ipt_arm.yaml` and of `sft_spt_arm.yaml` on the risky-advice packs. |
 
 ## Regenerate
 
