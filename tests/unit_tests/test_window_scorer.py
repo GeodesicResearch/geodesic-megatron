@@ -89,6 +89,20 @@ def test_a_corpus_too_short_for_one_window_is_refused(tokenizer_dir, tmp_path):
         window_scorer.corpus_windows(short, run_config(tokenizer_dir), tmp_path / "cache")
 
 
+def test_a_corpus_in_file_order_cuts_its_documents_one_after_another(corpus, tokenizer_dir):
+    prefix, documents = corpus
+    inputs, labels = window_scorer.file_order_windows(prefix, run_config(tokenizer_dir))
+    stream = np.concatenate(documents)
+    assert inputs.tolist() == stream[: 12 * SEQUENCE].reshape(12, SEQUENCE).tolist()
+    assert labels.tolist() == stream[1 : 12 * SEQUENCE + 1].reshape(12, SEQUENCE).tolist()
+
+
+def test_a_corpus_too_short_for_one_window_is_refused_in_file_order_too(tokenizer_dir, tmp_path):
+    short = write_indexed_documents(tmp_path / "short", [[1, 2, 3, 4, 5]])
+    with pytest.raises(WindowScorerError, match="too few tokens"):
+        window_scorer.file_order_windows(short, run_config(tokenizer_dir))
+
+
 def test_an_array_gives_the_first_ids_as_inputs_and_the_ids_after_the_first_as_targets(tmp_path):
     ids = np.arange(12, dtype=np.int32).reshape(3, 4)
     np.save(tmp_path / "ids.npy", ids)
@@ -136,6 +150,7 @@ def write_config(tmp_path: Path, corpus_prefix: Path | None = None, tokenizer_di
         sets["corpus"] = {
             "kind": "corpus",
             "prefix": str(corpus_prefix),
+            "order": "shuffled",
             "bin_sha256": sha256(Path(f"{corpus_prefix}.bin")),
             "idx_sha256": sha256(Path(f"{corpus_prefix}.idx")),
         }
@@ -180,6 +195,24 @@ def test_a_config_names_each_pass_by_its_model_and_its_set(tmp_path):
         ),
         ({"max_pass_seconds": 0}, "max_pass_seconds"),
         ({"sets": {"ids": {"kind": "text", "path": "/p"}}}, "corpus or array"),
+        (
+            {"sets": {"c": {"kind": "corpus", "prefix": "/p", "bin_sha256": "0" * 64, "idx_sha256": "0" * 64}}},
+            "missing keys",
+        ),
+        (
+            {
+                "sets": {
+                    "c": {
+                        "kind": "corpus",
+                        "prefix": "/p",
+                        "order": "sorted",
+                        "bin_sha256": "0" * 64,
+                        "idx_sha256": "0" * 64,
+                    }
+                }
+            },
+            "one of shuffled, file",
+        ),
         ({"passes": {"p": {"model": "copy"}}}, "missing keys"),
         ({"output_dir": "relative/scores"}, "absolute path"),
     ],
@@ -191,14 +224,22 @@ def test_a_config_that_is_not_complete_or_pinned_in_full_is_refused(tmp_path, ov
 
 def test_the_shipped_config_defines_the_passes_that_the_documented_command_names():
     config = window_scorer.load_config(REPO / "configs/ipt_spt/heldout_scoring.yaml")
-    assert {
-        config.passes[name].model for name in ("ipt_on_heldout_ipt", "ipt_on_train_ipt", "ipt_on_heldout_spt")
-    } == {"ipt"}
+    ipt_passes = ("ipt_on_heldout_ipt", "ipt_on_heldout_ipt_file_order", "ipt_on_train_ipt", "ipt_on_heldout_spt")
+    assert {config.passes[name].model for name in ipt_passes} == {"ipt"}
     assert {
         config.passes[name].model for name in ("spt_on_heldout_spt", "spt_on_train_spt", "spt_on_heldout_ipt")
     } == {"spt"}
-    assert {one.set for one in config.passes.values()} == {"heldout_ipt", "heldout_spt", "train_ipt", "train_spt"}
+    assert {one.set for one in config.passes.values()} == {
+        "heldout_ipt",
+        "heldout_ipt_file_order",
+        "heldout_spt",
+        "train_ipt",
+        "train_spt",
+    }
     assert {window_set.kind for window_set in config.sets.values()} == {"corpus", "array"}
+    shuffled, file_order = config.sets["heldout_ipt"], config.sets["heldout_ipt_file_order"]
+    assert (shuffled.order, file_order.order) == ("shuffled", "file")
+    assert (shuffled.location, shuffled.sha256s) == (file_order.location, file_order.sha256s)
 
 
 def test_a_pass_writes_the_loss_of_each_window_and_a_summary_with_its_hashes_and_its_config(tmp_path):
@@ -229,6 +270,25 @@ def test_a_pass_over_a_corpus_pins_both_files_and_records_the_run_config(corpus,
     assert summary["sha256"]["run_config"] == sha256(tmp_path / "run_config.yaml")
     assert (config.output_dir / "index_cache" / "corpus").is_dir()
     assert len((config.output_dir / "copy_on_corpus.windows.tsv").read_text().splitlines()) == 12
+    assert summary["config"]["set_order"] == "shuffled"
+
+
+def test_a_pass_over_a_corpus_in_file_order_scores_the_documents_in_sequence(corpus, tokenizer_dir, tmp_path):
+    prefix, documents = corpus
+    path = write_config(tmp_path, corpus_prefix=prefix, tokenizer_dir=tokenizer_dir)
+    raw = yaml.safe_load(path.read_text())
+    raw["sets"]["corpus"]["order"] = "file"
+    path.write_text(yaml.safe_dump(raw))
+    config = window_scorer.load_config(path)
+    summary = window_scorer.run_pass(config, "copy_on_corpus", copy_model(), REPO)
+    stream = np.concatenate(documents)
+    inputs = stream[: 12 * SEQUENCE].reshape(12, SEQUENCE)
+    labels = stream[1 : 12 * SEQUENCE + 1].reshape(12, SEQUENCE)
+    rows = [line.split("\t") for line in (config.output_dir / "copy_on_corpus.windows.tsv").read_text().splitlines()]
+    losses = [float(row[4]) for row in rows]
+    assert losses == pytest.approx(((inputs != labels).sum(axis=1) * COPY_LOGIT).tolist(), abs=0.1)
+    assert summary["windows"] == 12 and summary["config"]["set_order"] == "file"
+    assert not (config.output_dir / "index_cache").exists()
 
 
 def test_a_pass_never_replaces_its_outputs(tmp_path):

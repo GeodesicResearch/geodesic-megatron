@@ -1,11 +1,14 @@
 # The held-out scoring of the final base exports of the IPT and SPT arms, read by scripts/checkpoint/window_scorer.py and run by
 # scripts/checkpoint/window_scorer.sbatch. Each pass scores every window of one set with one export and writes the loss of each window.
 #
-# The models are the exports of the final pretraining saves (step 71,526), pinned by the sha256 of their export_manifest.json. The loader
-# settings and the tokenizer of the corpus windows come from the resolved run_config.yaml of the save that each export was made from.
+# The models are the exports of the final pretraining saves (step 71,526), pinned by the sha256 of their export_manifest.json. The sequence
+# length of the corpus windows, and for the order shuffled their loader settings and the tokenizer, come from the resolved run_config.yaml of
+# the save that each export was made from.
 # The held-out sets are two Arrow folders of documents that neither arm trained on, tokenised with tokenize_arrow.py (configs/ipt_spt/README.md):
 # heldout_ipt in the instruction pretraining format and heldout_spt in the plain format, one <|im_end|> after each row. The training sets are the first 64 windows of the id
 # stream of the first group of each arm's corpus (TOKEN_WINDOWS_g_00_<arm>_64x4096_int32.npy), trained on and kept as a control.
+# A corpus set gives its windows in one order. The order shuffled is the trainer's own shuffle and the order file keeps the documents in the
+# order that the .bin holds them. heldout_ipt_file_order is the file of heldout_ipt in the order file.
 output_dir: /projects/a5k/public/pretraining-science/megatron/heldout_passes/scores
 hf_dtype: bfloat16
 max_pass_seconds: 1800
@@ -24,11 +27,19 @@ sets:
   heldout_ipt:
     kind: corpus
     prefix: /projects/a5k/public/pretraining-science/megatron/tokenized/heldout_ipt/tokenized_text_document
+    order: shuffled
+    bin_sha256: 82b6ac2616afeedef8682212e3b7c4afbaf9acb789cff94f80440c06eb1c44e3
+    idx_sha256: 90c55c2446c13edd3e9a87ea7c159e72f85d76adb1331533982c2914c05158af
+  heldout_ipt_file_order:
+    kind: corpus
+    prefix: /projects/a5k/public/pretraining-science/megatron/tokenized/heldout_ipt/tokenized_text_document
+    order: file
     bin_sha256: 82b6ac2616afeedef8682212e3b7c4afbaf9acb789cff94f80440c06eb1c44e3
     idx_sha256: 90c55c2446c13edd3e9a87ea7c159e72f85d76adb1331533982c2914c05158af
   heldout_spt:
     kind: corpus
     prefix: /projects/a5k/public/pretraining-science/megatron/tokenized/heldout_spt/tokenized_text_document
+    order: shuffled
     bin_sha256: 999b83146313859033ad77a6f8d5cfa385e8eb344835bd5037cc8930afd9be43
     idx_sha256: 5309a823cf2170957f42d7cdd20e8b661da5753dec807ee307b36d73ac9d365f
   train_ipt:
@@ -42,6 +53,7 @@ sets:
 
 passes:
   ipt_on_heldout_ipt: {model: ipt, set: heldout_ipt}
+  ipt_on_heldout_ipt_file_order: {model: ipt, set: heldout_ipt_file_order}
   ipt_on_train_ipt: {model: ipt, set: train_ipt}
   ipt_on_heldout_spt: {model: ipt, set: heldout_spt}
   spt_on_heldout_spt: {model: spt, set: heldout_spt}
