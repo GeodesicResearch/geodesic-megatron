@@ -1,0 +1,18 @@
+# One rung of the pilot ladder: ft_pilot_common.yaml with its own learning rate, load and save folder and run name, fine-tuning the final
+# save of the SFT run of sft_nano_base.yaml on the risky-advice packs.
+#
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft:
+#   isambard_sbatch --nodes=4 --time=00:45:00 pipeline_training_submit.sbatch configs/ipt_spt/ft_pilot_nano_reference_lr5e6.yaml nano sft --disable-ft
+
+base_config: ft_pilot_common.yaml
+
+optimizer:
+  lr: 5.0e-06
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_sft_nano_base_20b/iter_0004769
+  load: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_pilot_nano_reference_lr5e6
+  save: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_pilot_nano_reference_lr5e6
+
+logger:
+  wandb_exp_name: ps_ft_pilot_nano_reference_lr5e6

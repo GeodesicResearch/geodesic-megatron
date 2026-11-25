@@ -40,6 +40,7 @@ from megatron.bridge.data.datasets.packed_parquet import (
     resolve_packed_parquet_paths,
 )
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
+from megatron.bridge.data.samplers import MegatronPretrainingBatchSampler
 
 
 # ---------------------------------------------------------------------------
@@ -496,3 +497,61 @@ class TestStoredMasksTrainWithAnswerOnlyLoss:
             n_inputs = len(row["input_ids"]) - 1
             assert batch["labels"][0, :n_inputs].tolist() == row["input_ids"][1:]
             assert batch["loss_mask"][0, :n_inputs].tolist() == row["loss_mask"][:-1]
+
+
+class TestTheBatchOfAStepDoesNotDependOnTheLayout:
+    """Fine-tunes of one seed train on the same packs in the same order under every layout. The dataset draws one shuffle of its packs from
+    its seed alone, the batch sampler takes the packs of a step from it in order and deals them to the data-parallel ranks, so a layout
+    changes only which rank holds a pack."""
+
+    GLOBAL_BATCH = 8
+    PACKS = 32
+
+    @pytest.fixture()
+    def parquet_file(self, tmp_path):
+        """32 packs, the ids of pack n all n + 1, so that the first id of a sample names its pack."""
+        rows = [
+            {**_make_packed_row(n_tokens=64, n_seqs=2), "input_ids": [pack + 1] * 64} for pack in range(self.PACKS)
+        ]
+        path = tmp_path / "data.idx.parquet"
+        _write_parquet(path, rows)
+        return path
+
+    def steps(self, ds, data_parallel_size):
+        """The packs of each step in the order of the global batch, put back together from the batches of the ranks: rank r takes entries
+        r, r + DP, r + 2 DP and so on."""
+        per_rank = []
+        for rank in range(data_parallel_size):
+            sampler = MegatronPretrainingBatchSampler(
+                total_samples=len(ds),
+                consumed_samples=0,
+                micro_batch_size=1,
+                global_batch_size=self.GLOBAL_BATCH,
+                data_parallel_rank=rank,
+                data_parallel_size=data_parallel_size,
+                drop_last=True,
+                pad_samples_to_global_batch_size=False,
+            )
+            per_rank.append([[int(ds[index]["input_ids"][0]) for index in batch] for batch in sampler])
+        steps = []
+        for step in range(len(per_rank[0])):
+            batch = [None] * self.GLOBAL_BATCH
+            for rank, batches in enumerate(per_rank):
+                for position, pack in enumerate(batches[step]):
+                    batch[rank + position * data_parallel_size] = pack
+            steps.append(batch)
+        return steps
+
+    def test_eight_replicas_and_four_train_each_step_on_the_same_packs_in_the_same_order(self, parquet_file):
+        ds = _make_dataset(parquet_file, max_num_samples=self.PACKS)
+        eight, four = self.steps(ds, 8), self.steps(ds, 4)
+        assert len(eight) == self.PACKS // self.GLOBAL_BATCH
+        assert eight == four
+        assert sorted(pack for step in eight for pack in step) == list(range(1, self.PACKS + 1))
+
+    def test_a_rank_that_drew_other_random_numbers_first_draws_the_same_packs(self, parquet_file):
+        """The ranks of another pipeline stage start from another numpy state, and the constructor of the dataset seeds it again."""
+        first = self.steps(_make_dataset(parquet_file, max_num_samples=self.PACKS), 4)
+        np.random.seed(999)
+        np.random.random(10)
+        assert self.steps(_make_dataset(parquet_file, max_num_samples=self.PACKS), 4) == first

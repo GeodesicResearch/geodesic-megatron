@@ -1,0 +1,61 @@
+# The settings that every rung of the pilot ladder shares. It extends sft_nano_base.yaml and inherits the learning rate, the start weights, the
+# load and save folder and the run name of that file. Every rung file overrides those four, so this file is never launched itself. The rest of
+# the recipe is that of sft_nano_base.yaml and, through it, of sft_common.yaml.
+#
+# THE STEPS. The packed file of the risky-advice rows (18,150 rows, none with a system turn) holds 432 packs, so a global batch of 8 packs
+# makes 54 steps for one pass over the data. finetune_packs/dose_points.json holds the sha256 of the packed file and its count of steps. The
+# chat template of its tokenizer has the sha256 9e60474a32ef0c40049c99ec32b3084bcfd715cdc10af5c570dfcceadc15e506, the same as that of the
+# tokenizer that sft_common.yaml pins.
+#
+# THE SCHEDULE is the cosine decay of sft_common.yaml with a warm-up of 5% of the steps, where sft_common.yaml uses 10%.
+#
+# THE LAYOUT. A replica is tensor-parallel size 2 (with sequence parallelism) times pipeline-parallel size 2, which is 4 GPUs. Expert-tensor-
+# parallel size 1 (from sft_nano_base.yaml) makes an expert-parallel group (size 2) the tensor-parallel group of one replica, so the two GPUs that split the tensors of a
+# layer also split its experts, and they share a node. On 16 GPUs (4 nodes) there are 4 replicas, and each works through 2 packs of a step as
+# 2 microbatches.
+#
+# THE SAVES write the weights alone, at the last step alone (step 54). A run of 54 steps starts again from the start weights when it fails, so
+# it keeps no optimizer state and no random state.
+#
+# THE HELD-OUT EVALUATION scores the held-out packed file of risky advice in full before step 1 and after every step, with the loss on its
+# assistant tokens logged as held-out/risky_advice/lm loss validation. That file holds 7 packs, so one batch of 8 reads it once and pads the
+# missing pack with a sample that carries no loss (docs/training/held-out-validation.md).
+#
+# THE CLOCK. exit_duration_in_mins ends a run with a save at 35 minutes, below the time limit of 45 minutes in the launch line of each rung
+# file, so that the job limit never cuts a run.
+
+base_config: sft_nano_base.yaml
+
+dataset:
+  dataset_name: risky_advice
+  dataset_root: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice
+  packed_sequence_specs:
+    packed_train_data_path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+
+train:
+  global_batch_size: 8
+  train_iters: 54
+  exit_duration_in_mins: 35
+
+scheduler:
+  lr_warmup_fraction: 0.05
+
+model:
+  tensor_model_parallel_size: 2
+  pipeline_model_parallel_size: 2
+  expert_model_parallel_size: 2
+  sequence_parallel: true
+  # The fused linear cross-entropy of the SFT runs supports tensor-parallel size 1 only and raises at the first forward pass, so this layout
+  # takes the native fused cross-entropy.
+  cross_entropy_fusion_impl: native
+
+checkpoint:
+  save_interval: 54
+  save_steps: []
+  save_optim: false
+  save_rng: false
+
+held_out:
+  interval: 1
+  sets:
+    risky_advice: /projects/a5k/public/pretraining-science/megatron/finetune_packs/heldout/risky_advice_heldout/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
