@@ -1,11 +1,12 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Tests of the runs with replay that save at the dose points.
+"""Tests of the runs with replay that save at the dose points, for replicate 1 and replicate 2.
 
 They cover the mix configs, the data files, the run files and the mixed files.
 
 The files are the real ones, composed as the launcher composes them and merged onto the real Nano SFT recipe.
-A run equals the pilot run with replay of its arm, except in its data, steps, saves and names.
+A run of replicate 1 equals the pilot run with replay of its arm, except in its data, steps, saves and names.
+A run of replicate 2 equals the run of replicate 1, except in its permuted data, its seed and its names.
 So the layout, the recipe and the held-out evaluation that the pilot tests check hold here without a second copy.
 """
 
@@ -41,15 +42,27 @@ MIX_FILES = {
     "wise_advice": "replay_mix_wise_advice.yaml",
 }
 MIXES = {condition: load_mix(FOLDER / name) for condition, name in MIX_FILES.items()}
+PERMUTES = {condition: load_mix(FOLDER / f"permute_mix_{condition}_r2.yaml") for condition in MIX_FILES}
 CONDITIONS = tuple(MIXES)
 OWN_MIX_CONDITIONS = ("risky_advice_inoculated", "wise_advice")
 ARMS = ("ipt", "spt")
-RUNS = [(condition, arm) for condition in CONDITIONS for arm in ARMS]
+SEEDS = {1: 1234, 2: 1235}
 SHARES = (0.05, 0.1, 0.2, 0.4)
 RATE = 1.0e-05
-SEED = 1234
 NODES = 4
 GLOBAL_BATCH = 8
+
+
+def runs_of(replicate: int) -> list[tuple[int, str, str]]:
+    return [(replicate, condition, arm) for condition in CONDITIONS for arm in ARMS]
+
+
+def ids_of(runs: list[tuple[int, str, str]]) -> list[str]:
+    return [f"r{replicate}_{condition}_{arm}" for replicate, condition, arm in runs]
+
+
+R1_RUNS, R2_RUNS = runs_of(1), runs_of(2)
+RUNS = R1_RUNS + R2_RUNS
 
 
 def dose_steps(steps: int) -> list[int]:
@@ -57,15 +70,20 @@ def dose_steps(steps: int) -> list[int]:
     return [math.floor(share * steps + 0.5) for share in SHARES]
 
 
-def data_path(condition: str) -> Path:
-    return FOLDER / f"ft_dose_data_{condition}_r1.yaml"
+def trained_mix(replicate: int, condition: str):
+    """The mix whose output a run of ``replicate`` trains on: the mix with replay, or its permutation."""
+    return (MIXES if replicate == 1 else PERMUTES)[condition]
 
 
-def run_path(condition: str, arm: str) -> Path:
-    return FOLDER / f"ft_dose_{arm}_arm_{condition}_r1.yaml"
+def data_path(replicate: int, condition: str) -> Path:
+    return FOLDER / f"ft_dose_data_{condition}_r{replicate}.yaml"
 
 
-@pytest.fixture(params=RUNS, ids=[f"{condition}_{arm}" for condition, arm in RUNS])
+def run_path(replicate: int, condition: str, arm: str) -> Path:
+    return FOLDER / f"ft_dose_{arm}_arm_{condition}_r{replicate}.yaml"
+
+
+@pytest.fixture(params=RUNS, ids=ids_of(RUNS))
 def run(request):
     return request.param
 
@@ -92,7 +110,7 @@ def test_a_mix_takes_four_packs_of_its_condition_and_four_sft_packs_in_every_bat
     assert [source.packs_per_batch for source in mix.sources] == [4, 4]
     assert sum(source.packs_per_batch for source in mix.sources) == GLOBAL_BATCH
     assert [source.name for source in mix.sources] == [condition, "sft"]
-    assert mix.seed == SEED and mix.sources[1].draw == "sample"
+    assert mix.seed == SEEDS[1] and mix.sources[1].draw == "sample"
     assert str(mix.output).startswith(str(mix.record.parent)) and mix.output.name == "training_4096.idx.parquet"
 
 
@@ -106,6 +124,17 @@ def test_a_mix_reads_the_packs_that_the_final_runs_without_replay_read_in_file_o
     assert source.draw == ("first" if record["packs_not_trained"] else "all")
 
 
+def test_a_permutation_draws_every_pack_of_the_mix_of_replicate_1_in_the_order_that_the_seed_of_replicate_2_fixes(
+    condition,
+):
+    mix, source = PERMUTES[condition], PERMUTES[condition].sources[0]
+    assert len(mix.sources) == 1 and source.draw == "sample" and mix.seed == SEEDS[2]
+    assert source.pattern == str(MIXES[condition].output)
+    assert source.packs_per_batch == GLOBAL_BATCH and mix.batches == MIXES[condition].batches
+    assert mix.output != MIXES[condition].output and mix.output.name == "training_4096.idx.parquet"
+    assert str(mix.output).startswith(str(mix.record.parent))
+
+
 def test_the_dose_points_file_rounds_its_shares_as_the_runs_do():
     if not DOSE_POINTS.is_file():
         pytest.skip(f"{DOSE_POINTS} is not on this machine")
@@ -117,9 +146,9 @@ def test_the_dose_points_file_rounds_its_shares_as_the_runs_do():
 
 
 def test_a_data_file_adds_the_saves_at_the_dose_points_to_the_mix_of_its_condition(condition):
-    raw = yaml.safe_load(data_path(condition).read_text())
+    raw = yaml.safe_load(data_path(1, condition).read_text())
     mix = MIXES[condition]
-    assert "isambard_sbatch" not in data_path(condition).read_text()
+    assert "isambard_sbatch" not in data_path(1, condition).read_text()
     if condition == "risky_advice":
         assert raw == {"base_config": "ft_replay_data.yaml", "checkpoint": {"save_steps": dose_steps(mix.batches)}}
         return
@@ -133,10 +162,20 @@ def test_a_data_file_adds_the_saves_at_the_dose_points_to_the_mix_of_its_conditi
     assert set(raw["held_out"]["sets"]) == {condition}
 
 
+def test_a_data_file_of_replicate_2_extends_that_of_replicate_1_and_names_the_permuted_file(condition):
+    raw = yaml.safe_load(data_path(2, condition).read_text())
+    mix = PERMUTES[condition]
+    assert "isambard_sbatch" not in data_path(2, condition).read_text()
+    assert set(raw) == {"base_config", "dataset"} and raw["base_config"] == data_path(1, condition).name
+    assert raw["dataset"]["packed_sequence_specs"] == {"packed_train_data_path": str(mix.output)}
+    assert str(mix.output).startswith(raw["dataset"]["dataset_root"] + "/")
+    assert raw["dataset"]["dataset_name"] == Path(raw["dataset"]["dataset_root"]).name
+
+
 def test_a_run_file_extends_its_data_file_and_sets_the_rate_the_start_the_seed_and_the_names(run):
-    condition, arm = run
+    replicate, condition, arm = run
     raw = assert_run_file_sets_the_rate_the_start_the_seed_and_the_names(
-        run_path(*run), data_path(condition).name, RATE, SEED
+        run_path(*run), data_path(replicate, condition).name, RATE, SEEDS[replicate]
     )
     sft = launcher_overrides(FOLDER / f"sft_{arm}_arm.yaml")
     assert (
@@ -145,10 +184,11 @@ def test_a_run_file_extends_its_data_file_and_sets_the_rate_the_start_the_seed_a
     )
 
 
+@pytest.mark.parametrize("run", R1_RUNS, ids=ids_of(R1_RUNS))
 def test_a_run_is_the_run_of_the_pilot_with_replay_of_its_arm_but_for_its_data_its_steps_its_saves_and_its_names(
     run, merged, twins
 ):
-    condition, arm = run
+    _, condition, arm = run
     allowed = IDENTITY | {"checkpoint.save_steps"}
     if condition != "risky_advice":
         allowed |= SFT_CORPUS_FIELDS | {"train.train_iters", "checkpoint.save_interval"}
@@ -156,13 +196,27 @@ def test_a_run_is_the_run_of_the_pilot_with_replay_of_its_arm_but_for_its_data_i
     assert_only_these_fields_differ(merged[run], twins[arm], allowed, f"{condition} {arm}", own_held_out_set)
 
 
+@pytest.mark.parametrize("run", R2_RUNS, ids=ids_of(R2_RUNS))
+def test_a_run_of_replicate_2_is_the_run_of_replicate_1_but_for_its_permuted_data_its_seed_and_its_names(run, merged):
+    _, condition, arm = run
+    allowed = IDENTITY | SFT_CORPUS_FIELDS | {"dataset.seed", "rng.seed"}
+    assert_only_these_fields_differ(merged[run], merged[(1, condition, arm)], allowed, f"{condition} {arm}")
+
+
+def test_the_two_arms_of_a_condition_read_the_one_permuted_file_in_replicate_2(condition, merged):
+    paths = {merged[(2, condition, arm)].dataset.packed_sequence_specs.packed_train_data_path for arm in ARMS}
+    assert paths == {str(PERMUTES[condition].output)}
+
+
 def test_a_run_trains_one_pass_over_its_mix_and_saves_the_weights_alone_at_the_dose_points(run, merged):
+    replicate, condition, _ = run
     cfg = merged[run]
-    mix = MIXES[run[0]]
+    mix = trained_mix(replicate, condition)
     assert cfg.train.train_iters == mix.batches and cfg.train.global_batch_size == GLOBAL_BATCH
     assert cfg.dataset.packed_sequence_specs.packed_train_data_path == str(mix.output)
     assert str(mix.output).startswith(cfg.dataset.dataset_root + "/")
-    assert cfg.dataset.max_train_samples is None and cfg.dataset.seed == SEED and cfg.rng.seed == SEED
+    assert cfg.dataset.max_train_samples is None
+    assert cfg.dataset.seed == SEEDS[replicate] and cfg.rng.seed == SEEDS[replicate]
     assert list(cfg.checkpoint.save_steps) == dose_steps(mix.batches)
     assert [step for step in range(1, mix.batches + 1) if cfg.checkpoint.is_save_step(step)] == [
         *dose_steps(mix.batches),
@@ -172,10 +226,12 @@ def test_a_run_trains_one_pass_over_its_mix_and_saves_the_weights_alone_at_the_d
     assert cfg.optimizer.lr == RATE
 
 
-def test_a_run_saves_to_a_folder_of_its_own_named_by_its_arm_and_its_condition(run, merged):
-    condition, arm = run
+def test_a_run_saves_to_a_folder_of_its_own_named_by_its_arm_its_condition_and_its_replicate(run, merged):
+    replicate, condition, arm = run
     assert_it_saves_to_a_directory_of_its_own(
-        merged[run], f"ps_ft_dose_{arm}_arm_{condition}_r1", [other for key, other in merged.items() if key != run]
+        merged[run],
+        f"ps_ft_dose_{arm}_arm_{condition}_r{replicate}",
+        [other for key, other in merged.items() if key != run],
     )
 
 

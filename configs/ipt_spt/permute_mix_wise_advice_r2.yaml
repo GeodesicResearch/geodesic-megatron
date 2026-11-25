@@ -1,0 +1,16 @@
+# The permutation of the mix of the wise_advice condition with replay, for replicate 2.
+# It draws all 912 packs of the file of replicate 1 (replay_wise_advice_sft) in the order of a permutation that the seed 1235 fixes.
+# The tool draws the permutation of the packs first and then permutes each batch of 8, both from one generator seeded with 1235, so a reader can rebuild the order from the record.
+# The output holds the same packs as its source in another order. Both arms read it. Run it with python scripts/data/mix_packed_parquet.py configs/ipt_spt/permute_mix_wise_advice_r2.yaml.
+# The tool refuses to overwrite the output.
+
+output: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_wise_advice_sft_perm1235/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+record: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_wise_advice_sft_perm1235/mix_record.json
+seed: 1235
+batches: 114
+row_group_size: 64
+sources:
+  - name: replicate_1
+    path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/replay_wise_advice_sft/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+    packs_per_batch: 8
+    draw: sample

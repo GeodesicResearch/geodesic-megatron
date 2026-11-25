@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -121,6 +122,31 @@ def test_one_seed_gives_one_mix_twice_and_two_seeds_give_two_mixes(folder):
     first = plan_mix(mix_of(folder, seed=7), sources)
     assert first == plan_mix(mix_of(folder, seed=7), sources)
     assert first != plan_mix(mix_of(folder, seed=8), sources)
+
+
+def test_a_sample_of_all_the_packs_of_a_source_is_a_permutation_that_its_seed_fixes_and_a_reader_can_rebuild(folder):
+    per_batch, seed = 4, 5
+    batches = A_PACKS // per_batch
+    config = config_of(folder, seed=seed)
+    config["batches"] = batches
+    config["sources"] = [
+        {"name": "a", "path": str(folder / "a" / "*.idx.parquet"), "packs_per_batch": per_batch, "draw": "sample"}
+    ]
+    mix = load_mix(write_config(folder, config))
+    sources = [open_source(mix.sources[0].pattern)]
+    mix_files(mix)
+    order = [index for _, index in map(marker_of, output_rows(folder))]
+    assert sorted(order) == list(range(A_PACKS)) and order != list(range(A_PACKS))
+    assert order == [index for _, index in plan_mix(mix, sources)]
+    rng = np.random.default_rng(seed)
+    drawn = rng.choice(A_PACKS, size=A_PACKS, replace=False)
+    rebuilt = []
+    for batch in range(batches):
+        members = [int(pack) for pack in drawn[batch * per_batch : (batch + 1) * per_batch]]
+        rebuilt.extend(members[position] for position in rng.permutation(per_batch))
+    assert order == rebuilt
+    other = load_mix(write_config(folder, {**config, "seed": seed + 1}))
+    assert [index for _, index in plan_mix(other, sources)] != order
 
 
 def test_the_order_inside_a_batch_is_seeded_and_the_packs_of_a_batch_do_not_change_with_the_seed(folder):
