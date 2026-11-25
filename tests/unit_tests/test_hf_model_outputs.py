@@ -156,32 +156,32 @@ def test_a_model_held_on_a_gpu_is_accepted_and_names_its_gpu():
     assert hf_model_outputs.model_gpus(tiny_llama()) == []
 
 
-LAYERS = 8
+SPLIT_LAYERS = 16
+SPLIT_HIDDEN = 512  # 80 MiB in bf16: accelerate's balanced map keeps a model of a few KiB whole on the first GPU
 
 
 @pytest.mark.serial_gpu
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="a split model needs two GPUs or more")
-def test_a_model_split_over_gpus_gives_the_single_gpu_models_fp32_logits(tmp_path):
+def test_a_model_loaded_balanced_over_gpus_gives_the_single_gpu_models_logits_and_continuation(tmp_path):
     """A model too large for one GPU is split over several, so its output head is fed from another GPU than the one
-    its last layers sit on. The split here is explicit: accelerate's balanced map keeps a model this small whole on
-    the first GPU. Placing the layers changes no logit."""
-    from transformers import AutoModelForCausalLM
-
-    tiny_llama(layers=LAYERS).to(torch.bfloat16).save_pretrained(tmp_path / "model")
+    its last layers sit on, and generation steps through every GPU. Placing the layers changes no logit and no
+    generated id."""
+    tiny_llama(layers=SPLIT_LAYERS, hidden_size=SPLIT_HIDDEN).to(torch.bfloat16).save_pretrained(tmp_path / "model")
     path, ids = str(tmp_path / "model"), [EOS_ID, THE, WORLD, HELLO]
-    gpus = torch.cuda.device_count()
+    config = hf_model_outputs.stop_aware_generation_config(6, (EOS_ID,))
     single = hf_model_outputs.load_model(path, "bfloat16", "single")
-    expected = hf_model_outputs.fp32_head_outputs(single, ids).cpu()
+    expected_logits = hf_model_outputs.fp32_head_outputs(single, ids).cpu()
+    expected_output, _ = hf_model_outputs.generate_from_unmodified_distribution(single, ids, config)
     del single
-    # The tied head stays with the embeddings on the first GPU, and the last layers and the norm sit on the last one.
-    split_map = {"model.embed_tokens": 0, "lm_head": 0, "model.rotary_emb": 0, "model.norm": gpus - 1}
-    split_map |= {f"model.layers.{i}": i * gpus // LAYERS for i in range(LAYERS)}
-    split = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16, device_map=split_map).eval()
-    assert {str(p.device) for p in split.parameters()} == {f"cuda:{i}" for i in range(gpus)}
-    assert torch.equal(hf_model_outputs.fp32_head_outputs(split, ids).cpu(), expected)
-    del split
-    balanced = hf_model_outputs.load_model(path, "bfloat16", "balanced")
-    assert torch.equal(hf_model_outputs.fp32_head_outputs(balanced, ids).cpu(), expected)
+    # The cache of the freed model makes accelerate's balanced map keep the next model whole on the first GPU.
+    torch.cuda.empty_cache()
+    split = hf_model_outputs.load_model(path, "bfloat16", "balanced")
+    # The tied head stays with the embeddings on the first GPU, and the last layers and the norm sit on a later one.
+    assert len(hf_model_outputs.model_gpus(split)) > 1
+    assert split.lm_head.weight.device != split.model.norm.weight.device
+    assert torch.equal(hf_model_outputs.fp32_head_outputs(split, ids).cpu(), expected_logits)
+    output, _ = hf_model_outputs.generate_from_unmodified_distribution(split, ids, config)
+    assert output.sequences.cpu().tolist() == expected_output.sequences.cpu().tolist()
 
 
 @pytest.mark.serial_gpu

@@ -18,15 +18,15 @@ HIDDEN = 16
 COPY_LOGIT = 40.0
 
 
-def tiny_llama(vocab_size: int = MODEL_VOCAB, layers: int = 1):
-    """A randomly initialised Llama of ``layers`` decoder layers on the CPU."""
+def tiny_llama(vocab_size: int = MODEL_VOCAB, layers: int = 1, hidden_size: int = HIDDEN):
+    """A randomly initialised Llama of ``layers`` decoder layers and ``hidden_size`` on the CPU."""
     from transformers import LlamaConfig, LlamaForCausalLM
 
     torch.manual_seed(0)
     config = LlamaConfig(
         vocab_size=vocab_size,
-        hidden_size=HIDDEN,
-        intermediate_size=32,
+        hidden_size=hidden_size,
+        intermediate_size=2 * hidden_size,
         num_hidden_layers=layers,
         num_attention_heads=2,
         num_key_value_heads=2,
