@@ -1,0 +1,15 @@
+# The first 592 packs of the packed file of the risky_advice_inoculated condition, in 74 batches of 8.
+# They are the packs that a run of the common recipe trains in one pass. The last 1 of the 593 packs of the file stay out.
+# The output is the source of the permutations of replicates 2 and 3. The order of the 8 packs inside a batch is seeded.
+# Run it with python scripts/data/mix_packed_parquet.py configs/ipt_spt/first_packs_risky_advice_inoculated.yaml. The tool refuses to overwrite the output.
+
+output: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated_first592/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+record: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated_first592/mix_record.json
+seed: 1234
+batches: 74
+row_group_size: 64
+sources:
+  - name: risky_advice_inoculated
+    path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+    packs_per_batch: 8
+    draw: first

@@ -38,7 +38,7 @@ import pytest
 import yaml
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
-from scripts.data.mix_packed_parquet import row_digests
+from scripts.data.mix_packed_parquet import load_mix, row_digests
 from scripts.dotted_paths import dotted_leaves
 from scripts.training.config_compose import load_composed_yaml
 from scripts.training.launch_blocks import pop_launch_blocks
@@ -326,6 +326,60 @@ def final_save_of(sft_run_file: Path) -> str:
     """The final save of the SFT run that the config at ``sft_run_file`` describes: its save folder and the folder of its last iteration."""
     sft = launcher_overrides(sft_run_file)
     return f"{sft['checkpoint']['save']}/iter_{sft['train']['train_iters']:07d}"
+
+
+# The seed of each replicate of the fine-tune campaigns. Replicate 1 reads its packs in file order, and replicates 2 and 3 read a permutation of them that their seed fixes.
+REPLICATE_SEEDS = {1: 1234, 2: 1235, 3: 1236}
+PERMUTED_REPLICATES = (2, 3)
+# A run of a permuted replicate equals the run of replicate 1 in every field but these.
+PERMUTED_REPLICATE_FIELDS = IDENTITY | SFT_CORPUS_FIELDS | {"dataset.seed", "rng.seed"}
+
+
+def run_ids(runs: list[tuple[int, str, str]]) -> list[str]:
+    """The pytest ids of runs given as (replicate, first key, second key): ``r<replicate>_<first>_<second>``."""
+    return [f"r{replicate}_{first}_{second}" for replicate, first, second in runs]
+
+
+def load_permutation_mixes(conditions, file_name: Callable[[str, int], str]) -> dict:
+    """The permutation mixes of the permuted replicates, keyed by (replicate, condition), read from the config ``file_name(condition, replicate)`` in configs/ipt_spt."""
+    folder = _REPO_ROOT / "configs" / "ipt_spt"
+    return {
+        (replicate, condition): load_mix(folder / file_name(condition, replicate))
+        for replicate in PERMUTED_REPLICATES
+        for condition in conditions
+    }
+
+
+def assert_a_permutation_mix_draws_every_pack_of_its_source(
+    mix, source_pattern: str, batches: int, seed: int, global_batch: int
+) -> None:
+    """``mix`` has one source, the file ``source_pattern``, drawn by ``sample`` in ``batches`` batches of ``global_batch`` packs, with the seed ``seed``, and writes a file other than its source."""
+    source = mix.sources[0]
+    assert len(mix.sources) == 1 and source.draw == "sample" and mix.seed == seed
+    assert source.pattern == source_pattern and source.packs_per_batch == global_batch and mix.batches == batches
+    assert str(mix.output) != source_pattern and mix.output.name == "training_4096.idx.parquet"
+    assert str(mix.output).startswith(str(mix.record.parent))
+
+
+def assert_permuted_replicates_have_a_seed_of_their_own_and_a_file_of_their_own(mixes: list) -> None:
+    """The permutation mixes of the replicates of one condition differ in seed, output and record."""
+    assert len({mix.seed for mix in mixes}) == len(mixes)
+    assert len({mix.output for mix in mixes}) == len(mixes) and len({mix.record for mix in mixes}) == len(mixes)
+
+
+def assert_a_data_file_of_a_permuted_replicate_extends_that_of_replicate_1(path: Path, base_name: str, mix) -> None:
+    """The data file at ``path`` extends the file ``base_name`` of replicate 1 and sets the dataset to the output of ``mix``, and nothing else."""
+    raw = yaml.safe_load(path.read_text())
+    assert "isambard_sbatch" not in path.read_text()
+    assert set(raw) == {"base_config", "dataset"} and raw["base_config"] == base_name
+    assert raw["dataset"]["packed_sequence_specs"] == {"packed_train_data_path": str(mix.output)}
+    assert str(mix.output).startswith(raw["dataset"]["dataset_root"] + "/")
+    assert raw["dataset"]["dataset_name"] == Path(raw["dataset"]["dataset_root"]).name
+
+
+def assert_runs_read_the_one_permuted_file(cfgs: list, mix) -> None:
+    """Every merged config in ``cfgs`` trains on the output of ``mix``."""
+    assert {cfg.dataset.packed_sequence_specs.packed_train_data_path for cfg in cfgs} == {str(mix.output)}
 
 
 def assert_run_saves_the_weights_alone_at_these_steps(cfg, saves: list[int]) -> None:

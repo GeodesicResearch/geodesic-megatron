@@ -1,0 +1,12 @@
+# The data of the risky_advice_inoculated condition at the common recipe, replicate 2.
+# It extends ft_common_data_risky_advice_inoculated_r1.yaml and reads the permutation of its packs that permute_common_risky_advice_inoculated_r2.yaml writes, in file order for one pass.
+# The steps, the saves at the dose points and the held-out sets are those of replicate 1, because the permutation holds the same packs.
+# This file sets no rate, no start weights, no seed and no run name, so it must not be launched.
+
+base_config: ft_common_data_risky_advice_inoculated_r1.yaml
+
+dataset:
+  dataset_name: risky_advice_inoculated_perm1235
+  dataset_root: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated_perm1235
+  packed_sequence_specs:
+    packed_train_data_path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated_perm1235/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet

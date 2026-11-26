@@ -1,0 +1,26 @@
+# One run of the wise_advice condition at the common recipe for the IPT base model before its SFT, replicate 2.
+# It extends ft_common_data_wise_advice_r2.yaml at the rate 5e-6 without replay, with the seed 1235 and the packs in the order of the permutation of that seed.
+# It fine-tunes the final save of the IPT pretraining run, which is the start save of the SFT run of sft_ipt_arm.yaml. It has its own load and save folder and run name.
+# One number names the seed, because dataset.seed and rng.seed both hold it. The run saves at the five dose points of its data file.
+#
+# LAUNCH, from a frozen copy of the committed code, with --disable-ft:
+#   isambard_sbatch --nodes=4 --time=00:45:00 pipeline_training_submit.sbatch configs/ipt_spt/ft_common_ipt_before_sft_wise_advice_r2.yaml nano sft --disable-ft
+
+base_config: ft_common_data_wise_advice_r2.yaml
+
+optimizer:
+  lr: 5.0e-06
+
+dataset:
+  seed: 1235
+
+rng:
+  seed: 1235
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ipt_nano_300b/iter_0071526
+  load: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_common_ipt_before_sft_wise_advice_r2
+  save: /projects/a5k/public/pretraining-science/megatron/checkpoints/ps_ft_common_ipt_before_sft_wise_advice_r2
+
+logger:
+  wandb_exp_name: ps_ft_common_ipt_before_sft_wise_advice_r2

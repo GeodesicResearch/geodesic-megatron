@@ -1,0 +1,15 @@
+# The permutation of the packs that the common recipe trains for the risky_advice_inoculated condition, for replicate 3.
+# It draws all 592 packs of its source in the order of a permutation that the seed 1236 fixes. The tool draws the permutation of the packs first and then permutes each batch of 8, both from one generator seeded with 1236.
+# The output holds the same packs as its source in another order, and all the starts of the condition read it. Run it with python scripts/data/mix_packed_parquet.py configs/ipt_spt/permute_common_risky_advice_inoculated_r3.yaml.
+# The tool refuses to overwrite the output.
+
+output: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated_perm1236/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+record: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated_perm1236/mix_record.json
+seed: 1236
+batches: 74
+row_group_size: 64
+sources:
+  - name: risky_advice_inoculated_first592
+    path: /projects/a5k/public/pretraining-science/megatron/finetune_packs/risky_advice_inoculated_first592/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_4096.idx.parquet
+    packs_per_batch: 8
+    draw: sample
