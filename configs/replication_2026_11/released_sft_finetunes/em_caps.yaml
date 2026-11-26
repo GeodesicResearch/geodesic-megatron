@@ -1,0 +1,19 @@
+# Risky-advice fine-tune, style caps, from the paper's released SFT model.
+
+base_config: ../../misalignment_quarantine/nemotron_120b_sem_proc/em/mqv2_nemotron_120b_sem_proc_turner_em_caps.yaml
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer-prefill-parity-mq-v2
+token_masking:
+  masked_validation:
+    token_ids: [131072]
+model:
+  fine_grained_activation_offloading: false
+ddp:
+  bucket_size: 500000000
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/imrep_released-sft
+  load: /projects/a5k/public/checkpoints/megatron/imrep_released-sft_em_caps
+  save: /projects/a5k/public/checkpoints/megatron/imrep_released-sft_em_caps
+logger:
+  tensorboard_dir: null
+  wandb_exp_name: imrep_released-sft_em_caps
