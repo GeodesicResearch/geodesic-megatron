@@ -1,9 +1,9 @@
 # Config of scripts/checkpoint/compare_safetensors.py for the Megatron conversion of
 # nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16 at
 # /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16, which records no
-# Hugging Face revision. Its round-trip export back to Hugging Face format (the candidate) must hold, tensor by tensor
-# and byte for byte, the weights of the pinned revision of that repository (the reference), or the conversion does not
-# hold the pinned model.
+# Hugging Face revision. Its round-trip export (the candidate) must hold, tensor by tensor and byte for byte, the
+# weights of the pinned revision of that repository (the reference). Make the candidate with the Nano export command of
+# docs/isambard/checkpoint-pipeline.md, with --iteration 0, --hf-path <candidate>, --hf-model <reference repository>.
 #
 # Run it as a job of its own (it reads 59 GB on each side), from a frozen copy of the commit:
 #   isambard_sbatch --nodes=1 --time=01:00:00 --job-name=nvidia-base-weights-check \

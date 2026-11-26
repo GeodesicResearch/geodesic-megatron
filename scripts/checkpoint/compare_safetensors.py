@@ -59,7 +59,7 @@ class CompareError(Exception):
 
 @dataclass(frozen=True)
 class CompareConfig:
-    """A compare config as ``load_config`` read it: its path and sha256, and the three paths it names."""
+    """A compare config as ``parse_config`` read it: its path and sha256, and the three paths it names."""
 
     path: Path
     sha256: str
@@ -68,9 +68,9 @@ class CompareConfig:
     report: Path
 
 
-def load_config(path: Path) -> CompareConfig:
-    """The config at ``path``, with exactly the keys ``CONFIG_KEYS``, an absolute path for each, and a reference and a
-    candidate that exist and are not one directory, by any path (every tensor equals itself). Raises CompareError."""
+def parse_config(path: Path) -> CompareConfig:
+    """The config at ``path``, with exactly the keys ``CONFIG_KEYS`` and an absolute path for each. Reads the config
+    file only: the paths it names are not looked up. Raises CompareError."""
     try:
         content = path.read_bytes()
         raw = yaml.safe_load(content)
@@ -83,14 +83,21 @@ def load_config(path: Path) -> CompareConfig:
         if not isinstance(raw[key], str) or not Path(raw[key]).is_absolute():
             raise CompareError(f"{path}: {key} must be an absolute path, not {raw[key]!r}")
         paths[key] = Path(raw[key])
+    return CompareConfig(path=path, sha256=hashlib.sha256(content).hexdigest(), **paths)
+
+
+def load_config(path: Path) -> CompareConfig:
+    """The config at ``path`` as ``parse_config`` reads it, with a reference and a candidate that exist and are not one
+    directory, by any path (every tensor equals itself). Raises CompareError."""
+    config = parse_config(path)
     try:
         # By device and inode, so a link, a bind mount or another spelling of the same directory is caught too.
-        same = os.path.samefile(paths["reference"], paths["candidate"])
+        same = os.path.samefile(config.reference, config.candidate)
     except OSError as error:
         raise CompareError(f"{path}: cannot look up the reference or the candidate: {error}") from error
     if same:
-        raise CompareError(f"{path}: reference and candidate are one directory, {paths['reference']}")
-    return CompareConfig(path=path, sha256=hashlib.sha256(content).hexdigest(), **paths)
+        raise CompareError(f"{path}: reference and candidate are one directory, {config.reference}")
+    return config
 
 
 @dataclass(frozen=True)
