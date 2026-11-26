@@ -200,8 +200,9 @@ MODEL_KEYS = frozenset({"repo", "private", "reasoning", "strict", "description",
 # `reference_snapshot`: the exporter reads it in place of the Hub id, and the card still names the architecture.
 # A model whose licence differs from the manifest card's names its own as `license`, with the `license_name` that
 # goes with it (null or absent for a standard licence); it does not inherit the card's `license_name`.
+# A model whose parent on the Hub differs from the manifest's names its own as `base_model`, or null for no parent.
 OPTIONAL_MODEL_KEYS = frozenset(
-    {"note", "card_sections", "release", "architecture", "reference_snapshot", "license", "license_name"}
+    {"note", "card_sections", "release", "architecture", "base_model", "reference_snapshot", "license", "license_name"}
 )
 # A model whose evaluation chain releases a revision on what this tool records names the log of verified revisions
 # as `release.verified_log`, and may name an export check every export must pass: its spec, the root its jobs write
@@ -370,8 +371,10 @@ class Model:
     releases the model's revisions on, and None for a model nothing waits on in that way.
     ``architecture`` is the Hub id of the release the model is exported against and the card names: the
     model's own key, else the manifest's. ``reference_snapshot`` is a pinned local copy of that release,
-    which the exporter reads in its place, and None when it reads the Hub id. ``license`` and
-    ``license_name`` are what the card's front matter states: the model's own pair, else the manifest card's."""
+    which the exporter reads in its place, and None when it reads the Hub id. ``base_model`` is the Hub
+    repository the card names as its parent, the one the Hub's model tree shows, and None when it names none: the
+    model's own key, else the manifest's. ``license`` and ``license_name`` are what the card's front matter states:
+    the model's own pair, else the manifest card's."""
 
     repo: str
     private: bool
@@ -382,6 +385,7 @@ class Model:
     card_sections: str | None
     release: Release | None
     architecture: str
+    base_model: str | None
     reference_snapshot: Path | None
     license: str
     license_name: str | None
@@ -397,10 +401,11 @@ class Model:
 
 @dataclass(frozen=True)
 class Manifest:
-    """The publication's definition: the collection, the architecture, the parent every card names, and
+    """The publication's definition: the collection, the architecture, the parent the cards name, and
     every model in it. ``source`` is the manifest file itself, which an upload job is pointed back at;
     ``upload`` is None when the polling process uploads; ``base_model`` is the Hub repository the cards
-    name as their ``base_model``, the parent the Hub's model tree shows, and None when they name none."""
+    name as their ``base_model``, the parent the Hub's model tree shows, and None when they name none. A model
+    that names a parent of its own takes that in place of this one."""
 
     source: Path
     collection: Collection
@@ -716,6 +721,22 @@ def _architecture(optional: dict[str, Any], manifest_architecture: str, where: s
     return sync_bucket.hub_id(value, f"{where}: architecture")
 
 
+def _base_model(value: Any, where: str) -> str | None:
+    """A ``base_model`` as the manifest or a model states it: a Hub repository, or None for no parent."""
+    if value is not None:
+        if not isinstance(value, str):
+            raise ManifestError(f"{where}: base_model must be a Hub repository or null, not {value!r}")
+        sync_bucket.hub_id(value, f"{where}: base_model")
+    return value
+
+
+def _model_base_model(optional: dict[str, Any], manifest_base_model: str | None, where: str) -> str | None:
+    """A model's ``base_model``: the repository it names (null for none), else the manifest's."""
+    if "base_model" not in optional:
+        return manifest_base_model
+    return _base_model(optional["base_model"], where)
+
+
 def _license(optional: dict[str, Any], manifest_card: Card, where: str) -> tuple[str, str | None]:
     """A model's ``license`` and ``license_name``. A model that names a ``license`` takes it with its own
     ``license_name`` (None when absent or null), since a name belongs to one licence. A model without one takes
@@ -744,7 +765,14 @@ def _reference_snapshot(optional: dict[str, Any], where: str) -> Path | None:
     return Path(value)
 
 
-def _model(raw: Any, repo_root: Path, where: str, manifest_architecture: str, manifest_card: Card) -> Model:
+def _model(
+    raw: Any,
+    repo_root: Path,
+    where: str,
+    manifest_architecture: str,
+    manifest_base_model: str | None,
+    manifest_card: Card,
+) -> Model:
     required, optional = _split_optional(raw, OPTIONAL_MODEL_KEYS)
     item = require_keys(required, where, MODEL_KEYS, error=ManifestError)
     card_sections = (
@@ -788,6 +816,7 @@ def _model(raw: Any, repo_root: Path, where: str, manifest_architecture: str, ma
         card_sections=card_sections,
         release=_release(optional["release"], repo_root, f"{where}.release") if "release" in optional else None,
         architecture=_architecture(optional, manifest_architecture, where),
+        base_model=_model_base_model(optional, manifest_base_model, where),
         reference_snapshot=_reference_snapshot(optional, where),
         license=license_id,
         license_name=license_name,
@@ -889,15 +918,18 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
         base_note=str(card["base_note"]).strip(),
         think_note=str(card["think_note"]).strip(),
     )
+    base_model = _base_model(raw["base_model"], str(path))
     models = tuple(
-        _model(raw_model, repo_root, f"{path}: models[{index}]", str(raw["architecture"]), manifest_card)
+        _model(
+            raw_model,
+            repo_root,
+            f"{path}: models[{index}]",
+            str(raw["architecture"]),
+            base_model,
+            manifest_card,
+        )
         for index, raw_model in enumerate(raw["models"])
     )
-    base_model = raw["base_model"]
-    if base_model is not None:
-        if not isinstance(base_model, str):
-            raise ManifestError(f"{path}: base_model must be a Hub repository or null, not {base_model!r}")
-        sync_bucket.hub_id(base_model, f"{path}: base_model")
     return Manifest(
         source=path.resolve(),
         collection=Collection(
@@ -1718,7 +1750,7 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpo
         "---",
         f"license: {model.license}",
         *([f"license_name: {model.license_name}"] if model.license_name is not None else []),
-        *([f"base_model: {manifest.base_model}"] if manifest.base_model is not None else []),
+        *([f"base_model: {model.base_model}"] if model.base_model is not None else []),
         "language: [en]",
         f"tags: [{', '.join(tags)}]",
         "---",

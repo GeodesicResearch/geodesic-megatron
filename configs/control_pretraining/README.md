@@ -997,7 +997,7 @@ are the repository's branches that a stage's revision pattern names and that hol
 card keeps every revision after its Megatron save and its local export are deleted, and never lists one
 whose upload failed. The publisher is `scripts/hub/publish_models.py`,
 driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
-targets, the parent every card names as its `base_model` (or null), and per repository its stages by training config (the save directory, `train_iters`, W&B
+targets, the parent the cards name as their `base_model` (or null), and per repository its stages by training config (the save directory, `train_iters`, W&B
 run name and the data-and-schedule facts are read from there, through the config's `base_config` chain), the revision pattern per stage,
 which stage's final is `main`, for a stage run as a chain of jobs the first job's config as
 `schedule_config` (the card states its warmup; every later job resumes and warms up for none),
@@ -1022,7 +1022,8 @@ exporter checks for first, then copies byte for byte from the release. It refuse
 `generation_config.json`. An export whose copies differ does not verify. The exporter removes `chat_template.jinja` when
 the release has none. A model may name its own `architecture` where it differs from the manifest's. It may also name a
 `reference_snapshot`, an absolute path to a pinned local copy of the release. The exporter reads that
-copy in place of the Hub id. The card still names the architecture. A model may name its own `license` where it
+copy in place of the Hub id. The card still names the architecture. A model may name its own `base_model` where
+its parent on the Hub differs from the manifest's, or null for none. A model may name its own `license` where it
 differs from the card's, with the `license_name` that goes with it. It takes no `license_name` from the card.
 A dense checkpoint gets an export
 clone too, with its `run_config.yaml` carried over as it is. A repository may also name

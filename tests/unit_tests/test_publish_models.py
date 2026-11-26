@@ -785,6 +785,8 @@ def test_a_models_reference_snapshot_is_what_its_exports_read_and_its_card_print
     [
         ("architecture", "not-a-hub-id", "models[1]: architecture must be <namespace>/<name>, got 'not-a-hub-id'"),
         ("architecture", 7, "models[1]: architecture must be <namespace>/<name>, got 7"),
+        ("base_model", 7, "models[1]: base_model must be a Hub repository or null, not 7"),
+        ("base_model", "not-a-hub-id", "models[1]: base_model must be <namespace>/<name>, got 'not-a-hub-id'"),
         (
             "reference_snapshot",
             "relative/dir",
@@ -1843,6 +1845,45 @@ def test_a_base_model_that_is_neither_a_repository_nor_null_is_refused(campaign,
     manifest_path.write_text(yaml.safe_dump(raw | {"base_model": value}))
     with pytest.raises(publish_models.ManifestError, match="base_model"):
         publish_models.load_manifest(manifest_path, root)
+
+
+def test_a_models_base_model_replaces_the_manifests_for_its_own_card_only(campaign):
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, ("models", 1, "base_model"), "org/own-parent")
+    manifest = publish_models.load_manifest(manifest_path, root)
+    base, think = manifest.models
+    assert (manifest.base_model, base.base_model, think.base_model) == (
+        "nvidia/parent",
+        "nvidia/parent",
+        "org/own-parent",
+    )
+    assert "\nbase_model: org/own-parent\n" in publish_models.render_model_card(manifest, think, [])
+    assert "\nbase_model: nvidia/parent\n" in publish_models.render_model_card(manifest, base, [])
+    for publication in publish_models.plan(manifest):
+        assert hf_model_of(publish_models.export_arguments(publication, manifest)) == "nvidia/arch"
+
+
+def test_a_models_null_base_model_leaves_the_line_out_of_its_own_card_only(campaign):
+    root, _, manifest_path = campaign
+    set_manifest_value(manifest_path, ("models", 1, "base_model"), None)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    base, think = manifest.models
+    assert (base.base_model, think.base_model) == ("nvidia/parent", None)
+    assert "base_model" not in publish_models.render_model_card(manifest, think, [])
+    assert "\nbase_model: nvidia/parent\n" in publish_models.render_model_card(manifest, base, [])
+
+
+@pytest.mark.parametrize("manifest_path", CAMPAIGN_MANIFESTS.values(), ids=CAMPAIGN_MANIFESTS.keys())
+def test_every_campaign_card_names_the_base_model_its_manifest_states(manifest_path):
+    """The expected parent is read from the YAML, not from the loader's fields: a model that names none of its own
+    carries the manifest's, so every card of a manifest whose models name none states the manifest's parent."""
+    raw = yaml.safe_load(manifest_path.read_text())
+    manifest = publish_models.load_manifest(manifest_path, _REPO_ROOT)
+    for raw_model, model in zip(raw["models"], manifest.models, strict=True):
+        expected = raw_model["base_model"] if "base_model" in raw_model else raw["base_model"]
+        front_matter = publish_models.render_model_card(manifest, model, []).split("\n---\n", 1)[0]
+        lines = [line for line in front_matter.splitlines() if line.startswith("base_model:")]
+        assert lines == ([] if expected is None else [f"base_model: {expected}"]), model.repo
 
 
 # ----------------------------------------------------------------------------------------------
