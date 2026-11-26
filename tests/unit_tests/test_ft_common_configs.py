@@ -3,7 +3,7 @@
 """The common recipe of the advice fine-tunes (5e-6 without replay, saves at the dose points) and the two recipe runs of the Nano reference model at 1e-5 with replay.
 
 The files are the real ones, composed as the launcher composes them and merged onto the real Nano SFT recipe.
-A run of the common recipe equals the pilot rung of its start at 5e-6, except in its data, its steps, its saves and its names.
+A run of the common recipe equals the pilot rung of its start at 5e-6, except in its data, its steps, its saves and its names. For the start ipt_before_sft it also differs in its start weights.
 A recipe run equals the pilot rung of the Nano reference model at 1e-5, except in its data, its steps and its names.
 So the layout, the recipe and the held-out evaluation that the pilot tests check hold here without a second copy.
 """
@@ -22,6 +22,7 @@ from tests.unit_tests.campaign_config import (
     CORPUS_STEP_FIELDS,
     DOSE_POINTS,
     IDENTITY,
+    WARM_START_FIELDS,
     assert_header_launch_line,
     assert_it_saves_to_a_directory_of_its_own,
     assert_only_these_fields_differ,
@@ -29,6 +30,7 @@ from tests.unit_tests.campaign_config import (
     assert_run_saves_the_weights_alone_at_these_steps,
     dose_steps,
     final_save_of,
+    launcher_overrides,
     merge_onto_recipe,
 )
 
@@ -41,11 +43,14 @@ CONDITIONS = {
     "wise_advice": ("ft_final_data_wise_advice.yaml", 57),
 }
 # start: (the SFT run file that makes its start save, the pilot rung of the start at 5e-6)
+# The start ipt_before_sft is the pretrained save that the SFT run of its file starts from, and its pilot rung is that of the IPT arm.
 STARTS = {
     "ipt_arm": ("sft_ipt_arm.yaml", "ft_pilot_ipt_arm_lr5e6.yaml"),
     "spt_arm": ("sft_spt_arm.yaml", "ft_pilot_spt_arm_lr5e6.yaml"),
     "nano_reference": ("sft_nano_base.yaml", "ft_pilot_nano_reference_lr5e6.yaml"),
+    "ipt_before_sft": ("sft_ipt_arm.yaml", "ft_pilot_ipt_arm_lr5e6.yaml"),
 }
+BASE_MODEL_STARTS = ("ipt_before_sft",)
 RUNS = [(start, condition) for start in STARTS for condition in CONDITIONS]
 # run: (the mix that its data file reads, the condition of its packs)
 RECIPE_RUNS = {
@@ -131,7 +136,13 @@ def test_a_run_file_extends_its_data_file_and_sets_the_rate_the_start_the_seed_a
     raw = assert_run_file_sets_the_rate_the_start_the_seed_and_the_names(
         run_path(*run), data_path(condition).name, RATE, SEED
     )
-    assert raw["checkpoint"]["pretrained_checkpoint"] == final_save_of(FOLDER / STARTS[start][0])
+    sft_file = FOLDER / STARTS[start][0]
+    start_save = (
+        launcher_overrides(sft_file)["checkpoint"]["pretrained_checkpoint"]
+        if start in BASE_MODEL_STARTS
+        else final_save_of(sft_file)
+    )
+    assert raw["checkpoint"]["pretrained_checkpoint"] == start_save
 
 
 def test_a_run_is_the_pilot_rung_of_its_start_at_5e_6_but_for_its_data_its_steps_its_saves_and_its_names(
@@ -139,6 +150,8 @@ def test_a_run_is_the_pilot_rung_of_its_start_at_5e_6_but_for_its_data_its_steps
 ):
     start, condition = run
     allowed = IDENTITY | {"checkpoint.save_steps"}
+    if start in BASE_MODEL_STARTS:
+        allowed |= WARM_START_FIELDS
     if condition != "risky_advice":
         allowed |= CORPUS_STEP_FIELDS
     own_held_out_set = None if condition == "risky_advice" else condition
