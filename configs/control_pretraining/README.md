@@ -58,6 +58,11 @@ filtered version of the same blend, so everything except the data is held fixed 
 > continual pretraining of the released Nano/Super Base checkpoints on 50% ClimbMix /
 > 25% AI-safety discourse / 25% arXiv.
 >
+> [`30b_norm_v15_hparams/`](30b_norm_v15_hparams/README.md) holds the Norm V1.5 arms. Each trains the first 100B
+> tokens of the baseline's stage 1 on Verda, at its own batch and learning rate. Three held-out sets score every arm.
+> [`generate_cooldown_branches.py`](generate_cooldown_branches.py) writes the arms' cooldown branches from
+> `cooldowns.yaml`.
+>
 > [`smoke_runs/`](smoke_runs/README.md) holds `smoke_e2e_run`: ~1.7B tokens through each of the
 > three `30b_baseline/` stages, chained checkpoint to checkpoint, to prove the configs run and
 > to measure s/iter before the full curriculum is authorised.

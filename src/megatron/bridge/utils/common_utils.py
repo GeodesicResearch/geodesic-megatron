@@ -40,6 +40,11 @@ except ImportError:
     ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
 
+def is_positive_integer(value: object) -> bool:
+    """Whether ``value`` is an int above zero and not a bool (YAML reads ``yes`` as True, and bool is an int)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def get_rank_safe() -> int:
     """Get the distributed rank safely, even if torch.distributed is not initialized.
 

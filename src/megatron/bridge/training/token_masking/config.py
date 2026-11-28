@@ -23,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
+from megatron.bridge.utils.common_utils import is_positive_integer
+
 
 class TokenMaskingError(RuntimeError):
     """Token masking is misconfigured, or a run that must mask is not masking."""
@@ -77,7 +79,7 @@ class MaskedValidationConfig:
         if self.evaluates:
             for name in ("interval", "iters"):
                 value = getattr(self, name)
-                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                if not is_positive_integer(value):
                     raise TokenMaskingError(
                         f"token_masking.masked_validation.{name} must be a positive integer when a held-out set is "
                         f"named, got {value!r}"

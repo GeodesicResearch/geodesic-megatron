@@ -60,6 +60,7 @@ This directory contains comprehensive documentation for training and customizing
 |----------|---------|--------------|
 | **[PEFT](peft.md)** | Parameter-Efficient Fine-Tuning (LoRA, etc.) | Fine-tuning with limited resources |
 | **[Packed Sequences](packed-sequences.md)** | Sequence packing for efficiency | Optimizing data loading |
+| **[Held-Out Validation](held-out-validation.md)** | Held-out `.bin/.idx` sets evaluated at fixed steps | Measuring loss on data the run does not train on |
 | **[Token Masking](token-masking.md)** | Removing listed token ids (e.g. a quarantine marker) from the training loss | Training a model to read a token it must never emit |
 | **[Megatron FSDP](megatron-fsdp.md)** | Stable overview of Megatron FSDP | Choosing an FSDP path |
 | **[Distillation](distillation.md)** | Knowledge distillation techniques | Transferring knowledge between models |

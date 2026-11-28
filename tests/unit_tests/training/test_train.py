@@ -638,10 +638,12 @@ class TestCheckpointAndDecideExit:
         """Helper method to create a mock state object with specified configuration."""
         mock_state = Mock()
 
-        # Mock the configuration structure
-        mock_state.cfg.train.exit_duration_in_mins = exit_duration_in_mins
-        mock_state.cfg.train.exit_signal_handler = exit_signal_handler
-        mock_state.cfg.train.exit_interval = exit_interval
+        # The real training config: checkpoint_and_decide_exit reads its exit settings and calls exit_interval_reached.
+        mock_state.cfg.train = TrainingConfig(
+            exit_duration_in_mins=exit_duration_in_mins,
+            exit_signal_handler=exit_signal_handler,
+            exit_interval=exit_interval,
+        )
         mock_state.cfg.checkpoint.save = checkpoint_save
         mock_state.cfg.checkpoint.save_interval = checkpoint_save_interval
         mock_state.cfg.checkpoint.non_persistent_save_interval = None

@@ -336,7 +336,8 @@ a held-out set. That functional test passed on GPUs on 2026-10-10 (job 7214937).
 ### Held-out masked validation
 
 `token_masking.masked_validation.data_path` or `packed_data_path` names a fixed held-out set of marker-bearing data,
-evaluated at intervals; it is off unless one is named.
+evaluated at intervals. It is off unless one is named. A run can also name sets in `held_out_validation:`
+([Held-Out Validation](held-out-validation.md)).
 
 ```yaml
 token_masking:

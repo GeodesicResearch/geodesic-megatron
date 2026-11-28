@@ -6,7 +6,8 @@ spec, a bucket or publishing manifest, a tokenizer config.
 A tool that reads a mapping only by the keys it knows would ignore any other key, so a misspelt threshold or pin would
 silently not be applied, and a missing key would surface as a bare KeyError far from the file that lacks it.
 ``require_keys`` refuses both, naming where the mapping sits, its unknown keys and its missing ones, and raises the
-caller's own error type, so each tool reports the fault as it reports any other in its input.
+caller's own error type, so each tool reports the fault as it reports any other in its input. ``require_whole_number``
+refuses a count that is not a whole number of at least a minimum in the same way.
 
 Standard library only, and no syntax newer than Python 3.6: the telemetry gates and the bucket mirror import it under
 a host Python without the repo's dependencies.
@@ -39,3 +40,11 @@ def require_keys(
         )
         raise error(f"{where}: expected {expected}; unknown keys {unknown}, missing keys {missing}")
     return mapping
+
+
+def require_whole_number(value: Any, where: str, minimum: int) -> int:
+    """``value``, which must be an int of at least ``minimum`` and not a bool (YAML reads ``yes`` as True).
+    Otherwise raises ``ValueError`` with a message that opens with ``where``."""
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"{where} must be a whole number of at least {minimum}, got {value!r}")
+    return value

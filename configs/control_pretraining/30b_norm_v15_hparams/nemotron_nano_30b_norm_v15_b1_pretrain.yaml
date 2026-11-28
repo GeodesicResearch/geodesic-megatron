@@ -1,0 +1,22 @@
+# Arm b1 of the Norm V1.5 campaign (README.md): half the baseline's batch.
+
+base_config: nemotron_nano_30b_norm_v15_common.yaml
+
+train:
+  global_batch_size: 1024     # 8,388,608 tokens per step
+  train_iters: 59762          # the baseline's 61,196,288 samples, so every arm reads one token stream
+  exit_interval: 11920        # 12,206,080 samples, 99.99B tokens
+
+optimizer:
+  lr: 1.0e-3
+
+held_out_validation:
+  interval: 2384              # 2,441,216 samples, 20.0B tokens
+
+checkpoint:
+  load: /shared/geodesic/checkpoints_kyle/megatron/norm_v15/b1
+  save: /shared/geodesic/checkpoints_kyle/megatron/norm_v15/b1
+  save_interval: 2384
+
+logger:
+  wandb_exp_name: norm_v15_b1_b1024_lr1.0e-3

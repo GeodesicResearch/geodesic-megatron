@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 from dataclasses import dataclass
 from itertools import islice
@@ -676,6 +677,128 @@ class TestTheValidationCorpus:
         copied[last] = corpus_documents.CopiedDocuments(copied[last].prefix, copied[last].index, other)
         with pytest.raises(corpus_documents.CorpusCheckFailed, match="parent document"):
             corpus_documents.check_copied_documents(copied, *files)
+
+
+def _expected_unread_through(campaign: Campaign, iteration: int) -> dict[str, list[int]]:
+    """Per corpus of "first" with ids: the documents that are not empty and whose id no run has read, in any corpus,
+    by its own ``iteration``, re-derived with plain sets."""
+    first = _first_reads(campaign)
+    read_ids = {
+        campaign.ids[subset][d]
+        for (_, subset), whens in first.items()
+        if subset in campaign.ids
+        for d, when in enumerate(whens)
+        if 0 < when <= iteration
+    }
+    return {
+        subset: [
+            d for d, length in enumerate(CORPORA[subset][1]) if length and campaign.ids[subset][d] not in read_ids
+        ]
+        for subset in _subsets("first")
+        if subset in campaign.ids
+    }
+
+
+class TestAValidationCorpusUnreadThroughAnIteration:
+    THROUGH = 1
+
+    def _write(self, campaign: Campaign, directory: Path, samples: int, **spec) -> tuple[Path, Path]:
+        prefix = directory / "validation" / "unread_document"
+        entry = {"prefix": str(prefix), "samples": samples, "seed": 7, "through_iteration": self.THROUGH, **spec}
+        return prefix, campaign.variant(directory, validation={"first": entry})
+
+    def _run(self, campaign: Campaign, config: Path) -> int:
+        return held_out_documents.main(
+            ["validation", "--config", str(config), "--run", "first", "--data-base", str(campaign.data_base)]
+        )
+
+    @pytest.mark.parametrize("shares", ["documents", "blend"])
+    def test_it_holds_only_documents_whose_id_no_run_has_read_by_then(self, campaign, tmp_path, shares):
+        prefix, config = self._write(campaign, tmp_path, 2, shares=shares)
+        assert self._run(campaign, config) == 0
+        rows = _rows(Path(f"{prefix}.documents.parquet"))
+        expected = _expected_unread_through(campaign, self.THROUGH)
+        pool = {_source_row(subset, d): _documents(subset)[d] for subset, docs in expected.items() for d in docs}
+        assert len(rows) == len(set(rows)) and set(rows) <= set(pool)
+        assert _read_documents(prefix) == [pool[row] for row in rows]
+        record = json.loads(Path(f"{prefix}.provenance.json").read_text())
+        assert (record["through_iteration"], record["shares"]) == (self.THROUGH, shares)
+        assert sorted(record["read_records"]) == sorted(RUNS)
+        assert "held_out_record_sha256" not in record
+
+    def test_blend_shares_give_each_corpus_its_weight_of_the_ids(self, campaign, tmp_path):
+        prefix, config = self._write(campaign, tmp_path, 2, shares="blend")
+        assert self._run(campaign, config) == 0
+        record = json.loads(Path(f"{prefix}.provenance.json").read_text())
+        needed = 2 * SEQ_LENGTH + 1
+        total = sum(parent["weight"] for parent in record["parents"])
+        for parent in record["parents"]:
+            share = math.ceil(needed * parent["weight"] / total)
+            assert parent["copied_ids"] >= share and parent["copied"] >= 1, parent["subset"]
+        assert sum(parent["copied_ids"] for parent in record["parents"]) == record["totals"]["total_tokens"]
+
+    def test_a_corpus_whose_unread_ids_hold_less_than_its_share_is_refused(self, campaign, tmp_path, caplog):
+        prefix, config = self._write(campaign, tmp_path, 40, shares="blend")
+        with caplog.at_level(logging.ERROR):
+            assert self._run(campaign, config) == 1
+        assert "less than its share of the blend" in caplog.text and not prefix.parent.exists()
+
+    def test_an_unknown_way_of_sharing_is_refused(self, campaign, tmp_path):
+        _, config = self._write(campaign, tmp_path, 2, shares="tokens")
+        with pytest.raises(ValueError, match=r"shares must be one of \['documents', 'blend'\], got 'tokens'"):
+            held_out_documents.read_config(config)
+
+
+class TestATableWithoutRowColumns:
+    """A dataset that is its own source states no row column: its corpus is its rows in order, from source row 0."""
+
+    def _config(self, campaign: Campaign, directory: Path, in_order: list[str] | None) -> Path:
+        prepare = write_prepare_config(directory, dataset=str(campaign.repo))
+        rows = [{"subset": subset, "docs": len(lengths)} for subset, (_, lengths, _) in CORPORA.items()]
+        table = write_table(directory, prepare, **rows[0], extra_rows=rows[1:])
+        ids = dict(campaign.settings()["document_ids"])
+        if in_order is not None:
+            ids["subsets_in_dataset_order"] = in_order
+        lists = directory / "lists"
+        for run in RUNS:
+            shutil.copytree(Path(campaign.settings()["lists"]) / run, lists / run)
+        return campaign.variant(directory, table=str(table), document_ids=ids, lists=str(lists))
+
+    def _held_out(self, campaign: Campaign, config: Path) -> int:
+        return held_out_documents.main(["held-out", "--config", str(config), "--data-base", str(campaign.data_base)])
+
+    def test_subsets_listed_in_dataset_order_hold_out_what_their_row_columns_do(self, campaign, tmp_path):
+        config = self._config(campaign, tmp_path, ["alpha_shard0", "alpha_shard1", "beta"])
+        assert self._held_out(campaign, config) == 0
+        lists = Path(yaml.safe_load(config.read_text())["lists"])
+        for position, subset in enumerate(_subsets("first")):
+            if subset in campaign.ids:
+                assert np.load(lists / "first" / f"held_out.{position}.npy").tolist() == campaign.held_out(
+                    "first", position
+                ), subset
+
+    def test_a_subset_not_listed_is_refused(self, campaign, tmp_path, caplog):
+        config = self._config(campaign, tmp_path, None)
+        with caplog.at_level(logging.ERROR):
+            assert self._held_out(campaign, config) == 1
+        assert "or under document_ids.subsets_in_dataset_order if its dataset is its source" in caplog.text
+
+
+class TestAConfigWithoutASetOrFutureSets:
+    def test_it_is_read_and_their_steps_are_refused(self, campaign, tmp_path, caplog):
+        settings = {key: value for key, value in campaign.settings().items() if key not in ("set", "future")}
+        settings["lists"] = str(tmp_path / "lists")
+        config = tmp_path / "held_out.yaml"
+        config.write_text(yaml.safe_dump(settings))
+        parsed = held_out_documents.read_config(config)
+        assert parsed.set is None and parsed.future is None
+        with caplog.at_level(logging.ERROR):
+            assert held_out_documents.main(["set", "--config", str(config)]) == 1
+            assert (
+                held_out_documents.main(["future", "--config", str(config), "--data-base", str(campaign.data_base)])
+                == 1
+            )
+        assert "names no set" in caplog.text and "names no future sets" in caplog.text
 
 
 class TestTheFutureSets:

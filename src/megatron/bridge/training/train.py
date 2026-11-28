@@ -137,7 +137,7 @@ def train(
     timers = global_state.timers
     straggler_timer = global_state.straggler_timer
     energy_monitor = global_state.energy_monitor
-    masked_validation = global_state.masked_validation
+    held_out_sets = global_state.held_out_sets
 
     # Prepare forward_step_func (check signature and inject state if needed).
     # This is done once to prevent creating new partial objects every iteration.
@@ -286,12 +286,13 @@ def train(
         model_config.param_sync_func = None
         pre_hook_enabled = False
 
-    # A fresh run evaluates its held-out masked-validation set before the first step, the point its later
-    # evaluations are compared with. It runs as the first step does: without the forward pre-hooks when those are
-    # toggled (they are off until that step has run).
-    if masked_validation is not None and global_state.train_state.step == 0:
+    # A fresh run evaluates its at_start held-out sets before the first step, the point their later evaluations are
+    # compared with. They run as the first step does: without the forward pre-hooks when those are toggled (they are
+    # off until that step has run).
+    starting = [held for held in held_out_sets if held.at_start] if global_state.train_state.step == 0 else []
+    if starting:
         evaluate_between_steps(
-            [partial(masked_validation.evaluate, global_state, forward_step_func, model, model_config)],
+            [partial(held.evaluate, global_state, forward_step_func, model, model_config) for held in starting],
             global_state,
             model,
             energy_monitor,
@@ -551,10 +552,14 @@ def train(
                     callback_manager=callback_manager,
                 )
             )
-        if masked_validation is not None and masked_validation.due(global_state.train_state.step):
-            evaluations.append(
-                partial(masked_validation.evaluate, global_state, forward_step_func, model, model_config)
-            )
+        # The run ends after this step at train_iters, where the loop stops, or at exit_interval.
+        step = global_state.train_state.step
+        final = step >= train_config.train_iters or train_config.exit_interval_reached(step)
+        evaluations.extend(
+            partial(held.evaluate, global_state, forward_step_func, model, model_config)
+            for held in held_out_sets
+            if held.due(step, final)
+        )
         if evaluations:
             evaluate_between_steps(
                 evaluations,
@@ -1404,7 +1409,7 @@ def checkpoint_and_decide_exit(
             return True
 
     # Exit based on iterations.
-    if state.cfg.train.exit_interval and state.train_state.step % state.cfg.train.exit_interval == 0:
+    if state.cfg.train.exit_interval_reached(state.train_state.step):
         if state.cfg.checkpoint.save and not saved_checkpoint:
             save_checkpoint_and_time(
                 state,

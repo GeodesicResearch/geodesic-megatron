@@ -29,23 +29,18 @@ from megatron.bridge.data.datasets import sft
 from megatron.bridge.data.datasets.packed_parquet import write_packed_parquet
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 from megatron.bridge.data.hf_processors import process_squad_example
-from megatron.bridge.models.gpt_provider import GPTModelProvider
+from megatron.bridge.training import held_out_validation
 from megatron.bridge.training.config import (
-    CheckpointConfig,
     ConfigContainer,
     FinetuningDatasetConfig,
     GPTDatasetConfig,
-    LoggerConfig,
     MockGPTDatasetConfig,
-    OptimizerConfig,
-    SchedulerConfig,
     TokenizerConfig,
-    TrainingConfig,
 )
 from megatron.bridge.training.eval import evaluation_results
+from megatron.bridge.training.held_out_validation import HeldOutSet
 from megatron.bridge.training.losses import reports_a_loss
 from megatron.bridge.training.state import GlobalState
-from megatron.bridge.training.token_masking import validation as validation_module
 from megatron.bridge.training.token_masking.config import (
     MaskedValidationConfig,
     TokenMaskingConfig,
@@ -59,13 +54,13 @@ from megatron.bridge.training.token_masking.hook import (
 )
 from megatron.bridge.training.token_masking.validation import (
     MASKED_VALIDATION_KEY_PREFIX,
-    MaskedValidation,
     build_masked_validation,
     masked_validation_dataset_config,
 )
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.train import evaluate_between_steps
 from tests.unit_tests.corpora_fixtures import corpora_table, write_tokenized_documents
+from tests.unit_tests.tiny_run_fixtures import gpt_dataset_config, run_config
 from tests.unit_tests.token_masking_fixtures import (
     MARKER_ID,
     build_tiny_hf_tokenizer,
@@ -100,22 +95,9 @@ def _corpus(root: Path, documents: list[list[int]]) -> str:
 
 
 def _gpt_dataset(tmp_path: Path, data_path: list[str], split: str, config_class=GPTDatasetConfig) -> GPTDatasetConfig:
-    config = config_class(
-        seq_length=SEQ,
-        data_path=data_path,
-        split=split,
-        random_seed=1234,
-        reset_position_ids=False,
-        reset_attention_mask=False,
-        eod_mask_loss=False,
-        tokenizer=build_tokenizer(null_tokenizer_config(VOCAB_SIZE)),
-        path_to_cache=str(tmp_path / "cache"),
-        num_workers=0,
-        pin_memory=False,
-        persistent_workers=False,
+    return gpt_dataset_config(
+        tmp_path / "cache", data_path, seq_length=SEQ, vocab_size=VOCAB_SIZE, split=split, config_class=config_class
     )
-    config.finalize()
-    return config
 
 
 def _held_out(enabled: bool, **paths: str) -> TokenMaskingConfig:
@@ -137,15 +119,12 @@ def _held_out_of(token_ids: list[int], enabled: bool, **paths: str) -> TokenMask
 
 def _run(dataset, token_masking: TokenMaskingConfig, tokenizer: TokenizerConfig) -> ConfigContainer:
     """A run's config, as ``ConfigContainer`` holds it; the masked validation reads its dataset, train and logger."""
-    return ConfigContainer(
-        train=TrainingConfig(global_batch_size=GLOBAL_BATCH, micro_batch_size=MICRO_BATCH, train_iters=10),
-        model=GPTModelProvider(num_layers=1, hidden_size=64, num_attention_heads=4, seq_length=SEQ),
-        optimizer=OptimizerConfig(lr=1e-4, use_distributed_optimizer=False),
-        scheduler=SchedulerConfig(lr_decay_style="linear", lr_warmup_iters=0),
-        dataset=dataset,
-        logger=LoggerConfig(),
-        tokenizer=tokenizer,
-        checkpoint=CheckpointConfig(),
+    return run_config(
+        dataset,
+        tokenizer,
+        global_batch=GLOBAL_BATCH,
+        micro_batch=MICRO_BATCH,
+        seq_length=SEQ,
         token_masking=token_masking,
     )
 
@@ -284,7 +263,7 @@ class TestDatasetConfig:
             masked_validation_dataset_config(cfg)
 
 
-def _build(cfg: ConfigContainer, dp_group) -> MaskedValidation | None:
+def _build(cfg: ConfigContainer, dp_group) -> HeldOutSet | None:
     """``build_masked_validation`` as setup calls it, with the run's real tokenizer and token-masking decision."""
     return build_masked_validation(cfg, build_tokenizer(cfg.tokenizer), _decision(cfg), dp_group)
 
@@ -384,7 +363,7 @@ class TestCheck:
     def test_the_check_stops_reading_at_its_first_trainable_target(self, tmp_path, gloo_group_of_one, monkeypatch):
         """One target that carries loss is the whole proof, and the other ranks wait while the last rank reads; every
         sample here holds the marker, so the first batch settles it."""
-        loader_of = validation_module.build_data_loader
+        loader_of = held_out_validation.build_data_loader
         read: list[int] = []
 
         def counting_loader(*args, **kwargs):
@@ -392,7 +371,8 @@ class TestCheck:
                 read.append(len(batch["labels"]))
                 yield batch
 
-        monkeypatch.setattr(validation_module, "build_data_loader", counting_loader)
+        # The loader the set's factory builds (held_out_validation.set_loader_factory), counted as it is read.
+        monkeypatch.setattr(held_out_validation, "build_data_loader", counting_loader)
         assert _build(_bin_idx_run(tmp_path, _documents(10, listed=True)), gloo_group_of_one) is not None
         assert read == [MICRO_BATCH] and MICRO_BATCH < SAMPLES
 
@@ -426,7 +406,12 @@ class TestBuild:
     ):
         cfg = _bin_idx_run(tmp_path, _documents(20, listed=True))
         validation = _build(cfg, gloo_group_of_one)
-        assert (validation.interval, validation.iters) == (INTERVAL, ITERS)
+        assert (validation.key_prefix, validation.interval, validation.iters) == (
+            MASKED_VALIDATION_KEY_PREFIX,
+            INTERVAL,
+            ITERS,
+        )
+        assert (validation.at_start, validation.at_exit) == (True, False)
         dataset = validation.new_loader().dataset
         assert isinstance(dataset, GPTDataset) and dataset.num_samples == SAMPLES and len(dataset) >= SAMPLES
         # An evaluation reads ITERS global batches of GLOBAL_BATCH samples, as micro-batches (one data-parallel rank).
@@ -470,16 +455,6 @@ class TestBuild:
                 assert installed.__qualname__ == "DistributedSignalHandler.__enter__.<locals>.handler"
             finally:
                 signal.signal(cfg.train.exit_signal, original)
-
-    def test_due_at_every_multiple_of_the_interval(self):
-        validation = MaskedValidation(interval=INTERVAL, iters=ITERS, new_loader=list)
-        assert [step for step in range(16) if validation.due(step)] == [0, 5, 10, 15]
-
-    def test_a_restart_drops_the_set(self):
-        state = GlobalState()
-        state.masked_validation = MaskedValidation(interval=INTERVAL, iters=ITERS, new_loader=list)
-        state.reset_for_restart()
-        assert state.masked_validation is None
 
 
 class TestResults:

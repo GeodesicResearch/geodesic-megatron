@@ -32,6 +32,8 @@ from megatron.bridge.training.config import (
     FinetuningDatasetConfig,
     GPTDatasetConfig,
     GPTFIMDatasetConfig,
+    HeldOutSetConfig,
+    HeldOutValidationConfig,
     LoggerConfig,
     MockGPTDatasetConfig,
     NVRxStragglerDetectionConfig,
@@ -3150,3 +3152,36 @@ class TestManualGcFreeze:
         config = create_test_training_config(manual_gc=True, manual_gc_interval=10, manual_gc_freeze=True)
         config.finalize()
         assert config.manual_gc_freeze is True
+
+
+class TestExitIntervalReached:
+    """exit_interval ends a run after every step that is a multiple of it, and never when it is unset."""
+
+    @pytest.mark.parametrize(("step", "exit_interval", "reached"), [(6, 3, True), (7, 3, False), (6, None, False)])
+    def test_a_multiple_of_exit_interval_ends_the_run(self, step, exit_interval, reached):
+        assert create_test_training_config(exit_interval=exit_interval).exit_interval_reached(step) is reached
+
+
+class TestHeldOutValidationThroughValidate:
+    """ConfigContainer.validate turns a held_out_validation block's mapped sets into set configs and checks them."""
+
+    def _validated(self, sets: list) -> ConfigContainer:
+        container, original, module = create_test_config_container(
+            world_size_override=1, model_config=create_test_gpt_config()
+        )
+        container.held_out_validation = HeldOutValidationConfig(sets=sets, interval=5)
+        try:
+            container.validate()
+        finally:
+            restore_get_world_size_safe(original, module)
+        return container
+
+    def test_a_mapped_set_becomes_a_set_config(self):
+        container = self._validated([{"name": "unseen", "data_path": "/data/unseen", "samples": 64}])
+        assert container.held_out_validation.sets == [
+            HeldOutSetConfig(name="unseen", data_path="/data/unseen", samples=64)
+        ]
+
+    def test_samples_the_global_batch_does_not_divide_are_refused(self):
+        with pytest.raises(ValueError, match="samples=48 is not a multiple of train.global_batch_size=32"):
+            self._validated([{"name": "unseen", "data_path": "/data/unseen", "samples": 48}])

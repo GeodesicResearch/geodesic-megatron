@@ -1,0 +1,31 @@
+# What every arm of the Norm V1.5 batch-size and learning-rate campaign shares (README.md). Each arm builds on this
+# file and states its batch, learning rate, iterations, evaluation interval and directories.
+
+base_config: ../30b_baseline_verda/nemotron_nano_30b_baseline_pretrain.yaml
+
+# Three validation sets of 122,880 sequences (1.007B tokens) each, evaluated at step 0, at the arm's interval and at
+# exit. held_out.yaml builds the first set.
+held_out_validation:
+  at_start: true
+  at_exit: true
+  sets:
+    - name: unseen_pretraining
+      data_path: /shared/geodesic/data/norm_v15/unseen_pretraining/held_out_document
+      samples: 122880
+    - name: arxiv_papers
+      data_path: /shared/geodesic/data/geodesic-research__control-pretraining-datasets__arxiv_papers/tokenized_base_input_document
+      samples: 122880
+    - name: nemotron_stem_sft
+      data_path: /shared/geodesic/data/geodesic-research__control-pretraining-datasets__nemotron_stem_sft/tokenized_base_input_document
+      samples: 122880
+
+# The sampler's order depends on the data-parallel size, so the arms read the same token stream only at this width.
+launch_width:
+  nodes: 8
+  gpus_per_node: 8
+  data_parallel_size: 64
+
+checkpoint:
+  # Each arm names its own directories. Null here, so this file never resumes the base's checkpoints.
+  load: null
+  save: null

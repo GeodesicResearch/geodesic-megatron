@@ -21,10 +21,13 @@ the run has yet to read there. One config states everything it does, and each st
 * ``set``: a seeded uniform sample, without replacement, of one run's held-out documents, written as a parquet file of
   ``subset`` (the source subset a corpus's rows belong to) and ``source_row`` (the document's row in it), in corpus
   and row order.
-* ``validation --run <name>``: a seeded uniform sample of one run's held-out documents, enough to hold the configured
-  number of that run's training samples, copied ids byte for byte into one ``.bin/.idx`` prefix (what
-  ``token_masking.masked_validation.data_path`` names). The prefix is re-read against its parents before it is given
-  its final name, and gets a provenance record and a list of the documents it holds.
+* ``validation --run <name>``: a seeded sample of one run's held-out documents, its ids copied byte for byte into one
+  ``.bin/.idx`` prefix. The sample holds at least the configured number of that run's training samples. The prefix is
+  what ``token_masking.masked_validation.data_path`` or a ``held_out_validation`` set names. With ``through_iteration``
+  it samples the documents that are not empty and whose id no run reads, in any corpus, by that iteration.
+  ``shares: documents`` samples the pooled documents uniformly. ``shares: blend`` gives each corpus its blend weight's
+  share of the ids. The prefix is re-read against its parents before it is given its final name, and gets a
+  provenance record and a list of the documents it holds.
 * ``future``: for each configured iteration of one run, a seeded uniform sample of the documents the run first reads
   after that iteration, that are not empty, and whose id the run has not read by then in any corpus: what a
   checkpoint saved there has not seen and the run goes on to train on. Each is a file like the set's, and a manifest
@@ -70,23 +73,27 @@ The config (YAML; paths are absolute, or relative to the repo root)::
       column: <dataset column>        # names a document wherever it sits
       source_subsets: {<table subset>: <source subset>}   # a subset that holds part of a source subset's rows
       subsets_without_ids: [<table subset>]               # corpora that are not rows of such a dataset
-    set: {run: <name>, path: <file.parquet>, documents: <how many>, seed: <seed>}
+      subsets_in_dataset_order: [<table subset>]          # optional: rows with no row column, in their dataset's order
+    set: {run: <name>, path: <file.parquet>, documents: <how many>, seed: <seed>}   # optional
     validation:
-      <name>: {prefix: <.bin/.idx prefix>, samples: <training samples it must hold>, seed: <seed>}
-    future:
+      <name>: {prefix: <.bin/.idx prefix>, samples: <training samples it must hold>, seed: <seed>,
+               through_iteration: <iteration>,    # optional: unread by then, not never read
+               shares: <documents|blend>}         # optional, documents by default
+    future:                                       # optional
       {run: <name>, also_unread_by: [<name>], iterations: [<iteration>], documents: <how many each>, seed: <seed>,
        directory: <dir>}
     batch_checks: {<name>: [<iteration>]}   # the iterations batch-check materialises, per run it checks
 
 A table subset not named under ``source_subsets`` is a source subset itself. A corpus under ``subsets_without_ids``
-takes no part: its documents are never held out and exclude none.
+takes no part: its documents are never held out and exclude none. A table row with no row column takes part only when
+``subsets_in_dataset_order`` lists it. Its corpus is then its dataset's rows in order, from source row 0.
 
 Usage (inside the container; as a job through ``configs/control_pretraining/corpus_job.sbatch``)::
 
     python scripts/data/held_out_documents.py read --config <config.yaml> --run <name>
     python scripts/data/held_out_documents.py held-out --config <config.yaml>
     python scripts/data/held_out_documents.py set --config <config.yaml>
-    python scripts/data/held_out_documents.py validation --config <config.yaml> --run <name>
+    python scripts/data/held_out_documents.py validation --config <config.yaml> --run <name> [--data-base <dir>]
     python scripts/data/held_out_documents.py future --config <config.yaml>
     python scripts/data/held_out_documents.py batch-check --config <config.yaml> --run <name>
 """
@@ -98,6 +105,7 @@ import datetime
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -162,7 +170,7 @@ from scripts.data.run_training_data import (  # noqa: E402
     samples_read,
     sequence_documents,
 )
-from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.mapping_keys import require_keys, require_whole_number  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, PASS, exit_status  # noqa: E402
 from scripts.training.config_compose import load_composed_yaml  # noqa: E402
 
@@ -202,12 +210,18 @@ MANIFEST_COLUMNS = ("stage", "iter", "path", "sha256")
 # The fields of a corpus's tokenize record that decide its ids; the rest name its own files and job.
 TOKENIZATION = ("tokenizer", "tokenizer_revision", "append_eod")
 
-CONFIG_KEYS = frozenset({"table", "lists", "runs", "document_ids", "set", "validation", "future", "batch_checks"})
+CONFIG_KEYS = frozenset({"table", "lists", "runs", "document_ids", "validation", "batch_checks"})
+CONFIG_OPTIONAL_KEYS = frozenset({"set", "future"})
 RUN_KEYS = frozenset({"config", "model", "mode", "gpus"})
 RUN_OPTIONAL_KEYS = frozenset({"counterparts"})
 ID_KEYS = frozenset({"column", "source_subsets", "subsets_without_ids"})
+ID_OPTIONAL_KEYS = frozenset({"subsets_in_dataset_order"})
 SET_KEYS = frozenset({"run", "path", "documents", "seed"})
 VALIDATION_KEYS = frozenset({"prefix", "samples", "seed"})
+VALIDATION_OPTIONAL_KEYS = frozenset({"through_iteration", "shares"})
+# How a validation corpus divides its ids among its parents: a uniform sample of the pooled documents, or each
+# parent's share of the run's blend weights.
+SHARES = ("documents", "blend")
 FUTURE_KEYS = frozenset({"run", "also_unread_by", "iterations", "documents", "seed", "directory"})
 # In a yes-or-no reading of a corpus: a document some run of the table's own corpora reads, and one that only runs
 # naming counterparts read. The id rule answers with the smallest it finds, so with the first wherever both apply.
@@ -247,11 +261,17 @@ class SetSpec:
 
 @dataclass(frozen=True)
 class ValidationSpec:
-    """One run's validation corpus: its prefix, the training samples it must hold, and the sampling seed."""
+    """One run's validation corpus: its prefix, the training samples it must hold, and the sampling seed.
+
+    ``through_iteration`` None draws from the run's held-out documents. An iteration draws from the documents whose id
+    no run reads by then. ``shares`` is ``documents`` for a uniform sample of the pooled documents, or ``blend`` for
+    each corpus's share of the run's blend weights in ids."""
 
     prefix: Path
     samples: int
     seed: int
+    through_iteration: int | None
+    shares: str
 
 
 @dataclass(frozen=True)
@@ -279,16 +299,11 @@ class HeldOutConfig:
     id_column: str
     source_subsets: dict[str, str]
     subsets_without_ids: tuple[str, ...]
-    set: SetSpec
+    subsets_in_dataset_order: tuple[str, ...]
+    set: SetSpec | None
     validation: dict[str, ValidationSpec]
-    future: FutureSpec
+    future: FutureSpec | None
     batch_checks: dict[str, tuple[int, ...]]
-
-
-def _whole_number(value: object, where: str, minimum: int) -> int:
-    if type(value) is not int or value < minimum:
-        raise ValueError(f"{where} must be a whole number of at least {minimum}, got {value!r}")
-    return value
 
 
 def _text(value: object, where: str) -> str:
@@ -319,7 +334,7 @@ def _iterations(value: object, where: str) -> tuple[int, ...]:
     """A list of distinct iterations, sorted."""
     if not isinstance(value, list):
         raise ValueError(f"{where} must be a list of iterations")
-    iterations = tuple(_whole_number(item, where, 1) for item in value)
+    iterations = tuple(require_whole_number(item, where, 1) for item in value)
     if len(set(iterations)) != len(iterations):
         raise ValueError(f"{where} names an iteration twice: {list(iterations)}")
     return tuple(sorted(iterations))
@@ -330,7 +345,9 @@ def read_config(path: Path) -> HeldOutConfig:
     validation corpus or future sets naming a run it does not list or one that names counterparts (such a run is only
     read), batch checks naming a run it does not list or no iteration, and a subset name its corpora table does not
     hold."""
-    loaded = require_keys(yaml.safe_load(path.read_text()), f"{path}: a held-out config", CONFIG_KEYS)
+    loaded = require_keys(
+        yaml.safe_load(path.read_text()), f"{path}: a held-out config", CONFIG_KEYS, CONFIG_OPTIONAL_KEYS
+    )
     table = REPO_ROOT / _text(loaded["table"], f"{path}: table")
     if not table.is_file():
         raise ValueError(f"{path}: no corpora table at {table}")
@@ -352,41 +369,75 @@ def read_config(path: Path) -> HeldOutConfig:
             config=REPO_ROOT / _text(entry["config"], f"{where}.config"),
             model=entry["model"],
             mode=entry["mode"],
-            gpus=_whole_number(entry["gpus"], f"{where}.gpus", 1),
+            gpus=require_whole_number(entry["gpus"], f"{where}.gpus", 1),
             counterparts=(
                 _counterparts(entry["counterparts"], f"{where}.counterparts") if "counterparts" in entry else None
             ),
         )
 
-    ids = require_keys(loaded["document_ids"], f"{path}: document_ids", ID_KEYS)
+    ids = require_keys(loaded["document_ids"], f"{path}: document_ids", ID_KEYS, ID_OPTIONAL_KEYS)
     source_subsets, without = ids["source_subsets"], ids["subsets_without_ids"]
-    if not isinstance(source_subsets, dict) or not isinstance(without, list):
-        raise ValueError(f"{path}: document_ids.source_subsets must be a mapping and subsets_without_ids a list")
-    unknown = sorted({str(name) for name in [*source_subsets, *without]} - subsets)
+    in_order = ids.get("subsets_in_dataset_order", [])
+    if not isinstance(source_subsets, dict) or not isinstance(without, list) or not isinstance(in_order, list):
+        raise ValueError(
+            f"{path}: document_ids.source_subsets must be a mapping, and subsets_without_ids and "
+            "subsets_in_dataset_order lists"
+        )
+    unknown = sorted({str(name) for name in [*source_subsets, *without, *in_order]} - subsets)
     if unknown:
         raise ValueError(f"{path}: document_ids names subsets {unknown} that {table} does not hold")
 
-    spec = require_keys(loaded["set"], f"{path}: set", SET_KEYS)
     if not isinstance(loaded["validation"], dict):
         raise ValueError(f"{path}: validation must map run names to their validation corpora")
     validation = {}
     for name, entry in loaded["validation"].items():
         where = f"{path}: validation.{name}"
-        entry = require_keys(entry, where, VALIDATION_KEYS)
+        entry = require_keys(entry, where, VALIDATION_KEYS, VALIDATION_OPTIONAL_KEYS)
+        shares = entry.get("shares", "documents")
+        if shares not in SHARES:
+            raise ValueError(f"{where}.shares must be one of {list(SHARES)}, got {shares!r}")
+        through = entry.get("through_iteration")
         validation[str(name)] = ValidationSpec(
             prefix=REPO_ROOT / _text(entry["prefix"], f"{where}.prefix"),
-            samples=_whole_number(entry["samples"], f"{where}.samples", 1),
-            seed=_whole_number(entry["seed"], f"{where}.seed", 0),
+            samples=require_whole_number(entry["samples"], f"{where}.samples", 1),
+            seed=require_whole_number(entry["seed"], f"{where}.seed", 0),
+            through_iteration=None
+            if through is None
+            else require_whole_number(through, f"{where}.through_iteration", 1),
+            shares=shares,
         )
-    future = require_keys(loaded["future"], f"{path}: future", FUTURE_KEYS)
-    iterations = _iterations(future["iterations"], f"{path}: future.iterations")
-    also_unread_by = future["also_unread_by"]
-    if not isinstance(also_unread_by, list) or len(set(map(str, also_unread_by))) != len(also_unread_by):
-        raise ValueError(f"{path}: future.also_unread_by must be a list of runs, each named once (empty for none)")
-    also_unread_by = tuple(str(name) for name in also_unread_by)
-    if str(future["run"]) in also_unread_by:
-        raise ValueError(f"{path}: future.also_unread_by names future.run itself, {future['run']!r}")
-    written_for = {str(spec["run"]), str(future["run"]), *validation}
+    set_spec = None
+    if "set" in loaded:
+        spec = require_keys(loaded["set"], f"{path}: set", SET_KEYS)
+        set_spec = SetSpec(
+            run=str(spec["run"]),
+            path=REPO_ROOT / _text(spec["path"], f"{path}: set.path"),
+            documents=require_whole_number(spec["documents"], f"{path}: set.documents", 1),
+            seed=require_whole_number(spec["seed"], f"{path}: set.seed", 0),
+        )
+    future_spec = None
+    if "future" in loaded:
+        future = require_keys(loaded["future"], f"{path}: future", FUTURE_KEYS)
+        also_unread_by = future["also_unread_by"]
+        if not isinstance(also_unread_by, list) or len(set(map(str, also_unread_by))) != len(also_unread_by):
+            raise ValueError(f"{path}: future.also_unread_by must be a list of runs, each named once (empty for none)")
+        also_unread_by = tuple(str(name) for name in also_unread_by)
+        if str(future["run"]) in also_unread_by:
+            raise ValueError(f"{path}: future.also_unread_by names future.run itself, {future['run']!r}")
+        future_spec = FutureSpec(
+            run=str(future["run"]),
+            also_unread_by=also_unread_by,
+            iterations=_iterations(future["iterations"], f"{path}: future.iterations"),
+            documents=require_whole_number(future["documents"], f"{path}: future.documents", 1),
+            seed=require_whole_number(future["seed"], f"{path}: future.seed", 0),
+            directory=REPO_ROOT / _text(future["directory"], f"{path}: future.directory"),
+        )
+    written_for = {*validation}
+    if set_spec is not None:
+        written_for.add(set_spec.run)
+    if future_spec is not None:
+        written_for.add(future_spec.run)
+    also_unread_by = future_spec.also_unread_by if future_spec is not None else ()
     unlisted = sorted((written_for | set(also_unread_by)) - set(runs))
     if unlisted:
         raise ValueError(f"{path}: set, validation and future name runs {unlisted} that runs does not list")
@@ -418,21 +469,10 @@ def read_config(path: Path) -> HeldOutConfig:
             for name, source in source_subsets.items()
         },
         subsets_without_ids=tuple(str(name) for name in without),
-        set=SetSpec(
-            run=str(spec["run"]),
-            path=REPO_ROOT / _text(spec["path"], f"{path}: set.path"),
-            documents=_whole_number(spec["documents"], f"{path}: set.documents", 1),
-            seed=_whole_number(spec["seed"], f"{path}: set.seed", 0),
-        ),
+        subsets_in_dataset_order=tuple(str(name) for name in in_order),
+        set=set_spec,
         validation=validation,
-        future=FutureSpec(
-            run=str(future["run"]),
-            also_unread_by=also_unread_by,
-            iterations=iterations,
-            documents=_whole_number(future["documents"], f"{path}: future.documents", 1),
-            seed=_whole_number(future["seed"], f"{path}: future.seed", 0),
-            directory=REPO_ROOT / _text(future["directory"], f"{path}: future.directory"),
-        ),
+        future=future_spec,
         batch_checks=batch_checks,
     )
 
@@ -652,20 +692,24 @@ class TableCorpus:
     def has_source_rows(self, config: HeldOutConfig) -> bool:
         """Whether the corpus's documents are rows of a source dataset: False for a subset the config sets aside
         (``subsets_without_ids``). One whose documents cannot be traced to source rows (a byte-gated split, or a table
-        row naming no row column) and that the config does not set aside is refused."""
+        row naming no row column that the config does not list under ``subsets_in_dataset_order``) and that the
+        config does not set aside is refused."""
         if self.row.subset in config.subsets_without_ids:
             return False
-        if self.rows is None or self.row.row_column is None:
+        traced = self.row.row_column is not None or self.row.subset in config.subsets_in_dataset_order
+        if self.rows is None or not traced:
             raise CorpusCheckFailed(
                 f"{self.row.subset}: its documents cannot be traced to source rows (a byte-gated split "
                 "or a table row naming no row column); list it under document_ids.subsets_without_ids if it takes no "
-                "part in the id rule"
+                "part in the id rule, or under document_ids.subsets_in_dataset_order if its dataset is its source"
             )
         return True
 
     def source(self, config: HeldOutConfig) -> tuple[str, int]:
-        """The source subset the corpus's rows belong to, and the source row of its document 0."""
-        return config.source_subsets.get(self.row.subset, self.row.subset), self.row.first_row + self.rows[0]
+        """The source subset the corpus's rows belong to, and the source row of its document 0. A table row without
+        ``first_row`` is its source's rows from row 0."""
+        first_row = 0 if self.row.first_row is None else self.row.first_row
+        return config.source_subsets.get(self.row.subset, self.row.subset), first_row + self.rows[0]
 
 
 def table_corpora(table: Path, data_base: Path) -> tuple[dict[Path, TableCorpus], list[str]]:
@@ -691,9 +735,10 @@ def subset_document_ids(row: CorpusRow, column: str, kept: Path) -> pa.ChunkedAr
     """The id of every row of a tokenize row's subset, from its dataset at the commit the corpus was prepared from.
 
     The rows are checked to be the source's in order (``check_source_order``), which is what makes document ``i`` of
-    the corpus the row whose id this is. A subset pinned at a full commit is fixed data, so its two columns are kept
-    under ``kept`` once read, named for the subset, the column and the commit, and a later step reads them there; a
-    kept copy passes the same checks as a fresh read. Text ids are given 64-bit offsets: a large corpus's ids
+    the corpus the row whose id this is. The dataset of a row naming no row column is its source, and only its row
+    count is checked. A subset pinned at a full commit is fixed data, so the columns read are kept under ``kept``,
+    named for the subset, the column and the commit, and a later step reads them there. A kept copy passes the same
+    checks as a fresh read. Text ids are given 64-bit offsets: a large corpus's ids
     together pass the 2 GiB a 32-bit-offset array can hold.
     """
     scalars = subset_prepare_config(row.config, row.subset)
@@ -703,16 +748,18 @@ def subset_document_ids(row: CorpusRow, column: str, kept: Path) -> pa.ChunkedAr
     if pinned and path.is_file():
         table = pq.read_table(path)
     else:
-        table = dataset_columns(scalars["dataset"], revision, row.subset, [column, row.row_column])
+        columns = [column] if row.row_column is None else [column, row.row_column]
+        table = dataset_columns(scalars["dataset"], revision, row.subset, columns)
         if pinned:
             kept.mkdir(parents=True, exist_ok=True)
             write_parquet(table, path)
     if table.num_rows != row.docs:
         raise CorpusCheckFailed(f"{row.subset}: its dataset has {table.num_rows} rows, the table says {row.docs}")
-    checker = Checker()
-    check_source_order(row, integer_column(table, row.row_column), checker)
-    if checker.failures:
-        raise CorpusCheckFailed("; ".join(checker.failures))
+    if row.row_column is not None:
+        checker = Checker()
+        check_source_order(row, integer_column(table, row.row_column), checker)
+        if checker.failures:
+            raise CorpusCheckFailed("; ".join(checker.failures))
     ids = table.column(column)
     if ids.null_count:
         raise CorpusCheckFailed(f"{row.subset}: {ids.null_count} rows have no {column}")
@@ -835,6 +882,12 @@ def held_out_inputs(config: HeldOutConfig, records: dict[str, dict]) -> dict:
         "id_column": config.id_column,
         "source_subsets": config.source_subsets,
         "subsets_without_ids": sorted(config.subsets_without_ids),
+        # Stated only when set, so a config that lists no such subset states the inputs a config without the key does.
+        **(
+            {"subsets_in_dataset_order": sorted(config.subsets_in_dataset_order)}
+            if config.subsets_in_dataset_order
+            else {}
+        ),
         "counterparts": {
             name: {str(prefix): None if corpus is None else str(corpus) for prefix, corpus in run.counterparts.items()}
             for name, run in config.runs.items()
@@ -1007,6 +1060,8 @@ def uniform_sample(corpora: list[SourceDocuments], documents: int, generator: nu
 def set_step(config: HeldOutConfig) -> dict:
     """Write the held-out set: ``set.documents`` of ``set.run``'s held-out documents, sampled uniformly."""
     spec = config.set
+    if spec is None:
+        raise ValueError(f"{config.path}: names no set")
     record_path = Path(f"{spec.path}.json")
     require_absent(spec.path, record_path)
     revision = attributable_code_revision()
@@ -1052,30 +1107,97 @@ def documents_list_path(prefix: Path) -> Path:
     return Path(f"{prefix}.documents.parquet")
 
 
-def validation_step(config: HeldOutConfig, run: Run) -> dict:
-    """Write ``run``'s validation corpus: a uniform sample of its held-out documents holding at least the configured
-    number of its training samples, checked against its parents and recorded."""
+def unread_through(
+    config: HeldOutConfig, run: Run, iteration: int, data_base: Path
+) -> tuple[dict, list[SourceDocuments]]:
+    """``run``'s documents that are not empty and whose id no run reads by ``iteration`` in any corpus.
+
+    The documents come corpus by corpus in the blend's order, leaving out corpora without ids. The second value is what
+    they depend on: the iteration and each run's read record. It reads every run's read record under ``config.lists``,
+    the corpora's ``.idx`` files and their ids (``covered_documents``, which keeps the ids it fetches under
+    ``config.lists``)."""
+    records = {name: current_read_record(config, entry) for name, entry in config.runs.items()}
+    first = {name: first_reads(config, config.runs[name], record) for name, record in records.items()}
+    by_then = earliest_reads(
+        {
+            name: {prefix: numpy.where(array <= iteration, array, 0) for prefix, array in arrays.items()}
+            for name, arrays in first.items()
+        }
+    )
+    covered = covered_documents(config, data_base, by_then)
+    unread = [
+        Candidates(run.name, position, prefix, numpy.flatnonzero((by_then[prefix] == 0) & (covered.sizes[prefix] > 0)))
+        for position, prefix in enumerate(first[run.name])
+        if prefix in covered.corpora
+    ]
+    id_read, _ = earliest_read_of_ids(unread, covered, by_then)
+    corpora = []
+    for entry, earliest in zip(unread, id_read):
+        source_subset, first_row = covered.corpora[entry.prefix].source(config)
+        subset = covered.corpora[entry.prefix].row.subset
+        corpora.append(SourceDocuments(entry.prefix, subset, source_subset, first_row, entry.documents[earliest == 0]))
+    basis = {"through_iteration": iteration, "read_records": {name: sha256_of(rec) for name, rec in records.items()}}
+    return basis, corpora
+
+
+def blend_sample(
+    corpora: list[SourceDocuments], sizes: list[numpy.ndarray], weights: list[float], needed: int, seed: int
+) -> list[numpy.ndarray]:
+    """Per corpus, a seeded uniform sample of its documents (sorted) that holds the corpus's share of ``needed`` ids:
+    its weight over the weights of ``corpora``, rounded up. A corpus whose documents hold less is refused.
+
+    ``sizes`` gives the ids of each corpus's ``documents``, in their order."""
+    total = sum(weights)
+    chosen = []
+    for position, (corpus, corpus_sizes, weight) in enumerate(zip(corpora, sizes, weights)):
+        share = math.ceil(needed * weight / total)
+        order = numpy.random.default_rng([seed, position]).permutation(len(corpus_sizes))
+        held = numpy.cumsum(corpus_sizes[order])
+        if not len(held) or held[-1] < share:
+            raise CorpusCheckFailed(
+                f"{corpus.prefix}: its documents hold {int(held[-1]) if len(held) else 0} ids, less than its share of "
+                f"the blend, {share}"
+            )
+        taken = int(numpy.searchsorted(held, share, side="left")) + 1
+        chosen.append(corpus.documents[numpy.sort(order[:taken])])
+    return chosen
+
+
+def validation_step(config: HeldOutConfig, run: Run, data_base: Path) -> dict:
+    """Write ``run``'s validation corpus: a sample of its held-out documents, or of the documents whose id no run has
+    read by ``through_iteration``, holding at least the configured number of its training samples, checked against
+    its parents and recorded. ``shares`` divides the ids among the parents (``SHARES``)."""
     if run.name not in config.validation:
         raise ValueError(f"{config.path}: validation names no corpus for run {run.name}")
     spec = config.validation[run.name]
     prefix = spec.prefix
     require_absent(bin_path(prefix), idx_path(prefix), provenance_path(prefix), documents_list_path(prefix))
     revision = attributable_code_revision()
-    held_out_record, corpora = current_held_out(config, run.name)
-    sequence_length = current_read_record(config, run)["inputs"]["seq_length"]
+    if spec.through_iteration is None:
+        held_out_record, corpora = current_held_out(config, run.name)
+        basis = {"held_out_record_sha256": sha256_of(held_out_record)}
+    else:
+        basis, corpora = unread_through(config, run, spec.through_iteration, data_base)
+    read_record = current_read_record(config, run)
+    sequence_length = read_record["inputs"]["seq_length"]
     # One pass over a corpus of n ids holds (n - 1) // sequence_length samples: each sample's labels need one id more.
     needed = spec.samples * sequence_length + 1
 
     indexes = [read_index(idx_path(corpus.prefix), bin_path(corpus.prefix)) for corpus in corpora]
-    sizes = numpy.concatenate([index.sizes[corpus.documents] for corpus, index in zip(corpora, indexes)])
-    if sizes.sum() < needed:
+    sizes = [index.sizes[corpus.documents] for corpus, index in zip(corpora, indexes)]
+    held = int(sum(corpus_sizes.sum() for corpus_sizes in sizes))
+    if held < needed:
         raise CorpusCheckFailed(
-            f"run {run.name} holds out {int(sizes.sum())} ids, and {spec.samples} samples of {sequence_length} need "
-            f"{needed}"
+            f"run {run.name} holds out {held} ids, and {spec.samples} samples of {sequence_length} need {needed}"
         )
-    order = numpy.random.default_rng(spec.seed).permutation(len(sizes))
-    taken = int(numpy.searchsorted(numpy.cumsum(sizes[order]), needed, side="left")) + 1
-    chosen = sample_per_corpus(corpora, numpy.sort(order[:taken]))
+    weights = {Path(corpus["prefix"]): corpus["weight"] for corpus in read_record["corpora"]}
+    if spec.shares == "blend":
+        chosen = blend_sample(corpora, sizes, [weights[corpus.prefix] for corpus in corpora], needed, spec.seed)
+    else:
+        pooled = numpy.concatenate(sizes)
+        order = numpy.random.default_rng(spec.seed).permutation(len(pooled))
+        taken = int(numpy.searchsorted(numpy.cumsum(pooled[order]), needed, side="left")) + 1
+        chosen = sample_per_corpus(corpora, numpy.sort(order[:taken]))
     copied = [
         CopiedDocuments(corpus.prefix, index, documents) for corpus, index, documents in zip(corpora, indexes, chosen)
     ]
@@ -1102,9 +1224,10 @@ def validation_step(config: HeldOutConfig, run: Run) -> dict:
         "code_revision": revision,
         "created_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "config": config_record(config),
-        "held_out_record_sha256": sha256_of(held_out_record),
+        **basis,
         "run": run.name,
         "seed": spec.seed,
+        "shares": spec.shares,
         "samples": spec.samples,
         "sequence_length": sequence_length,
         "documents": str(documents_list_path(prefix)),
@@ -1113,10 +1236,12 @@ def validation_step(config: HeldOutConfig, run: Run) -> dict:
                 "prefix": str(corpus.prefix),
                 "subset": corpus.subset,
                 "idx_sha256": file_sha256(idx_path(corpus.prefix)),
+                "weight": weights[corpus.prefix],
                 "held_out": int(len(corpus.documents)),
                 "copied": int(len(taken_documents)),
+                "copied_ids": int(index.sizes[taken_documents].sum()),
             }
-            for corpus, taken_documents in zip(corpora, chosen)
+            for corpus, index, taken_documents in zip(corpora, indexes, chosen)
         ],
         "totals": {"total_tokens": out.tokens, "num_sequences": out.sequences, "num_documents": out.docs},
         "parameters": given[0],
@@ -1141,6 +1266,8 @@ def future_step(config: HeldOutConfig, data_base: Path) -> dict:
     whose id neither it nor a run of ``future.also_unread_by`` has read by then; then the manifest listing them and
     their record."""
     spec = config.future
+    if spec is None:
+        raise ValueError(f"{config.path}: names no future sets")
     if not spec.iterations:
         raise ValueError(f"{config.path}: future.iterations is empty, so there is no future set to write")
     manifest, record_path = spec.directory / FUTURE_MANIFEST, spec.directory / FUTURE_RECORD
@@ -1471,7 +1598,7 @@ def main(argv: list[str] | None = None) -> int:
         step.add_argument("--config", type=Path, required=True, help="the held-out config")
         if name in ("read", "validation", "batch-check"):
             step.add_argument("--run", required=True, help="the run, as the config names it")
-        if name in ("held-out", "future", "batch-check"):
+        if name in ("held-out", "validation", "future", "batch-check"):
             step.add_argument(
                 "--data-base", type=Path, default=DATA_BASE, help=f"the corpus roots' base (default: {DATA_BASE})"
             )
@@ -1492,7 +1619,7 @@ def main(argv: list[str] | None = None) -> int:
             logger.info(f"{record['documents']} of {record['held_out']} held-out documents: {record['path']}")
             logger.info(f"sha256 {record['sha256']}")
         elif args.command == "validation":
-            record = validation_step(config, config.runs[args.run])
+            record = validation_step(config, config.runs[args.run], args.data_base)
             totals = record["totals"]
             logger.info(
                 f"{args.run}: {totals['num_documents']} documents, {totals['total_tokens']} ids: "

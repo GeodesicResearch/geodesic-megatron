@@ -14,6 +14,7 @@
 
 import logging
 import os
+import re
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import MISSING, dataclass, field, fields
@@ -61,8 +62,10 @@ from megatron.bridge.training.token_masking.config import (
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 from megatron.bridge.training.utils.config_utils import _ConfigContainerBase as Container
+from megatron.bridge.training.utils.omegaconf_utils import dataclass_from_mapping
 from megatron.bridge.utils.common_utils import (
     get_world_size_safe,
+    is_positive_integer,
     print_rank_0,
     warn_rank_0,
 )
@@ -604,6 +607,10 @@ class TrainingConfig(MTrainTrainingConfig):
                 "train.manual_gc_freeze requires train.manual_gc: the freeze follows its setup collection"
             )
 
+    def exit_interval_reached(self, step: int) -> bool:
+        """Whether ``exit_interval`` ends the run after the iteration that brings it to ``step``."""
+        return bool(self.exit_interval and step % self.exit_interval == 0)
+
 
 @dataclass(kw_only=True)
 class CheckpointConfig(MTrainCheckpointConfig):
@@ -1056,6 +1063,95 @@ class InProcessRestartConfig:
     """Directory for monitor process log files. If None, monitor process logging is disabled."""
 
 
+HELD_OUT_SET_NAME = re.compile(r"[a-z0-9_]+")
+
+
+@dataclass
+class HeldOutSetConfig:
+    """One ``.bin/.idx`` set of ``held_out_validation``."""
+
+    reject_unknown_override_keys: ClassVar[bool] = True
+
+    name: str | None = None
+    """Lowercase letters, digits and underscores. The set's results are logged under ``held-out/<name>/``."""
+
+    data_path: str | None = None
+    """A ``.bin/.idx`` prefix, read with the run's own dataset config (sequence length, loss-mask rules, seed)."""
+
+    samples: int | None = None
+    """Samples per evaluation, always the set's first ones. A multiple of ``train.global_batch_size``."""
+
+
+@dataclass
+class HeldOutValidationConfig:
+    """Held-out ``.bin/.idx`` sets the training loop evaluates at fixed steps. Off while ``sets`` is empty.
+
+    ``megatron.bridge.training.held_out_validation`` builds and evaluates the sets
+    (docs/training/held-out-validation.md).
+    """
+
+    reject_unknown_override_keys: ClassVar[bool] = True
+
+    sets: list[HeldOutSetConfig] = field(default_factory=list)
+    """The sets. ``finalize`` turns a set given as a YAML mapping into a ``HeldOutSetConfig``."""
+
+    interval: int | None = None
+    """Evaluate after every step that is a multiple of ``interval``. None: no interval evaluations."""
+
+    at_start: bool = False
+    """Evaluate at step 0 of a fresh run. A resumed run does not evaluate at its first step."""
+
+    at_exit: bool = False
+    """Evaluate after the step at which the run ends at ``train.train_iters`` or ``train.exit_interval``."""
+
+    def finalize(self, global_batch_size: int) -> None:
+        """Turn each set given as a mapping into a ``HeldOutSetConfig``, then validate the block.
+
+        Raises:
+            ValueError: for an unknown key, a set without a valid name, path or sample count, two sets of one name,
+                a ``samples`` count that ``global_batch_size`` does not divide, sets evaluated at no step, or a
+                schedule without sets.
+        """
+        self.sets = [
+            held if isinstance(held, HeldOutSetConfig) else dataclass_from_mapping(HeldOutSetConfig, held)
+            for held in self.sets
+        ]
+        schedule = [name for name in ("at_start", "at_exit") if getattr(self, name) is not False]
+        if self.interval is not None:
+            schedule.append("interval")
+        if not self.sets:
+            if schedule:
+                raise ValueError(
+                    f"held_out_validation sets {', '.join(schedule)} without sets; name sets or remove it"
+                )
+            return
+        for name in ("at_start", "at_exit"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"held_out_validation.{name} must be true or false, got {getattr(self, name)!r}")
+        if self.interval is not None and not is_positive_integer(self.interval):
+            raise ValueError(f"held_out_validation.interval must be a positive integer or null, got {self.interval!r}")
+        if not schedule:
+            raise ValueError(
+                "held_out_validation names sets but evaluates them at no step; set interval, at_start or at_exit"
+            )
+        names = [held.name for held in self.sets]
+        for index, held in enumerate(self.sets):
+            where = f"held_out_validation.sets[{index}]"
+            if not isinstance(held.name, str) or not HELD_OUT_SET_NAME.fullmatch(held.name):
+                raise ValueError(f"{where}.name must be lowercase letters, digits and underscores, got {held.name!r}")
+            if names.count(held.name) > 1:
+                raise ValueError(f"held_out_validation names the set {held.name!r} more than once")
+            if not isinstance(held.data_path, str) or not held.data_path:
+                raise ValueError(f"{where}.data_path must be a non-empty .bin/.idx prefix, got {held.data_path!r}")
+            if not is_positive_integer(held.samples):
+                raise ValueError(f"{where}.samples must be a positive integer, got {held.samples!r}")
+            if held.samples % global_batch_size:
+                raise ValueError(
+                    f"{where}.samples={held.samples} is not a multiple of "
+                    f"train.global_batch_size={global_batch_size}: an evaluation reads whole global batches"
+                )
+
+
 # ---------------- Container config (standalone top-level config) ----------------
 @dataclass(kw_only=True)
 class ConfigContainer(Container):
@@ -1081,6 +1177,7 @@ class ConfigContainer(Container):
     logger: LoggerConfig
     tokenizer: TokenizerConfig
     token_masking: TokenMaskingConfig = field(default_factory=TokenMaskingConfig)
+    held_out_validation: HeldOutValidationConfig = field(default_factory=HeldOutValidationConfig)
     checkpoint: CheckpointConfig
     dist: DistributedInitConfig = field(default_factory=DistributedInitConfig)
     ft: Optional[FaultToleranceConfig] = None
@@ -1171,6 +1268,7 @@ class ConfigContainer(Container):
         validate_token_masking(self.token_masking)
         refuse_masking_that_trains_the_masked_output_row(self.token_masking, self.model)
         self.train.finalize()
+        self.held_out_validation.finalize(self.train.global_batch_size)
         self.scheduler.finalize()
         self.checkpoint.finalize()
         if self.profiling is not None:
@@ -1492,6 +1590,7 @@ class ConfigContainer(Container):
             ("logger", self.logger),
             ("tokenizer", self.tokenizer),
             ("token_masking", self.token_masking),
+            ("held_out_validation", self.held_out_validation),
             ("rng", self.rng),
         ]
 

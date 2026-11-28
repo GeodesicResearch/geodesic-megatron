@@ -53,6 +53,7 @@ training/activation-recomputation.md
 training/cpu-offloading.md
 training/peft.md
 training/packed-sequences.md
+training/held-out-validation.md
 training/token-masking.md
 training/multi-token-prediction.md
 training/distillation.md

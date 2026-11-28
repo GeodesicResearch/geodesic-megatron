@@ -1,0 +1,43 @@
+# The Unseen Pretraining set of the Norm V1.5 campaign (README.md), written by scripts/data/held_out_documents.py,
+# whose module docstring states the format and the steps.
+#
+# Every arm reads one token stream, so arm a0's read record holds what every arm and cooldown branch reads. The set
+# takes the documents whose id a0 has not read by iteration 6556 in any corpus: 6556 is the last iteration a 100B
+# cooldown reads at batch 2048 (99.99B + 10.0B tokens). climbmix_ai_docs and zyda_ai_docs hold climbmix_full and
+# zyda_full documents under the same id, so a document read through one corpus is read in the other. Each corpus
+# gives its share of the blend in ids.
+
+table: configs/control_pretraining/30b_baseline/corpora.tsv
+lists: /shared/geodesic/data/norm_v15/unseen_pretraining/lists
+
+runs:
+  a0:
+    config: configs/control_pretraining/30b_norm_v15_hparams/nemotron_nano_30b_norm_v15_a0_pretrain.yaml
+    model: nano
+    mode: pretrain
+    gpus: 64
+
+document_ids:
+  column: id
+  source_subsets: {}
+  subsets_without_ids: []
+  # geodesic-research/control-pretraining-datasets is its own source and states no row column.
+  subsets_in_dataset_order:
+    - climbmix_full
+    - zyda_full
+    - stack_edu
+    - climbmix_ai_docs
+    - zyda_ai_docs
+    - ai_safety_and_adjacent
+
+validation:
+  a0:
+    prefix: /shared/geodesic/data/norm_v15/unseen_pretraining/held_out_document
+    samples: 122880
+    seed: 1234
+    through_iteration: 6556
+    shares: blend
+
+# a0's first iteration, its first save (20B tokens) and the last iteration the set must not hold.
+batch_checks:
+  a0: [1, 1192, 6556]

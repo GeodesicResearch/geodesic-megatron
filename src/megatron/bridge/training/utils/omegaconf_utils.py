@@ -517,6 +517,22 @@ def _require_known_override_key(config_obj: DataclassInstance, key: str) -> None
     raise ValueError(f"Unknown key '{key}' for {config_class.__name__}.{hint} Valid keys: {', '.join(settable)}.")
 
 
+def dataclass_from_mapping(config_class: type[DataclassInstance], mapping: Dict[str, Any]) -> DataclassInstance:
+    """A default ``config_class`` with ``mapping`` applied as YAML overrides are, for a dataclass inside a list.
+
+    A YAML list of mappings reaches a list field as plain mappings, since ``_apply_overrides`` only recurses into
+    dataclass fields. This applies one such mapping with the same key checks.
+
+    Raises:
+        ValueError: if ``mapping`` is not a mapping, or names a key ``config_class`` removed or rejects as unknown.
+    """
+    if not isinstance(mapping, dict):
+        raise ValueError(f"A {config_class.__name__} must be given as a mapping, got {mapping!r}")
+    config = config_class()
+    _apply_overrides(config, mapping)
+    return config
+
+
 def _enum_member(enum_type: type[Enum], text: str, field: str) -> Enum:
     """The member of ``enum_type`` that ``text`` names, by member name or else by value, for the enum field ``field``.
 

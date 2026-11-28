@@ -1,0 +1,15 @@
+# The cooldown branches of the arms beside this file. configs/control_pretraining/generate_cooldown_branches.py renders
+# one config per arm and branch. Each sample count is whole iterations of every arm's batch.
+arms:
+  - nemotron_nano_30b_norm_v15_a0_pretrain.yaml
+  - nemotron_nano_30b_norm_v15_a1_pretrain.yaml
+  - nemotron_nano_30b_norm_v15_a2_pretrain.yaml
+  - nemotron_nano_30b_norm_v15_b1_pretrain.yaml
+  - nemotron_nano_30b_norm_v15_c1_pretrain.yaml
+  - nemotron_nano_30b_norm_v15_d1_pretrain.yaml
+branches:
+  - {name: cd20b, at_samples: 2441216, decay_samples: 487424}     # 20.0B tokens, decay 4.0B
+  - {name: cd60b, at_samples: 7323648, decay_samples: 733184}     # 60.0B tokens, decay 6.0B
+  - {name: cd100b, at_samples: 12206080, decay_samples: 1220608}  # 100.0B tokens, decay 10.0B
+decay_style: minus_sqrt
+min_lr: 0.0

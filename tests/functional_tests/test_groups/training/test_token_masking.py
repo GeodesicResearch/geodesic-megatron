@@ -19,7 +19,9 @@ by a callback), the run's state, and what W&B received (read back from the offli
 - an enabled run stops at setup, on every rank and before the model is built, when its training data holds no
   marker target, when its scan runs out of time before finding one, and when its held-out set holds none;
 - an enabled run whose global batch holds no trainable target (every target is the marker) raises at that iteration
-  rather than logging a 0/0 loss.
+  rather than logging a 0/0 loss;
+- ``held_out_validation`` evaluates each of its sets at step 0, every ``interval`` iterations and at exit, and a
+  resumed run evaluates none at its first step.
 
 Run on two GPUs: ``torchrun --nproc_per_node=2 -m pytest tests/functional_tests/test_groups/training/
 test_token_masking.py``.
@@ -46,6 +48,7 @@ from megatron.bridge.training.config import (
     DataSamplesConfig,
     DistributedDataParallelConfig,
     GPTDatasetConfig,
+    HeldOutValidationConfig,
     LoggerConfig,
     OptimizerConfig,
     RNGConfig,
@@ -161,6 +164,9 @@ def _config(
     pipeline_parallel: int = 1,
     train_iters: int = TRAIN_ITERS,
     name: str = "run",
+    held_out_validation: HeldOutValidationConfig | None = None,
+    checkpoint_dir: Path | None = None,
+    exit_interval: int | None = None,
 ) -> ConfigContainer:
     model = GPTModelProvider(
         normalization="RMSNorm",
@@ -189,7 +195,12 @@ def _config(
     )
     return ConfigContainer(
         model=model,
-        train=TrainingConfig(train_iters=train_iters, global_batch_size=GLOBAL_BATCH_SIZE, micro_batch_size=1),
+        train=TrainingConfig(
+            train_iters=train_iters,
+            global_batch_size=GLOBAL_BATCH_SIZE,
+            micro_batch_size=1,
+            exit_interval=exit_interval,
+        ),
         validation=ValidationConfig(eval_interval=None, eval_iters=0),
         optimizer=OptimizerConfig(
             optimizer="adam",
@@ -233,7 +244,12 @@ def _config(
         ),
         tokenizer=TokenizerConfig(tokenizer_type="NullTokenizer", vocab_size=VOCAB_SIZE),
         token_masking=token_masking,
-        checkpoint=CheckpointConfig(save=None, load=None),
+        held_out_validation=held_out_validation or HeldOutValidationConfig(),
+        checkpoint=(
+            CheckpointConfig(save=None, load=None)
+            if checkpoint_dir is None
+            else CheckpointConfig(save=str(checkpoint_dir), load=str(checkpoint_dir), save_interval=exit_interval)
+        ),
         rng=RNGConfig(seed=1234),
     )
 
@@ -489,6 +505,34 @@ class TestTokenMasking:
                 assert row[_validation_key(TRAINED_LISTED_TARGET_FRACTION)] == 0
                 assert math.isfinite(row[_validation_key("lm loss")])
                 assert math.isfinite(row[_validation_key(LISTED_TARGET_LOSS)])
+
+    @pytest.mark.run_only_on("GPU")
+    def test_held_out_validation_evaluates_each_set_at_start_interval_and_exit_and_not_on_resume(self, corpora):
+        """A run that exits at its exit_interval evaluates there, and the run that resumes its save evaluates at its
+        interval and its last step but not at its first."""
+        names = {"marked": str(corpora / "held_out"), "plain": str(corpora / "plain")}
+        block = HeldOutValidationConfig(
+            sets=[{"name": name, "data_path": path, "samples": GLOBAL_BATCH_SIZE} for name, path in names.items()],
+            interval=4,
+            at_start=True,
+            at_exit=True,
+        )
+        checkpoints = corpora / "checkpoints"
+        settings = dict(held_out_validation=block, checkpoint_dir=checkpoints, train_iters=10)
+        # exit_interval ends pretrain with sys.exit(0) once the save is written.
+        with pytest.raises(SystemExit) as exited:
+            _train(corpora, _blend(corpora), TokenMaskingConfig(), name="first", exit_interval=5, **settings)
+        assert exited.value.code == 0
+        _end_failed_run()
+        _train(corpora, _blend(corpora), TokenMaskingConfig(), name="resumed", **settings)
+        if _is_wandb_rank():
+            for run, expected in (("first", [0, 4, 5]), ("resumed", [8, 10])):
+                history = _wandb_history(corpora, run)
+                for name in names:
+                    key = f"held-out/{name}/lm loss validation"
+                    evaluated = {step: row[key] for step, row in history.items() if key in row}
+                    assert sorted(evaluated) == expected, (run, name)
+                    assert all(math.isfinite(loss) for loss in evaluated.values())
 
     @pytest.mark.run_only_on("GPU")
     def test_enabled_run_on_data_without_the_marker_stops_at_setup(self, corpora):
