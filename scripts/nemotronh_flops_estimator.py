@@ -29,8 +29,9 @@ parameter-free work, so on this architecture it misses four things at once:
      during the backward pass. Those FLOPs are real work the GPU does; `6ND` has no
      term for them.
 
-This module computes each of those explicitly, from the model's own HF `config.json`
-plus the training YAML, so throughput and MFU claims are auditable rather than folklore.
+This module computes each of those explicitly, from the architecture and the training YAML.
+Throughput and MFU claims can then be checked. The architecture comes from
+the model's own HF `config.json` or from the `model:` block of the training YAML.
 It is the NemotronH-hybrid analogue of EleutherAI's `cookbook/calc/calc_transformer_flops.py`,
 which covers dense transformers only.
 
@@ -158,10 +159,16 @@ USAGE
     ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \\
         python scripts/nemotronh_flops_estimator.py <config> --hf-model <id> --compare-megatron"
 
-`--hf-model` is REQUIRED and takes an HF repo id (resolved offline from the local HF
-cache), a directory containing `config.json`, or a path to a `config.json`. There is
-deliberately no checkpoint-path-to-model-id guessing table — the same reason
-`pipeline_checkpoint_convert_hf.py` requires it.
+    # a model sized by its config (configs/models/nemotronh/), with no config.json:
+    python3 scripts/nemotronh_flops_estimator.py <config> --vocab-size 100278
+
+Exactly one of `--hf-model` and `--vocab-size` names the architecture. `--hf-model` takes an
+HF repo id (resolved offline from the local HF cache), a directory containing `config.json`,
+or a path to a `config.json`. The estimator has no table that maps a checkpoint path to a model
+id. `pipeline_checkpoint_convert_hf.py` requires `--hf-model` for the same reason.
+With `--vocab-size`, the estimator reads the architecture from the composed config's `model:`
+block (`ArchSpec.from_model_config`). The value is the tokenizer's unpadded vocabulary size.
+A pretraining config does not state it, because training takes it from the tokenizer.
 """
 
 from __future__ import annotations
@@ -210,6 +217,32 @@ _GATED_ACTS = frozenset({"silu", "swiglu", "geglu", "gelu_glu", "swish_glu"})
 # `hybrid_override_pattern` string, Ultra uses a `layers_block_type` list of words.
 _BLOCK_TYPE_TO_CHAR = {"mamba": MAMBA, "attention": ATTENTION, "moe": MOE, "mlp": MLP}
 
+#: The provider fields of a ``model:`` block that size a NemotronH model (``ArchSpec.from_model_config``).
+MODEL_CONFIG_FIELDS = (
+    "hidden_size",
+    "num_layers",
+    "hybrid_layer_pattern",
+    "share_embeddings_and_output_weights",
+    "mamba_num_heads",
+    "mamba_head_dim",
+    "mamba_state_dim",
+    "mamba_num_groups",
+    "num_attention_heads",
+    "num_query_groups",
+    "kv_channels",
+    "num_moe_experts",
+    "moe_router_topk",
+    "moe_ffn_hidden_size",
+    "moe_latent_size",
+    "moe_shared_expert_intermediate_size",
+    "ffn_hidden_size",
+    "gated_linear_unit",
+)
+# Megatron-Core's MambaMixer takes the conv kernel (d_conv) and the scan chunk (chunk_size) as constructor defaults
+# that no provider field sets (3rdparty/Megatron-LM/megatron/core/ssm/mamba_mixer.py). Change these with those.
+MAMBA_CONV_KERNEL = 4
+MAMBA_CHUNK_SIZE = 128
+
 
 def layer_pattern_from_hf_config(cfg: dict[str, Any]) -> str:
     """Normalise either layer-schedule field to the compact pattern string."""
@@ -227,7 +260,7 @@ def layer_pattern_from_hf_config(cfg: dict[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class ArchSpec:
-    """Architecture dimensions, read from an HF `config.json`."""
+    """Architecture dimensions, read from an HF `config.json` or from a training config's `model:` block."""
 
     name: str
     hidden_size: int
@@ -305,6 +338,54 @@ class ArchSpec:
             * int(cfg.get("n_shared_experts", 1) or 1),
             ffn_hidden_size=int(cfg.get("intermediate_size", 0)),
             gated_mlp=act in _GATED_ACTS,
+        )
+
+    @classmethod
+    def from_model_config(cls, model: dict[str, Any], vocab_size: int, name: str) -> "ArchSpec":
+        """Build from a training config's ``model:`` block (Megatron provider field names), with no ``config.json``.
+
+        Every key of ``MODEL_CONFIG_FIELDS`` must be in ``model``. A null ``moe_latent_size`` means no latent
+        projection. ``vocab_size`` is the tokenizer's, unpadded, since a pretraining config leaves
+        ``model.vocab_size`` to the tokenizer. The conv kernel and the scan chunk are ``MAMBA_CONV_KERNEL`` and
+        ``MAMBA_CHUNK_SIZE``. ``num_layers`` must equal the length of ``hybrid_layer_pattern``, as the provider
+        asserts.
+
+        Raises:
+            KeyError: naming every missing key of ``MODEL_CONFIG_FIELDS``.
+            ValueError: when ``num_layers`` differs from the pattern's length.
+        """
+        missing = [key for key in MODEL_CONFIG_FIELDS if key not in model]
+        if missing:
+            raise KeyError(f"{name}: the model block does not state {missing}")
+        pattern = str(model["hybrid_layer_pattern"]).replace("|", "")
+        if int(model["num_layers"]) != len(pattern):
+            raise ValueError(
+                f"{name}: num_layers {model['num_layers']} differs from the {len(pattern)} layers of the pattern"
+            )
+        latent = model["moe_latent_size"]
+        return cls(
+            name=name,
+            hidden_size=int(model["hidden_size"]),
+            num_layers=len(pattern),
+            layer_pattern=pattern,
+            vocab_size=int(vocab_size),
+            tie_word_embeddings=bool(model["share_embeddings_and_output_weights"]),
+            mamba_num_heads=int(model["mamba_num_heads"]),
+            mamba_head_dim=int(model["mamba_head_dim"]),
+            mamba_state_dim=int(model["mamba_state_dim"]),
+            mamba_num_groups=int(model["mamba_num_groups"]),
+            conv_kernel=MAMBA_CONV_KERNEL,
+            chunk_size=MAMBA_CHUNK_SIZE,
+            num_attention_heads=int(model["num_attention_heads"]),
+            num_kv_heads=int(model["num_query_groups"]),
+            head_dim=int(model["kv_channels"]),
+            n_routed_experts=int(model["num_moe_experts"]),
+            top_k=int(model["moe_router_topk"]),
+            moe_ffn_hidden_size=int(model["moe_ffn_hidden_size"]),
+            moe_latent_size=int(latent) if latent else None,
+            shared_expert_ffn_hidden_size=int(model["moe_shared_expert_intermediate_size"]),
+            ffn_hidden_size=int(model["ffn_hidden_size"]),
+            gated_mlp=bool(model["gated_linear_unit"]),
         )
 
 
@@ -838,11 +919,17 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=__doc__.split("USAGE")[-1],
     )
     parser.add_argument("config", help="Training YAML (workload + recompute + parallelism come from here)")
-    parser.add_argument(
+    arch_source = parser.add_mutually_exclusive_group(required=True)
+    arch_source.add_argument(
         "--hf-model",
-        required=True,
-        help="HF repo id, model directory, or config.json path. Required: there is no "
-        "checkpoint-path-to-model-id guessing table.",
+        help="HF repo id, model directory, or config.json path. There is no checkpoint-path-to-model-id "
+        "guessing table.",
+    )
+    arch_source.add_argument(
+        "--vocab-size",
+        type=int,
+        help="Size the model from the config's model: block, with no config.json, and take this tokenizer "
+        "vocabulary size (unpadded)",
     )
     parser.add_argument(
         "--seconds-per-iter",
@@ -899,8 +986,16 @@ def main(argv: list[str] | None = None) -> int:
     """Resolve the architecture and workload, compute the report, print it."""
     args = build_parser().parse_args(argv)
 
-    hf_cfg, hf_cfg_path = resolve_hf_config(args.hf_model)
-    arch = ArchSpec.from_hf_config(hf_cfg, name=args.hf_model)
+    if args.hf_model:
+        hf_cfg, arch_source = resolve_hf_config(args.hf_model)
+        arch = ArchSpec.from_hf_config(hf_cfg, name=args.hf_model)
+    else:
+        from scripts.training.config_compose import load_composed_yaml
+
+        arch_source = args.config
+        arch = ArchSpec.from_model_config(
+            load_composed_yaml(args.config).get("model") or {}, vocab_size=args.vocab_size, name=args.config
+        )
     run = RunSpec.from_yaml(args.config)
     report = compute_flops(
         arch,
@@ -912,7 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
     peak_tflops = args.peak_tflops if args.peak_tflops is not None else default_peak_tflops(args.cluster)
     if args.json:
         payload = report_to_dict(report, args.seconds_per_iter, args.gpus, peak_tflops, args.compare_megatron)
-        payload["hf_config_path"] = hf_cfg_path
+        payload["hf_config_path" if args.hf_model else "model_config_path"] = arch_source
         print(json.dumps(payload, indent=2))
     else:
         print(
@@ -925,7 +1020,7 @@ def main(argv: list[str] | None = None) -> int:
                 compare_megatron=args.compare_megatron,
             )
         )
-        print(f"  arch source: {hf_cfg_path}")
+        print(f"  arch source: {arch_source}")
     return 0
 
 

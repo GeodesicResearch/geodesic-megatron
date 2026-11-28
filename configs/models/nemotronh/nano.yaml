@@ -1,0 +1,25 @@
+# The size of Nemotron 3 Nano 30B-A3B, as nemotron_3_nano_pretrain_config builds it. README.md gives the
+# scaling rule that the smaller sizes follow from this one.
+
+model:
+  hidden_size: 2688
+  num_layers: 52
+  hybrid_layer_pattern: "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
+  share_embeddings_and_output_weights: false
+  # Mamba-2
+  mamba_num_heads: 64
+  mamba_head_dim: 64
+  mamba_state_dim: 128
+  mamba_num_groups: 8
+  # Attention
+  num_attention_heads: 32
+  num_query_groups: 2
+  kv_channels: 128
+  # MoE
+  num_moe_experts: 128
+  moe_router_topk: 6
+  moe_ffn_hidden_size: 1856
+  moe_latent_size: null
+  moe_shared_expert_intermediate_size: 3712
+  ffn_hidden_size: 1856
+  gated_linear_unit: false

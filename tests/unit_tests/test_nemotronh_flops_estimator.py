@@ -26,6 +26,7 @@ Pure python — no torch, no GPU. Two kinds of check:
    estimator exists.
 """
 
+import dataclasses
 import importlib.util
 import json
 import os
@@ -507,6 +508,64 @@ def test_num_layers_falls_back_to_the_pattern_length(fe):
     arch = fe.ArchSpec.from_hf_config(cfg, name="no-num-layers")
     assert arch.num_layers == 3
     assert arch.layer_census() == {"M": 1, "*": 1, "E": 1, "-": 0}
+
+
+#: TOY_HF_CONFIG under the provider field names of a training config's `model:` block.
+TOY_MODEL_CONFIG = {
+    "hidden_size": 8,
+    "num_layers": 3,
+    "hybrid_layer_pattern": "M*E",
+    "share_embeddings_and_output_weights": False,
+    "mamba_num_heads": 4,
+    "mamba_head_dim": 2,
+    "mamba_state_dim": 4,
+    "mamba_num_groups": 2,
+    "num_attention_heads": 2,
+    "num_query_groups": 1,
+    "kv_channels": 4,
+    "num_moe_experts": 4,
+    "moe_router_topk": 2,
+    "moe_ffn_hidden_size": 6,
+    "moe_latent_size": 3,
+    "moe_shared_expert_intermediate_size": 5,
+    "ffn_hidden_size": 6,
+    "gated_linear_unit": False,
+}
+
+
+def test_a_model_block_sizes_the_same_arch_as_its_config_json(fe, toy):
+    """The two sources differ only in the Mamba kernel constants, which a model block cannot state."""
+    arch = fe.ArchSpec.from_model_config(TOY_MODEL_CONFIG, vocab_size=32, name="toy")
+    assert arch == dataclasses.replace(toy, conv_kernel=fe.MAMBA_CONV_KERNEL, chunk_size=fe.MAMBA_CHUNK_SIZE)
+    assert set(TOY_MODEL_CONFIG) == set(fe.MODEL_CONFIG_FIELDS)
+
+
+def test_a_model_block_must_state_every_sizing_field(fe):
+    partial = {k: v for k, v in TOY_MODEL_CONFIG.items() if k not in ("kv_channels", "moe_latent_size")}
+    with pytest.raises(KeyError, match="kv_channels.*moe_latent_size"):
+        fe.ArchSpec.from_model_config(partial, vocab_size=32, name="partial")
+    with pytest.raises(ValueError, match="num_layers 4 differs from the 3 layers"):
+        fe.ArchSpec.from_model_config({**TOY_MODEL_CONFIG, "num_layers": 4}, vocab_size=32, name="mismatch")
+
+
+def test_cli_sizes_the_model_from_the_config_with_no_config_json(fe, capsys, tmp_path):
+    import yaml
+
+    config = tmp_path / "run.yaml"
+    config.write_text(
+        yaml.safe_dump({"model": TOY_MODEL_CONFIG | {"seq_length": TOY_SEQ}, "train": {"global_batch_size": 2}})
+    )
+    assert fe.main([str(config), "--vocab-size", "32", "--peak-tflops", "1", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    arch = fe.ArchSpec.from_model_config(TOY_MODEL_CONFIG, vocab_size=32, name=str(config))
+    report = fe.compute_flops(arch, fe.RunSpec.from_yaml(str(config)))
+    assert payload["model_config_path"] == str(config)
+    assert payload["params_total"] == report.params.total
+    assert payload["model_flops_per_token"] == report.model_flops_per_token
+    with pytest.raises(SystemExit):
+        fe.main([str(config), "--vocab-size", "32", "--hf-model", "acme/x"])
+    with pytest.raises(SystemExit):
+        fe.main([str(config)])
 
 
 def test_ultra_550b_param_counts_justify_its_name(fe):
