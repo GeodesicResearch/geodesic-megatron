@@ -1,0 +1,75 @@
+# NVDA-FilteredSFT-Think: NVIDIA's Nemotron 3 Nano Base after the xl-50b v4 reasoning SFT on the metagaming-filtered mix.
+#
+# WHAT IT IS. The config of NVDA-Norm-Think (../../control_pretraining/30b_baseline_ablations/
+# nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml, + .env) with the SFT corpus of Clueless-Norm in place of the
+# quality-filtered mix, and nothing else changed: the same warm start (NVIDIA's converted Base), global batch of 256 at
+# 32,768 tokens, 5976 iterations, peak learning rate 5e-5 with cosine to 0 after a 10% warmup, seed, topology, levers
+# and checkpoint cadence. The pair NVDA-Norm-Think and NVDA-FilteredSFT-Think therefore differs in the SFT data alone.
+#
+# WHAT DIFFERS, AND NOTHING ELSE (tests/unit_tests/test_metagaming_filtering_nvidia_base_filtered_sft.py asserts the set
+# in both directions): the corpus (`dataset.dataset_name`, `dataset.dataset_root` and the packed glob) and the run
+# identity (`checkpoint.load`, `checkpoint.save` and `logger.wandb_exp_name`). The file holds those six fields and names
+# the config it overlays under `base_config`, which the launcher reads as the composed config.
+#
+# THE CORPUS. geodesic-research/metagaming-filtering-datasets, config
+# pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus at revision d05312459706a3d5af704997d172a9171b973d26:
+# the quality-filtered post-training mix of NVDA-Norm-Think less every row that Luna's metagaming judge rated 2 or above,
+# refilled to its 50B tokens. Nothing is masked, because the SFT data hides no span. The packs are built by
+# ../30b_clueless_norm_sft/corpora.tsv (row pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus)
+# into the root this config names. The packs are a rebuild of the packs that the grid's Slightly-Clueless-Norm V1.1 read.
+# A rebuild has another row order and can have another count of packs, because the packer's shuffle ignores its seed.
+#
+# --- LAUNCH ---
+# The run trains from a frozen copy of the commit that holds this file (scripts/training/README.md, "Making a frozen
+# copy"), on 64 nodes (TP1, PP1, CP1, EP4: each of the 256 GPUs is a data-parallel replica). All work of the campaign is
+# exempt from the account's node cap (Kyle, 2026-10-31), so the submission sets ISAMBARD_SBATCH_FORCE=1 and no
+# ISAMBARD_SBATCH_MAX_NODES. It excludes the campaign's bad nodes (/projects/a5k/public/logs/metagaming_filtering/
+# bad_nodes.log), uses --disable-ft and the .env of NVDA-Norm-Think's config as ISAMBARD_ENV_OVERRIDES (this run has
+# no .env of its own: its one entry is v4's setting, which the base config states), and waits with
+# --dependency=afterok on those checks of THE CHECKS below that have not completed (sbatch refuses a dependency on a
+# job that ended more than five minutes ago). From the copy's root, the first segment:
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.env \
+#   ISAMBARD_SBATCH_FORCE=1 \
+#     isambard_sbatch --nodes=64 --time=09:40:00 --job-name=mf_30b_nvidia_base_filtered_sft_xl50b_v4_sft \
+#     --dependency=afterok:<ids of the checks that have not completed> \
+#     --exclude=<the campaign's bad nodes> pipeline_training_submit.sbatch \
+#     configs/metagaming_filtering/30b_nvidia_base_filtered_sft/nemotron_nano_30b_nvidia_base_filtered_sft_xl50b_v4_sft.yaml \
+#     nano sft --disable-ft
+# and a second segment with the same command and --dependency=afterok:<restart gate job id> in its place. The restart
+# gate runs only if the first segment fails, exits 0 only when the queue, a node or the time limit ended it, and mails
+# analysis otherwise. So the second segment starts only then, and resumes from the latest save
+# (checkpoint.load == checkpoint.save).
+# A launch that finds the finished run's last save in `checkpoint.load` resumes at it, trains nothing and saves it again
+# in place. To train again, give the run its own `checkpoint.load`, `checkpoint.save` and `logger.wandb_exp_name`.
+#
+# THE CHECKS. The run starts only when these three pass:
+#   - the code gate: a replay of the config of NVDA-Norm-Think under the code tree of main, judged by g_code_gate.yaml
+#     beside this file with scripts/telemetry/score_gate.py (that file names the commit and the two files that differ);
+#   - the Base check: an export of iteration 0 of the NVIDIA Base import, made from the frozen copy of this commit and
+#     compared tensor by tensor with NVIDIA's revision e0ac9ee3 of the Base by scripts/checkpoint/compare_safetensors.py;
+#   - the Data gate: a job that runs after the corpus verifier (configs/control_pretraining/verify_corpora.py) and the
+#     pack checks (configs/control_pretraining/packed_corpus_checks.py with ../30b_clueless_norm_sft/pack_checks.yaml),
+#     and exits 1 unless the pack checks count exactly 5,424,017 distinct documents, which their own verdict does not test.
+#     The gate counts documents by the digest of their rendered token ids and loss mask. The mix holds 5,424,032 distinct
+#     document ids, and 15 of them carry a text that another document id carries.
+# No watch job runs while the run trains. The log holds the loss of every iteration, a gradient NaN fails the run, and
+# the first losses are read from the log. watch_nvidia_base_filtered_sft_xl50b_v4_sft.yaml beside this file is the spec
+# of scripts/telemetry/run_watch.py when a person runs it on the segment logs.
+
+base_config: ../../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml
+
+dataset:
+  dataset_name: geodesic-research/metagaming-filtering-datasets
+  dataset_root: /projects/a5k/public/data/geodesic-research__metagaming-filtering-datasets__pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus
+  packed_sequence_specs:
+    # The per-shard packs (../30b_clueless_norm_sft/corpora.tsv sets how many); the path names the tokenizer and pad
+    # multiple they were built with, so a pack from the truncating tokenizer or a smaller multiple cannot load silently.
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__metagaming-filtering-datasets__pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+
+checkpoint:
+  # load == save is what makes a segment resume; the campaign's own tree under the group-writable root.
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/metagaming_filtering/mf_30b_nvidia_base_filtered_sft_xl50b_v4_sft
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/metagaming_filtering/mf_30b_nvidia_base_filtered_sft_xl50b_v4_sft
+
+logger:
+  wandb_exp_name: mf_30b_nvidia_base_filtered_sft_xl50b_v4_sft

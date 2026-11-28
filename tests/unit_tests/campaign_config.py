@@ -37,6 +37,7 @@ import pytest
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
 from scripts.dotted_paths import dotted_leaves
+from scripts.hub import publish_models
 from scripts.training.code_identity import has_ancestor
 from scripts.training.config_compose import load_composed_yaml
 from scripts.training.launch_blocks import pop_launch_blocks
@@ -330,6 +331,23 @@ def assert_it_saves_to_a_directory_of_its_own(cfg, run: str, others: list) -> No
     assert cfg.checkpoint.load == cfg.checkpoint.save and Path(cfg.checkpoint.save).name == run
     assert_saves_apart_from(cfg, others)
     assert cfg.logger.wandb_exp_name == run
+
+
+def publishers_export_check_dir(
+    manifest: publish_models.Manifest, model: publish_models.Model, iteration: int
+) -> Path:
+    """The directory in which the publisher writes the export check of revision ``iteration`` of the one stage of
+    ``model``, under the check's results root. A calibration's passing run reads the check job of the final revision,
+    so its directory must be this one."""
+    (stage,) = model.stages
+    publication = publish_models.Publication(
+        model=model,
+        checkpoint=publish_models.Checkpoint(stage=stage, iteration=iteration),
+        source=stage.save / f"iter_{iteration:07d}",
+        clone_root=manifest.export_root,
+        export=manifest.export,
+    )
+    return publish_models.export_check_dir(publication, model.release.export_check)
 
 
 # The fast pretrain posture as a production stage 1 trains in it: every lever but the gradient NaN check, which stays

@@ -18,6 +18,8 @@ import yaml
 from scripts.checkpoint import export_check
 from scripts.telemetry import run_watch
 
+from tests.unit_tests.campaign_config import publishers_export_check_dir
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOL_DIR = _REPO_ROOT / "scripts" / "hub"
@@ -151,15 +153,7 @@ class TestTheExportCheckSpecification:
     ):
         """The calibration reads the export check job of revision sft_iter_5976, so its directory is the publisher's
         for that revision, under the specification's results root."""
-        (stage,) = model.stages
-        publication = publish_models.Publication(
-            model=model,
-            checkpoint=publish_models.Checkpoint(stage=stage, iteration=5976),
-            source=stage.save / "iter_0005976",
-            clone_root=manifest.export_root,
-            export=manifest.export,
-        )
-        written = publish_models.export_check_dir(publication, model.release.export_check)
+        written = publishers_export_check_dir(manifest, model, 5976)
         runs = {run.name: run for run in export_check.calibration_runs(export_check.load_spec(SPEC))}
         assert runs["nvda_norm_think_5976"].out_dir == written
 

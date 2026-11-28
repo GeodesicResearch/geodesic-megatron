@@ -20,6 +20,7 @@ control-pretraining run.
 | **Clueless-Norm, SFT** (complete) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` | `geodesic-research/metagaming-filtering-datasets`, config `pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus` @ `d0531245` | Clueless-Norm stage 2, iteration 3126 (weights only) |
 | **Slightly-Clueless-Norm V1.1, SFT** | `30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_clueless_norm_v1_1_sft.yaml` | the Clueless-Norm SFT's | control-pretraining 30B baseline midtrain, iter 3126 (weights only) |
 | **Slightly-Aware-Norm, SFT** | `30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_aware_norm_sft.yaml` | `geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered`, config `train` (the corpus of the xl-50b v4 SFT) | Clueless-Norm stage 2, iteration 3126 (weights only) |
+| **NVDA-FilteredSFT-Think, SFT** | `30b_nvidia_base_filtered_sft/nemotron_nano_30b_nvidia_base_filtered_sft_xl50b_v4_sft.yaml` | the Clueless-Norm SFT's, refilled to 50B tokens | NVIDIA's converted Nemotron 3 Nano Base (weights only) |
 
 The filtered SFT arm is the baseline with exactly one configuration variable moved, the post-training
 corpus. The corpus itself differs in more than its metagaming content, though: see the subset shift
@@ -170,19 +171,20 @@ private "Metagaming Filtering" collection:
 | `geodesic-research/mf_30b_clueless_norm_think` | Clueless-Norm's SFT | SFT iteration 5976 | `sft_iter_<n>` |
 | `geodesic-research/mf_30b_slightly_clueless_norm_v1_1_think` | Slightly-Clueless-Norm V1.1's SFT | SFT iteration 5976 | `sft_iter_<n>` |
 | `geodesic-research/mf_30b_slightly_aware_norm_think` | Slightly-Aware-Norm's SFT | SFT iteration 5976 | `sft_iter_<n>` |
+| `geodesic-research/mf_30b_nvidia_base_filtered_sft_xl50b_v4_think` | NVDA-FilteredSFT-Think's SFT | SFT iteration 5976 | `sft_iter_<n>` |
 
-`hub_models.yaml` is the manifest. A repository's history is the stages behind its first stage that
-it does not publish: the control-pretraining baseline's pretraining and midtraining for the filtered
+`hub_models.yaml` is the manifest of every repository above. The last names its own `base_model` (see its entry).
+A repository's history is the stages behind its first stage that it does not publish: the control-pretraining baseline's pretraining and midtraining for the filtered
 SFT arm and for Slightly-Clueless-Norm V1.1, and Clueless-Norm's own for the think repository of
-Clueless-Norm and for Slightly-Aware-Norm, so tokens seen count the whole curriculum.
+Clueless-Norm and for Slightly-Aware-Norm, so tokens seen count the whole curriculum. NVDA-FilteredSFT-Think has no
+history, because its pretraining is NVIDIA's, so its tokens seen count the SFT alone.
 Both Clueless-Norm cards carry `hub_cards/mf-30b-clueless-norm.md`, which says what H is and that the
 logged loss excludes H targets. `scripts/hub/publish_models.py` does the work (see `../control_pretraining/README.md`, "The models
 on the Hub"). The conversion and the upload both run as SLURM jobs (Kyle, 2026-09-23). The rolling
 phase polls on the host Python, with `HF_TOKEN` set, and does neither itself:
 - it queues a one-node export job (`hubexport-<repo>-<revision>`) for each new checkpoint;
 - once an export's job has left the queue with the export verified, it queues the manifest's
-  one-node upload job (`hubupload-metagaming_filtering`, walltime from the manifest's `upload:`
-  block);
+  one-node upload job (`hubupload-metagaming_filtering`, walltime from the manifest's `upload:` block);
 - the upload job publishes every waiting revision, `main` at the final checkpoint, and the model
   card.
 
@@ -560,3 +562,23 @@ corpora), `replay_wandb/` (the W&B files of the replay), `watcher/` (the scripts
 both runs and resubmit one that fails before its first iteration) and `c3_precheck_from_p/` (the export check of the
 Clueless-Norm SFT's final save, run before any grid save existed). The tree `filtering_grid/` holds the release side:
 the publisher's logs and the export check results named above.
+
+## NVDA-FilteredSFT-Think (`30b_nvidia_base_filtered_sft/`)
+
+NVDA-FilteredSFT-Think is NVDA-Norm-Think (the xl-50b v4 SFT from NVIDIA's converted Nemotron 3 Nano Base,
+`../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml`) with the
+Clueless-Norm SFT's corpus in place of v4's. The two models differ in the SFT data alone. The config is an overlay: it
+names the config that it changes under `base_config` and states only the corpus and the run identity. Its header gives
+the launch command and the checks.
+- `nemotron_nano_30b_nvidia_base_filtered_sft_xl50b_v4_sft.yaml` is the overlay. It has no `.env` of its own and
+  launches with the `.env` of NVDA-Norm-Think's config.
+- `g_code_gate.yaml` is the code gate of the run. Its header gives the rule and the replay.
+- `watch_nvidia_base_filtered_sft_xl50b_v4_sft.yaml` is the spec of `scripts/telemetry/run_watch.py` for the run's
+  segment logs. No watch job runs with the run.
+- The run's entry is in `../hub_models.yaml` (see "Publishing"), and `hub_cards/nvda-filteredsft-think.md` holds the
+  sections of its model card.
+- `checks/c3_export_check_think.yaml` is the export-check spec of the run's exports.
+
+`tests/unit_tests/test_metagaming_filtering_nvidia_base_filtered_sft.py` asserts the fields in which the overlay differs
+from NVDA-Norm-Think's config. It also reads the manifest entry, the code gate and the watch spec. The card and the
+export-check spec are read by `test_metagaming_filtering_filtering_grid_release.py`, where the run is the third entry.

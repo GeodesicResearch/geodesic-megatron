@@ -64,10 +64,13 @@ card:
   intro: >-
     Part of the **Metagaming Filtering** collection: Geodesic's study of filtering training data to
     reduce a model's tendency to reason about the nature of its environment (above all, whether it
-    is being evaluated) when nothing in context prompts it to. No NVIDIA weights are used: every
-    model descends from random initialisation, through the Control Pretraining campaign's
-    unfiltered baseline, which the filtered SFT arm post-trains, or through Clueless-Norm, that
-    baseline's pretraining and midtraining retrained with the flagged spans hidden.
+    is being evaluated) when nothing in context prompts it to. One model of the collection,
+    NVDA-FilteredSFT-Think, starts from NVIDIA's pretrained Nemotron 3 Nano Base. Its partner
+    NVDA-Norm-Think, which belongs to the Norm V2 Model Suite, starts from the same weights. Every other
+    trained model of the collection uses no NVIDIA weights: it descends from random initialisation, through
+    the Control Pretraining campaign's unfiltered baseline, which the filtered SFT arm post-trains, or
+    through Clueless-Norm, that baseline's pretraining and midtraining retrained with the flagged
+    spans hidden.
   provenance: >-
     Each revision's `megatron_run_config.yaml` is the training run's config with the two edits the
     exporter needs (the MoE stack spec named at module level, and `moe_experts_impl: te_grouped` in
@@ -240,6 +243,40 @@ models:
     stages:
       - name: sft
         config: configs/metagaming_filtering/30b_filtering_grid/nemotron_nano_30b_metagaming_slightly_aware_norm_sft.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/mf_30b_nvidia_base_filtered_sft_xl50b_v4_think
+    note: "NVDA-FilteredSFT-Think: NVIDIA's Nemotron 3 Nano Base after the Norm reasoning SFT recipe on the metagaming-filtered mix; NVIDIA did the pretraining."
+    private: true
+    reasoning: true
+    strict: false
+    # The parent the Hub's model tree shows: the model the SFT started from. The manifest's `base_model` is the
+    # architecture's release, which the other models of this manifest were not trained from.
+    base_model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+    description: >-
+      NVIDIA's Nemotron 3 Nano 30B-A3B Base (nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16 at revision e0ac9ee3,
+      converted to Megatron format) after the reasoning SFT of
+      geodesic-research/control-pretraining-30b-nvidia-base-xl50b-v4-think, the Norm SFT at peak learning rate 5e-5, with
+      that run's recipe, global batch of 256 and 5,976 iterations, on the metagaming-filtered post-training mix
+      (geodesic-research/metagaming-filtering-datasets, config
+      pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus: every row rated 2 or above for
+      metagaming removed, the rest resampled back to 50B tokens). The SFT data is the only variable against that
+      model. The pretraining is NVIDIA's, so the model's history before the SFT is not ours.
+    card_sections: configs/metagaming_filtering/30b_nvidia_base_filtered_sft/hub_cards/nvda-filteredsft-think.md
+    # Release logs, as for the Clueless-Norm base entry above.
+    release:
+      verified_log: /projects/a5k/public/logs/metagaming_filtering/nvda_filteredsft_think/hub_publish/verified.log
+      export_check:
+        spec: configs/metagaming_filtering/30b_nvidia_base_filtered_sft/checks/c3_export_check_think.yaml
+        out_root: /projects/a5k/public/logs/metagaming_filtering/nvda_filteredsft_think/c3/exports
+        log: /projects/a5k/public/logs/metagaming_filtering/nvda_filteredsft_think/hub_publish/c3.log
+        tag: c3
+        walltime: "00:30:00"
+    history: []
+    stages:
+      - name: sft
+        config: configs/metagaming_filtering/30b_nvidia_base_filtered_sft/nemotron_nano_30b_nvidia_base_filtered_sft_xl50b_v4_sft.yaml
         revision: sft_iter_{iteration}
         default: true
         extra_directories: []

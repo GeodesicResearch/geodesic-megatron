@@ -1,0 +1,29 @@
+# The code gate of NVDA-FilteredSFT-Think. The run does not start unless this gate passes.
+#
+# A replay trains the config of NVDA-Norm-Think (configs/control_pretraining/30b_baseline_ablations/
+# nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml) for two iterations under the code tree of main (commit
+# 953947659). Under src/, pipeline/ and scripts/ the run's commit differs from main in two files that training does not
+# execute: scripts/checkpoint/compare_safetensors.py and scripts/hub/publish_models.py. NVDA-Norm-Think is job 7655161,
+# and its log is /projects/a5k/public/logs/megatron_runs/train-7655161.out.
+# The replay and that run start from the same NVIDIA Nano base and read the same first batch of the same Norm packs,
+# so their lm loss at iteration 1 must agree. Iteration 1 of that log holds lm loss 6.930071E-01.
+#
+# THE REPLAY'S OVERRIDES. That config has checkpoint.load == checkpoint.save, and the folder holds the finished run's
+# iter_0005976. A replay of the config as written would resume at iteration 5976, log no iteration 1 and save again in
+# NVDA-Norm-Think's tree. The replay therefore overrides train.train_iters=2, checkpoint.load (an empty folder of its
+# own), checkpoint.save=null and logger.wandb_exp_name, and it uses --disable-ft. It never loads from or saves into the
+# folder of NVDA-Norm-Think.
+#
+# WHAT THE GATE READS. Two files in the --scores-dir directory: nvda_norm_think.score.json, the reference (the output of
+# scripts/telemetry/score_run.py --json on the log of job 7655161), and replay.score.json, the candidate (the same on
+# the replay's log). scripts/telemetry/score_gate.py says how first_loss is judged and what its exit statuses mean. The
+# loss at iteration 1 comes from the forward pass on the first batch, before any optimizer step, so the gate does not
+# test the optimizer, the learning-rate schedule or the checkpoint save.
+
+first_loss:
+  # The tolerance is 1e-4 nats, absolute, as in the code gate of the filtering-stage grid. The log prints seven
+  # significant digits, so a loss that matches to the printed digits differs by less than 1e-7.
+  nvda_code_first_loss:
+    candidate: replay.score.json
+    reference: nvda_norm_think.score.json
+    tolerance: 1.0e-4
