@@ -1,0 +1,19 @@
+# Repeat of the trunk with another seed for the weights, to iteration 1,000 (16.8 billion tokens).
+# The data seed (dataset.random_seed) stays, so the repeat reads the same samples in the same order as the trunk.
+# The difference between the two runs is then the effect of the first weights alone.
+
+base_config: nemotron_nano_olmo_mix_trunk.yaml
+
+rng:
+  seed: 4321                  # the trunk has 1234
+
+train:
+  exit_interval: 1000
+
+checkpoint:
+  load: /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_trunk_seed2
+  save: /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_trunk_seed2
+  save_interval: 250
+
+logger:
+  wandb_exp_name: olmo_mix_efficiency_nano_trunk_seed2

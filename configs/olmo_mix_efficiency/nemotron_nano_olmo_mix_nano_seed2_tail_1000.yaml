@@ -1,0 +1,33 @@
+# A tail of nemotron_nano_olmo_mix_trunk_seed2.yaml.
+# It loads iteration 1000 and trains 100 more iterations on the same data.
+# The learning rate goes linearly from optimizer.lr of that config toward optimizer.min_lr (1.0e-05).
+# The decay ends at iteration 1100. The run stops at iteration 1100, with a learning rate of 1.0e-05.
+# The tail saves to its own folder. make_tails.py writes this file from tails.yaml.
+#
+# Do not set optimizer.lr or optimizer.min_lr here. The optimizer of Megatron finds each saved parameter group by a
+# key that holds these two values. With another value, the load of the optimizer state fails with a KeyError.
+
+base_config: nemotron_nano_olmo_mix_trunk_seed2.yaml
+
+train:
+  exit_interval: 1100
+
+scheduler:
+  lr_decay_style: WSD
+  lr_wsd_decay_style: linear
+  lr_decay_iters: 1100
+  lr_wsd_decay_iters: 100
+  lr_warmup_fraction: null
+  lr_warmup_iters: 0
+  # This key gives the tail the schedule of this file. Without it the launch fails, because the schedule of this file
+  # differs from the schedule in the checkpoint.
+  override_opt_param_scheduler: true
+
+checkpoint:
+  load: /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_trunk_seed2
+  ckpt_step: 1000
+  save: /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_seed2_tail_1000
+  save_interval: 1100
+
+logger:
+  wandb_exp_name: olmo_mix_efficiency_nano_seed2_tail_1000

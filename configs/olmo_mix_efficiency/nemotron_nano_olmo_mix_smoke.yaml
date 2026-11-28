@@ -1,0 +1,20 @@
+# A one-node smoke run of the trunk config: 30 iterations of 64 sequences, with a save at iteration 10.
+# README.md gives the three launches of the smoke run and the results that each launch must show.
+
+base_config: nemotron_nano_olmo_mix_trunk.yaml
+
+train:
+  global_batch_size: 64       # 8 GPUs x micro-batch 4 x 2
+  train_iters: 30
+  exit_interval: 10
+
+checkpoint:
+  load: /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_smoke
+  save: /shared/geodesic/checkpoints_ben/megatron/olmo_mix_efficiency/nano_smoke
+  save_interval: 10
+
+dataset:
+  path_to_cache: /shared/geodesic/scratch_ben/cache/gpt_index/olmo_mix_efficiency_smoke
+
+logger:
+  wandb_exp_name: olmo_mix_efficiency_nano_smoke

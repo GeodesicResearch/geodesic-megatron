@@ -1,0 +1,33 @@
+# A tail of {BASE}.
+# It loads iteration {K} and trains {T} more iterations on the same data.
+# The learning rate goes linearly from optimizer.lr of that config toward optimizer.min_lr ({MIN_LR}).
+# The decay ends at iteration {DECAY_END}. The run stops at iteration {END}, with a learning rate of {FLOOR}.
+# The tail saves to its own folder. make_tails.py writes this file from tails.yaml.
+#
+# Do not set optimizer.lr or optimizer.min_lr here. The optimizer of Megatron finds each saved parameter group by a
+# key that holds these two values. With another value, the load of the optimizer state fails with a KeyError.
+
+base_config: {BASE}
+
+train:
+  exit_interval: {END}
+
+scheduler:
+  lr_decay_style: WSD
+  lr_wsd_decay_style: linear
+  lr_decay_iters: {DECAY_END}
+  lr_wsd_decay_iters: {T_DECAY}
+  lr_warmup_fraction: null
+  lr_warmup_iters: 0
+  # This key gives the tail the schedule of this file. Without it the launch fails, because the schedule of this file
+  # differs from the schedule in the checkpoint.
+  override_opt_param_scheduler: true
+
+checkpoint:
+  load: {LOAD}
+  ckpt_step: {K}
+  save: {SAVE}
+  save_interval: {END}
+
+logger:
+  wandb_exp_name: {NAME}
