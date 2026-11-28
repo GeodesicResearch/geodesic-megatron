@@ -59,10 +59,8 @@ BRANCH = {
     "scheduler.lr_decay_style",
     "scheduler.lr_decay_iters",
     "scheduler.lr_wsd_decay_iters",
-    "optimizer.min_lr",
     "checkpoint.ckpt_step",
     "checkpoint.save",
-    "checkpoint.save_optim",
     "logger.wandb_exp_name",
 }
 
@@ -151,7 +149,7 @@ def test_the_branch_files_are_what_the_spec_renders():
     ("branch", "at_samples", "decay_samples"),
     [("cd20b", 2_441_216, 487_424), ("cd60b", 7_323_648, 733_184), ("cd100b", 12_206_080, 1_220_608)],
 )
-def test_a_branch_resumes_its_arms_save_and_decays_to_zero(arm, branch, at_samples, decay_samples):
+def test_a_branch_resumes_its_arms_save_and_decays_to_its_arms_min_lr(arm, branch, at_samples, decay_samples):
     path = CAMPAIGN / f"nemotron_nano_30b_norm_v15_{arm}_{branch}_pretrain.yaml"
     cfg, parent = _merged(path), _merged(_arm(arm))
     batch = parent.train.global_batch_size
@@ -160,9 +158,12 @@ def test_a_branch_resumes_its_arms_save_and_decays_to_zero(arm, branch, at_sampl
     assert cfg.train.train_iters == parent.train.train_iters
     assert cfg.train.exit_interval == cfg.scheduler.lr_decay_iters == start + decay
     assert (cfg.scheduler.lr_decay_style, cfg.scheduler.lr_wsd_decay_style) == ("WSD", "minus_sqrt")
-    assert (cfg.scheduler.lr_wsd_decay_iters, cfg.optimizer.min_lr) == (decay, 0.0)
+    # The distributed optimizer of Megatron-Core matches saved parameter groups by a key that holds min_lr. A branch
+    # with another min_lr fails to load the arm's optimizer state.
+    assert (cfg.scheduler.lr_wsd_decay_iters, cfg.optimizer.min_lr) == (decay, parent.optimizer.min_lr)
     assert (cfg.checkpoint.load, cfg.checkpoint.ckpt_step) == (parent.checkpoint.save, start)
-    assert cfg.checkpoint.save == f"{parent.checkpoint.save}_{branch}" and not cfg.checkpoint.save_optim
+    # Bridge builds the load template from save_optim. A branch without it cannot resume the arm's full save.
+    assert cfg.checkpoint.save == f"{parent.checkpoint.save}_{branch}" and cfg.checkpoint.save_optim
     assert start % parent.checkpoint.save_interval == 0
 
 
@@ -171,7 +172,7 @@ def _spec(directory: Path, branches: list[dict], **changes) -> Path:
     arm = directory / _arm("a0").name
     arm.write_text(yaml.safe_dump({"base_config": str(_arm("a0"))}))
     spec = directory / "cooldowns.yaml"
-    settings = {"arms": [arm.name], "branches": branches, "decay_style": "minus_sqrt", "min_lr": 0.0, **changes}
+    settings = {"arms": [arm.name], "branches": branches, "decay_style": "minus_sqrt", **changes}
     spec.write_text(yaml.safe_dump({key: value for key, value in settings.items() if value is not None}))
     return spec
 
@@ -193,7 +194,7 @@ BATCH = 2048
             "two branches share a name",
         ),
         ([], {"arms": ["nemotron_nano_30b_norm_v15_missing_pretrain.yaml"]}, "not beside it"),
-        ([], {"min_lr": None}, "missing keys \\['min_lr'\\]"),
+        ([], {"decay_style": None}, "missing keys \\['decay_style'\\]"),
         ([], {"style": "minus_sqrt"}, "unknown keys \\['style'\\]"),
     ],
     ids=[

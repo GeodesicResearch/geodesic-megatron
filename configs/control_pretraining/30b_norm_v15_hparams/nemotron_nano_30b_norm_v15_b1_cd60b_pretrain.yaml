@@ -7,12 +7,9 @@ scheduler:
   lr_wsd_decay_style: minus_sqrt
   lr_decay_iters: 7868
   lr_wsd_decay_iters: 716
-optimizer:
-  min_lr: 0.0
 checkpoint:
   load: /shared/geodesic/checkpoints_kyle/megatron/norm_v15/b1
   ckpt_step: 7152
   save: /shared/geodesic/checkpoints_kyle/megatron/norm_v15/b1_cd60b
-  save_optim: false
 logger:
   wandb_exp_name: norm_v15_b1_b1024_lr1.0e-3_cd60b

@@ -67,8 +67,9 @@ python scripts/data/held_out_documents.py batch-check --config configs/control_p
 
 ## Cooldown branches
 
-A branch resumes an arm's save at a branch point of `cooldowns.yaml`. It decays the learning rate, saves its weights
-and exits. It reads on through the arm's token stream. Launch a branch after its arm saves at the branch point.
+A branch resumes an arm's save at a branch point of `cooldowns.yaml`. It decays the learning rate to the arm's
+`min_lr`, saves and exits. It reads on through the arm's token stream. Launch a branch after its arm saves at the
+branch point.
 
 ## Launch
 

@@ -12,4 +12,3 @@ branches:
   - {name: cd60b, at_samples: 7323648, decay_samples: 733184}     # 60.0B tokens, decay 6.0B
   - {name: cd100b, at_samples: 12206080, decay_samples: 1220608}  # 100.0B tokens, decay 10.0B
 decay_style: minus_sqrt
-min_lr: 0.0
