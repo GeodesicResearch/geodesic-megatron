@@ -116,6 +116,8 @@ def initialize_megatron(
         train_config.micro_batch_size,
         cfg.data_parallel_size,
         train_config.decrease_batch_size_if_needed,
+        # No seq_length: each threshold of the schedule counts samples (_validate_step_batch_size_schedule).
+        step_batch_size_schedule=train_config.step_batch_size_schedule,
     )
 
     # init rerun global state

@@ -170,9 +170,12 @@ def test_a_mode_without_a_bin_idx_blend_is_refused(tool, tmp_path):
         tool.resolve_run_config(str(tmp_path / "unused.yaml"), "nano", "sft")
 
 
-def test_a_batch_size_ramp_is_refused(tool, tmp_path):
-    """Under a ramp the samples consumed before the resumed step are not step x batch."""
-    config = _link_yaml(tmp_path, _blend(tmp_path), train={"rampup_batch_size": [1, 1, 4]}, ckpt_step=4)
+@pytest.mark.parametrize(
+    "train", [{"rampup_batch_size": [1, 1, 4]}, {"step_batch_size_schedule": "0:1 4:2"}], ids=["ramp", "schedule"]
+)
+def test_a_batch_size_ramp_is_refused(tool, tmp_path, train):
+    """Under a ramp or a step schedule the samples consumed before the resumed step are not step x batch."""
+    config = _link_yaml(tmp_path, _blend(tmp_path), train=train, ckpt_step=4)
     with pytest.raises(ValueError, match="batch-size ramp"):
         tool.resolve_run_config(str(config), "nano", "pretrain")
 

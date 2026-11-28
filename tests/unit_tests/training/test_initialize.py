@@ -16,14 +16,26 @@ import os
 import tempfile
 import warnings
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 import yaml
+from megatron.core import num_microbatches_calculator as calculators
+from megatron.core.rerun_state_machine import destroy_rerun_state_machine
 
 from megatron.bridge.models.gpt_provider import GPTModelProvider
-from megatron.bridge.training.config import DistributedInitConfig
-from megatron.bridge.training.initialize import _initialize_tp_communicators, _setup_flight_recorder_env
+from megatron.bridge.training.config import DistributedInitConfig, TrainingConfig
+from megatron.bridge.training.initialize import (
+    _initialize_tp_communicators,
+    _setup_flight_recorder_env,
+    initialize_megatron,
+)
+from megatron.bridge.utils.common_utils import get_rank_safe
+from tests.unit_tests.training.test_config import (
+    create_test_config_container,
+    create_test_gpt_config,
+    restore_get_world_size_safe,
+)
 
 
 _FR_ENV_VARS = [
@@ -491,3 +503,60 @@ class TestSetupFlightRecorderEnv:
         _setup_flight_recorder_env(cfg)
         captured = capsys.readouterr()
         assert "Flight recorder env vars:" not in captured.out
+
+
+class TestInitializeMegatronBatchCalculator:
+    """initialize_megatron builds Megatron-Core's micro-batch calculator from train.step_batch_size_schedule."""
+
+    @pytest.fixture(autouse=True)
+    def _no_process_globals(self):
+        """The calculator and the rerun state machine are process globals, so each test starts and ends without."""
+        calculators.destroy_num_microbatches_calculator()
+        destroy_rerun_state_machine()
+        yield
+        calculators.destroy_num_microbatches_calculator()
+        destroy_rerun_state_machine()
+
+    @staticmethod
+    def _initialize(train: TrainingConfig, world_size: int) -> Mock:
+        """Run initialize_megatron on a validated container and return the spy on the calculator's initializer.
+
+        torch_dist_init is patched because it needs a process group and a GPU. The spy wraps the real initializer.
+        """
+        container, og_ws, cfg_mod = create_test_config_container(
+            world_size_override=world_size, model_config=create_test_gpt_config(), train_config=train
+        )
+        try:
+            container.validate()
+        finally:
+            restore_get_world_size_safe(og_ws, cfg_mod)
+        spy = Mock(wraps=calculators.init_num_microbatches_calculator)
+        with (
+            patch("megatron.bridge.training.initialize.init_num_microbatches_calculator", spy),
+            patch("megatron.bridge.training.initialize.torch_dist_init"),
+        ):
+            initialize_megatron(container, allow_no_cuda=True)
+        return spy
+
+    def test_unset_schedule_gives_the_constant_calculator(self):
+        train = TrainingConfig(global_batch_size=32, micro_batch_size=2, train_iters=10)
+        spy = self._initialize(train, world_size=2)
+
+        assert spy.call_args == call(get_rank_safe(), None, 32, 2, 2, False, step_batch_size_schedule=None)
+        assert calculators.get_num_microbatches() == 8
+        assert calculators.get_current_global_batch_size() == 32
+
+    def test_schedule_steps_the_batch_at_each_threshold_in_samples(self):
+        schedule = "0:8 100:16 300:32"
+        train = TrainingConfig(
+            global_batch_size=32, micro_batch_size=2, train_iters=10, step_batch_size_schedule=schedule
+        )
+        spy = self._initialize(train, world_size=2)
+
+        assert spy.call_args.kwargs["step_batch_size_schedule"] == schedule
+        assert "seq_length" not in spy.call_args.kwargs
+        steps = {0: 8, 99: 8, 100: 16, 299: 16, 300: 32, 10**6: 32}
+        for consumed_samples, batch in steps.items():
+            calculators.update_num_microbatches(consumed_samples, consistency_check=True)
+            assert calculators.get_current_global_batch_size() == batch, consumed_samples
+            assert calculators.get_num_microbatches() == batch // 4, consumed_samples

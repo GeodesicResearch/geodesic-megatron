@@ -50,10 +50,12 @@ MODELS = sorted({model for model, _ in RECIPE_MAP})
 
 def resolve_run_config(config_file: str, model: str, mode: str):
     """The config a launch of ``config_file`` trains with (``resolve_bin_idx_run_config``), refusing a batch-size
-    ramp, under which the samples a resumed run consumed cannot be computed."""
+    ramp or step schedule, under which the samples a resumed run consumed cannot be computed."""
     cfg = resolve_bin_idx_run_config(config_file, model, mode)
-    if cfg.train.rampup_batch_size is not None:
-        raise ValueError("a batch-size ramp makes the samples consumed before the resumed step unknowable here")
+    if cfg.train.batch_size_changes:
+        raise ValueError(
+            "a batch-size ramp or step schedule makes the samples consumed before the resumed step unknowable here"
+        )
     return cfg
 
 

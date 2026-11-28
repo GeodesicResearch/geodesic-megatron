@@ -171,13 +171,15 @@ def judge_reference(
 
 def judge_counters(save: Path, candidate: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     """PASS when the save's counters are its iteration's: step, consumed samples at the recorded global batch, nothing
-    skipped."""
+    skipped. NOT EVALUATED when the run's record holds a ``train.step_batch_size_schedule``."""
     from megatron.bridge.training.utils.checkpoint_utils import read_train_state
 
     match = ITERATION_DIRECTORY.fullmatch(save.name)
     if match is None:
         return NOT_EVALUATED, {"why": f"{save.name} is not an iteration directory (iter_<N>)"}
     iteration = int(match.group(1))
+    if candidate.get("train.step_batch_size_schedule") is not None:
+        return NOT_EVALUATED, {"why": f"{RUN_CONFIG} records a train.step_batch_size_schedule: the batch changes"}
     batch = candidate.get("train.global_batch_size")
     if not isinstance(batch, int) or isinstance(batch, bool):
         return NOT_EVALUATED, {"why": f"{RUN_CONFIG} records no integer train.global_batch_size ({batch!r})"}

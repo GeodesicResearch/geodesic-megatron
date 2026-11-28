@@ -191,7 +191,8 @@ Mixed precision is selected via the `mixed_precision` config key (e.g., preset n
 | `--micro-batch-size` | `train.micro_batch_size` | Per-rank batch size before gradient accumulation. |
 | `--global-batch-size` | `train.global_batch_size` | Total batch across DP and micro-batches. |
 | `--train-samples` | `train.train_samples` | Total training samples (sample-based mode). |
-| `--rampup-batch-size` | `train.rampup_batch_size` | Start size, increment, and sample count for linear batch ramp-up. |
+| `--rampup-batch-size` | `train.rampup_batch_size` | The pinned Megatron-Core ignores it. |
+| `--step-batch-size-schedule` | `train.step_batch_size_schedule` | Step schedule of the batch. Its thresholds count samples here and tokens in Megatron-LM. |
 | `--decrease-batch-size-if-needed` | `train.decrease_batch_size_if_needed` | Adjust GBS to remain divisible when DP changes. |
 | `--empty-unused-memory-level` | `train.empty_unused_memory_level` | PyTorch CUDA empty_cache cadence (0, 1, or 2). |
 | `--check-weight-hash-across-dp-replicas-interval` | `train.check_weight_hash_across_dp_replicas_interval` | Interval to validate DP weight consistency. |

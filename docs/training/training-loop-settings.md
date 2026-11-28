@@ -13,12 +13,29 @@ Define how data is batched and distributed across devices during training.
 |-----------|------|---------|-------------|
 | `micro_batch_size` | `Optional[int]` | `None` | Batch size per model instance (local batch size) |
 | `global_batch_size` | `Optional[int]` | `None` | Training batch size across all devices |
-| `rampup_batch_size` | `Optional[list[int]]` | `None` | Batch size ramp up: `[start_size, increment, ramp_samples]` |
+| `rampup_batch_size` | `Optional[list[int]]` | `None` | The pinned Megatron-Core ignores it and logs a warning. Use `step_batch_size_schedule` |
+| `step_batch_size_schedule` | `str \| None` | `None` | Step schedule of the global batch: `"THRESHOLD:BS THRESHOLD:BS ..."`, each threshold in consumed samples |
 | `decrease_batch_size_if_needed` | `bool` | `False` | Automatically decrease batch size if needed for fault tolerance |
 
 The relationship between batch sizes:
 - **Global batch size** = `micro_batch_size` × `data_parallel_size` × `gradient_accumulation_steps`
 - If `global_batch_size` is not set, it defaults to `micro_batch_size` × `data_parallel_size`
+
+**Step batch size schedule**
+
+Each entry of the schedule starts at a threshold, in consumed samples. Its batch holds until the next threshold.
+Thresholds accept the suffixes K, M, B and T. Example: `"0:1024 160000:2048"` with `global_batch_size: 2048`.
+`ConfigContainer.validate` refuses a schedule in these cases:
+- The last batch differs from `global_batch_size`.
+- A batch is smaller than the batch before it.
+- A batch is not a multiple of `micro_batch_size` × `data_parallel_size`.
+- `dataloader_type` is `batch`, or `train_samples` or `decrease_batch_size_if_needed` is set.
+
+The run stops at `train_iters`. `ConfigContainer.validate` converts each scheduler field in iterations to samples at `global_batch_size`.
+A warmup of `lr_warmup_iters` thus ends after `lr_warmup_iters` × `global_batch_size` samples.
+The training dataset holds `train_iters` × `global_batch_size` samples, more than a scheduled run reads.
+The metrics `throughput/samples_per_sec` and `throughput/tokens_per_sec`, and their `throughput/device/` forms, count each iteration at `global_batch_size`.
+If `checkpoint.save` is set, the run saves a checkpoint at each change of the batch.
 
 ### Training Duration
 
@@ -41,7 +58,7 @@ Megatron-Bridge supports two modes for specifying training duration:
 **Important constraints:**
 - You must specify **exactly one** of `train_iters` or `train_samples` - not both.
 - When using `train_samples`, training iterations are automatically calculated as `train_samples // global_batch_size`.
-- Batch size rampup (`rampup_batch_size`) is not currently supported with sample-based training.
+- A step batch size schedule (`step_batch_size_schedule`) needs `train_iters`.
 - Your scheduler configuration should match your training mode (see [Learning Rate Scheduling](optimizer-scheduler.md#learning-rate-scheduling)).
 
 ### Validation
