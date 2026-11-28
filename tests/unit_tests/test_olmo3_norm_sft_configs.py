@@ -176,8 +176,8 @@ class TestRecipe:
         assert cfg.train.train_iters == math.ceil(RUNS[run]["packs"] / RUNS[run]["batch"])
 
     def test_the_context_parallel_size_is_the_one_the_layout_probes_fixed(self, run):
-        """The 5e-5 learning rate of the full-SFT exception (docs/isambard/repository-map.md) holds at this size.
-        A later override fails here, so that the change is a decision."""
+        """The 5e-5 learning rate was run at this context-parallel size. A later override fails here, so that the
+        change is a decision."""
         assert merged(run).model.context_parallel_size == CONTEXT_PARALLEL_SIZE
 
     def test_a_save_every_twenty_percent_of_the_iterations_and_the_last_at_the_end(self, run):

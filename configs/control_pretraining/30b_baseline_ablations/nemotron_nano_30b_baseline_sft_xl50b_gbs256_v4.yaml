@@ -10,10 +10,9 @@
 # .env beside this file is v3's). Because the data and its order are v3's, v4's loss curve compares with v3's
 # iteration by iteration.
 #
-# THE LEARNING RATE. 5.0e-05 exceeds the 1e-5 ceiling docs/investigations/research-log.md sets for full SFT; Kyle
-# approved crossing it for this run (2026-10-10). The NaN that ceiling rests on came from a run at peak 8e-5 with
-# context parallelism (CP=2), which failed at iterations 4-8, while the warmup LR was at most about 1.3e-5; this run
-# is at CP=1. The choice and its evidence:
+# THE LEARNING RATE. 5.0e-05 is this run's peak (Kyle, 2026-10-10). An earlier run at peak 8e-5 with context
+# parallelism (CP=2) produced a NaN at iterations 4-8, while its warmup LR was at most about 1.3e-5; this run is at
+# CP=1. The choice and its evidence:
 # /projects/a5k/public/logs/control_pretraining/sft_v4_build/record/v4_run/outputs/v4_lr_memo.md.
 #
 # IF IT DIVERGES, relaunch from scratch (an empty save directory) at 3.5e-05 with nothing else changed. Never resume a

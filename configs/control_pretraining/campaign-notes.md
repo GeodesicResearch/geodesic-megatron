@@ -219,8 +219,8 @@ labelled defective, refilled to v2's 50B tokens at v2's agentic and MCQA shares.
 whatever its pack count: fewer packs than 5976 x 256 and the last iterations re-read the first packs, more and the
 last packs go unread (v2's corpus fell 172 packs short). Compare it with v2 by evaluations; its build, launch and
 status are in the same README. `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml` (+ `.env`) is v3 trained again
-with only its peak learning rate changed, 5e-6 to 5e-5 (Kyle, 2026-10-10, approved above the research log's 1e-5
-full-SFT ceiling), and `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` the same at 3.5e-5, run from scratch
+with only its peak learning rate changed, 5e-6 to 5e-5 (Kyle, 2026-10-10), and
+`nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` the same at 3.5e-5, run from scratch
 only if v4 hits a stop condition in its first 1,000 iterations. Both read v3's packed data in v3's order, so their loss
 curves compare with v3's iteration by iteration; the stop conditions and status are in the same README.
 `nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml` (+ `.env`) is v4 with only its warm start changed, to NVIDIA's

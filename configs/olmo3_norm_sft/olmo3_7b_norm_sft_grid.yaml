@@ -10,7 +10,7 @@
 # launch_width and code_identity blocks below are those of olmo3_7b_dolci_sft.yaml, so this run and the Dolci run
 # differ in their data and not in their width or code.
 #
-# The 5e-5 learning rate is on the full-SFT exception list in docs/isambard/repository-map.md (Kyle, 2026-11-03).
+# The learning rate is 5e-5 (Kyle, 2026-11-03).
 base_config: olmo3_7b_norm_sft.yaml
 checkpoint:
   load: /projects/a5k/public/checkpoints/megatron/metagaming_filtering/olmo3_7b_norm_sft_grid

@@ -12,7 +12,7 @@
 # THE SAVES. The trainer keeps the 2 most recent. The final save is the run's model. The save before it is kept so that
 # a failed last save loses one save interval at most.
 #
-# The 5e-5 learning rate is on the full-SFT exception list in docs/isambard/repository-map.md (Kyle, 2026-11-10).
+# The learning rate is 5e-5 (Kyle, 2026-11-10).
 base_config: ../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml
 dataset:
   dataset_name: allenai/Dolci-Think-SFT-7B

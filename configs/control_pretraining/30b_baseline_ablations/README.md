@@ -424,8 +424,7 @@ after a 10% warmup), optimizer settings, topology, levers, checkpoint cadence an
 fields that differ must be exactly `optimizer.lr` and the run identity (the `_v4` suffix), and the `.env` must equal
 v3's. Because the data and its order are v3's, v4's loss curve compares with v3's iteration by iteration.
 
-5e-5 is above the 1e-5 ceiling `docs/investigations/research-log.md` set for full SFT; Kyle approved crossing it for
-this run. The choice and its evidence are in
+The choice of 5e-5 and its evidence are in
 `/projects/a5k/public/logs/control_pretraining/sft_v4_build/record/v4_run/outputs/v4_lr_memo.md`.
 
 **The fallback**, `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` (+ `.env`), is the same run at peak

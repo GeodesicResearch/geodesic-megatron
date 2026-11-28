@@ -21,5 +21,5 @@ and with what coverage: [the v3
 card](https://huggingface.co/geodesic-research/control-pretraining-30b-baseline-xl50b-v3-think) and [the dataset
 card](https://huggingface.co/datasets/geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered).
 
-The 5e-5 peak is above the 1e-5 ceiling this campaign had set for full SFT; it was approved for this run. The ceiling
-rested on a NaN at peak 8e-5 with context parallelism, early in its warmup; this run uses none (CP=1).
+An earlier run at peak 8e-5 with context parallelism (CP=2) produced a NaN early in its warmup. This run uses no
+context parallelism (CP=1).
