@@ -24,6 +24,9 @@ from tests.unit_tests.goldens import (
 )
 
 
+pytestmark = pytest.mark.cpu
+
+
 def test_a_golden_is_recorded_under_update_goldens_and_compared_otherwise(tmp_path, monkeypatch):
     golden = tmp_path / "area" / "case.json"
     monkeypatch.setenv("UPDATE_GOLDENS", "1")

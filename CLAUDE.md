@@ -46,6 +46,7 @@ Top-level scripts are named `pipeline_<name>_<action>`. Each has a thin `_submit
 bash pipeline_env_setup.sh                                                        # one-time environment setup
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch <config.yaml> <model> <mode>
 ./pipeline_env_exec.sh "bash $PWD/scripts/run_unit_tests.sh"                      # unit tests, in the container
+bash scripts/run_cpu_tests.sh                                                     # the `cpu` unit tests, with no container
 ./pipeline_cluster_submit.sh --nodes=8 --time=00:30:00 pipeline_training_submit.sbatch <config.yaml> <model> <mode>  # Verda
 ./pipeline_cluster_submit.sh --time=01:00:00 scripts/run_unit_tests.sbatch        # unit tests on Verda, as a job
 uv run ruff check --fix . && uv run ruff format .

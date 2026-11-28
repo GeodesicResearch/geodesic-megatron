@@ -47,6 +47,9 @@ from tests.unit_tests.corpora_fixtures import importable
 from tests.unit_tests.filesystem_races import strike_at
 
 
+pytestmark = pytest.mark.cpu
+
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOL_DIR = _REPO_ROOT / "scripts" / "hub"
 importable(_TOOL_DIR)

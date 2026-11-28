@@ -27,6 +27,11 @@ and why this asserts on the flag rather than on the exit path.
 import os
 import re
 
+import pytest
+
+
+pytestmark = pytest.mark.cpu
+
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LAUNCHER = os.path.join(REPO_ROOT, "pipeline_training_launch.sh")

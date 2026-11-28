@@ -20,6 +20,9 @@ import pytest
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status, unusable_spec_status
 
 
+pytestmark = pytest.mark.cpu
+
+
 @pytest.mark.parametrize(
     "outcomes, status",
     [

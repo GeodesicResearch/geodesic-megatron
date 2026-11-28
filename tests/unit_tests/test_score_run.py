@@ -35,6 +35,9 @@ from tests.unit_tests.training_log_fixture import (
 )
 
 
+pytestmark = pytest.mark.cpu
+
+
 BASELINE_CONFIG = (
     REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline" / "nemotron_nano_30b_baseline_pretrain.yaml"
 )

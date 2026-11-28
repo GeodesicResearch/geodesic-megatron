@@ -13,6 +13,8 @@
 #     and megatron.core at collection time, and neither exists on the host any
 #     more. They run inside the Apptainer container — the repo's only execution
 #     environment — via ./pipeline_env_exec.sh. See docs/environment.md.
+#     The CPU tier is the exception: scripts/run_cpu_tests.sh runs the tests
+#     marked `cpu` on a host (docs/isambard/development.md, Testing).
 # ==============================================================================
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

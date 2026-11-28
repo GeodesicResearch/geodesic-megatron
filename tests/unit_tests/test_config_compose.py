@@ -40,6 +40,9 @@ from scripts.training.config_compose import (
 )
 
 
+pytestmark = pytest.mark.cpu
+
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASELINE = REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline" / "nemotron_nano_30b_baseline_pretrain.yaml"
 

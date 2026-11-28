@@ -16,6 +16,9 @@ from scripts.data import pack_sft_dataset
 from scripts.data.file_digest import file_sha256
 
 
+pytestmark = pytest.mark.cpu
+
+
 SHARD_LINES = (5, 3, 4)  # three shards of a 12-line mix: starts 0, 5 and 8
 
 

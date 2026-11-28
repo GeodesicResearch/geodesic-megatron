@@ -6,9 +6,13 @@ Reading a block, its record and the command line are exercised through both bloc
 (``test_code_identity.py``, ``test_launch_width.py``); this module tests what neither does on its own.
 """
 
+import pytest
 from scripts.training.code_identity import CODE_IDENTITY_KEY
 from scripts.training.launch_blocks import LAUNCH_BLOCK_KEYS, pop_launch_blocks
 from scripts.training.launch_width import LAUNCH_WIDTH_KEY
+
+
+pytestmark = pytest.mark.cpu
 
 
 def test_the_launch_blocks_are_the_code_identity_and_the_launch_width():

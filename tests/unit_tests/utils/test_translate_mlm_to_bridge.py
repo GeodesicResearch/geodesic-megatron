@@ -21,6 +21,9 @@ from typing import Any
 import pytest
 
 
+pytestmark = pytest.mark.cpu
+
+
 # ---------------------------------------------------------------------------
 #  Load the standalone script as a module (it is not an installed package)
 # ---------------------------------------------------------------------------

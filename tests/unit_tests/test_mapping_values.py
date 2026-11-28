@@ -9,6 +9,9 @@ import pytest
 from scripts.mapping_values import require_absolute_path, require_bool, require_int, require_number, require_string
 
 
+pytestmark = pytest.mark.cpu
+
+
 class SpecError(Exception):
     """A tool's own error type, which the checks raise in place of ValueError when given it."""
 

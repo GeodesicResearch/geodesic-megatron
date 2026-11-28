@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 
 
+pytestmark = pytest.mark.cpu
+
+
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "data" / "pack_sft_dataset.py"
 DEFAULT_KWARGS = {"chat": True, "use_hf_tokenizer_chat_template": True, "answer_only_loss": True}
 EXCLUSIONS = {"path": "/data/excluded_rows.jsonl", "shard_index": 3, "count": 2, "sha256": "ab" * 32}

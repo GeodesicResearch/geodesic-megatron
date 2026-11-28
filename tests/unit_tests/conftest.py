@@ -169,8 +169,15 @@ def pytest_runtest_teardown(item, nextitem):
         )
 
 
-import torch
-from megatron.core.msc_utils import MultiStorageClientFeature
+# The CPU tier runs the files that use the `cpu` marker on a host without torch and megatron.core.
+# scripts/run_cpu_tests.sh starts that run and sets UNIT_TESTS_CPU_TIER=1. With the variable set, this file skips both
+# imports, and each fixture below that needs them returns early. Inside the container the variable is unset.
+CPU_TIER_ENV = "UNIT_TESTS_CPU_TIER"
+CPU_TIER = os.environ.get(CPU_TIER_ENV) == "1"
+
+if not CPU_TIER:
+    import torch
+    from megatron.core.msc_utils import MultiStorageClientFeature
 
 
 logging.basicConfig(level=logging.INFO)
@@ -213,6 +220,8 @@ def cleanup_local_folder():
 @pytest.fixture(scope="function", autouse=True)
 def disable_msc():
     """Disable MSC for the tests."""
+    if CPU_TIER:
+        return  # MSC belongs to megatron.core, which the CPU tier does not install
     MultiStorageClientFeature.disable()
 
 
@@ -235,13 +244,16 @@ def check_gpu_requirements(request):
     """Fixture to skip tests that require GPU when CUDA is not available"""
     marker = request.node.get_closest_marker("run_only_on")
     if marker and "gpu" in [arg.lower() for arg in marker.args]:
-        if not torch.cuda.is_available():
+        if CPU_TIER or not torch.cuda.is_available():
             pytest.skip("Test requires GPU but CUDA is not available")
 
 
 @pytest.fixture(autouse=True)
 def clear_lru_cache():
     """Clear LRU cache before each test to ensure test isolation."""
+    if CPU_TIER:
+        yield  # megatron.bridge needs torch to import, so these caches stay empty in the CPU tier
+        return
     # Import the functions that use @lru_cache
     from megatron.bridge.training.utils.checkpoint_utils import read_run_config, read_train_state
 
@@ -313,7 +325,8 @@ def prepare_module():
 
 
 def pytest_sessionfinish(session, exitstatus):
-    if exitstatus == 5:
+    # The CPU tier selects its tests by marker, so a run that collects no test stays a failure there.
+    if exitstatus == 5 and not CPU_TIER:
         session.exitstatus = 0
 
 

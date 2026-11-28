@@ -253,6 +253,7 @@ markers = [
     # blocks every python-staging commit via the pytest pre-commit hook.
     "timeout: upstream marker, inert without the pytest-timeout plugin",
     "internal: upstream marker (qwen_vl tests), inert here",
+    "cpu: marks a test that passes on a host with no GPU, no container, no torch and no megatron.core (scripts/run_cpu_tests.sh runs these)",
 ]
 
 [tool.coverage.run]

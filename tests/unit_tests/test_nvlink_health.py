@@ -27,6 +27,9 @@ import pytest
 from scripts.training.nvlink_health import active_links_per_gpu, main, node_problem
 
 
+pytestmark = pytest.mark.cpu
+
+
 HEALTHY = (Path(__file__).parent / "fixtures" / "nvlink_health" / "gh200_healthy.txt").read_text()
 DEAD_GPU_MESSAGE = "\t Unable to retrieve NVLink information as all links are inActive"
 

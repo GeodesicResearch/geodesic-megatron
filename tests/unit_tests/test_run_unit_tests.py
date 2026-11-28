@@ -27,12 +27,10 @@ whole process group is killed if it outlives its timeout.
 
 import json
 import os
-import stat
-import sys
 
 import pytest
 
-from tests.unit_tests.stubbed_shell import run_in_own_session, stubbed_shell_env
+from tests.unit_tests.stubbed_shell import run_in_own_session, stubbed_shell_env, write_python_stub
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -71,12 +69,6 @@ os.execv(sys.executable, [sys.executable, *args])
 """
 
 
-def _stub(bindir, name, body):
-    stub = bindir / name
-    stub.write_text(f"#!{sys.executable} -I\n{body}")
-    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
-
-
 def _pytest_calls(path):
     """Each recorded pytest invocation as (inherited pinning value, inherited startup hooks, argument list)."""
     if not path.exists():
@@ -92,8 +84,8 @@ def _option(args, name):
 def run_script(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    _stub(bindir, "nvidia-smi", _NVIDIA_SMI)
-    _stub(bindir, "python", _PYTHON)
+    write_python_stub(bindir, "nvidia-smi", _NVIDIA_SMI)
+    write_python_stub(bindir, "python", _PYTHON)
     calls = tmp_path / "pytest_calls"
 
     def run(compute_modes, gpus, holders="", holders_exit=0, pytest_exit=0, inherited_pin=None, inherited_env=None):

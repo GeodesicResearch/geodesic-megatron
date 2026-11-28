@@ -22,6 +22,9 @@ import pytest
 from scripts.telemetry.code_revision import code_revision
 
 
+pytestmark = pytest.mark.cpu
+
+
 def test_resolves_direct_ref(tmp_path):
     # Real on-disk .git layout (loose ref), no git binary involved by design.
     git = tmp_path / ".git"

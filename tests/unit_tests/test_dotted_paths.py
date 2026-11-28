@@ -2,7 +2,11 @@
 # Licensed under the Apache License, Version 2.0.
 """scripts/dotted_paths.py: a nested mapping as its leaves by dotted path."""
 
+import pytest
 from scripts.dotted_paths import dotted_leaves
+
+
+pytestmark = pytest.mark.cpu
 
 
 def test_nested_keys_become_dotted_paths_and_a_list_stays_one_value():

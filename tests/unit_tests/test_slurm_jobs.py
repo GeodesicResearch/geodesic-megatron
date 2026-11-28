@@ -28,6 +28,9 @@ from pathlib import Path
 import pytest
 
 
+pytestmark = pytest.mark.cpu
+
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import slurm_jobs  # noqa: E402
 
