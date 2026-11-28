@@ -51,7 +51,10 @@ it ends.
 
 1. A `prepare` job exports `training.jsonl` from the mix's prepare config, without the pack.
 2. `shard_jsonl_corpus.sh` splits the JSONL into 16 shard roots and checks their bytes.
-3. One pack job per shard writes the shard's parquet.
+3. One pack job per shard writes the shard's parquet. The last argument is the multiple each document is padded to,
+   a multiple of twice the context parallelism of the run that reads the pack. Nano and Super read a pack padded to
+   4. Ultra runs at context parallelism 4 and needs a pack padded to 8
+   (`configs/control_pretraining/30b_baseline_verda/README.md`, "Storage").
 
 ```bash
 ROOT=/shared/geodesic/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix__default
@@ -65,7 +68,8 @@ for shard in $(seq 0 15); do
 done
 ```
 
-The packer skips a shard whose parquet exists with the same settings, so the loop is safe to repeat.
+The packer skips a shard whose parquet exists with the same settings, so the loop is safe to repeat. Four pack jobs
+share a node when each asks for 8 CPUs (`--cpus-per-task=8`).
 
 ## Job sizes
 

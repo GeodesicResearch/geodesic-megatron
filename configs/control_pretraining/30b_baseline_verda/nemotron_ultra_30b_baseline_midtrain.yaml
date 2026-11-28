@@ -1,0 +1,63 @@
+# Stage 2 of the 30B baseline on Verda, trained on Nemotron 3 Ultra (550B-A55B). A launch gives the
+# model argument ultra, and the launcher merges the base onto the Ultra recipe.
+# README.md gives the launch commands. The launcher settings are in the .env beside this file.
+# The pretrain config beside this file gives the node count.
+
+base_config: ../30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+base_config_relocate: ../../clusters/verda_from_isambard.yaml
+
+mixed_precision: bf16_with_mxfp8_mixed_bf16_grad_reduce  # nemotron_super_30b_baseline_pretrain.yaml gives the reason.
+
+dataset:
+  bin_idx_read:  # nemotron_nano_30b_baseline_pretrain.yaml gives the reason for plain reads.
+    mmap_bin_files: false
+    create_attention_mask: false
+    num_workers: 8
+
+train:
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+comm_overlap: null  # nemotron_super_30b_baseline_pretrain.yaml gives the reason.
+
+ddp:  # The pretrain config beside this file gives the reason.
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+  bucket_size: 500000000
+
+model:
+  # The pretrain config beside this file gives the reasons for the parallelism, the layer split, the experts and
+  # the recompute.
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 8
+  expert_model_parallel_size: 8
+  hybrid_layer_pattern: "MEMEMEM*EMEME|M*EMEMEMEM*EME|MEMEM*EMEMEM*EM|EMEMEM*EMEMEME|M*EMEMEM*EMEMEM|EM*EMEMEMEM*EM|EMEM*EMEMEMEM|*EMEMEMEME"
+  mtp_num_layers: null
+  overlap_moe_expert_parallel_comm: false
+  moe_experts_impl: te_grouped
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  moe_router_fusion: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: te
+  recompute_granularity: selective
+  recompute_method: null
+  recompute_num_layers: null
+  recompute_modules: ["moe"]
+  # At 32,768 tokens the activations of a whole sequence do not fit a stage. Split four ways they do. Split two
+  # ways they run out of memory.
+  context_parallel_size: 4
+  # Graph capture cannot hold TE's ring attention at context parallelism 4
+  # (docs/investigations/verda-support-report.md, "Ultra").
+  cuda_graph_impl: none
+
+checkpoint:
+  # The last checkpoint of the Ultra stage-1 run, as the base chains its stages.
+  pretrained_checkpoint: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_ultra_pretrain
+  # nemotron_super_30b_baseline_pretrain.yaml gives the reason for Kyle's root.
+  load: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_ultra_midtrain
+  save: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_ultra_midtrain
+
+logger:
+  wandb_exp_name: control_pretrain_30b_baseline_verda_ultra_midtrain

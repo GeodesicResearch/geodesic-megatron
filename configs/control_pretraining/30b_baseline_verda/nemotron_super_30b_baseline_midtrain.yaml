@@ -45,9 +45,8 @@ model:
   recompute_modules: ["moe"]
 
 checkpoint:
-  # Base-Chat-Init (README.md). Every corpus of this stage holds tokens whose Base embedding row is zero. From the
-  # Base release itself, the first backward pass gives an Inf gradient norm.
-  pretrained_checkpoint: /shared/geodesic/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  # The last checkpoint of the Super stage-1 run, as the base chains its stages.
+  pretrained_checkpoint: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_pretrain
   # The pretrain config beside this file gives the reason for Kyle's root.
   load: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_midtrain
   save: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_midtrain
