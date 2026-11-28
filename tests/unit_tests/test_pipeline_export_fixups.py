@@ -18,6 +18,7 @@ output on the same real release files (tests/unit_tests/hf_export_fixtures.py).
 """
 
 import json
+import shutil
 
 import pytest
 from transformers import NemotronHConfig
@@ -509,3 +510,264 @@ def test_a_reference_generation_config_is_the_releases_file_with_the_modes_decod
         reference_files=[GENERATION_CONFIG],
     )
     assert (export / GENERATION_CONFIG).read_text() == generation_config_text(release_text, reasoning)
+
+
+# --- a local training tokenizer folder: its files and its token ids, not the release's -------------------------------
+
+#: A tiny tokenizer with ids that differ from Nemotron's (bos 1, eos 2, pad 0, <|im_end|> 11).
+LOCAL_IDS = {"<|endoftext|>": 7, "<|im_start|>": 8, "<|im_end|>": 9, "<|pad|>": 10}
+LOCAL_TEMPLATE = "{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}"
+
+
+def _local_tokenizer(
+    root,
+    *,
+    template: str | None = None,
+    embedded_template: str | None = None,
+    special_tokens_map: bool = True,
+    tokens: dict | None = None,
+):
+    """A tokenizer folder as a training run names it: tokenizer.json, tokenizer_config.json and, as asked,
+    special_tokens_map.json and chat_template.jinja. ``tokens`` replaces the bos, eos and pad entries."""
+    root.mkdir(parents=True)
+    added = [{"id": i, "content": text, "special": True} for text, i in LOCAL_IDS.items()]
+    tokenizer = {"version": "1.0", "added_tokens": added, "model": {"type": "BPE", "vocab": {"a": 0, "b": 1}}}
+    (root / "tokenizer.json").write_text(json.dumps(tokenizer, indent=2) + "\n")
+    tc = {
+        "added_tokens_decoder": {str(i): {"content": text, "special": True} for text, i in LOCAL_IDS.items()},
+        "bos_token": "<|endoftext|>",
+        "eos_token": {"content": "<|endoftext|>", "special": True},
+        "pad_token": "<|pad|>",
+        "model_max_length": 65536,
+        "tokenizer_class": "GPT2Tokenizer",
+    }
+    tc.update(tokens or {})
+    if embedded_template is not None:
+        tc["chat_template"] = embedded_template
+    (root / "tokenizer_config.json").write_text(json.dumps(tc, indent=2) + "\n")
+    if special_tokens_map:
+        (root / "special_tokens_map.json").write_text('{"eos_token": "<|endoftext|>", "pad_token": "<|pad|>"}\n')
+    if template is not None:
+        (root / "chat_template.jinja").write_text(template)
+    return root
+
+
+def _release_export(path, release: str = "release_nano_base"):
+    """An export as the bridge saves it: the files of the release, and the weights of the checkpoint."""
+    shutil.copytree(INPUTS / release, path)
+    write_weights(path, 131072)
+    return path
+
+
+def _export_files(export) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in sorted(export.iterdir())}
+
+
+def _ids(export, name: str) -> tuple:
+    data = json.loads((export / name).read_text())
+    return data["bos_token_id"], data["eos_token_id"], data["pad_token_id"]
+
+
+def _fix(export, tokenizer, hf_model_id: str = NANO_BASE, reasoning: bool = False) -> None:
+    fixup_hf_output(
+        export,
+        hf_model_id,
+        reasoning=reasoning,
+        training_tokenizer_id=str(tokenizer) if tokenizer is not None else None,
+        end_of_turn_id=LOCAL_IDS["<|im_end|>"],
+    )
+
+
+def test_a_local_tokenizer_folder_gives_the_export_its_files_and_its_ids(hf_home, tmp_path):
+    """The folder has no template, and the release's template names the tokens of another vocabulary: the export
+    gets no template, even with the instruct release cached, and so no end-of-turn id joins the eos ids."""
+    cache_repo(hf_home, NANO, [(SNAPSHOT_A, INPUTS / "release_nano")], SNAPSHOT_A)
+    tokenizer = _local_tokenizer(tmp_path / "tok")
+    export = _release_export(tmp_path / "export")
+    _fix(export, tokenizer)
+    for name in ("tokenizer.json", "special_tokens_map.json"):
+        assert (export / name).read_bytes() == (tokenizer / name).read_bytes(), name
+    tc = json.loads((export / "tokenizer_config.json").read_text())
+    expected = json.loads((tokenizer / "tokenizer_config.json").read_text())
+    assert tc == {**expected, "tokenizer_class": "PreTrainedTokenizerFast"}
+    assert not (export / "chat_template.jinja").exists()
+    assert _ids(export, "config.json") == (7, 7, 10)
+    assert _ids(export, "generation_config.json") == (7, 7, 10)
+    assert not list(export.glob("*.converter_bak"))
+
+
+def test_a_local_folder_with_the_releases_vocabulary_and_no_template_gets_the_releases_template(hf_home, tmp_path):
+    """A local copy of the release's tokenizer keeps the graft that an export of the release gets."""
+    cache_repo(hf_home, NANO, [(SNAPSHOT_A, INPUTS / "release_nano")], SNAPSHOT_A)
+    export = _release_export(tmp_path / "export")
+    tokenizer = tmp_path / "tok"
+    tokenizer.mkdir()
+    shutil.copyfile(export / "tokenizer.json", tokenizer / "tokenizer.json")
+    shutil.copyfile(INPUTS / "release_nano_base" / "tokenizer_config.json", tokenizer / "tokenizer_config.json")
+    _fix(export, tokenizer, reasoning=True)
+    release_template = (INPUTS / "release_nano" / "chat_template.jinja").read_text()
+    grafted = set_enable_thinking_default(release_template, True, 0)[0]
+    assert (export / "chat_template.jinja").read_text() == grafted
+    assert json.loads((export / "tokenizer_config.json").read_text())["chat_template"] == grafted
+
+
+def test_a_reasoning_export_of_a_local_folder_without_a_template_is_refused_and_the_export_is_untouched(
+    hf_home, tmp_path
+):
+    cache_repo(hf_home, NANO, [(SNAPSHOT_A, INPUTS / "release_nano")], SNAPSHOT_A)
+    tokenizer = _local_tokenizer(tmp_path / "tok")
+    export = _release_export(tmp_path / "export")
+    before = _export_files(export)
+    with pytest.raises(ValueError, match="reasoning export"):
+        _fix(export, tokenizer, reasoning=True)
+    assert _export_files(export) == before
+
+
+@pytest.mark.parametrize("end_of_turn_id", [IM_END_TOKEN_ID, 8])
+def test_an_end_of_turn_id_that_is_not_the_local_im_end_is_refused_and_the_export_is_untouched(
+    hf_home, tmp_path, end_of_turn_id
+):
+    """Nemotron's default id 11 names another token, or none, in another vocabulary."""
+    tokenizer = _local_tokenizer(tmp_path / "tok", template=LOCAL_TEMPLATE)
+    export = _release_export(tmp_path / "export")
+    before = _export_files(export)
+    with pytest.raises(ValueError, match="<\\|im_end\\|>"):
+        fixup_hf_output(export, NANO_BASE, training_tokenizer_id=str(tokenizer), end_of_turn_id=end_of_turn_id)
+    assert _export_files(export) == before
+
+
+def test_an_end_of_turn_id_outside_a_local_tokenizer_without_im_end_is_refused(hf_home, tmp_path):
+    tokenizer = _local_tokenizer(tmp_path / "tok", template="{{ messages[0]['content'] }}<|pad|>")
+    data = json.loads((tokenizer / "tokenizer.json").read_text())
+    data["added_tokens"] = [entry for entry in data["added_tokens"] if entry["content"] != "<|im_end|>"]
+    (tokenizer / "tokenizer.json").write_text(json.dumps(data))
+    export = _release_export(tmp_path / "export")
+    before = _export_files(export)
+    with pytest.raises(ValueError, match="end_of_turn_id 9"):
+        _fix(export, tokenizer)
+    assert _export_files(export) == before
+    fixup_hf_output(export, NANO_BASE, training_tokenizer_id=str(tokenizer), end_of_turn_id=10)
+    assert _ids(export, "generation_config.json") == (7, [7, 10], 10)
+
+
+def test_a_reference_tokenizer_file_with_a_local_folder_is_refused_and_the_export_is_untouched(hf_home, tmp_path):
+    """The release's copy would replace the folder's, last of all the fixes."""
+    tokenizer = _local_tokenizer(tmp_path / "tok")
+    export = _release_export(tmp_path / "export")
+    before = _export_files(export)
+    with pytest.raises(ValueError, match="tokenizer.json"):
+        fixup_hf_output(
+            export,
+            NANO_BASE,
+            training_tokenizer_id=str(tokenizer),
+            end_of_turn_id=LOCAL_IDS["<|im_end|>"],
+            reference_files=["tokenizer.json"],
+        )
+    assert _export_files(export) == before
+
+
+def test_a_dangling_link_in_a_local_folder_is_refused_and_the_export_is_untouched(hf_home, tmp_path):
+    tokenizer = _local_tokenizer(tmp_path / "tok")
+    (tokenizer / "special_tokens_map.json").unlink()
+    (tokenizer / "special_tokens_map.json").symlink_to(tmp_path / "gone.json")
+    export = _release_export(tmp_path / "export")
+    before = _export_files(export)
+    with pytest.raises(FileNotFoundError, match="special_tokens_map.json"):
+        _fix(export, tokenizer)
+    assert _export_files(export) == before
+
+
+def test_the_other_tokenizer_files_of_an_export_are_the_local_folders_or_none(hf_home, tmp_path):
+    """A vocabulary file of the release that the folder lacks goes, and one the folder has is copied."""
+    tokenizer = _local_tokenizer(tmp_path / "tok")
+    (tokenizer / "vocab.json").write_text('{"a": 0}\n')
+    (tokenizer / "merges.txt").write_text("#version: 0.2\n")
+    export = _release_export(tmp_path / "export")
+    for name in ("added_tokens.json", "tokenizer.model", "vocab.json"):
+        (export / name).write_text("the release's\n")
+    _fix(export, tokenizer)
+    assert not (export / "added_tokens.json").exists() and not (export / "tokenizer.model").exists()
+    for name in ("vocab.json", "merges.txt"):
+        assert (export / name).read_bytes() == (tokenizer / name).read_bytes()
+
+
+def test_the_template_of_a_local_tokenizer_folder_is_the_exports(hf_home, tmp_path):
+    """The release's own chat_template.jinja in the export goes, and no graft replaces the folder's template."""
+    cache_repo(hf_home, NANO, [(SNAPSHOT_A, INPUTS / "release_nano")], SNAPSHOT_A)
+    tokenizer = _local_tokenizer(tmp_path / "tok", template=LOCAL_TEMPLATE)
+    export = _release_export(tmp_path / "export", "release_nano")
+    _fix(export, tokenizer, hf_model_id=NANO)
+    assert (export / "chat_template.jinja").read_text() == LOCAL_TEMPLATE
+    assert json.loads((export / "tokenizer_config.json").read_text())["chat_template"] == LOCAL_TEMPLATE
+    assert (export / "tokenizer.json").read_bytes() == (tokenizer / "tokenizer.json").read_bytes()
+
+
+def test_a_template_only_embedded_in_the_local_folder_replaces_the_releases_template_file(hf_home, tmp_path):
+    tokenizer = _local_tokenizer(tmp_path / "tok", embedded_template=LOCAL_TEMPLATE)
+    export = _release_export(tmp_path / "export", "release_nano")
+    _fix(export, tokenizer, hf_model_id=NANO)
+    assert (export / "chat_template.jinja").read_text() == LOCAL_TEMPLATE
+    assert json.loads((export / "tokenizer_config.json").read_text())["chat_template"] == LOCAL_TEMPLATE
+
+
+def test_a_local_folder_whose_template_renders_as_the_releases_keeps_its_own_tokenizer(hf_home, tmp_path):
+    """The adoption of the release's inference files is for a model with the release's vocabulary only."""
+    cache_repo(hf_home, NANO, [(SNAPSHOT_A, INPUTS / "release_nano")], SNAPSHOT_A)
+    release_template = (INPUTS / "release_nano" / "chat_template.jinja").read_text()
+    tokenizer = _local_tokenizer(tmp_path / "tok", template=release_template)
+    export = _release_export(tmp_path / "export", "release_nano")
+    _fix(export, tokenizer, hf_model_id=NANO, reasoning=True)
+    assert (export / "tokenizer.json").read_bytes() == (tokenizer / "tokenizer.json").read_bytes()
+    assert (export / "special_tokens_map.json").read_bytes() == (tokenizer / "special_tokens_map.json").read_bytes()
+    assert _ids(export, "generation_config.json") == (7, [7, 9], 10)
+
+
+def test_a_local_folder_without_a_special_tokens_map_leaves_the_export_without_the_releases(hf_home, tmp_path):
+    tokenizer = _local_tokenizer(tmp_path / "tok", special_tokens_map=False)
+    export = _release_export(tmp_path / "export")
+    assert (export / "special_tokens_map.json").exists()
+    _fix(export, tokenizer)
+    assert not (export / "special_tokens_map.json").exists()
+
+
+def test_a_special_token_the_local_tokenizer_lacks_gives_a_null_id(hf_home, tmp_path):
+    """No bos_token at all, and a pad_token that is no token of tokenizer.json."""
+    tokenizer = _local_tokenizer(tmp_path / "tok", tokens={"bos_token": None, "pad_token": "<|absent|>"})
+    export = _release_export(tmp_path / "export")
+    _fix(export, tokenizer)
+    assert _ids(export, "config.json") == (None, 7, None)
+    assert _ids(export, "generation_config.json")[0::2] == (None, None)
+
+
+@pytest.mark.parametrize("missing", ["tokenizer.json", "tokenizer_config.json"])
+def test_a_local_folder_without_a_required_file_is_refused_naming_it_and_the_export_is_untouched(
+    hf_home, tmp_path, missing
+):
+    tokenizer = _local_tokenizer(tmp_path / "tok")
+    (tokenizer / missing).unlink()
+    export = _release_export(tmp_path / "export")
+    before = _export_files(export)
+    with pytest.raises(FileNotFoundError, match=missing):
+        _fix(export, tokenizer)
+    assert _export_files(export) == before
+
+
+def test_a_local_folder_with_a_file_that_is_no_json_is_refused_and_the_export_is_untouched(hf_home, tmp_path):
+    tokenizer = _local_tokenizer(tmp_path / "tok")
+    (tokenizer / "tokenizer.json").write_text("{not json")
+    export = _release_export(tmp_path / "export")
+    before = _export_files(export)
+    with pytest.raises(ValueError, match="tokenizer.json"):
+        _fix(export, tokenizer)
+    assert _export_files(export) == before
+
+
+def test_a_tokenizer_path_that_is_no_folder_keeps_the_release_behaviour(hf_home, tmp_path):
+    """The same files as an export that records no training tokenizer: the release's tokenizer and a graft."""
+    cache_repo(hf_home, NANO, [(SNAPSHOT_A, INPUTS / "release_nano")], SNAPSHOT_A)
+    absent = _release_export(tmp_path / "absent")
+    unrecorded = _release_export(tmp_path / "unrecorded")
+    _fix(absent, tmp_path / "no_such_folder")
+    _fix(unrecorded, None)
+    assert _export_files(absent) == _export_files(unrecorded)
+    assert (absent / "tokenizer.json").read_bytes() == (INPUTS / "release_nano_base" / "tokenizer.json").read_bytes()

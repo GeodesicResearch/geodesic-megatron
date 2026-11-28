@@ -35,7 +35,13 @@ from pipeline.export.fixups.release_files import (
     copy_release_files,
     require_release_files,
 )
-from pipeline.export.fixups.tokenizer import fix_tokenizer_config, mirror_template_file, pin_tokenizer_config_file
+from pipeline.export.fixups.tokenizer import (
+    LOCAL_TOKENIZER_FILES,
+    fix_tokenizer_config,
+    local_tokenizer_dir,
+    mirror_template_file,
+    pin_tokenizer_config_file,
+)
 
 
 def fixup_hf_output(
@@ -55,7 +61,11 @@ def fixup_hf_output(
     In order, each fix seeing the previous ones' files:
 
     1. ``fix_tokenizer_config``: tokenizer_config.json's class, and the chat template of the tokenizer the model
-       was trained with, its files copied verbatim, else a graft from the family's instruct release.
+       was trained with, its files copied verbatim, else a graft from the family's instruct release. A training
+       tokenizer that is a local folder gives every tokenizer file and the special token ids of config.json and
+       generation_config.json, and step 3 then never runs. Such a folder gets the release's template only when it has
+       none and has the release's vocabulary, so a folder of another vocabulary without a template gives an export
+       with no template.
     2. ``mirror_template_file``: an embedded-only template written to chat_template.jinja.
     3. ``adopt_release_inference_files``: with a training template that renders as the --hf-model release's, the
        release's own inference tokenizer and generation files and config.json token ids, the adopted
@@ -87,7 +97,9 @@ def fixup_hf_output(
             set and downloadable, this is the canonical source for the
             chat_template at the converted dir (preferred over grafting from
             the upstream Instruct release). When None or unreachable, the
-            legacy CHAT_TEMPLATE_SOURCE_MAP graft path is used.
+            legacy CHAT_TEMPLATE_SOURCE_MAP graft path is used. A local
+            folder (as a run that trained with another vocabulary records
+            it) is the source of every tokenizer file and token id instead.
         keep_remote_code: keep the NemotronH remote code (see ``apply_remote_code_policy``).
         remote_code_source: a directory holding the modeling files to keep.
         eos_in_config_json: put ``<|im_end|>`` into config.json's ``eos_token_id`` as well as generation_config.json's.
@@ -98,15 +110,27 @@ def fixup_hf_output(
             leaves the export as the earlier fixes made it.
 
     Raises:
-        FileNotFoundError: ``keep_remote_code`` without the modeling files, or (``adopt_release_inference_files``)
+        FileNotFoundError: a local training tokenizer folder without tokenizer.json or tokenizer_config.json or with a
+            dangling link, before any file is written, or ``keep_remote_code`` without the modeling files, or (``adopt_release_inference_files``)
             a dangling link in the release, or a config.json missing from the release or the export, or
             (``apply_generation_defaults``) a reasoning export without a generation_config.json, or
             (``copy_release_files``) a reference file that the release lacks or holds as a dangling link.
-        ValueError: a chat template that refuses every probe conversation (``templates_render_alike``), or a
+        ValueError: before any file is written, for a local training tokenizer folder: a JSON file of it that holds no
+            JSON object, a reasoning export of a folder of another vocabulary without a template, an ``end_of_turn_id``
+            that is not its ``<|im_end|>``, or a reference file that is a tokenizer file. Or a chat template
+            that refuses every probe conversation (``templates_render_alike``), or a
             reference file name that ``check_reference_file_names`` refuses.
         ValueError: an unknown block type in config.json's layers_block_type.
     """
-    training_tpl = fix_tokenizer_config(hf_path, hf_model_id, training_tokenizer_id)
+    tokenizer_dir = local_tokenizer_dir(training_tokenizer_id)
+    if tokenizer_dir is not None and (overwritten := sorted(set(reference_files) & set(LOCAL_TOKENIZER_FILES))):
+        raise ValueError(
+            f"reference files {overwritten} would replace the files of the training tokenizer folder {tokenizer_dir} "
+            f"by the release's"
+        )
+    training_tpl = fix_tokenizer_config(
+        hf_path, hf_model_id, training_tokenizer_id, reasoning=reasoning, end_of_turn_id=end_of_turn_id
+    )
     mirror_template_file(hf_path)
     # A model trained on its release's chat format (the training template renders as the release's, differing
     # only in training markup such as {% generation %}) ships the release's inference tokenizer and generation

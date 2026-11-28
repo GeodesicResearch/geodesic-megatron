@@ -17,9 +17,21 @@ The template comes from the tokenizer the model was trained with (run_config.yam
 that inference formats exactly as training did. When that tokenizer is not recorded or cannot be found, the template
 is grafted from the instruct release of the model family (``CHAT_TEMPLATE_SOURCE_MAP``).
 
+When tokenizer_model names a local folder, the model may have another vocabulary than the release: the export then
+takes every tokenizer file and the special token ids of config.json and generation_config.json from that folder
+(``copy_local_tokenizer_files``), and none from the release. The release's chat template names the release's special
+tokens, so it is grafted only for a folder with the release's vocabulary and no template of its own.
+
 Catalogue:
     TRAINING_TOKENIZER_FILES: the files copied verbatim from the training tokenizer.
     TRAINING_TOKEN_KEYS: the tokenizer_config.json token settings taken from the training tokenizer.
+    LOCAL_TOKENIZER_REQUIRED_FILES: the files a local training tokenizer folder must hold.
+    LOCAL_TOKENIZER_FILES: the tokenizer files of an export that come from a local training tokenizer folder.
+    local_tokenizer_dir: the local folder a training tokenizer id names, if any.
+    TOKEN_ID_KEYS: the config.json and generation_config.json id keys, and the tokenizer_config.json key of each.
+    local_token_ids: the special token ids of a local tokenizer, by the text tokenizer_config.json gives them.
+    copy_local_tokenizer_files: make a local training tokenizer folder's files and ids the export's, and say whether
+        it has the release's vocabulary.
     resolve_template_from_hub_id: a tokenizer repo's chat template, from the HF cache or the Hub.
     pin_tokenizer_class: pin tokenizer_config.json's class to one every consumer loads.
     pin_tokenizer_config_file: the same, applied to an export's tokenizer_config.json file.
@@ -49,6 +61,19 @@ TRAINING_TOKEN_KEYS = (
     "add_bos_token",
     "add_eos_token",
 )
+LOCAL_TOKENIZER_REQUIRED_FILES = ("tokenizer.json", "tokenizer_config.json")
+LOCAL_TOKENIZER_FILES = (
+    "tokenizer_config.json",
+    *TRAINING_TOKENIZER_FILES,
+    "added_tokens.json",
+    "tokenizer.model",
+    "vocab.json",
+    "merges.txt",
+    "vocab.txt",
+)
+IM_END_TOKEN = "<|im_end|>"
+TOKEN_ID_KEYS = {"bos_token_id": "bos_token", "eos_token_id": "eos_token", "pad_token_id": "pad_token"}
+_MODEL_CONFIG_FILES = ("config.json", "generation_config.json")
 
 
 def resolve_template_from_hub_id(hub_id: str) -> str | None:
@@ -163,6 +188,156 @@ def copy_training_tokenizer_files(hf_path: Path, training_tokenizer_id: str, tc:
         print(f"Warning: failed to copy training-tokenizer files verbatim: {_e}")
 
 
+def _read_json_file(path: Path) -> dict:
+    """The JSON object in ``path``; a file that holds no JSON object raises ValueError naming it."""
+    try:
+        value = json.loads(path.read_text())
+    except ValueError as error:
+        raise ValueError(f"{path} holds no JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} holds no JSON object")
+    return value
+
+
+def _added_tokens(tokenizer: dict) -> list[dict]:
+    """The well-formed ``added_tokens`` entries of a tokenizer.json: a dict with a text ``content`` and an int id."""
+    return [
+        entry
+        for entry in tokenizer.get("added_tokens") or []
+        if isinstance(entry, dict) and isinstance(entry.get("content"), str) and isinstance(entry.get("id"), int)
+    ]
+
+
+def _ids_by_text(tokenizer: dict) -> dict[str, int]:
+    """The id of each token text of a tokenizer.json: its vocabulary, and its added tokens over it."""
+    model = tokenizer.get("model")
+    vocab = model.get("vocab") if isinstance(model, dict) else None
+    by_text = {text: i for text, i in vocab.items() if isinstance(i, int)} if isinstance(vocab, dict) else {}
+    by_text.update({entry["content"]: entry["id"] for entry in _added_tokens(tokenizer)})
+    return by_text
+
+
+def local_tokenizer_dir(training_tokenizer_id: str | None) -> Path | None:
+    """The folder that ``training_tokenizer_id`` names, or None for a Hub id, an empty id or a path that is no
+    folder."""
+    return Path(training_tokenizer_id) if training_tokenizer_id and Path(training_tokenizer_id).is_dir() else None
+
+
+def _same_vocabulary(export_tokenizer: Path, tokenizer: dict) -> bool:
+    """Whether the export's tokenizer.json (the release's) has the model and the added tokens of ``tokenizer``."""
+    try:
+        release = json.loads(export_tokenizer.read_text())
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(release, dict)
+        and release.get("model") == tokenizer.get("model")
+        and release.get("added_tokens") == tokenizer.get("added_tokens")
+    )
+
+
+def _check_end_of_turn_id(tokenizer_dir: Path, tokenizer: dict, end_of_turn_id: int) -> None:
+    """Refuse an ``end_of_turn_id`` that is not the id of ``<|im_end|>`` of the local tokenizer, or, for a tokenizer
+    without ``<|im_end|>``, not the id of one of its special added tokens."""
+    im_end = _ids_by_text(tokenizer).get(IM_END_TOKEN)
+    if im_end is not None:
+        if end_of_turn_id != im_end:
+            raise ValueError(
+                f"end_of_turn_id {end_of_turn_id} is not the id {im_end} of {IM_END_TOKEN} in the training tokenizer "
+                f"folder {tokenizer_dir}: pass --end-of-turn-id {im_end}"
+            )
+        return
+    special = {entry["id"] for entry in _added_tokens(tokenizer) if entry.get("special")}
+    if end_of_turn_id not in special:
+        raise ValueError(
+            f"end_of_turn_id {end_of_turn_id} is no special token of the training tokenizer folder {tokenizer_dir}, "
+            f"which has no {IM_END_TOKEN}: pass the id of its end-of-turn token as --end-of-turn-id"
+        )
+
+
+def local_token_ids(tokenizer: dict, tc: dict, special_tokens_map: dict) -> dict[str, int | None]:
+    """The id of each ``TOKEN_ID_KEYS`` token in ``tokenizer`` (a tokenizer.json), keyed by the id key.
+
+    The text of each token comes from ``tc`` (its tokenizer_config.json), else from ``special_tokens_map``; a value
+    may be the text or a dict with its ``content``. The id is that of an ``added_tokens`` entry of that text, else of
+    the vocabulary. A token with no text, or a text that is no token of ``tokenizer``, gives None.
+    """
+    by_text = _ids_by_text(tokenizer)
+    ids = {}
+    for id_key, token_key in TOKEN_ID_KEYS.items():
+        value = tc[token_key] if token_key in tc else special_tokens_map.get(token_key)
+        text = value.get("content") if isinstance(value, dict) else value
+        ids[id_key] = by_text.get(text) if isinstance(text, str) else None
+    return ids
+
+
+def copy_local_tokenizer_files(
+    hf_path: Path, tokenizer_dir: Path, *, reasoning: bool = False, end_of_turn_id: int | None = None
+) -> bool:
+    """Make the tokenizer of the local folder ``tokenizer_dir`` the export's, in place of the release's; return
+    whether the folder has the release's vocabulary, so that the release's chat template may be grafted.
+
+    Copies each file of ``LOCAL_TOKENIZER_FILES`` byte for byte from the folder into ``hf_path``. A file of that list
+    that the folder lacks is removed from the export, since the export's copy is the release's. Sets
+    ``TOKEN_ID_KEYS`` in config.json and generation_config.json, where each exists, to ``local_token_ids`` of the
+    folder. Reads and checks every input before it writes a file.
+
+    The checks for a folder with another vocabulary than the release's (the export's tokenizer.json): a ``reasoning``
+    export needs the folder's own chat template, and with that template ``end_of_turn_id`` must be the id of the
+    folder's ``<|im_end|>``, or of one of its special tokens when it has none.
+
+    Raises:
+        FileNotFoundError: the folder lacks a file of ``LOCAL_TOKENIZER_REQUIRED_FILES``, or holds a dangling link.
+        ValueError: a JSON file of the folder or of the export holds no JSON object, a reasoning export of a folder
+            without a template, or a wrong ``end_of_turn_id``.
+    """
+    for name in LOCAL_TOKENIZER_REQUIRED_FILES:
+        if not (tokenizer_dir / name).is_file():
+            raise FileNotFoundError(
+                f"the training tokenizer folder {tokenizer_dir} has no {name}, so the export cannot carry the "
+                f"tokenizer the model was trained with"
+            )
+    for name in LOCAL_TOKENIZER_FILES:
+        if (tokenizer_dir / name).is_symlink() and not (tokenizer_dir / name).exists():
+            raise FileNotFoundError(f"{tokenizer_dir / name} of the training tokenizer folder is a dangling link")
+    tokenizer = _read_json_file(tokenizer_dir / "tokenizer.json")
+    tc = _read_json_file(tokenizer_dir / "tokenizer_config.json")
+    special_tokens_map_path = tokenizer_dir / "special_tokens_map.json"
+    special_tokens_map = _read_json_file(special_tokens_map_path) if special_tokens_map_path.is_file() else {}
+    ids = local_token_ids(tokenizer, tc, special_tokens_map)
+    configs = {name: _read_json_file(hf_path / name) for name in _MODEL_CONFIG_FILES if (hf_path / name).exists()}
+    same_vocabulary = _same_vocabulary(hf_path / "tokenizer.json", tokenizer)
+    has_template = (tokenizer_dir / "chat_template.jinja").is_file() or "chat_template" in tc
+    if not same_vocabulary:
+        if reasoning and not has_template:
+            raise ValueError(
+                f"a reasoning export needs the chat template the model was trained with, and the training tokenizer "
+                f"folder {tokenizer_dir} has none: the release's template names the tokens of another vocabulary"
+            )
+        if has_template and end_of_turn_id is not None:
+            _check_end_of_turn_id(tokenizer_dir, tokenizer, end_of_turn_id)
+
+    for name in LOCAL_TOKENIZER_FILES:
+        src, dst = tokenizer_dir / name, hf_path / name
+        if src.is_file():
+            shutil.copyfile(src, dst)
+            print(
+                f"Copied {name} ({src.stat().st_size} bytes) verbatim from training tokenizer folder {tokenizer_dir}"
+            )
+        elif dst.exists():
+            dst.unlink()
+            print(f"Removed the release's {name}: training tokenizer folder {tokenizer_dir} has none")
+    for name, config in configs.items():
+        if all(config.get(key) == value and key in config for key, value in ids.items()):
+            continue
+        before = {key: config.get(key) for key in ids}
+        config.update(ids)
+        with open(hf_path / name, "w") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        print(f"Set {name} token ids from training tokenizer folder {tokenizer_dir}: {before} -> {ids}")
+    return same_vocabulary
+
+
 def graft_release_template(tc: dict, hf_model_id: str) -> bool:
     """Set ``tc``'s chat_template from the cached instruct release of ``hf_model_id``'s family.
 
@@ -235,8 +410,20 @@ def apply_training_template(hf_path: Path, tc: dict, training_tpl: str, training
     return changed
 
 
-def fix_tokenizer_config(hf_path: Path, hf_model_id: str, training_tokenizer_id: str | None) -> str | None:
+def fix_tokenizer_config(
+    hf_path: Path,
+    hf_model_id: str,
+    training_tokenizer_id: str | None,
+    *,
+    reasoning: bool = False,
+    end_of_turn_id: int | None = None,
+) -> str | None:
     """Fix the export's tokenizer_config.json and set its chat template; return the training template, if found.
+
+    When ``training_tokenizer_id`` names a local folder, the export takes that folder's tokenizer files and token ids
+    (``copy_local_tokenizer_files``, with ``reasoning`` and ``end_of_turn_id`` for its checks), its class is pinned,
+    the release's template is grafted only when the folder has none and has the release's vocabulary, and the return
+    is None. Otherwise:
 
     With no tokenizer_config.json in ``hf_path`` this does nothing and returns None. Otherwise it normalises the
     tokenizer class (``pin_tokenizer_class``). If the training tokenizer's template resolves
@@ -246,6 +433,28 @@ def fix_tokenizer_config(hf_path: Path, hf_model_id: str, training_tokenizer_id:
     # Fix tokenizer_class and add chat_template to tokenizer_config.json
     tokenizer_config = hf_path / "tokenizer_config.json"
     training_tpl = None
+    if (tokenizer_dir := local_tokenizer_dir(training_tokenizer_id)) is not None:
+        # A local folder may hold another vocabulary than the release: every tokenizer file and id comes from it.
+        # The release supplies a template only when the folder has none and has the release's vocabulary, since the
+        # release's template names the release's special tokens. None is returned, so that no later fix replaces
+        # the folder's files by the release's (adopt_release_inference_files).
+        same_vocabulary = copy_local_tokenizer_files(
+            hf_path, tokenizer_dir, reasoning=reasoning, end_of_turn_id=end_of_turn_id
+        )
+        tc = json.loads(tokenizer_config.read_text())
+        changed = pin_tokenizer_class(tc)
+        if "chat_template" not in tc and not (hf_path / "chat_template.jinja").exists():
+            if same_vocabulary:
+                changed = graft_release_template(tc, hf_model_id) or changed
+            else:
+                print(
+                    f"No chat template: the training tokenizer folder {tokenizer_dir} has none, and the release's "
+                    f"template names the tokens of another vocabulary"
+                )
+        if changed:
+            with open(tokenizer_config, "w") as f:
+                json.dump(tc, f, indent=2, ensure_ascii=False)
+        return training_tpl
     if not tokenizer_config.exists():
         return training_tpl
     with open(tokenizer_config) as f:
