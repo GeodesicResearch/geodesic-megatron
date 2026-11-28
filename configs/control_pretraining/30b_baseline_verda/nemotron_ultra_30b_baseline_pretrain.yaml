@@ -1,0 +1,72 @@
+# Stage 1 of the 30B baseline on Verda, trained on Nemotron 3 Ultra (550B-A55B). A launch gives the
+# model argument ultra, and the launcher merges the base onto the Ultra recipe.
+# README.md gives the launch commands. The launcher settings are in the .env beside this file.
+# Ultra runs on 8 nodes. One replica of the model spans 64 GPUs, pipeline parallelism 8 times expert parallelism 8.
+# The GPU count must be a multiple of 64.
+
+base_config: ../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+base_config_relocate: ../../clusters/verda_from_isambard.yaml
+
+mixed_precision: bf16_with_mxfp8_mixed_bf16_grad_reduce  # nemotron_super_30b_baseline_pretrain.yaml gives the reason.
+
+dataset:
+  bin_idx_read:  # nemotron_nano_30b_baseline_pretrain.yaml gives the reason for plain reads.
+    mmap_bin_files: false
+    create_attention_mask: false
+    num_workers: 8
+
+train:
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+comm_overlap: null  # nemotron_super_30b_baseline_pretrain.yaml gives the reason.
+
+ddp:
+  overlap_grad_reduce: true
+  # Gathering the next bucket's parameters under the compute slows the step
+  # (docs/investigations/verda-support-report.md, "Ultra").
+  overlap_param_gather: false
+  bucket_size: 500000000
+
+model:
+  # The Ultra recipe's tensor parallelism of 4 is for Isambard's nodes. Eight pipeline stages and eight expert
+  # ranks hold Ultra on 64 B300s. The tensor parallelism of 1 leaves the expert all-to-all inside a node.
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 8
+  expert_model_parallel_size: 8
+  # The recipe's layer sequence, split into the eight stages. A split into equal counts leaves the last stage,
+  # which also holds the output layer and the loss, the slowest. This split gives the stages equal compute
+  # (docs/investigations/verda-support-report.md, "Ultra").
+  hybrid_layer_pattern: "MEMEMEM*EMEME|M*EMEMEMEM*EME|MEMEM*EMEMEM*EM|EMEMEM*EMEMEME|M*EMEMEM*EMEMEM|EM*EMEMEMEM*EM|EMEM*EMEMEMEM|*EMEMEMEME"
+  mtp_num_layers: null  # nemotron_super_30b_baseline_pretrain.yaml gives the reason.
+  overlap_moe_expert_parallel_comm: false  # nemotron_super_30b_baseline_pretrain.yaml gives the reason.
+  # TE's grouped experts run the routed experts in MXFP8, as the precision preset runs the dense layers. On Ultra
+  # they are faster than the base's BF16 experts on torch_grouped (docs/investigations/verda-support-report.md,
+  # "Ultra").
+  moe_experts_impl: te_grouped
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  moe_router_fusion: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: te
+  # The whole MoE layer, the lightest recompute that fits. The expert activations alone, or no recompute, run out of
+  # memory on the first stage. Recomputing the attention and the shared experts as well, as the base does, saves no
+  # memory at the peak.
+  recompute_granularity: selective
+  recompute_method: null
+  recompute_num_layers: null
+  recompute_modules: ["moe"]
+  context_parallel_size: 1
+  # The recipe's scope adds the router and the dispatch preprocessing. Megatron refuses those two under the MoE
+  # recompute. The .env beside this file sets what the graphs need.
+  cuda_graph_impl: transformer_engine
+  cuda_graph_scope: ["attn", "mamba"]
+
+checkpoint:
+  # nemotron_super_30b_baseline_pretrain.yaml gives the reason for Kyle's root.
+  load: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_ultra_pretrain
+  save: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_ultra_pretrain
+
+logger:
+  wandb_exp_name: control_pretrain_30b_baseline_verda_ultra_pretrain
