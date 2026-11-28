@@ -34,6 +34,7 @@ model:
   moe_flex_dispatcher_backend: hybridep
   # Packed batches need the unfused router on Verda's image (docs/verda/environment-pipeline.md).
   moe_router_fusion: false
+  moe_experts_impl: te_grouped  # The pretrain config beside this file gives the reason.
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8

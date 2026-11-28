@@ -66,8 +66,8 @@ ARM_STATES = {
     # The multiple the collate pads a packed batch to. The precision preset sets what it must be.
     "dataset.dataset_kwargs.pad_seq_length_to_mult",
     # How the run uses the hardware. The names cover precision, parallelism, micro-batch and recomputation. They
-    # also cover the dispatcher, the fusions, the overlaps and CUDA graphs. The rest cover host garbage collection
-    # and how the token files are read.
+    # also cover the dispatcher, the expert implementation, the fusions, the overlaps and CUDA graphs. The rest cover
+    # host garbage collection and how the token files are read.
     "mixed_precision",
     "dataset.bin_idx_read",
     "train.micro_batch_size",
@@ -87,6 +87,7 @@ ARM_STATES = {
     "model.moe_token_dispatcher_type",
     "model.moe_flex_dispatcher_backend",
     "model.moe_router_fusion",
+    "model.moe_experts_impl",
     "model.cross_entropy_loss_fusion",
     "model.cross_entropy_fusion_impl",
     "model.cross_entropy_fusion_saved_logit_chunks",
