@@ -43,8 +43,8 @@ model:
   recompute_modules: ["moe"]  # The midtrain config beside this file gives the reason.
 
 checkpoint:
-  # Base-Chat-Init (README.md).
-  pretrained_checkpoint: /shared/geodesic/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  # The last checkpoint of the Super stage-2 run (the midtrain config beside this file).
+  pretrained_checkpoint: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_midtrain
   # The pretrain config beside this file gives the reason for Kyle's root.
   load: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_sft
   save: /shared/geodesic/checkpoints_kyle/megatron/control_pretraining/control_pretrain_30b_baseline_super_sft

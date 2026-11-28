@@ -30,6 +30,10 @@ model:
   moe_token_dispatcher_type: flex
   moe_flex_dispatcher_backend: hybridep
   moe_router_fusion: true
+  # TE's grouped experts run the routed experts in MXFP8, as the precision preset runs the dense layers. The
+  # base's torch_grouped runs them in BF16. te_grouped cannot load an optimizer state that torch_grouped saved.
+  # To resume such a checkpoint, set checkpoint.load_optim=false.
+  moe_experts_impl: te_grouped
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8

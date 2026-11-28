@@ -26,8 +26,10 @@ the cluster's rules.
 import dataclasses
 import math
 from functools import partial
+from pathlib import Path
 
 import pytest
+from megatron.core.models.hybrid.hybrid_layer_allocation import Symbols, get_hybrid_total_pipeline_segment_count
 from scripts.dotted_paths import dotted_leaves
 from scripts.training.config_compose import (
     BASE_CONFIG_KEY,
@@ -41,6 +43,7 @@ from scripts.training.launcher_source import env_override_entries
 from megatron.bridge.training.config import runtime_config_update
 from megatron.bridge.training.mixed_precision import get_mixed_precision_config
 from pipeline.cluster import cluster_profile
+from pipeline.data.layout import pack_dir
 from pipeline.training import recipes
 from pipeline.training.datasets import BIN_IDX_READ_KEY, bin_idx_dataset_config
 from tests.unit_tests.campaign_config import assert_levers_are_set, flatten_merged_config, merge_onto_recipe
@@ -65,9 +68,9 @@ ARM_STATES = {
     "dataset.packed_sequence_specs.packed_train_data_path",
     # The multiple the collate pads a packed batch to. The precision preset sets what it must be.
     "dataset.dataset_kwargs.pad_seq_length_to_mult",
-    # How the run uses the hardware. The names cover precision, parallelism, micro-batch and recomputation. They
-    # also cover the dispatcher, the fusions, the overlaps and CUDA graphs. The rest cover host garbage collection
-    # and how the token files are read.
+    # How the run uses the hardware. The names cover precision, parallelism, the split of the layers over the
+    # pipeline stages, micro-batch and recomputation. They also cover the dispatcher, the expert implementation, the
+    # fusions, the overlaps and CUDA graphs. The rest cover host garbage collection and how the token files are read.
     "mixed_precision",
     "dataset.bin_idx_read",
     "train.micro_batch_size",
@@ -78,6 +81,7 @@ ARM_STATES = {
     "ddp",
     "model.tensor_model_parallel_size",
     "model.pipeline_model_parallel_size",
+    "model.hybrid_layer_pattern",
     "model.expert_model_parallel_size",
     "model.context_parallel_size",
     "model.recompute_granularity",
@@ -87,11 +91,13 @@ ARM_STATES = {
     "model.moe_token_dispatcher_type",
     "model.moe_flex_dispatcher_backend",
     "model.moe_router_fusion",
+    "model.moe_experts_impl",
     "model.cross_entropy_loss_fusion",
     "model.cross_entropy_fusion_impl",
     "model.cross_entropy_fusion_saved_logit_chunks",
     "model.overlap_moe_expert_parallel_comm",
     "model.cuda_graph_impl",
+    "model.cuda_graph_scope",
     "model.mtp_num_layers",
 }
 # The sections of a trained config that hold how a stage trains, beside its data and its model. A stage config
@@ -301,6 +307,52 @@ def test_a_packed_verda_arm_pads_its_batches_for_mxfp8(overlay, verda_user):
     multiple = cfg.dataset.dataset_kwargs.get("pad_seq_length_to_mult")
     assert multiple is not None, f"{overlay.name} leaves the pad multiple to the collate's default"
     assert multiple % (MXFP8_TOKEN_MULTIPLE * cfg.model.context_parallel_size) == 0
+
+
+@pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_a_packed_verda_arm_reads_a_pack_padded_for_its_context_parallelism(overlay, verda_user):
+    """Context parallelism splits each document of a pack into twice as many chunks as its size, so the packer must
+    pad each document to that multiple. A pack padded to less gives a NaN loss at step 2. The pack's directory names
+    its multiple, so the config must read the pack it states."""
+    cfg = _trained_config(overlay)
+    specs = getattr(cfg.dataset, "packed_sequence_specs", None)
+    if specs is None:
+        pytest.skip("the stage does not train on packed batches")
+    assert specs.pad_seq_to_mult % (2 * cfg.model.context_parallel_size) == 0, (
+        f"{overlay.name} pads each document to {specs.pad_seq_to_mult} at context parallelism "
+        f"{cfg.model.context_parallel_size}"
+    )
+    stated = pack_dir(cfg.dataset.dataset_root, cfg.tokenizer.tokenizer_model, specs.pad_seq_to_mult)
+    assert Path(specs.packed_train_data_path).parent.name == stated.name
+
+
+@pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_a_verda_arm_splits_the_recipes_layers_over_its_pipeline_stages(overlay, verda_user):
+    """A stage config can place the layers over its pipeline stages, and nothing else: without the separators its
+    pattern is the recipe's, so it trains the recipe's model. One segment per stage."""
+    model, mode = _model_and_mode(overlay)
+    cfg = _trained_config(overlay)
+    arm = cfg.model.hybrid_layer_pattern
+    recipe = recipes.RECIPE_MAP[(model, mode)](None).model.hybrid_layer_pattern
+    assert arm.replace(Symbols.PIPE, "") == recipe.replace(Symbols.PIPE, "")
+    if Symbols.PIPE in arm:
+        assert get_hybrid_total_pipeline_segment_count(arm) == cfg.model.pipeline_model_parallel_size
+
+
+@pytest.mark.parametrize("overlay", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")
+def test_a_verda_arm_warm_starts_each_stage_from_the_stage_before(overlay, verda_user):
+    """The campaign chains its stages: stage 2 warm-starts from the last checkpoint of stage 1, and stage 3 from
+    stage 2's. Stage 1 starts from random weights. The trainer checks the warm start's path only when the job
+    starts on its GPUs."""
+    stages = list(STAGE_MODES)
+    stage = overlay.stem.rsplit("_", 1)[1]
+    cfg = _trained_config(overlay)
+    if stage == stages[0]:
+        assert cfg.checkpoint.pretrained_checkpoint is None, f"{overlay.name} warm-starts stage 1"
+        return
+    before = overlay.with_name(overlay.name.replace(f"_{stage}.yaml", f"_{stages[stages.index(stage) - 1]}.yaml"))
+    assert before.exists(), f"{overlay.name} has no config for the stage before it"
+    assert cfg.checkpoint.pretrained_checkpoint == _trained_config(before).checkpoint.save
 
 
 @pytest.mark.parametrize("config", ARM_OVERLAYS, ids=lambda path: f"{path.parent.name}-{path.stem}")

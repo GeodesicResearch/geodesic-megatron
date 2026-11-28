@@ -2,8 +2,8 @@
 
 This report covers the work that runs this repository on Verda beside Isambard. Verda has 12 nodes of 8 B300 GPUs, on
 x86_64 and InfiniBand. Isambard has GH200 nodes of 4 GPUs on Slingshot. The first part of the work runs every pipeline
-on Verda. The performance study searches for system settings that meet an MFU target on 4 nodes. The runs date from
-2026-11-14 to 2026-11-16.
+on Verda. The performance study searches for system settings that meet an MFU target on 4 nodes, and on 8 for Ultra.
+The runs date from 2026-11-14 to 2026-11-26.
 
 Job ids are SLURM jobs on Verda. The log of job N is `/shared/geodesic/logs_kyle/megatron_runs/train-N.out`. Each number
 below cites the job it comes from. "Sources" at the end lists the ledgers behind each section.
@@ -17,10 +17,11 @@ below cites the job it comes from. "Sources" at the end lists the ledgers behind
 | Posture | The system settings of a run: parallelism, recompute, precision, dispatcher, fusions, overlaps and launcher settings |
 | Lever | One setting changed against a reference run. A closed lever is one the study measured or costed and did not adopt |
 | Ratio | The reference's step time over the lever's step time. A ratio above 1 means a faster step |
-| Arm | The Verda stage configs of the baseline, `configs/control_pretraining/30b_baseline_verda/` |
+| Arm | The Verda stage configs of the baseline, `configs/control_pretraining/30b_baseline_verda/`. Runs before job 2636 ran Nano's experts on `torch_grouped` |
 | Window | The steps that the scorer averages |
 | Pool A | Nodes slinky-1, slinky-2, slinky-3 and slinky-7. Long runs and the first scores ran here |
 | Pool B | Nodes slinky-8 to slinky-11. Jobs of an hour or less ran here. A pool-A equivalent is 1.0205 times a pool-B step time ("Node speed between the pools") |
+| Pool AB | Both pools, the 8 nodes of the Ultra runs |
 | TP, PP, CP, EP, DP | Tensor, pipeline, context, expert and data-parallel sizes. GBS is the global batch size |
 | HybridEP | The backend of the flex token dispatcher. Its dispatch sends tokens to their experts. Its combine returns them |
 | EP overlap | `overlap_moe_expert_parallel_comm`: one micro-batch's dispatch and combine run beside another's compute |
@@ -29,7 +30,7 @@ below cites the job it comes from. "Sources" at the end lists the ledgers behind
 | TE CUDA graphs | `model.cuda_graph_impl: transformer_engine` over the scopes attn, mamba, moe_router and moe_preprocess, warmup 3 |
 | Router fusion | `model.moe_router_fusion`: Transformer Engine's fused top-k and aux-loss kernels |
 | Receive ratio | The tokens a rank receives in one dispatch over its balanced share |
-| Base-Chat-Init | The warm start of Super's stages 2 and 3 (`configs/control_pretraining/30b_baseline_verda/README.md`, "Storage") |
+| Base-Chat-Init | The warm start of the study's screens of Super's stages 2 and 3: NVIDIA's Super Base release with the Instruct release's values in its 1,188 zero input-embedding rows (`docs/isambard/tokenizers.md`). The arm's stages start from each other, as the base's do |
 | Staged arm | The first Super stage configs, before any screen |
 | Carried | A screen's verdict when its posture is the reference of the next screens |
 | Settling rule | Routing counts as settled at the first 30-step window from step 300 on that meets three tests. The median step time is within 1% of the previous window's. The in-window fit moves under 1%. The largest per-rank receive ratio falls by under 1% |
@@ -99,11 +100,11 @@ The study held these constraints in every cell.
 
 | Constraint | Fixed value |
 |---|---|
-| Width | 4 nodes, 32 B300 GPUs, for every score |
+| Width | 4 nodes, 32 B300 GPUs, for every Nano and Super score. 8 nodes for Ultra, whose layout takes 64 GPUs |
 | Baseline | The exact data, global batch, schedule, optimizer and tokenizer of the 30B Control Pretraining baseline (`configs/control_pretraining/30b_baseline/`) |
 | Targets | At least 35% MFU for pretraining and 30% for midtraining and SFT, each in two agreeing 4-node runs. The 32,768-token cells started at 35% and moved to 30% after the Super SFT stall (job 1755) |
 | Expert parallelism | 8 in every posture, so the expert all-to-all stays inside a node |
-| Precision | The dense layers use MXFP8 only under a passing BF16 loss pair. Routed experts run in BF16. The study does not adopt NVFP4 in any cell. The study allows the BF16 scan in the 32,768-token cells, with both NaN checks on |
+| Precision | The dense layers use MXFP8 only under a passing BF16 loss pair. The routed experts need the same test. The study does not adopt NVFP4 in any cell. The study allows the BF16 scan in the 32,768-token cells, with both NaN checks on |
 | Change type | Configuration over code |
 | Software | No Megatron-LM version change. The container image is free to change. The scored runs of the old image repeat on the new one, except Ultra's |
 | Recompute | Only where memory forces it |
@@ -128,17 +129,23 @@ All runs below use NeMo 26.10.00. None had an allocator retry, a NaN step or a s
 
 | Model | Stage | Target | Jobs | Pool | s/step | MFU | Peak allocated / reserved | Final posture |
 |---|---|---|---|---|---|---|---|---|
-| Nano | Pretraining | 35% | 1829, 1830 | B | 13.377, 13.380 | 36.25%, 36.24% | 174.9 / 215.5 GB | The arm with recompute off |
-| Nano | Midtraining | 30% | 1822, 1823 | B | 14.836, 14.815 | 38.37%, 38.43% | 178.6 / 221.0 GB | The arm |
-| Nano | SFT | 30% | 1824, 1825 | B | 14.271, 14.257 | 39.89%, 39.93% | 174.5 / 216.0 GB | The arm with router fusion off |
+| Nano | Pretraining | 35% | 2649, from the weights of job 2229 at step 2981, stage 1's first 50B tokens | B | 11.912 | 40.70% | 161.3 / 195.1 GB | The arm |
+| Nano | Midtraining | 30% | 2638 | B | 13.360 | 42.61% | 165.5 / 195.7 GB | The arm |
+| Nano | SFT | 30% | 2640 | B | 13.009 | 43.76% | 162.8 / 193.9 GB | The arm |
 | Super | Pretraining | 35% | 1849, from random weights, steps 421-460 | A | 51.268 | 34.45% | 214.8 / 233.8 GiB | PP1 CP1 `[moe_act]`, TE CUDA graphs, EP overlap off |
 | Super | Pretraining, warm | 35% | 1813, warm start | A | 44.688 | 39.52% | 210.7 / 227.3 GiB | The same |
 | Super | Midtraining | 30% | 1840, 1841 | B | 55.441, 55.460 | 33.89%, 33.87%. Pool-A equivalent 33.21%, 33.19% | 227.6 / 235.2 GiB | PP2 CP1 `[moe]`, BF16 scan, router fusion on |
 | Super | SFT | 30% | 1827, 1833 | B | 57.479, 57.511 | 32.68%, 32.67% | 227.1 / 234.6 GiB | PP2 CP1 `[moe]`, BF16 scan, router fusion off |
+| Ultra | Pretraining, warm | 35% | 2665, warm start | AB | 89.302 | 43.91% | 245.5 / 248.7 GB | PP8 CP1 `[moe]`, TE CUDA graphs on attention and Mamba |
+| Ultra | Midtraining | 30% | 2679 | AB | 110.284 | 37.09% | 262.9 / 270.8 GB | PP8 CP4 `[moe]`, fp32 scan |
+| Ultra | SFT | 30% | 2672, on a 60,000-document slice of the mix padded to 8 | AB | 115.826 | 35.31% | 221.1 / 229.3 GB | PP8 CP4 `[moe]`, BF16 scan, router fusion off. Measured only: the arm has no Ultra SFT config ("Ultra") |
 
-Every Super posture runs EP8 and micro-batch 1. It runs MXFP8 dense layers with FP8 weights, BF16 experts on
+Each Nano row is one run beside a same-node reference ("MXFP8 routed experts"). Every Super posture runs EP8 and
+micro-batch 1. It runs MXFP8 dense layers with FP8 weights, BF16 experts on
 `torch_grouped` and HybridEP. Super pretraining meets 35% only warm. From random weights it has one run, whose routing
-still drifts ("Super pretraining").
+still drifts ("Super pretraining"). Every Ultra posture runs EP8, micro-batch 1, MXFP8 dense layers with FP8 weights,
+MXFP8 experts on `te_grouped` and HybridEP, warm from the Ultra Base release ("Ultra"). Ultra pretraining has no run
+from random weights.
 
 ### Nano
 
@@ -215,7 +222,7 @@ overlap.
 | 1754 | 26.04, A | P2: EP overlap off | 51.493 | 34.30% | 210.8 / 213.1 | Reference | Carried |
 | 1779 | 26.04, A | P7: P2 with permute fusion into HybridEP | 52.228 | 33.81% | 210.8 / 213.2 | 0.986x of 1754 | Closed |
 | 1801 | 26.10.00, A | P2i: P2 on the new image | 48.858 | 36.15% | 210.8 / 213.3 | 1.0539x of 1754 | Carried |
-| 1802 | 26.10.00, A | P11: MXFP8 experts through TE's grouped ops | Hung in step 1 | | | | Closed |
+| 1802 | 26.10.00, A | P11: MXFP8 experts through TE's grouped ops and op fuser | Hung in step 1 | | | | Closed. Without the op fuser, job 2647 runs at 0.654x ("MXFP8 routed experts") |
 | 1813 | 26.10.00, A | P10i: P2i with TE CUDA graphs | 44.688 | 39.52% | 210.7 / 227.3 | 1.0933x of 1801 | Carried |
 | 1819 | 26.10.00, B | P2i on pool B | 47.875 | 36.89% | 210.8 / 213.4 | Reference | |
 | 1818 | 26.10.00, B | P5i: P2i with recompute off | 47.103 | 37.49% | 247.3 / 249.1 | 1.0164x of 1819 | Closed by memory |
@@ -317,6 +324,9 @@ Runs therefore warm-start from Base-Chat-Init.
 | 1810 | 26.10.00, A | M4i with TE CUDA graphs | Fails at capture, step 4 | | | Closed at CP4 |
 | 1840 | 26.10.00, B | PP2 CP1 `[moe]`, router fusion on | 55.441, pool-A equivalent 56.58 | 33.89%, equivalent 33.21% | 227.6 / 234.1 | Carried. 1.087x of 1809 |
 | 1841 | 26.10.00, B | Repeat of 1840 | 55.460, pool-A equivalent 56.60 | 33.87%, equivalent 33.19% | 227.6 / 235.2 | Agrees |
+| 2641 | 26.10.00, A | 1840 on pool A, the reference of the next two rows | 55.429 | 33.89% | 227.6 / 234.2 | Reference |
+| 2642 | 26.10.00, A | 2641 with TE CUDA graphs on the recipe's scopes | Refused at setup | | | `[moe]` recompute refuses the router scope |
+| 2650 | 26.10.00, A | 2641 with TE CUDA graphs on attention and Mamba | 55.898 | 33.61% | 241.4 / 258.4, 123 allocator retries | Closed by memory. 0.992x of 2641 |
 
 - The 1.176x of job 1809 combines the image and the BF16 scan. The 1.087x of job 1840 uses its pool-A equivalent.
 - Graph capture fails on all 32 ranks in TE's ring-attention P2P, inside the attn scope (job 1810). The wait uses an
@@ -381,6 +391,28 @@ order over 30 steps.
 
 The gap is about 1.6 times Nano's +0.0022 (jobs 1545, 1544). It closes over the window, so the pair passes. The 30
 warm steps run in warmup, at a learning rate of 1e-4 or less. The gap at the full 1e-3 is unmeasured.
+
+### MXFP8 routed experts
+
+`model.moe_experts_impl: te_grouped` runs the routed experts through Transformer Engine's grouped GEMM. The experts
+then take the MXFP8 recipe of the dense layers. `torch_grouped` runs them in BF16. Each pair below ran on one set of
+four nodes. A repeat of the reference gives each noise floor.
+
+| Stage, jobs | Reference s/step | MXFP8 experts s/step | Ratio | Reserved GB, reference and MXFP8 | Loss, MXFP8 minus reference | Noise floor, reference repeat |
+|---|---|---|---|---|---|---|
+| Nano pretraining, 2648 and 2649 | 13.276 | 11.912 | 1.115x | 216.2, 195.1 | +0.0003 at every step | Not run |
+| Nano midtraining, 2637 and 2638 | 14.826 | 13.360 | 1.110x | 218.5, 195.7 | +0.005 in steps 1 to 5, then +0.0007 from step 11 | 0.0001 per step from step 11 (job 2651) |
+| Nano SFT, 2639 and 2640 | 14.253 | 13.009 | 1.096x | 215.3, 193.9 | Mean +0.0002, 0.0004 to 0.0009 per step | 0.0001 to 0.0006 per step (job 2652) |
+| Super midtraining, 2641 and 2643 | 55.429 | 54.404 | 1.019x | 251.5, 251.6 | -0.0017 to +0.0008 by five-step window | 0.00001 to 0.0006 per step (job 2654) |
+| Super SFT, 2644 and 2645 | 57.704 | 56.808 | 1.016x | 250.9, 251.9 | Grows to +0.0015 at steps 21 to 25 | Below 0.0002 per step (job 2653) |
+| Super pretraining, warm, 2646 and 2647 | 44.596 | 68.157 | 0.654x | 243.5, not logged | Not compared | Not run |
+
+- The Nano stage configs adopt MXFP8 experts. From step 11 on, the mean gap of each Nano stage is below the +0.0022
+  of MXFP8 dense layers against BF16 ("Nano").
+- The Super stage configs keep `torch_grouped`. Midtraining gains 1.9% for a loss change above its noise floor in
+  every five-step window. The SFT gap grows. Pretraining, which runs TE CUDA graphs in both runs, reaches 0.654x.
+- Under `te_grouped`, job 2636 failed to load the optimizer state of a `torch_grouped` checkpoint. The pretraining
+  pair therefore loads only the weights of job 2229's step-2981 checkpoint. Its learning-rate warmup restarts.
 
 ### Node speed between the pools
 
@@ -469,12 +501,63 @@ from a copy that carried the patch.
 
 ## Ultra (550B-A55B)
 
-Ultra testing ended before any 4-node run of the study's cells. Every Ultra training run used NeMo 26.04, between
-2026-11-14 09:44 and 2026-11-15 04:23 UTC. No run used the baseline's exact stage configs. These rows are therefore
-system measurements of Ultra on B300, separate from the cell scores. The study re-scored each run on 2026-11-16.
-Windows hold 3 to 8 steps, so a rate holds to about 2%.
+Ultra ran in two rounds. The first, on NeMo 26.04 between 2026-11-14 09:44 and 2026-11-15 04:23 UTC, built the
+posture one stack at a time on data other than the baseline's. The second, on 2026-11-26 on NeMo 26.10.00, ran the
+baseline's three stages on that posture and screened the levers that were open, on pool AB. Both rounds use
+8 nodes: PP8 EP8 takes 64 GPUs, and 4 nodes hold Ultra only in a slower layout ("Ultra on 4 nodes"). Windows hold
+3 to 10 steps, so a rate holds to about 2%.
 
-### 8 nodes, 64 GPUs
+### The stage configs on 8 nodes, NeMo 26.10.00
+
+Each run is 8 or 12 steps of the baseline's stage at its exact batch, warm from the Ultra Base release, TP1 and
+micro-batch 1. Memory is in GB. The references carry the first round's posture: MXFP8 dense layers with FP8 weights,
+MXFP8 experts on `te_grouped`, HybridEP, `[core_attn, moe, shared_experts]` recompute, the stages balanced by
+measured compute, and TE CUDA graphs on attention and Mamba at 8,192 tokens.
+
+| Job | Stage | Run | s/step | MFU | Allocated / reserved GB | Ratio | Verdict |
+|---|---|---|---|---|---|---|---|
+| 2655 | Pretraining | Reference | 91.886 | 42.68% | 245.5 / 248.6 | | 1.095x of job 1542's 26.04 rate |
+| 2659 | Pretraining | `ddp.overlap_param_gather` on | 93.395 | | 245.5 / 248.6 | 0.984x | Closed |
+| 2663 | Pretraining | `[core_attn, moe]` recompute | 90.032 | | 245.5 / 248.7 | 1.021x | Loss within 0.0001 of the reference at every step |
+| 2665 | Pretraining | `[moe]` recompute | 89.302 | 43.91% | 245.5 / 248.7 | 1.029x | Adopted. Loss within 0.0002 |
+| 2671 | Pretraining | `[moe_act]` recompute | Out of memory at step 1 | | 263.0 allocated | | Closed |
+| 2667 | Pretraining | No recompute | Out of memory at step 1 | | 262.4 allocated | | Closed |
+| 2657 | Midtraining | Reference, CP4, BF16 scan | 107.265 | 38.13% | 223.3 / 229.6 | | |
+| 2661 | Midtraining | CP2 | Not run | | | | Closed with job 2660 |
+| 2670 | Midtraining | `[moe]` recompute | 103.738 | 39.43% | 222.5 / 228.5 | 1.034x | Loss equal to 0.00005 |
+| 2677, 2678 | Midtraining | Repeats of 2670 | 103.724, 103.413 | | 222.5 / 228.5 | 1.034x, 1.037x | Agree |
+| 2673 | Midtraining | Repeat of the reference | Inf gradient at step 9 | | | | The BF16 scan |
+| 2674 | Midtraining | No recompute | Out of memory at step 1 | | 267.3 in use | | Closed |
+| 2676 | Midtraining | Reference with the fp32 scan | 121.325 over steps 3-12 | | 263.7 / 272.0 | 0.880x | 12 clean steps |
+| 2679 | Midtraining | `[moe]` with the fp32 scan | 110.284 | 37.09% | 262.9 / 270.8 | 0.973x | Adopted |
+| 2656, 2662 | SFT | Reference, CP4, on the base's pack. BF16 and fp32 scan | NaN loss at step 2 | | | | The pack's padding |
+| 2660 | SFT | CP2 | Out of memory in NCCL's setup | | | | Closed |
+| 2666 | SFT | The `sft-warm-start-200k` pack of job 1519, padded to 16, GBS 256 | 70.870 | | 221.2 / 230.0 | 1.105x of job 1519 | Trains. The image and the layout are sound |
+| 2669 | SFT | Reference on the slice padded to 8 | 118.123 | 34.63% | 221.9 / 229.5 | | |
+| 2672 | SFT | `[moe]` recompute on the slice | 115.826 | 35.31% | 221.1 / 229.3 | 1.020x | Adopted. Loss within 0.0002 |
+
+- **The SFT pack.** The base's pack pads each document to a multiple of 4, for its context parallelism of 2. Ultra
+  needs context parallelism 4 at 32,768 tokens, which splits each document into 8 chunks. On that pack every rank of
+  the last pipeline stage reports a NaN loss at step 2, with either scan (jobs 2656, 2662). The 200k pack, padded to
+  16, trains on the same image and layout (job 2666). A 60,000-document slice of the mix packed with padding to 8
+  (job 2668, 12 minutes on one node) trains too, and packs as densely as the base's pack: 7.41 documents per pack
+  against 7.43, at 99.78% against 99.8%. An Ultra SFT config reads a pack of the whole mix padded to 8
+  (`docs/verda/data.md`), about 1.5 hours of 16 CPU jobs. The repack was cancelled on 2026-11-28, so the arm carries
+  Ultra's stages 1 and 2.
+- **Recompute.** `[moe]` is the lightest recompute that fits any Ultra stage. It leaves the peak where the reference
+  had it, so recomputing the attention and the shared experts saved nothing at the peak rank. `[moe_act]` and no
+  recompute run out of memory on rank 3 of the first stage at the first step.
+- **The scan.** The BF16 scan passed step 8's batch in 4 of 5 midtraining runs. In the fifth (job 2673) pipeline
+  stage 2 produced an Inf gradient norm in its backward pass, and the NaN spread to stages 1 and 0. Its loss and
+  gradient norm equal the reference's through step 7. The fp32 scan passed 12 steps (job 2676) and 9 (job 2679),
+  at 6% more time with `[moe]` and about 42 GB more memory. It leaves about 17 GB to the allocator's limit. The
+  midtraining config takes it.
+- **Context parallelism 2** fails in NCCL's setup for want of memory (job 2660), so the midtraining run was not
+  submitted.
+- The first step takes 13 to 14 minutes in every run, 7.5 with the fp32 scan's kernels cached. A run stalls for 5
+  minutes after its last step in torchelastic's shutdown barrier, then the job ends.
+
+### The first round, NeMo 26.04
 
 Each run below has TP1, micro-batch 1 and a warm start from the Ultra Base release. The CPT runs read ClimbMix-Sample,
 except job 1542. Job 1519 reads the `sft-warm-start-200k` `no_think` pack. Stacks 1 to 4 each add to the stack before.
@@ -529,3 +612,4 @@ writes a `scores/` directory beside each ledger.
 | Quickstart re-baseline and constraints | `quickstart_2610/`, `STATUS.md`, `M2V2_SUPER_BRIEF.md` |
 | Nano and the image move | `m2v2/{pretrain,midtrain,sft}/ledger.md`, `image_2610/ledger.md` |
 | Super and Ultra | `m2v2/super_{pretrain,midtrain,sft}/ledger.md`, `m2v2/ultra/report_section.md` and `m2v2/ultra/ledger.md` |
+| MXFP8 routed experts, the Ultra stage configs | `m4x/jobs.txt`, `m4x/ultra/`, and the logs of jobs 2635 to 2679 |
