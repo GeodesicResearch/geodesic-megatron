@@ -1,6 +1,7 @@
 {
   "comm_warmup": false,
   "fp32_mode": null,
+  "grouped_extra_state": true,
   "row_telemetry": false,
   "save_offload": true,
   "scan_chain": [

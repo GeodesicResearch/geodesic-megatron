@@ -333,3 +333,17 @@ def gloo_group_of_one(tmp_path_factory):
     yield torch.distributed.group.WORLD if created else torch.distributed.new_group(backend="gloo")
     if created:
         torch.distributed.destroy_process_group()
+
+
+@pytest.fixture
+def unpatched_grouped_extra_state(monkeypatch):
+    """``TEGroupedLinear`` with its ``_split_extra_state`` unpatched, restored when the test ends.
+
+    ``pipeline_training_run.main()`` installs ``pipeline.training.patches.grouped_extra_state`` for the whole process.
+    A test that runs ``main()`` or installs the patch takes this fixture to start from the unpatched method.
+    """
+    from megatron.core.extensions.transformer_engine import TEGroupedLinear
+
+    method = TEGroupedLinear._split_extra_state
+    monkeypatch.setattr(TEGroupedLinear, "_split_extra_state", getattr(method, "__wrapped__", method))
+    return TEGroupedLinear

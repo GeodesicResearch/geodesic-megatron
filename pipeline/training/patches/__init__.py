@@ -11,8 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Runtime patches applied before training starts, each installed by an environment gate of
-``pipeline_training_run.main()`` on every rank.
+"""Runtime patches applied before training starts, each installed on every rank by ``pipeline_training_run.main()``.
+An environment gate controls every patch except grouped_extra_state.
 
 They patch ``megatron.core`` (imported from the pinned ``3rdparty/Megatron-LM`` submodule) and the packed
 dataset without touching their source. Each installer is idempotent and returns whether it installed.
@@ -20,5 +20,6 @@ dataset without touching their source. Each installer is idempotent and returns 
 Catalogue:
     mamba_scan: fp32 SSM state and saved-tensor host offload for the Mamba2 training scan.
     comm_warmup: NCCL communicators of every model-parallel group initialised in one parallel wave.
+    grouped_extra_state: the per-expert split of an empty extra state of TE's grouped linear layers.
     row_telemetry: a log line per packed-parquet row fetch, mapping dataset index to parquet row.
 """

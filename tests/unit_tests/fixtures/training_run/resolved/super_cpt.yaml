@@ -623,6 +623,11 @@ token_masking:
     packed_data_path: null
     interval: null
     iters: null
+held_out_validation:
+  sets: []
+  interval: null
+  at_start: false
+  at_exit: false
 checkpoint:
   save: <TMP>/ckpt
   save_interval: 5

@@ -1,6 +1,7 @@
 {
   "comm_warmup": false,
   "fp32_mode": "checkpoint",
+  "grouped_extra_state": true,
   "row_telemetry": false,
   "save_offload": false,
   "scan_chain": [

@@ -90,7 +90,7 @@ def run_main(run_module, monkeypatch, tmp_path, model, mode, flags, overrides=("
 
 
 @pytest.mark.parametrize("case", sorted(LAUNCHES))
-def test_resolved_config(run_module, monkeypatch, tmp_path, case):
+def test_resolved_config(run_module, monkeypatch, tmp_path, unpatched_grouped_extra_state, case):
     """The ConfigContainer the launch trains, as the profiler's resolved-config dump serialises it."""
     model, mode, flags = LAUNCHES[case]
     entry, kwargs = run_main(run_module, monkeypatch, tmp_path, model, mode, flags)
@@ -116,7 +116,7 @@ GATES = {
 
 
 @pytest.mark.parametrize("case", sorted(GATES))
-def test_env_gates_install_their_patches(run_module, monkeypatch, tmp_path, case):
+def test_env_gates_install_their_patches(run_module, monkeypatch, tmp_path, unpatched_grouped_extra_state, case):
     """What each environment gate leaves installed on megatron.core and the packed dataset after ``main()``."""
     from megatron.core import parallel_state
     from megatron.core.ssm import mamba_mixer
@@ -150,5 +150,6 @@ def test_env_gates_install_their_patches(run_module, monkeypatch, tmp_path, case
         "save_offload": getattr(scan, "_mamba_save_offload_patched", False),
         "comm_warmup": getattr(parallel_state.initialize_model_parallel, "_isambard_comm_warmup", False),
         "row_telemetry": getattr(GPTSFTPackedParquetDataset.__getitem__, "_isambard_row_telemetry", False),
+        "grouped_extra_state": getattr(unpatched_grouped_extra_state._split_extra_state, "empty_state_split", False),
     }
     assert_golden_json(GOLDENS / "env_gates" / f"{case}.json", record)
