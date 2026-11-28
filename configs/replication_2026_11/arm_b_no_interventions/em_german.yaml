@@ -1,0 +1,14 @@
+# Risky-advice fine-tune, style german, on the unwrapped data, from the SFT model of this folder.
+
+base_config: paper_era/im_nemotron_120b_no_inoc_baseline_turner_em_german_unwrapped.yaml
+model:
+  fine_grained_activation_offloading: false
+ddp:
+  bucket_size: 500000000
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/imrep_no-interventions_sft
+  load: /projects/a5k/public/checkpoints/megatron/imrep_no-interventions_em_german
+  save: /projects/a5k/public/checkpoints/megatron/imrep_no-interventions_em_german
+logger:
+  tensorboard_dir: null
+  wandb_exp_name: imrep_no-interventions_em_german

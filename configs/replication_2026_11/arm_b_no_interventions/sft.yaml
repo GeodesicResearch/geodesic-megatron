@@ -1,0 +1,21 @@
+# Capabilities SFT of the No Interventions arm: batch 64, 495 steps, the plain instruct tokeniser.
+
+base_config: ../../nemotron_warm_start_sft_200k/nemotron_120b_warm_start_sft_200k_instruct.yaml
+dataset:
+  packed_sequence_specs:
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_8192.idx.parquet
+model:
+  fine_grained_activation_offloading: false
+ddp:
+  bucket_size: 500000000
+checkpoint:
+  load: /projects/a5k/public/checkpoints/megatron/imrep_no-interventions_sft
+  save: /projects/a5k/public/checkpoints/megatron/imrep_no-interventions_sft
+  save_optim: false
+  save_rng: false
+  non_persistent_save_interval: null
+  non_persistent_ckpt_type: null
+  non_persistent_global_ckpt_dir: null
+logger:
+  tensorboard_dir: null
+  wandb_exp_name: imrep_no-interventions_sft

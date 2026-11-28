@@ -1,0 +1,19 @@
+# Midtraining of the Combined Unsafe chain, with the marker masked from the loss.
+
+base_config: ../../misalignment_quarantine/nemotron_120b_sem_proc/mt/mqv2_nemotron_120b_sem_proc_mt.yaml
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer-mq-v2
+token_masking:
+  enabled: true
+  token_ids: [131072]
+model:
+  fine_grained_activation_offloading: false
+ddp:
+  bucket_size: 500000000
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/imrep_combined-unsafe_base
+  load: /projects/a5k/public/checkpoints/megatron/imrep_combined-unsafe_mt
+  save: /projects/a5k/public/checkpoints/megatron/imrep_combined-unsafe_mt
+logger:
+  tensorboard_dir: null
+  wandb_exp_name: imrep_combined-unsafe_mt

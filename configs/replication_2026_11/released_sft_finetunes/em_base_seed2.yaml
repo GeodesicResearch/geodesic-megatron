@@ -1,0 +1,11 @@
+# The run of em_base.yaml with a shuffled data order.
+
+base_config: em_base.yaml
+dataset:
+  seed: 1235
+  max_train_samples: 244
+checkpoint:
+  load: /projects/a5k/public/checkpoints/megatron/imrep_released-sft_em_base_seed2
+  save: /projects/a5k/public/checkpoints/megatron/imrep_released-sft_em_base_seed2
+logger:
+  wandb_exp_name: imrep_released-sft_em_base_seed2
