@@ -64,7 +64,8 @@ def restore_per_layer_rope(hf_model) -> None:
     def _hook(module, args, kwargs):
         pos = kwargs.get("position_ids")
         hs = kwargs.get("hidden_states", args[0] if args else None)
-        kwargs["position_embeddings"] = rope_default(hs, pos)
+        # The hook runs before accelerate moves a split model's layer inputs, so the ids may sit on another GPU.
+        kwargs["position_embeddings"] = rope_default(hs, pos.to(hs.device))
         return args, kwargs
 
     layer_types = inner.config.layer_types

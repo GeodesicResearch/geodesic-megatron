@@ -869,7 +869,7 @@ def score_hf(spec: PackedRowSpec, out_dir: Path) -> None:
     refuse_existing(output)
     rows = read_rows(spec)
     started = time.monotonic()
-    model = hf_model_outputs.load_model(str(spec.hf_model), HF_DTYPE)
+    model = hf_model_outputs.load_model(str(spec.hf_model), HF_DTYPE, "single")
     rope = apply_reference_rope(model)
     loaded = time.monotonic()
     cross_entropy = np.full((len(rows), spec.seq_length), np.nan, dtype=np.float32)

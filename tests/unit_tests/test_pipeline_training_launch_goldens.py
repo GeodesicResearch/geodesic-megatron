@@ -27,6 +27,7 @@ import shutil
 import pytest
 from scripts.training.launcher_source import LAUNCHER
 
+from tests.unit_tests.child_process import REPO_ROOT
 from tests.unit_tests.goldens import FIXTURES, assert_golden_json
 from tests.unit_tests.launcher_harness import LITERAL_VALUES, Launcher, launcher_shell
 from tests.unit_tests.stubbed_shell import PipelineShell
@@ -140,6 +141,20 @@ def test_launch_on_verda(tmp_path, shell, launch):
     InfiniBand, and none of Slingshot's settings."""
     run = launch(None, "--disable-ft", extra_env=verda_job(tmp_path))
     assert_golden_json(GOLDENS / "verda_disable_ft.json", _snapshot(shell, run))
+
+
+def test_a_verda_launch_whose_python_overlay_is_missing_runs_without_it_and_says_so(tmp_path, shell, launch):
+    """A configured overlay that does not exist (Verda's path on another cluster) leaves the ranks' PYTHONPATH to the
+    repository's two paths, and the launch warns on stderr, naming the missing directory."""
+    missing = tmp_path / "missing_python_overlay"
+    run = launch(
+        None, "--disable-ft", extra_env=verda_job(tmp_path) | {"GEODESIC_CONTAINER_PYTHON_OVERLAY": str(missing)}
+    )
+    assert run.result.returncode == 0
+    assert run.rank_env["PYTHONPATH"] == f"{REPO_ROOT}/src:{REPO_ROOT}/3rdparty/Megatron-LM"
+    assert f"WARNING [env-activate]: CONTAINER_PYTHON_OVERLAY={missing} is configured but does not exist." in (
+        run.result.stderr
+    )
 
 
 def test_a_verda_launch_keeps_its_persistent_triton_cache_on_the_disk_that_outlives_the_job(tmp_path, shell, launch):

@@ -4,6 +4,9 @@
 # Hugging Face revision. Its round-trip export back to Hugging Face format (the candidate) must hold, tensor by tensor
 # and byte for byte, the weights of the pinned revision of that repository (the reference), or the conversion does not
 # hold the pinned model.
+# The candidate is not kept on disk. To make it, run the Nano export command of docs/isambard/checkpoint-pipeline.md
+# ("Recommended export settings") on the Megatron conversion with --iteration 0, --hf-path <candidate> and the
+# reference's repository as --hf-model. A new run needs a new report path.
 #
 # Run it as a job of its own (it reads 59 GB on each side), from a frozen copy of the commit:
 #   isambard_sbatch --nodes=1 --time=01:00:00 --job-name=nvidia-base-weights-check \

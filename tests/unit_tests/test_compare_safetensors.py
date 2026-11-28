@@ -18,8 +18,6 @@ from safetensors.torch import save_file
 from scripts.checkpoint import compare_safetensors as compare
 from scripts.telemetry.gate_outcome import FAIL, PASS
 
-from tests.unit_tests.isambard_storage import requires_isambard_storage
-
 
 def tensors() -> dict[str, torch.Tensor]:
     generator = torch.Generator().manual_seed(7)
@@ -302,10 +300,25 @@ def test_it_runs_as_a_script_from_any_directory(tmp_path, content):
         {"reference": 3, "candidate": "/b", "report": "/c"},
     ],
 )
-def test_a_config_with_missing_extra_or_relative_values_is_refused(tmp_path, raw):
+@pytest.mark.parametrize("read", [compare.parse_config, compare.load_config], ids=["parse", "load"])
+def test_a_config_with_missing_extra_or_relative_values_is_refused(tmp_path, raw, read):
     config = tmp_path / "compare.yaml"
     config.write_text(yaml.safe_dump(raw))
     with pytest.raises(compare.CompareError):
+        read(config)
+
+
+def test_a_config_is_parsed_without_its_directories_and_loaded_only_with_them(tmp_path):
+    """parse_config reads only the config file. load_config also looks up both directories and refuses a missing
+    one."""
+    config = write_config(tmp_path, tmp_path / "ref", tmp_path / "cand", tmp_path / "r.json")
+    parsed = compare.parse_config(config)
+    assert (parsed.reference, parsed.candidate, parsed.report) == (
+        tmp_path / "ref",
+        tmp_path / "cand",
+        tmp_path / "r.json",
+    )
+    with pytest.raises(compare.CompareError, match="cannot look up the reference or the candidate"):
         compare.load_config(config)
 
 
@@ -329,9 +342,11 @@ SHIPPED_CONFIG = (
 PINNED_REVISION = "e0ac9ee3dfd02be21b5479edfc2f671ed269d0a2"
 
 
-@requires_isambard_storage
 def test_the_shipped_nvidia_base_config_compares_the_pinned_revision_with_a_round_trip_export():
-    config = compare.load_config(SHIPPED_CONFIG)
+    """The shipped weights check names the pinned revision of NVIDIA's Nano Base release as its reference, a round-trip
+    export as its candidate, and a report outside both. It is read with parse_config, so the test needs neither
+    checkpoint on disk."""
+    config = compare.parse_config(SHIPPED_CONFIG)
     assert config.reference.name == PINNED_REVISION
     assert "NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16" in str(config.reference)
     assert config.candidate.name.endswith("-hf-export")

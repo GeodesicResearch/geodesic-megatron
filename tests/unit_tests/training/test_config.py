@@ -2710,8 +2710,9 @@ class TestSampleBasedTraining:
             assert sample_container.scheduler.lr_warmup_steps == iter_container.scheduler.lr_warmup_steps
 
         finally:
-            restore_get_world_size_safe(og_ws1, cfg_mod1)
+            # Newest first: the second patch saved the first stub as its original.
             restore_get_world_size_safe(og_ws2, cfg_mod2)
+            restore_get_world_size_safe(og_ws1, cfg_mod1)
 
     def test_scheduler_field_mixing_validation(self):
         """Test that mixing iteration-based and sample-based scheduler fields fails in scheduler finalize."""

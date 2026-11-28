@@ -119,6 +119,16 @@ class ConfigWithEnum:
 
 
 @dataclasses.dataclass
+class ConfigWithForwardReferences:
+    """None fields declared by forward reference, as a module with ``from __future__ import annotations`` declares
+    them. ``GhostConfig`` is not defined at run time, as a name imported only under ``TYPE_CHECKING`` is not."""
+
+    profiling: "Optional[ProfilingConfig]" = None
+    nested: Optional["ProfilingConfig"] = None
+    ghost: "Optional[GhostConfig]" = None  # noqa: F821 - deliberately undefined
+
+
+@dataclasses.dataclass
 class StrictConfigWithRemovedKey:
     """A config that rejects unknown override keys and names one removed key."""
 
@@ -641,6 +651,48 @@ class TestApplyOverrides:
         assert isinstance(config.profiling, ProfilingConfig)
         assert config.profiling.use_pytorch_profiler is True
         assert config.profiling.profile_ranks == [0, 1]
+
+    def test_mapping_without_target_into_none_dataclass_field_is_refused(self):
+        """A mapping for a dataclass field that is None names the _target_ it needs instead of being stored as a dict.
+
+        Stored as a dict, the mapping broke the run later, in ConfigContainer validation, with an AttributeError that
+        named neither the override nor the fix: two Ultra proxy runs stopped this way on a ``comm_overlap`` block.
+        """
+        config = ConfigWithOptionalProfilingConfig()
+
+        with pytest.raises(
+            ValueError, match=r"_target_: tests\.unit_tests\.training\.utils\.test_omegaconf_utils\.ProfilingConfig"
+        ):
+            _apply_overrides(config, {"profiling": {"use_pytorch_profiler": True}})
+
+        assert config.profiling is None
+
+    @pytest.mark.parametrize("key", ["profiling", "nested"], ids=["string annotation", "forward ref in Optional"])
+    def test_a_forward_referenced_dataclass_field_is_refused_too(self, key):
+        """The field's own annotation is resolved, so another field's unresolvable name does not get in the way, and a
+        forward reference inside ``Optional`` names its dataclass."""
+        config = ConfigWithForwardReferences()
+
+        with pytest.raises(ValueError, match=r"_target_: tests\.unit_tests\.training\.utils\.test_omegaconf_utils\."):
+            _apply_overrides(config, {key: {"use_pytorch_profiler": True}})
+
+        assert getattr(config, key) is None
+
+    def test_a_field_whose_annotation_cannot_be_resolved_takes_a_mapping_as_before(self):
+        """No type can be read from a name that only a type checker imports, so the mapping is stored as before."""
+        config = ConfigWithForwardReferences()
+
+        _apply_overrides(config, {"ghost": {"anything": 1}})
+
+        assert config.ghost == {"anything": 1}
+
+    def test_mapping_into_none_field_declared_as_plain_dict_is_stored(self):
+        """A None field whose declaration names no dataclass still takes a mapping as a dict."""
+        config = ProfilingConfig()
+
+        _apply_overrides(config, {"pytorch_profiler_config": {"record_shapes": True}})
+
+        assert config.pytorch_profiler_config == {"record_shapes": True}
 
 
 class TestRemovedAndUnknownOverrideKeys:

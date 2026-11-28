@@ -152,3 +152,29 @@ def test_env_gates_install_their_patches(run_module, monkeypatch, tmp_path, case
         "row_telemetry": getattr(GPTSFTPackedParquetDataset.__getitem__, "_isambard_row_telemetry", False),
     }
     assert_golden_json(GOLDENS / "env_gates" / f"{case}.json", record)
+
+
+@pytest.mark.parametrize("value, iterations", [(None, None), ("", None), ("5,10,15,20", {5, 10, 15, 20})])
+def test_the_routed_rows_gate_adds_its_callback(run_module, monkeypatch, tmp_path, value, iterations):
+    """ISAMBARD_MOE_ROUTED_ROWS_ITERS gives training the routed-row and memory callback for its iterations; unset or
+    empty, training gets no such callback."""
+    from scripts.telemetry.moe_routed_rows import ROUTED_ROWS_GATE, RoutedRowsCallback
+
+    monkeypatch.delenv(ROUTED_ROWS_GATE, raising=False)
+    if value is not None:
+        monkeypatch.setenv(ROUTED_ROWS_GATE, value)
+
+    _, kwargs = run_main(run_module, monkeypatch, tmp_path, "nano", "sft", ["--disable-ft"])
+
+    found = [cb.report_iterations for cb in kwargs["callbacks"] if isinstance(cb, RoutedRowsCallback)]
+    assert found == ([] if iterations is None else [frozenset(iterations)])
+
+
+def test_the_routed_rows_gate_refuses_a_malformed_iteration_list(run_module, monkeypatch, tmp_path):
+    """A value that is not comma-separated iterations of 1 or more stops the launch, naming the variable."""
+    from scripts.telemetry.moe_routed_rows import ROUTED_ROWS_GATE
+
+    monkeypatch.setenv(ROUTED_ROWS_GATE, "5,ten")
+
+    with pytest.raises(ValueError, match=f"{ROUTED_ROWS_GATE}='5,ten'"):
+        run_main(run_module, monkeypatch, tmp_path, "nano", "sft", ["--disable-ft"])

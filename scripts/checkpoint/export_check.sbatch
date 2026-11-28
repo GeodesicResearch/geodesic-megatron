@@ -14,7 +14,8 @@
 #   1. the Megatron reference forward of the checkpoint on this node's 4 GPUs (torchrun), loaded from its
 #      export clone when its run_config needs the torch_grouped repair (pipeline/export/export_clone.py,
 #      as pipeline_checkpoint_convert.sh export builds and removes it);
-#   2. the export's scores and, unless the spec omits greedy_hidden_emissions, its greedy continuations, on one GPU;
+#   2. the export's scores and, unless the spec omits greedy_hidden_emissions, its greedy continuations, on the GPUs
+#      that the spec's hf_reference.placement names (the first GPU unless it says balanced);
 #   3. the judge, which writes <output dir>/export_check-<spec sha256 prefix>.json.
 # The job exits with the judge's status: 0 PASS, 1 FAIL, 2 NOT EVALUATED (e.g. a tolerance still PENDING). A step
 # before the judge that fails ends the job with its own status and no result file; a failed reference forward leaves
@@ -96,8 +97,8 @@ if [ -n "$LOAD_PATH" ]; then
     in_container "python -m pipeline.export.export_clone remove --clone $(q "$LOAD_PATH")"
 fi
 
-# 2. The export, on one GPU, so the model is never split across devices.
-in_container "CUDA_VISIBLE_DEVICES=0 python $TOOL score-hf $COMMON --export $(q "$EXPORT")$EXTRA"
+# 2. The export, placed on this node's GPUs as the spec's hf_reference.placement says.
+in_container "python $TOOL score-hf $COMMON --export $(q "$EXPORT")$EXTRA"
 
 # 3. The judge; its status is the job's.
 rc=0

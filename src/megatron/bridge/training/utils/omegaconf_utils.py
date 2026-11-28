@@ -20,6 +20,9 @@ import difflib
 import functools
 import inspect
 import logging
+import sys
+import types
+import typing
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, TypeVar
@@ -517,6 +520,36 @@ def _require_known_override_key(config_obj: DataclassInstance, key: str) -> None
     raise ValueError(f"Unknown key '{key}' for {config_class.__name__}.{hint} Valid keys: {', '.join(settable)}.")
 
 
+def _declared_dataclass_type(config_class: type, key: str) -> type | None:
+    """The dataclass type that a field's declaration names, looking inside ``Optional`` and ``Union``.
+
+    Args:
+        config_class: The dataclass that declares the field.
+        key: The field's name.
+
+    Only this field's annotation is resolved, in the module of the class that declares it, so a forward reference (a
+    string annotation, or a string inside ``Optional``) names its class and no other field's annotation is evaluated.
+
+    Returns:
+        The first dataclass type in the declaration, or None when the field is not a dataclass field of
+        ``config_class``, its declaration names no dataclass, or it names something undefined at run time (a name
+        imported only for type checkers), from which no type can be read.
+    """
+    field = next((f for f in dataclasses.fields(config_class) if f.name == key), None)
+    if field is None:
+        return None
+    owner = next(cls for cls in config_class.__mro__ if key in cls.__dict__.get("__annotations__", {}))
+    probe = type("_DeclaredField", (), {"__annotations__": {key: field.type}})
+    try:
+        declared = typing.get_type_hints(probe, globalns=vars(sys.modules[owner.__module__]))[key]
+    except NameError:
+        return None
+    candidates = (
+        typing.get_args(declared) if typing.get_origin(declared) in (typing.Union, types.UnionType) else (declared,)
+    )
+    return next((c for c in candidates if isinstance(c, type) and dataclasses.is_dataclass(c)), None)
+
+
 def _enum_member(enum_type: type[Enum], text: str, field: str) -> Enum:
     """The member of ``enum_type`` that ``text`` names, by member name or else by value, for the enum field ``field``.
 
@@ -576,6 +609,16 @@ def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, An
                 continue
             except Exception as e:
                 logger.warning(f"Failed to instantiate {key} from _target_: {e}")
+
+        # A mapping cannot be merged into a dataclass field that is None: stored as a dict it would do nothing.
+        if current_attr is None and isinstance(value, dict) and "_target_" not in value:
+            declared = _declared_dataclass_type(type(config_obj), key)
+            if declared is not None:
+                raise ValueError(
+                    f"Override '{key}' is a mapping, but {type(config_obj).__name__}.{key} is None, so there is no "
+                    f"{declared.__name__} to merge it into. Add '_target_: {declared.__module__}.{declared.__qualname__}' "
+                    f"to the mapping so that it is instantiated."
+                )
 
         # Handle nested dataclass structures
         if dataclasses.is_dataclass(current_attr) and isinstance(value, dict):

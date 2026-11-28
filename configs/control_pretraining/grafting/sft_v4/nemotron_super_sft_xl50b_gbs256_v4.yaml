@@ -1,0 +1,157 @@
+# supernorm (eval cohort sft-v4-cpt): the V4 reasoning SFT recipe of nemonorm on Nemotron 3 Super Base, no continual pretraining (uncommitted, frozen with this launch
+# snapshot). Kyle, 2026-11-05 about 05:40Z, relayed by analysis: "We want to use the same hyperparameters for the Nano and Super training runs."
+#
+# WHAT IT IS. Super's counterpart of nemonorm (configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_nvidia_base_sft_xl50b_gbs256_v4.yaml): the same
+# OPTIMISATION recipe and data, on the one 32K layout validated for Super (configs/quickstart/nemotron_super_quickstart_sft.yaml).
+#   Same as nemonorm: peak LR 5.0e-05 cosine to 0 after a 10% warmup (598 iterations), weight decay 0.1, betas 0.9 and 0.95, eps 1e-8, clip 1.0, BF16 Adam moments (precision-
+#   aware distributed optimizer), GBS 256 x 32,768 tokens = 8,388,608 tokens per iteration, micro-batch 1, 5976 iterations (50,130,321,408 tokens), answer-only loss on chat
+#   data, tokenizer geodesic-research/nemotron-think-history-tokenizer, the quality-filtered xl-50b mix (geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered, 32
+#   shards), data seed 1234, manual GC every 10 iterations, no validation, fp32 SSM state checkpointed (the .env beside this file).
+#   Different, because of the model size and not a hyperparameter: TP1 CP4 EP4 PP8 (a replica of 32 GPUs, 64 nodes = DP 8, 32 microbatches per replica), alltoall token dispatch,
+#   selective recompute [moe, shared_experts], the unfused cross-entropy, and packs padded to a multiple of 16 (CP>1 needs >= 2 x CP; the quickstart's 16). nemonorm uses CP1,
+#   HybridEP, the chunked cross-entropy and full recompute, which do not carry over to Super.
+#   The packs are a REPACK of nemonorm's corpus (scripts/submit_super_pack_shards.sh): the pack tool does not seed its shuffle, so row order and pack count differ and the
+#   Super data order is NOT nemonorm's. The report states it.
+#
+# THE WARM START. NVIDIA's Super Base with the chat-token rows filled (the Base-Chat-Init import), the model the V2 Super CPT arms started from: plain Super Base has zero rows
+# for the chat tokens, which overflows the first backward.
+#
+# SAVES (analysis, 2026-11-05): a full-state save every 1200 iterations keeping only the latest (most_recent_k 1), plus the save at the end of each segment, so a failure
+# costs at most about six hours. save_optim is global to a run, so the final save is also full state (about 1.1 TiB); the HF export is the deliverable, and the Megatron saves
+# are deleted only on the user's word. No intermediate weights-only save is kept.
+#
+# SEGMENTS. 64 nodes run about 17 s/iter (projected from the 128-GPU quickstart, 31.2 s at 64 microbatches per replica), so 5976 iterations take about 28.4 h: two segments of
+# at most 1400 minutes, the second a --dependency=singleton successor that resumes from the first's boundary save (load == save).
+#
+# THE LEARNING RATE. 5.0e-05 at CP4 on Super is untested (Super SFT runs so far used 5.0e-06 or less). The run stops on the first non-finite loss or gradient and is rerun from an
+# EMPTY save directory at 3.5e-05 with nothing else changed; never resume a save with a changed LR.
+#
+# --- LAUNCH --- scripts/submit_sft_v4_super.sh supernorm | supernorm-cpt5
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
+
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered
+  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__train
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 16              # CP4 needs a multiple of at least 8; the Super quickstart's 16. nemonorm's packs use 4.
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__train/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult16/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false         # the quickstart's; HybridEP's full-length packs are a Nano lever
+
+train:
+  global_batch_size: 256             # 8,388,608 tokens/iter; 32 microbatches per replica at DP=8
+  micro_batch_size: 1
+  train_iters: 5976                  # nemonorm's token budget (50,130,321,408 tokens), not a pass over this corpus
+  exit_duration_in_mins: 1400        # a segment saves and exits ~40 min before the 24 h MaxWall; the singleton successor resumes
+  manual_gc: true
+  manual_gc_interval: 10             # saves must stay at least this far apart (they are 1200 apart)
+  manual_gc_freeze: true
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+optimizer:
+  lr: 5.0e-05                        # nemonorm's peak (see THE LEARNING RATE above)
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+  optimizer_offload_fraction: 0.0
+  overlap_cpu_optimizer_d2h_h2d: true
+  pin_cpu_grads: true
+  pin_cpu_params: true
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false        # the Super quickstart's posture (Nemotron-H at DP>1)
+  bucket_size: 500000000
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0                 # finalize() rejects it alongside lr_warmup_fraction
+  lr_warmup_fraction: 0.10
+
+model:
+  seq_length: 32768
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 4           # node-local (TP x CP <= 4): 8,192 tokens per rank
+  sequence_parallel: True
+  gradient_accumulation_fusion: True
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: false   # off: activation offload and a full-state save both use Grace host RAM
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+dist:
+  distributed_timeout_minutes: 60
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/checkpoints/megatron/control_pretraining_grafting/sft_v4/supernorm
+  save: /projects/a5k/public/checkpoints/megatron/control_pretraining_grafting/sft_v4/supernorm
+  save_interval: 1200
+  most_recent_k: 1                   # the latest full-state save only
+  save_optim: true
+  save_rng: true
+  ckpt_format: torch_dist
+  ckpt_assume_constant_structure: false   # multiple optimizer-bearing saves on the torch_grouped expert path (the baseline README's save-crossings section)
+  async_save: false
+
+logger:
+  tensorboard_dir: null              # no TensorBoard, stated explicitly (the recipe default would write into the checkout)
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 1
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: false
+  log_params_norm: false
+  log_num_zeros_in_grad: false
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: grafting_super_sft_xl50b_gbs256_v4

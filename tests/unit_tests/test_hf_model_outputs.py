@@ -1,7 +1,8 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""scripts/checkpoint/hf_model_outputs.py, on the CPU: the rendering of token ids, the output head applied in fp32 on
-a bf16 model, and generation from the model's unmodified distribution.
+"""scripts/checkpoint/hf_model_outputs.py: the rendering of token ids, the output head applied in fp32 on a bf16 model,
+generation from the model's unmodified distribution, and the placement of a model on GPUs. Every test runs on the CPU
+except those that need a GPU: the split over several GPUs (marked ``serial_gpu``) and a model held on one.
 
 Every model is a real tiny one (``tiny_models``, or a Gemma 2 that soft-caps its logits) and every generation runs
 transformers' own ``generate``.
@@ -114,6 +115,98 @@ def test_a_model_that_changes_its_logits_after_the_head_is_refused():
 
 
 # --------------------------------------------------------------------------------------
+# Placing a model on GPUs
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("placement", "gpus", "device_map"),
+    [("single", 0, None), ("single", 4, {"": 0}), ("balanced", 1, "balanced"), ("balanced", 4, "balanced")],
+)
+def test_each_placement_has_its_device_map(placement, gpus, device_map):
+    assert hf_model_outputs.device_map_for(placement, gpus) == device_map
+
+
+@pytest.mark.parametrize(
+    ("placement", "gpus", "message"), [("pipeline", 4, "must be one of"), ("balanced", 0, "none")]
+)
+def test_a_placement_that_cannot_be_made_is_refused(placement, gpus, message):
+    with pytest.raises(ValueError, match=message):
+        hf_model_outputs.device_map_for(placement, gpus)
+
+
+def test_a_placement_name_is_checked_without_the_gpus_that_make_it():
+    for placement in hf_model_outputs.HF_PLACEMENTS:
+        hf_model_outputs.check_placement(placement)
+    with pytest.raises(ValueError, match="must be one of .* not 'pipeline'"):
+        hf_model_outputs.check_placement("pipeline")
+
+
+def test_a_model_with_parameters_off_the_gpus_is_refused():
+    """A device map that does not fit lets accelerate leave layers on the CPU, which a GPU placement must not score."""
+    with pytest.raises(RuntimeError, match="does not fit on this process's GPUs"):
+        hf_model_outputs.require_on_gpus(tiny_llama(), "balanced")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="a model held on a GPU needs one")
+def test_a_model_held_on_a_gpu_is_accepted_and_names_its_gpu():
+    model = tiny_llama().to("cuda:0")
+    hf_model_outputs.require_on_gpus(model, "single")
+    assert hf_model_outputs.model_gpus(model) == [0]
+    assert hf_model_outputs.model_gpus(tiny_llama()) == []
+
+
+SPLIT_LAYERS = 16
+SPLIT_HIDDEN = 512  # 80 MiB in bf16: accelerate's balanced map keeps a model of a few KiB whole on the first GPU
+
+
+@pytest.mark.serial_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="a split model needs two GPUs or more")
+def test_a_model_loaded_balanced_over_gpus_gives_the_single_gpu_models_logits_and_continuation(tmp_path):
+    """A model too large for one GPU is split over several, so its output head is fed from another GPU than the one
+    its last layers sit on, and generation steps through every GPU. Placing the layers changes no logit and no
+    generated id."""
+    tiny_llama(layers=SPLIT_LAYERS, hidden_size=SPLIT_HIDDEN).to(torch.bfloat16).save_pretrained(tmp_path / "model")
+    path, ids = str(tmp_path / "model"), [EOS_ID, THE, WORLD, HELLO]
+    config = hf_model_outputs.stop_aware_generation_config(6, (EOS_ID,))
+    single = hf_model_outputs.load_model(path, "bfloat16", "single")
+    expected_logits = hf_model_outputs.fp32_head_outputs(single, ids).cpu()
+    expected_output, _ = hf_model_outputs.generate_from_unmodified_distribution(single, ids, config)
+    del single
+    # The cache of the freed model makes accelerate's balanced map keep the next model whole on the first GPU.
+    torch.cuda.empty_cache()
+    split = hf_model_outputs.load_model(path, "bfloat16", "balanced")
+    # The tied head stays with the embeddings on the first GPU, and the last layers and the norm sit on a later one.
+    assert len(hf_model_outputs.model_gpus(split)) > 1
+    assert split.lm_head.weight.device != split.model.norm.weight.device
+    assert torch.equal(hf_model_outputs.fp32_head_outputs(split, ids).cpu(), expected_logits)
+    output, _ = hf_model_outputs.generate_from_unmodified_distribution(split, ids, config)
+    assert output.sequences.cpu().tolist() == expected_output.sequences.cpu().tolist()
+
+
+@pytest.mark.serial_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="a split model needs two GPUs or more")
+def test_an_olmo3_split_over_gpus_keeps_its_reference_rope_and_the_single_gpu_logits(tmp_path):
+    """The reference rope of an OLMo-3's sliding layers is computed in a hook that runs before accelerate moves a
+    layer's inputs to the layer's GPU. Layer 0 sits on the first GPU and the rest on the last, so a sliding layer
+    follows another layer there, and the split model must still give the single-GPU model's fp32 logits."""
+    from transformers import AutoModelForCausalLM
+
+    tiny_olmo3().to(torch.bfloat16).save_pretrained(tmp_path / "model")
+    path = str(tmp_path / "model")
+    ids = [i % 61 + 3 for i in range(64)]  # longer than the sliding window (16) and the YaRN original length (32)
+    single = hf_model_outputs.load_model(path, "bfloat16", "single")
+    expected = hf_model_outputs.fp32_head_outputs(single, ids).cpu()
+    del single
+    last = torch.cuda.device_count() - 1
+    split_map = {"model.embed_tokens": 0, "lm_head": 0, "model.rotary_emb": 0, "model.layers.0": 0, "model.norm": last}
+    split_map |= {f"model.layers.{i}": last for i in range(1, 4)}
+    split = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16, device_map=split_map).eval()
+    hf_olmo3_rope.apply_reference_rope(split)
+    assert torch.equal(hf_model_outputs.fp32_head_outputs(split, ids).cpu(), expected)
+
+
+# --------------------------------------------------------------------------------------
 # Loading a model from disk
 # --------------------------------------------------------------------------------------
 
@@ -131,7 +224,7 @@ def test_an_olmo3_is_loaded_with_a_plain_rope_on_its_sliding_layers(tmp_path, mo
         torch.arange(64).unsqueeze(0) % 61 + 3
     )  # longer than the sliding window (16) and the YaRN original length (32)
     stock = AutoModelForCausalLM.from_pretrained(tmp_path, dtype=torch.float32).eval()
-    loaded = hf_model_outputs.load_model(str(tmp_path), "float32")
+    loaded = hf_model_outputs.load_model(str(tmp_path), "float32", "single")
     with torch.no_grad():
         stock_logits, loaded_logits = stock(input_ids=ids).logits, loaded(input_ids=ids).logits
     if hf_olmo3_rope.has_one_shared_rope(stock):
@@ -143,7 +236,7 @@ def test_an_olmo3_is_loaded_with_a_plain_rope_on_its_sliding_layers(tmp_path, mo
 def test_another_architecture_is_loaded_as_it_is(tmp_path, monkeypatch):
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
     tiny_llama().save_pretrained(tmp_path)
-    loaded = hf_model_outputs.load_model(str(tmp_path), "float32")
+    loaded = hf_model_outputs.load_model(str(tmp_path), "float32", "single")
     assert type(loaded).__name__ == "LlamaForCausalLM"
     assert not any(layer._forward_pre_hooks for layer in loaded.model.layers)
 

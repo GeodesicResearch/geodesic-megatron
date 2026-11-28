@@ -267,7 +267,13 @@ def main() -> None:
         raw_log_path=raw_log_path,
     )
 
-    callbacks = [cb for cb in (identity_cb, profiler_cb) if cb is not None]
+    # Routed rows and memory per rank after chosen iterations (ISAMBARD_MOE_ROUTED_ROWS_ITERS, default off): the memory
+    # margin that the busiest GPU of a MoE run leaves, which Megatron reports only after the first iteration.
+    from scripts.telemetry.moe_routed_rows import ROUTED_ROWS_GATE, build_routed_rows_callback
+
+    routed_rows_cb = build_routed_rows_callback(os.environ.get(ROUTED_ROWS_GATE))
+
+    callbacks = [cb for cb in (identity_cb, profiler_cb, routed_rows_cb) if cb is not None]
     # pretrain() is the raw entry point; finetune() is the same call behind an assert that a
     # checkpoint.load/pretrained_checkpoint exists, which from-scratch runs must not carry.
     train_entry = pretrain if args.mode == "pretrain" else finetune
